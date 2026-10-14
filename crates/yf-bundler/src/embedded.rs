@@ -10,8 +10,11 @@ pub(crate) struct Embedded {
     pub(crate) typescript: bool,
 }
 
+/// Virtual id of solid-js.
+pub(crate) const SOLID_ID: &str = "\0yf:solid-js";
+
 const SOLID: Embedded = Embedded {
-    id: "\0yf:solid-js",
+    id: SOLID_ID,
     source: include_str!("../../../js/vendor/solid-js/solid.js"),
     typescript: false,
 };
@@ -22,9 +25,12 @@ const SOLID_UNIVERSAL: Embedded = Embedded {
     typescript: false,
 };
 
+/// The yf runtime's source.
+pub(crate) const RUNTIME_SOURCE: &str = include_str!("../../../js/runtime/index.ts");
+
 const RUNTIME: Embedded = Embedded {
     id: "\0yf:runtime",
-    source: include_str!("../../../js/runtime/index.ts"),
+    source: RUNTIME_SOURCE,
     typescript: true,
 };
 

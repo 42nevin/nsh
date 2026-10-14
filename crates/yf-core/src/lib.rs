@@ -13,21 +13,40 @@ mod fenwick;
 mod geometry;
 mod mount;
 mod ops;
+mod props;
 mod style;
 mod text;
+mod transform;
 
 pub use yf_anim;
 
 pub use crate::{
     core::{ApplyError, Core, ListBind},
     geometry::{Rect, Size},
-    mount::{MountBatch, MountItem, ViewKind},
+    mount::{
+        ActivityProps, ControlSizes, InputConfig, ModalConfig, MountBatch, MountItem, NativeProps,
+        ScreenConfig, ScrollBehavior, SliderProps, StickyCell, SwitchProps, VideoProps, ViewKind,
+        WebProps,
+    },
     ops::{
-        EventKind, EventMask, EventPayload, ImageSource, NodeId, Op, Prop, ROOT_ID, ResizeMode, Tag,
+        AutoCapitalize, CellSlot, Command, Dialog, DialogButton, DialogButtonStyle, EventKind,
+        EventMask, EventPayload, HeaderSlot, ImageSource, KeyboardDismissMode, KeyboardTaps,
+        KeyboardType, ListContentStyle, ModalAnimation, ModalPresentation, ModalProp, NativeProp,
+        NodeId, Op, PayloadValue, Prop, ROOT_ID, ResizeMode, ReturnKeyType, ScreenAnimation,
+        ScreenProp, ScrollProp, SnapAlignment, StatusBarConfig, StatusBarStyle, Tag, Viewability,
+        WebSource,
+    },
+    props::{
+        Accessibility, AccessibilityActionDef, AccessibilityProp, AccessibilityRole,
+        AccessibilityState, AccessibilityValue, Checked, EdgeInsets, GestureValues,
+        LayoutAnimation, LayoutCurve, LayoutProperty, LayoutTransition, LiveRegion, PointerEvents,
+        ViewProps,
     },
     style::{
-        Color, CornerRadii, Shadow, Style, StyleError, StyleValue, TextAlign, TextStyle, Transform,
+        BorderStyle, Borders, Color, CornerRadii, EllipsizeMode, FontFamily, Shadow, Style,
+        StyleError, StyleValue, TextAlign, TextDecoration, TextShadow, TextStyle, TextTransform,
         ViewStyle,
     },
     text::{ApproxTextEngine, AttributedText, ResolvedTextStyle, TextEngine, TextLayout, TextSpan},
+    transform::{Decomposed, MAX_TRANSFORMS, Matrix, Transform, TransformKind, TransformOp},
 };

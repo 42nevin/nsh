@@ -1,0 +1,7 @@
+[env]
+# One deployment target for Rust and the C code (QuickJS) of every Apple
+# target; `yf package` writes the same `MinimumOSVersion`.
+IPHONEOS_DEPLOYMENT_TARGET = "15.0"
+
+[alias]
+xtask = "run -q -p xtask --"

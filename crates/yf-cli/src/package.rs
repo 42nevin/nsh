@@ -1,0 +1,505 @@
+//! `yf package`: builds an installable app from the prebuilt runtime, the
+//! app bundle and its assets. Needs no Rust; iOS packaging uses Xcode's
+//! command line tools (`codesign`, and `actool` for icons).
+
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
+
+use anyhow::{Context as _, bail};
+use serde::Deserialize;
+
+use crate::runtime::{self, Platform};
+
+/// Where the app runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum PackageTarget {
+    /// iOS devices: a signed `.ipa` (or an unsigned `.app` without `--sign`).
+    Ios,
+    /// The iOS simulator: an ad hoc signed `.app`.
+    IosSimulator,
+    /// Android: a signed `.apk`.
+    Android,
+}
+
+/// App metadata: `yf.json` next to the entry, overridden by flags.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AppConfig {
+    /// Display name.
+    pub(crate) name: Option<String>,
+    /// Bundle identifier (`com.example.app`).
+    pub(crate) id: Option<String>,
+    /// User-visible version (`1.2.0`).
+    pub(crate) version: Option<String>,
+    /// Build number.
+    pub(crate) build: Option<u32>,
+    /// App icon: a square PNG, ideally 1024×1024, relative to `yf.json`.
+    pub(crate) icon: Option<PathBuf>,
+}
+
+/// Options of `yf package`.
+pub(crate) struct PackageOptions<'a> {
+    pub(crate) entry: &'a Path,
+    pub(crate) target: PackageTarget,
+    pub(crate) out: &'a Path,
+    pub(crate) config: AppConfig,
+    /// Code signing identity (device builds).
+    pub(crate) sign: Option<&'a str>,
+    /// Provisioning profile (device builds).
+    pub(crate) profile: Option<&'a Path>,
+    /// Android release keystore, key alias and password.
+    pub(crate) keystore: Option<(&'a Path, &'a str, &'a str)>,
+    /// Install and launch in the simulator afterwards.
+    pub(crate) run: bool,
+}
+
+/// Reads `yf.json` next to `entry`, if any; relative paths become absolute.
+pub(crate) fn read_config(entry: &Path) -> anyhow::Result<AppConfig> {
+    let dir = entry.parent().unwrap_or(Path::new("."));
+    let path = dir.join("yf.json");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(AppConfig::default());
+    };
+    let mut config: AppConfig =
+        serde_json::from_str(&text).with_context(|| format!("invalid {}", path.display()))?;
+    config.icon = config.icon.map(|icon| dir.join(icon));
+    Ok(config)
+}
+
+pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
+    let entry = options.entry.canonicalize()?;
+    let config = &options.config;
+    let name = config.name.clone().unwrap_or_else(|| {
+        entry
+            .parent()
+            .and_then(|d| d.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "App".to_owned())
+    });
+    let id = config.id.clone().unwrap_or_else(|| {
+        let slug: String = name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_lowercase();
+        format!("dev.yf.{slug}")
+    });
+    let executable: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let executable = if executable.is_empty() {
+        "App".to_owned()
+    } else {
+        executable
+    };
+
+    let built =
+        crate::build::compile(&entry, true).map_err(|e| anyhow::anyhow!("{}", e.colored))?;
+    let platform = match options.target {
+        PackageTarget::Ios => Platform::IphoneOs,
+        PackageTarget::IosSimulator => Platform::IphoneSimulator,
+        PackageTarget::Android => {
+            return package_android(&options, config, &name, &id, &entry, &built);
+        }
+    };
+    let runner = runtime::file(platform, "yf-app")?;
+
+    fs::create_dir_all(options.out)?;
+    let app = options.out.join(format!("{name}.app"));
+    if app.exists() {
+        fs::remove_dir_all(&app)?;
+    }
+    let resources = app.join("yf");
+    fs::create_dir_all(&resources)?;
+    fs::copy(&runner, app.join(&executable))
+        .with_context(|| format!("copy {}", runner.display()))?;
+    fs::write(resources.join("bundle.qbc"), &built.bytecode)?;
+    let root = entry.parent().unwrap_or(Path::new("."));
+    for asset in &built.assets {
+        let dest = resources.join("assets").join(asset);
+        if let Some(dir) = dest.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::copy(root.join(asset), &dest).with_context(|| format!("copy {}", asset.display()))?;
+    }
+
+    let sdk = match options.target {
+        PackageTarget::Ios => "iphoneos",
+        PackageTarget::IosSimulator | PackageTarget::Android => "iphonesimulator",
+    };
+    let mut info = info_plist(&name, &id, &executable, config, sdk);
+    if let Some(icon) = &config.icon {
+        let partial = compile_icon(icon, &app, sdk)?;
+        for (key, value) in partial {
+            info.insert(key, value);
+        }
+    }
+    plist::Value::Dictionary(info).to_file_xml(app.join("Info.plist"))?;
+
+    match options.target {
+        PackageTarget::IosSimulator => {
+            codesign(&app, "-", None)?;
+            log::info!("packaged {}", app.display());
+            if options.run {
+                let udid = crate::run::simulator(None)?;
+                crate::run::simctl(&["install", &udid, &app.to_string_lossy()])?;
+                crate::run::simctl(&["launch", "--terminate-running-process", &udid, &id])?;
+                log::info!("launched {id} in the simulator");
+            }
+        }
+        PackageTarget::Android => unreachable!("packaged above"),
+        PackageTarget::Ios => {
+            if options.run {
+                bail!("--run only applies to the simulator and Android");
+            }
+            let (Some(identity), Some(profile)) = (options.sign, options.profile) else {
+                log::warn!(
+                    "{} is unsigned: pass --sign <identity> and --profile <file.mobileprovision> to install it on devices",
+                    app.display()
+                );
+                return Ok(());
+            };
+            fs::copy(profile, app.join("embedded.mobileprovision"))
+                .with_context(|| format!("copy {}", profile.display()))?;
+            let entitlements = entitlements(profile, &id)?;
+            let path = options.out.join(format!("{executable}.entitlements"));
+            entitlements.to_file_xml(&path)?;
+            codesign(&app, identity, Some(&path))?;
+            let ipa = options.out.join(format!("{name}.ipa"));
+            make_ipa(&app, &ipa)?;
+            log::info!("packaged {}", ipa.display());
+        }
+    }
+    Ok(())
+}
+
+/// An APK with the release runtime: `AppActivity` runs `assets/yf/bundle.qbc`.
+fn package_android(
+    options: &PackageOptions<'_>,
+    config: &AppConfig,
+    name: &str,
+    id: &str,
+    entry: &Path,
+    built: &crate::build::Built,
+) -> anyhow::Result<()> {
+    use crate::android::{self, Apk, Signing};
+    let sdk = android::Sdk::find()?;
+    let runtime = runtime::android(false)?;
+    let root = entry.parent().unwrap_or(Path::new("."));
+    let mut assets = vec![("yf/bundle.qbc".to_owned(), built.bytecode.clone())];
+    for asset in &built.assets {
+        let path = asset.to_string_lossy().replace('\\', "/");
+        let bytes = fs::read(root.join(asset)).with_context(|| format!("read {path}"))?;
+        assets.push((format!("yf/assets/{path}"), bytes));
+    }
+    let signing = match options.keystore {
+        Some((path, alias, password)) => Signing::Keystore {
+            path: path.to_path_buf(),
+            alias: alias.to_owned(),
+            password: password.to_owned(),
+        },
+        None => {
+            log::warn!("signing with the debug key: pass --keystore for store releases");
+            Signing::Debug
+        }
+    };
+    fs::create_dir_all(options.out)?;
+    let apk_path = options.out.join(format!("{name}.apk"));
+    let version = config.version.as_deref().unwrap_or("1.0.0");
+    android::build_apk(
+        &sdk,
+        &Apk {
+            package: id,
+            label: name,
+            version_name: version,
+            version_code: config.build.unwrap_or(1),
+            activity: "dev.yf.AppActivity",
+            dev: false,
+            runtime: &runtime,
+            icon: config.icon.as_deref(),
+            assets,
+            signing,
+        },
+        &apk_path,
+    )?;
+    log::info!("packaged {}", apk_path.display());
+    if options.run {
+        let serial = android::device(&sdk)?;
+        android::adb(
+            &sdk,
+            &serial,
+            &["install", "-r", &apk_path.to_string_lossy()],
+        )?;
+        android::adb(
+            &sdk,
+            &serial,
+            &[
+                "shell",
+                "am",
+                "start",
+                "-n",
+                &format!("{id}/dev.yf.AppActivity"),
+            ],
+        )?;
+        log::info!("launched {id} on {serial}");
+    }
+    Ok(())
+}
+
+fn info_plist(
+    name: &str,
+    id: &str,
+    executable: &str,
+    config: &AppConfig,
+    sdk: &str,
+) -> plist::Dictionary {
+    use plist::Value;
+    let mut d = plist::Dictionary::new();
+    let s = |v: &str| Value::String(v.to_owned());
+    d.insert("CFBundleDevelopmentRegion".into(), s("en"));
+    d.insert("CFBundleExecutable".into(), s(executable));
+    d.insert("CFBundleIdentifier".into(), s(id));
+    d.insert("CFBundleName".into(), s(name));
+    d.insert("CFBundleDisplayName".into(), s(name));
+    d.insert("CFBundlePackageType".into(), s("APPL"));
+    d.insert(
+        "CFBundleShortVersionString".into(),
+        s(config.version.as_deref().unwrap_or("1.0.0")),
+    );
+    d.insert(
+        "CFBundleVersion".into(),
+        s(&config.build.unwrap_or(1).to_string()),
+    );
+    d.insert(
+        "CFBundleSupportedPlatforms".into(),
+        Value::Array(vec![s(if sdk == "iphoneos" {
+            "iPhoneOS"
+        } else {
+            "iPhoneSimulator"
+        })]),
+    );
+    d.insert("MinimumOSVersion".into(), s(MINIMUM_OS));
+    d.insert(
+        "UIDeviceFamily".into(),
+        Value::Array(vec![1.into(), 2.into()]),
+    );
+    d.insert("LSRequiresIPhoneOS".into(), true.into());
+    // A launch screen entry opts into the full screen (no letterboxing).
+    d.insert(
+        "UILaunchScreen".into(),
+        Value::Dictionary(Default::default()),
+    );
+    d.insert("UIApplicationSupportsMultipleScenes".into(), false.into());
+    d.insert(
+        "UISupportedInterfaceOrientations".into(),
+        Value::Array(vec![
+            s("UIInterfaceOrientationPortrait"),
+            s("UIInterfaceOrientationLandscapeLeft"),
+            s("UIInterfaceOrientationLandscapeRight"),
+        ]),
+    );
+    d.insert(
+        "UISupportedInterfaceOrientations~ipad".into(),
+        Value::Array(vec![
+            s("UIInterfaceOrientationPortrait"),
+            s("UIInterfaceOrientationPortraitUpsideDown"),
+            s("UIInterfaceOrientationLandscapeLeft"),
+            s("UIInterfaceOrientationLandscapeRight"),
+        ]),
+    );
+    d
+}
+
+/// The deployment target the runtime is built for (`cargo xtask dist`).
+const MINIMUM_OS: &str = "15.0";
+
+/// Compiles `icon` into the app's asset catalog (`Assets.car`) with
+/// `actool`, returning the Info.plist keys it produces.
+fn compile_icon(icon: &Path, app: &Path, sdk: &str) -> anyhow::Result<plist::Dictionary> {
+    let work = app.with_extension("xcassets-work");
+    let set = work.join("Assets.xcassets/AppIcon.appiconset");
+    fs::create_dir_all(&set)?;
+    fs::copy(icon, set.join("icon.png")).with_context(|| format!("copy {}", icon.display()))?;
+    fs::write(
+        work.join("Assets.xcassets/Contents.json"),
+        r#"{"info":{"author":"yf","version":1}}"#,
+    )?;
+    // One 1024 pt image; actool derives every size (Xcode 14+ catalogs).
+    fs::write(
+        set.join("Contents.json"),
+        r#"{"images":[{"filename":"icon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"yf","version":1}}"#,
+    )?;
+    let partial = work.join("partial.plist");
+    let output = Command::new("xcrun")
+        .args(["actool", "--compile"])
+        .arg(app)
+        .args(["--platform", sdk, "--minimum-deployment-target", MINIMUM_OS])
+        .args(["--app-icon", "AppIcon", "--output-partial-info-plist"])
+        .arg(&partial)
+        .args([
+            "--target-device",
+            "iphone",
+            "--target-device",
+            "ipad",
+            "--output-format",
+            "human-readable-text",
+        ])
+        .arg(work.join("Assets.xcassets"))
+        .output()
+        .context("run xcrun actool (is Xcode installed?)")?;
+    if !output.status.success() || !partial.exists() {
+        bail!(
+            "actool failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let keys = plist::Value::from_file(&partial)?
+        .into_dictionary()
+        .unwrap_or_default();
+    fs::remove_dir_all(&work)?;
+    Ok(keys)
+}
+
+fn codesign(app: &Path, identity: &str, entitlements: Option<&Path>) -> anyhow::Result<()> {
+    let mut cmd = Command::new("codesign");
+    cmd.args(["--force", "--sign", identity]);
+    if identity == "-" {
+        cmd.arg("--timestamp=none");
+    }
+    if let Some(e) = entitlements {
+        cmd.arg("--entitlements").arg(e);
+    }
+    let output = cmd
+        .arg(app)
+        .stdout(Stdio::null())
+        .output()
+        .context("run codesign")?;
+    if !output.status.success() {
+        bail!(
+            "codesign failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// The entitlements a provisioning profile grants, checked against `id`.
+fn entitlements(profile: &Path, id: &str) -> anyhow::Result<plist::Value> {
+    let output = Command::new("security")
+        .args(["cms", "-D", "-i"])
+        .arg(profile)
+        .output()
+        .context("run security cms")?;
+    if !output.status.success() {
+        bail!("cannot read provisioning profile {}", profile.display());
+    }
+    let profile = plist::Value::from_reader_xml(output.stdout.as_slice())?;
+    let entitlements = profile
+        .as_dictionary()
+        .and_then(|d| d.get("Entitlements"))
+        .cloned()
+        .context("the provisioning profile has no entitlements")?;
+    let app_id = entitlements
+        .as_dictionary()
+        .and_then(|d| d.get("application-identifier"))
+        .and_then(|v| v.as_string())
+        .unwrap_or_default();
+    if !profile_allows(app_id, id) {
+        bail!("the provisioning profile is for {app_id}, not {id}");
+    }
+    Ok(entitlements)
+}
+
+/// Whether a profile's `application-identifier` (`TEAMID.com.example.app`,
+/// or a wildcard such as `TEAMID.*`) covers bundle id `id`.
+fn profile_allows(app_id: &str, id: &str) -> bool {
+    app_id
+        .split_once('.')
+        .map(|(_, pattern)| match pattern.strip_suffix('*') {
+            Some(prefix) => id.starts_with(prefix),
+            None => pattern == id,
+        })
+        .unwrap_or(false)
+}
+
+/// `Payload/<App>.app` zipped, keeping permissions and symlinks.
+fn make_ipa(app: &Path, ipa: &Path) -> anyhow::Result<()> {
+    let staging = ipa.with_extension("payload");
+    let payload = staging.join("Payload");
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+    }
+    fs::create_dir_all(&payload)?;
+    let status = Command::new("ditto")
+        .arg(app)
+        .arg(payload.join(app.file_name().context("app name")?))
+        .status()?;
+    if !status.success() {
+        bail!("copying the app failed");
+    }
+    let _ = fs::remove_file(ipa);
+    // `--keepParent`: entries start with `Payload/`; `--norsrc`: no
+    // `__MACOSX/` resource forks.
+    let status = Command::new("ditto")
+        .args(["-c", "-k", "--norsrc", "--keepParent"])
+        .arg(&payload)
+        .arg(ipa)
+        .status()?;
+    fs::remove_dir_all(&staging)?;
+    if !status.success() {
+        bail!("creating {} failed", ipa.display());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profiles_match_bundle_ids() {
+        assert!(profile_allows(
+            "ABCDE12345.com.example.app",
+            "com.example.app"
+        ));
+        assert!(!profile_allows(
+            "ABCDE12345.com.example.app",
+            "com.example.other"
+        ));
+        assert!(profile_allows("ABCDE12345.*", "com.example.app"));
+        assert!(profile_allows(
+            "ABCDE12345.com.example.*",
+            "com.example.app"
+        ));
+        assert!(!profile_allows("ABCDE12345.com.other.*", "com.example.app"));
+        assert!(!profile_allows("", "com.example.app"));
+    }
+
+    #[test]
+    fn ipa_holds_the_app_under_payload() {
+        let dir = std::env::temp_dir().join(format!("yf-ipa-{}", std::process::id()));
+        let app = dir.join("Demo.app");
+        fs::create_dir_all(app.join("yf")).unwrap();
+        fs::write(app.join("Demo"), b"binary").unwrap();
+        fs::write(app.join("yf/bundle.qbc"), b"code").unwrap();
+        let ipa = dir.join("Demo.ipa");
+        make_ipa(&app, &ipa).unwrap();
+        let listing = Command::new("unzip").arg("-Z1").arg(&ipa).output().unwrap();
+        let listing = String::from_utf8(listing.stdout).unwrap();
+        let mut entries: Vec<&str> = listing.lines().collect();
+        entries.sort_unstable();
+        assert_eq!(
+            entries,
+            [
+                "Payload/",
+                "Payload/Demo.app/",
+                "Payload/Demo.app/Demo",
+                "Payload/Demo.app/yf/",
+                "Payload/Demo.app/yf/bundle.qbc"
+            ]
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}

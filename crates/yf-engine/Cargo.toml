@@ -10,6 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+rustc-hash.workspace = true
 log.workspace = true
 oxc_sourcemap.workspace = true
 yf-core.workspace = true

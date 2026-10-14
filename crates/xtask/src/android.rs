@@ -1,0 +1,258 @@
+//! Android runtime builds: Rust (`libyf.so`) with the NDK, Java with
+//! `javac` + `d8` from the SDK. No Gradle.
+
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use anyhow::{Context as _, bail};
+
+/// ABIs built by default.
+pub(crate) const ABIS: [&str; 2] = ["arm64-v8a", "x86_64"];
+/// Minimum Android API level (Android 9): hardware-accelerated shadow
+/// layers and the `Typeface` weight API.
+pub(crate) const MIN_SDK: u32 = 28;
+/// The SDK platform compiled against.
+pub(crate) const COMPILE_SDK: u32 = 35;
+
+/// Locations of the Android SDK and NDK.
+pub(crate) struct Sdk {
+    pub(crate) root: PathBuf,
+    pub(crate) ndk: PathBuf,
+    pub(crate) build_tools: PathBuf,
+}
+
+impl Sdk {
+    pub(crate) fn find() -> anyhow::Result<Sdk> {
+        let root = ["ANDROID_HOME", "ANDROID_SDK_ROOT"]
+            .iter()
+            .find_map(env::var_os)
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Android/sdk")))
+            .filter(|p| p.exists())
+            .context("Android SDK not found: set ANDROID_HOME")?;
+        let ndk = match env::var_os("ANDROID_NDK_HOME") {
+            Some(ndk) => PathBuf::from(ndk),
+            None => {
+                newest(&root.join("ndk")).context("no NDK in the SDK: install `ndk;<version>`")?
+            }
+        };
+        let build_tools = newest(&root.join("build-tools")).context("no SDK build-tools")?;
+        Ok(Sdk {
+            root,
+            ndk,
+            build_tools,
+        })
+    }
+
+    pub(crate) fn android_jar(&self) -> PathBuf {
+        self.root
+            .join(format!("platforms/android-{COMPILE_SDK}/android.jar"))
+    }
+
+    fn toolchain(&self) -> PathBuf {
+        // The NDK's "darwin-x86_64" toolchain is universal.
+        let host = if cfg!(target_os = "macos") {
+            "darwin-x86_64"
+        } else {
+            "linux-x86_64"
+        };
+        self.ndk.join("toolchains/llvm/prebuilt").join(host)
+    }
+}
+
+/// The highest version-named subdirectory of `dir`.
+fn newest(dir: &Path) -> Option<PathBuf> {
+    let mut versions: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir())
+        .collect();
+    let key = |p: &PathBuf| -> Vec<u64> {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .split(['.', '-'])
+            .map(|part| part.parse().unwrap_or(0))
+            .collect()
+    };
+    versions.sort_by_key(key);
+    versions.pop()
+}
+
+fn triple(abi: &str) -> anyhow::Result<&'static str> {
+    Ok(match abi {
+        "arm64-v8a" => "aarch64-linux-android",
+        "x86_64" => "x86_64-linux-android",
+        other => bail!("unsupported ABI {other} (64-bit only: arm64-v8a, x86_64)"),
+    })
+}
+
+/// Repository root (this crate lives in `crates/xtask`).
+pub(crate) fn root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// Builds `libyf.so` for `abis` and `classes.dex` into
+/// `target/android/<profile>[-dev]`, returning that directory.
+pub(crate) fn build(release: bool, dev: bool, abis: &[String]) -> anyhow::Result<PathBuf> {
+    let sdk = Sdk::find()?;
+    let profile = if release { "release" } else { "debug" };
+    let out = root().join("target/android").join(if dev {
+        format!("{profile}-dev")
+    } else {
+        profile.to_owned()
+    });
+    for abi in abis {
+        let triple = triple(abi)?;
+        let so = cargo_lib(&sdk, triple, release, dev)?;
+        let dest = out.join("lib").join(abi);
+        fs::create_dir_all(&dest)?;
+        fs::copy(&so, dest.join("libyf.so"))?;
+        println!("{}", dest.join("libyf.so").display());
+    }
+    java(&sdk, &out)?;
+    Ok(out)
+}
+
+/// A cargo command set up to cross-compile for `triple` with the NDK.
+fn ndk_cargo(sdk: &Sdk, triple: &str) -> Command {
+    let toolchain = sdk.toolchain();
+    let bin = toolchain.join("bin");
+    let clang = bin.join(format!("{triple}{MIN_SDK}-clang"));
+    let env_triple = triple.replace('-', "_");
+    let mut cmd = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    cmd.current_dir(root())
+        .env(format!("CC_{env_triple}"), &clang)
+        .env(format!("AR_{env_triple}"), bin.join("llvm-ar"))
+        .env(
+            format!("CARGO_TARGET_{}_LINKER", env_triple.to_uppercase()),
+            &clang,
+        )
+        .env(
+            format!("BINDGEN_EXTRA_CLANG_ARGS_{env_triple}"),
+            format!("--sysroot={}", toolchain.join("sysroot").display()),
+        );
+    cmd
+}
+
+/// Clippy on the Android crate (it is empty on other targets).
+pub(crate) fn clippy() -> anyhow::Result<()> {
+    let sdk = Sdk::find()?;
+    let status = ndk_cargo(&sdk, "aarch64-linux-android")
+        .args([
+            "clippy",
+            "-p",
+            "yf-platform-android",
+            "--target",
+            "aarch64-linux-android",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+        ])
+        .status()?;
+    if !status.success() {
+        bail!("clippy found problems");
+    }
+    Ok(())
+}
+
+fn cargo_lib(sdk: &Sdk, triple: &str, release: bool, dev: bool) -> anyhow::Result<PathBuf> {
+    let mut cmd = ndk_cargo(sdk, triple);
+    cmd.args(["build", "-p", "yf-platform-android", "--target", triple]);
+    if release {
+        cmd.arg("--release");
+    }
+    if dev {
+        cmd.args(["--features", "dev"]);
+    }
+    let status = cmd.status().context("run cargo")?;
+    if !status.success() {
+        bail!("building libyf.so for {triple} failed");
+    }
+    let profile = if release { "release" } else { "debug" };
+    Ok(root()
+        .join("target")
+        .join(triple)
+        .join(profile)
+        .join("libyf.so"))
+}
+
+/// Compiles the Java runtime to `out/classes.dex`.
+fn java(sdk: &Sdk, out: &Path) -> anyhow::Result<()> {
+    let src = root().join("crates/yf-platform-android/java");
+    let mut sources = Vec::new();
+    collect(&src, &mut sources)?;
+    let classes = out.join("classes");
+    if classes.exists() {
+        fs::remove_dir_all(&classes)?;
+    }
+    fs::create_dir_all(&classes)?;
+    // Java 17 bytecode: d8 desugars it for every supported API level.
+    let status = Command::new("javac")
+        .args([
+            "--release",
+            "17",
+            "-Xlint:-options",
+            "-encoding",
+            "UTF-8",
+            "-classpath",
+        ])
+        .arg(sdk.android_jar())
+        .arg("-d")
+        .arg(&classes)
+        .args(&sources)
+        .status()
+        .context("run javac (is a JDK installed?)")?;
+    if !status.success() {
+        bail!("javac failed");
+    }
+    let mut class_files = Vec::new();
+    collect_ext(&classes, "class", &mut class_files)?;
+    let status = Command::new(sdk.build_tools.join("d8"))
+        .args(["--min-api", &MIN_SDK.to_string(), "--lib"])
+        .arg(sdk.android_jar())
+        .arg("--output")
+        .arg(out)
+        .args(&class_files)
+        .status()
+        .context("run d8")?;
+    if !status.success() {
+        bail!("d8 failed");
+    }
+    // `classes.jar` for the AAR (Gradle projects dex it themselves).
+    let jar = out.join("classes.jar");
+    let _ = fs::remove_file(&jar);
+    let status = Command::new("jar")
+        .arg("cf")
+        .arg(&jar)
+        .arg("-C")
+        .arg(&classes)
+        .arg(".")
+        .status()
+        .context("run jar")?;
+    if !status.success() {
+        bail!("jar failed");
+    }
+    println!("{}", out.join("classes.dex").display());
+    Ok(())
+}
+
+fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    collect_ext(dir, "java", out)
+}
+
+fn collect_ext(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_ext(&path, ext, out)?;
+        } else if path.extension().is_some_and(|e| e == ext) {
+            out.push(path);
+        }
+    }
+    Ok(())
+}

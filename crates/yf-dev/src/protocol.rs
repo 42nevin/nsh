@@ -3,12 +3,13 @@
 //! Control messages are JSON text frames. A bundle is sent as a
 //! [`ServerMessage::Bundle`] text frame immediately followed by one binary
 //! frame with the payload and, if announced, one binary frame with the
-//! source map (JSON).
+//! source map (JSON). A [`ServerMessage::Patch`] (a hot update) is framed the
+//! same way and precedes the bundle of the same version.
 
 use serde::{Deserialize, Serialize};
 
 /// Protocol version; bump on incompatible changes.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// WebSocket endpoint path.
 pub const WS_PATH: &str = "/ws";
@@ -56,6 +57,19 @@ pub enum ServerMessage {
     BuildFailed {
         /// Compiler output.
         message: String,
+    },
+    /// A hot update from bundle `base` to bundle `version`: the next binary
+    /// frame is a script (UTF-8 JS) that replaces the changed modules in
+    /// place. Hosts running `base` apply it; the bundle of `version`
+    /// follows either way.
+    Patch {
+        /// Build number after the update.
+        version: u64,
+        /// Build number the update applies to.
+        base: u64,
+        /// A second binary frame with the source map follows.
+        #[serde(default)]
+        source_map: bool,
     },
     /// A new bundle; the next binary frame is its payload.
     Bundle {

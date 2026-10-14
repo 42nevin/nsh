@@ -9,7 +9,10 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     geometry::Size,
-    style::{Color, TextAlign, TextStyle},
+    style::{
+        Color, EllipsizeMode, FontFamily, TextAlign, TextDecoration, TextShadow, TextStyle,
+        TextTransform,
+    },
 };
 
 /// Fully resolved character style of a text run.
@@ -23,6 +26,18 @@ pub struct ResolvedTextStyle {
     pub font_weight: u16,
     /// Line height in points; `0.0` means the font's natural line height.
     pub line_height: f32,
+    /// Font family; `None` is the system font.
+    pub font_family: Option<FontFamily>,
+    /// Italic.
+    pub italic: bool,
+    /// Extra space between characters in points.
+    pub letter_spacing: f32,
+    /// Underline / strikethrough.
+    pub decoration: TextDecoration,
+    /// Color of the decoration lines; `None` uses `color`.
+    pub decoration_color: Option<Color>,
+    /// Case transform (applied by the core when building the text).
+    pub transform: TextTransform,
 }
 
 impl Default for ResolvedTextStyle {
@@ -33,6 +48,15 @@ impl Default for ResolvedTextStyle {
             font_size: 14.0,
             font_weight: 400,
             line_height: 0.0,
+            font_family: None,
+            italic: false,
+            letter_spacing: 0.0,
+            decoration: TextDecoration {
+                underline: false,
+                line_through: false,
+            },
+            decoration_color: None,
+            transform: TextTransform::None,
         }
     }
 }
@@ -46,15 +70,25 @@ impl ResolvedTextStyle {
             font_size: style.font_size.unwrap_or(self.font_size),
             font_weight: style.font_weight.unwrap_or(self.font_weight),
             line_height: style.line_height.unwrap_or(self.line_height),
+            font_family: style.font_family.or(self.font_family),
+            italic: style.italic.unwrap_or(self.italic),
+            letter_spacing: style.letter_spacing.unwrap_or(self.letter_spacing),
+            decoration: style.decoration.unwrap_or(self.decoration),
+            decoration_color: style.decoration_color.or(self.decoration_color),
+            transform: style.transform.unwrap_or(self.transform),
         }
     }
 
-    /// True if both styles produce the same glyph metrics (color ignored).
+    /// True if both styles produce the same glyph metrics (colors and
+    /// decorations ignored).
     #[inline]
     fn layout_eq(&self, other: &Self) -> bool {
         self.font_size == other.font_size
             && self.font_weight == other.font_weight
             && self.line_height == other.line_height
+            && self.font_family == other.font_family
+            && self.italic == other.italic
+            && self.letter_spacing == other.letter_spacing
     }
 }
 
@@ -82,6 +116,12 @@ pub struct AttributedText {
     pub spans: Vec<TextSpan>,
     /// Paragraph alignment.
     pub align: TextAlign,
+    /// Maximum number of lines; 0 means no limit (`numberOfLines`).
+    pub max_lines: u32,
+    /// How text beyond `max_lines` is cut.
+    pub ellipsize: EllipsizeMode,
+    /// Shadow behind the whole block (drawing only, not layout).
+    pub shadow: Option<TextShadow>,
 }
 
 impl AttributedText {
@@ -91,6 +131,7 @@ impl AttributedText {
         if s.is_empty() {
             return;
         }
+        let s = &*style.transform.apply(s);
         let len = s.encode_utf16().count() as u32;
         self.text.push_str(s);
         match self.spans.last_mut() {
@@ -110,6 +151,8 @@ impl AttributedText {
     /// metrics and alignment. Decorative attributes (colors) are ignored.
     pub fn layout_eq(&self, other: &Self) -> bool {
         self.align == other.align
+            && self.max_lines == other.max_lines
+            && self.ellipsize == other.ellipsize
             && self.text == other.text
             && self.spans.len() == other.spans.len()
             && self
@@ -124,11 +167,13 @@ impl AttributedText {
     pub fn layout_hash(&self) -> u64 {
         let mut h = std::hash::DefaultHasher::new();
         self.text.hash(&mut h);
-        (self.align as u8).hash(&mut h);
+        (self.align as u8, self.max_lines, self.ellipsize).hash(&mut h);
         for s in &self.spans {
             (s.start, s.end, s.style.font_weight).hash(&mut h);
+            (s.style.font_family, s.style.italic).hash(&mut h);
             s.style.font_size.to_bits().hash(&mut h);
             s.style.line_height.to_bits().hash(&mut h);
+            s.style.letter_spacing.to_bits().hash(&mut h);
         }
         h.finish()
     }
@@ -172,6 +217,14 @@ pub trait TextEngine {
 
     /// The final layout in a box of exactly `size`, for drawing.
     fn layout(&self, prepared: &Self::Prepared, size: Size) -> TextLayout;
+
+    /// Makes the font in `data` (TrueType / OpenType) available by its
+    /// family name. Fonts are registered before the text using them is
+    /// measured.
+    fn register_font(&self, data: &[u8]) -> Result<(), String> {
+        let _ = data;
+        Err("this text engine does not support custom fonts".to_owned())
+    }
 }
 
 /// A deterministic, platform-free [`TextEngine`] for headless runs and
@@ -181,25 +234,37 @@ pub trait TextEngine {
 pub struct ApproxTextEngine;
 
 impl TextEngine for ApproxTextEngine {
-    /// `(character count, font size)`.
-    type Prepared = (usize, f32);
+    /// `(character count, font size, max lines)`.
+    type Prepared = (usize, f32, u32);
 
-    fn prepare(&self, text: &AttributedText) -> (usize, f32) {
+    fn prepare(&self, text: &AttributedText) -> (usize, f32, u32) {
         let size = text.spans.first().map_or(14.0, |s| s.style.font_size);
-        (text.text.chars().count(), size)
+        (text.text.chars().count(), size, text.max_lines)
     }
 
-    fn measure(&self, &(chars, size): &(usize, f32), max_width: Option<f32>) -> Size {
+    fn measure(
+        &self,
+        &(chars, size, max_lines): &(usize, f32, u32),
+        max_width: Option<f32>,
+    ) -> Size {
         let width = chars as f32 * size * 0.55;
         let line = size * 1.2;
-        match max_width {
-            Some(max) if width > max && max > 0.0 => Size::new(max, (width / max).ceil() * line),
-            _ => Size::new(width, line),
+        let (width, mut lines) = match max_width {
+            Some(max) if width > max && max > 0.0 => (max, (width / max).ceil()),
+            _ => (width, 1.0),
+        };
+        if max_lines > 0 {
+            lines = lines.min(max_lines as f32);
         }
+        Size::new(width, lines * line)
     }
 
-    fn layout(&self, _: &(usize, f32), size: Size) -> TextLayout {
+    fn layout(&self, _: &(usize, f32, u32), size: Size) -> TextLayout {
         TextLayout(Arc::new(size))
+    }
+
+    fn register_font(&self, _: &[u8]) -> Result<(), String> {
+        Ok(())
     }
 }
 

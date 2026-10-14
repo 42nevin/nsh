@@ -19,4 +19,5 @@ rolldown_error = "=1.2.13"
 rolldown_sourcemap = "=1.2.13"
 oxc_sourcemap.workspace = true
 imagesize.workspace = true
+ttf-parser.workspace = true
 tokio.workspace = true

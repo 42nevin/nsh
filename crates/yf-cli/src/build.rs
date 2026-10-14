@@ -64,6 +64,30 @@ pub(crate) fn compile(entry: &Path, release: bool) -> Result<Built, BuildError> 
     })
 }
 
+/// Bundles `entry` for development with hot module replacement: the whole
+/// app (source and bytecode) plus the modules, to compute later updates.
+pub(crate) fn compile_hot(entry: &Path) -> Result<(Built, yf_bundler::HotBundle), BuildError> {
+    let hot = yf_bundler::bundle_hot(entry)?;
+    let (code, source_map) = hot.script();
+    let start = Instant::now();
+    let bytecode = yf_js::compile_bytecode(&code, false)?;
+    log::info!(
+        "built {} ({} B js in {:.1} ms, {} B bytecode in {:.1} ms)",
+        entry.display(),
+        code.len(),
+        hot.elapsed_ms,
+        bytecode.len(),
+        start.elapsed().as_secs_f64() * 1000.0,
+    );
+    let built = Built {
+        code,
+        bytecode,
+        source_map,
+        assets: hot.assets.clone(),
+    };
+    Ok((built, hot))
+}
+
 /// Bundles `entry` into `out/bundle.js`, `out/bundle.js.map` and
 /// `out/bundle.qbc`.
 pub(crate) fn build(entry: &Path, out: &Path, release: bool) -> anyhow::Result<()> {

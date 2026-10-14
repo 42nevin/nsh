@@ -21,7 +21,9 @@ yf-js = { path = "crates/yf-js" }
 yf-engine = { path = "crates/yf-engine" }
 yf-bundler = { path = "crates/yf-bundler" }
 yf-platform-apple = { path = "crates/yf-platform-apple" }
+yf-platform-android = { path = "crates/yf-platform-android" }
 yf-dev = { path = "crates/yf-dev" }
+yf-ffi = { path = "crates/yf-ffi" }
 
 anyhow = "1"
 thiserror = "2"
@@ -31,13 +33,20 @@ notify = "8.2"
 log = "0.4"
 libc = "0.2"
 imagesize = "0.15"
+ttf-parser = "0.25"
 oxc_sourcemap = "9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+plist = "1.7"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 rustc-hash = "2.1"
 slab = "0.4"
+url = "2.5"
+ureq = "3.1"
+jni = "0.21"
 taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "block_layout", "content_size"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "fs"] }
 
@@ -46,19 +55,158 @@ rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "
 
 rolldown = "=1.2.13"
 rolldown_common = "=1.2.13"
-oxc = { version = "=0.153.0", features = ["transformer", "codegen", "semantic"] }
+oxc = { version = "=0.153.0", features = ["transformer", "codegen", "semantic", "isolated_declarations"] }
 # Solid universal-mode JSX compiler (Oxc port). Pinned to a commit: the published tag predates the `compile` API.
 dom-expressions-compiler = { git = "https://github.com/yumemi-thomas/solid-1x-compiler", rev = "e03fc5d9494ac83c718cee701dbac104dbeee540", default-features = false }
 
+# Apple bindings: default features off. The defaults pull in every header
+# and link frameworks we never use (CloudKit, CoreData, Metal, ...), which
+# costs compile time and app launch time (dyld loads each linked framework).
 objc2 = "0.6.5"
-objc2-foundation = "0.3.2"
-objc2-ui-kit = "0.3.2"
-objc2-core-foundation = "0.3.2"
-objc2-core-graphics = "0.3.2"
-objc2-core-text = "0.3.2"
-objc2-image-io = "0.3.2"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "block2",
+  "NSArray",
+  "NSAttributedString",
+  "NSCache",
+  "NSData",
+  "NSDictionary",
+  "NSEnumerator",
+  "NSError",
+  "NSNotification",
+  "NSObject",
+  "NSOperation",
+  "NSRange",
+  "NSRunLoop",
+  "NSSet",
+  "NSString",
+  "NSURL",
+  "NSURLRequest",
+  "NSURLResponse",
+  "NSURLSession",
+  "NSValue",
+] }
+objc2-ui-kit = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "block2",
+  "objc2-core-foundation",
+  "objc2-core-graphics",
+  "objc2-quartz-core",
+  "NSAttributedString",
+  "UIBarAppearance",
+  "UIBehavioralStyle",
+  "UIBarButtonItem",
+  "UIBarItem",
+  "UINavigationBar",
+  "UINavigationBarAppearance",
+  "UINavigationController",
+  "UINavigationItem",
+  "UIPresentationController",
+  "UIViewControllerTransitionCoordinator",
+  "UIAccessibility",
+  "UIAccessibilityConstants",
+  "UIAlertController",
+  "UIPopoverPresentationController",
+  "UIPopoverSupport",
+  "UIAccessibilityCustomAction",
+  "UIAccessibilityIdentification",
+  "UIEvent",
+  "UIGestureRecognizerSubclass",
+  "UIPinchGestureRecognizer",
+  "UIRotationGestureRecognizer",
+  "UITouch",
+  "NSLayoutAnchor",
+  "NSLayoutConstraint",
+  "NSText",
+  "NSTextContainer",
+  "UIActivityIndicatorView",
+  "UIApplication",
+  "UIColor",
+  "UIControl",
+  "UIDevice",
+  "UIFont",
+  "UIFontDescriptor",
+  "UIGeometry",
+  "UIGestureRecognizer",
+  "UIGraphics",
+  "UIImage",
+  "UIInterface",
+  "UILabel",
+  "UILayoutGuide",
+  "UILongPressGestureRecognizer",
+  "UIPanGestureRecognizer",
+  "UIRefreshControl",
+  "UIResponder",
+  "UIScene",
+  "UISceneConfiguration",
+  "UISceneDefinitions",
+  "UISceneOptions",
+  "UISceneSession",
+  "UIScreen",
+  "UIScrollView",
+  "UISlider",
+  "UISwitch",
+  "UITapGestureRecognizer",
+  "UITextField",
+  "UITextInput",
+  "UITextInputTraits",
+  "UITextView",
+  "UITraitCollection",
+  "UIView",
+  "UIViewController",
+  "UIWindow",
+  "UIWindowScene",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "CFAttributedString",
+  "CFCGTypes",
+  "CFData",
+  "CFDictionary",
+  "CFNumber",
+  "CFString",
+  "CFURL",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "CGColor",
+  "CGContext",
+  "CGImage",
+  "CGPath",
+] }
+objc2-core-text = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "objc2-core-graphics",
+  "CTFont",
+  "CTFontDescriptor",
+  "CTFontManager",
+  "CTFontTraits",
+  "CTFrame",
+  "CTFramesetter",
+  "CTLine",
+  "CTParagraphStyle",
+  "CTRun",
+  "CTStringAttributes",
+  "CTTypesetter",
+] }
+objc2-image-io = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "objc2-core-graphics",
+  "CGImageSource",
+] }
 block2 = "0.6.2"
-objc2-quartz-core = "0.3.2"
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "objc2-core-foundation",
+  "objc2-core-graphics",
+  "CADisplayLink",
+  "CALayer",
+  "CATransform3D",
+  "CAAnimation",
+  "CAMediaTiming",
+  "CAShapeLayer",
+  "CATransaction",
+] }
 dispatch2 = "0.3.1"
 
 [profile.release]

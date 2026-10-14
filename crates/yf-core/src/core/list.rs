@@ -1,15 +1,23 @@
 //! Virtualized list state: item sizes, offsets, the render window and cell
 //! recycling. Pure bookkeeping; the core feeds it measurements and scroll
 //! offsets and applies its decisions to the tree.
+//!
+//! Positions are computed along the list's main axis in *natural*
+//! coordinates (distance from the start of the content: padding, header,
+//! items, footer). An inverted list lays the same content out from the end
+//! of the scroll view (item 0 at the bottom) and keeps its distance from
+//! the end while content changes, like React Native's inverted lists.
 
 use rustc_hash::FxHashMap;
 
-use crate::fenwick::Fenwick;
+use crate::{
+    fenwick::Fenwick,
+    ops::{CellSlot, ListContentStyle, Viewability},
+};
 
 /// How far beyond the viewport cells are kept rendered, in viewports.
 const OVERSCAN: f32 = 1.0;
-/// `onEndReached` fires when the viewport end is this close to the content
-/// end, in viewports.
+/// Default `onEndReachedThreshold`, in viewports.
 const END_THRESHOLD: f32 = 1.0;
 
 /// A recycling slot: one cell node, bound to at most one item.
@@ -34,17 +42,92 @@ impl Slot {
     }
 }
 
+/// A non-recycled cell: the header, footer or empty placeholder.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Extra {
+    /// Cell node key, or `u32::MAX`.
+    pub(super) cell: u32,
+    /// Measured main-axis size (0 until measured).
+    pub(super) size: f32,
+}
+
+impl Extra {
+    const NONE: Self = Self {
+        cell: u32::MAX,
+        size: 0.0,
+    };
+
+    fn present(&self) -> bool {
+        self.cell != u32::MAX
+    }
+}
+
+/// Which extra cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExtraKind {
+    Header = 0,
+    Footer = 1,
+    Empty = 2,
+}
+
+/// Where the blocks of a list's content start, in natural coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Blocks {
+    pub(super) header: f32,
+    /// The first item row (or the empty placeholder).
+    pub(super) body: f32,
+    pub(super) footer: f32,
+    /// Content length: everything plus the end padding.
+    pub(super) total: f32,
+}
+
+/// A scroll the core asked the platform for, not yet reflected in the
+/// offsets it reports.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PendingScroll {
+    By(f32),
+    To(f32),
+}
+
+/// A sticky cell's range of travel, in content coordinates along the main
+/// axis: it sits at `start` and is pushed down with the scroll offset
+/// until `end`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct StickyRange {
+    pub(super) cell: u32,
+    pub(super) start: f32,
+    pub(super) end: f32,
+}
+
 #[derive(Debug)]
 pub(super) struct ListState {
     pub(super) count: u32,
     estimated: f32,
-    /// Measured main-axis sizes; NaN = not measured yet.
+    /// Items per row (`numColumns`).
+    pub(super) columns: u32,
+    /// Measured main-axis sizes of items; NaN = not measured yet.
     sizes: Vec<f32>,
-    offsets: Fenwick,
+    /// Row sizes (the largest item of each row) plus the gap after the row.
+    rows: Fenwick,
     pub(super) slots: Vec<Slot>,
     by_index: FxHashMap<u32, u32>,
     free: Vec<u32>,
-    /// Main-axis scroll offset reported by the platform.
+    pub(super) extras: [Extra; 3],
+    /// `contentContainerStyle`: padding and gaps.
+    pub(super) content: ListContentStyle,
+    pub(super) horizontal: bool,
+    pub(super) inverted: bool,
+    /// `stickyHeaderIndices`, sorted.
+    pub(super) sticky: Vec<u32>,
+    /// Sticky ranges last sent to the platform.
+    pub(super) sent_sticky: Vec<StickyRange>,
+    pub(super) viewability: Viewability,
+    /// Last reported viewable items (`first..=last`).
+    pub(super) viewable: Option<(u32, u32)>,
+    /// `onEndReachedThreshold`, in viewports.
+    pub(super) end_threshold: f32,
+    /// Main-axis scroll offset reported by the platform (content
+    /// coordinates).
     pub(super) offset: f32,
     /// Main-axis size of the list viewport (from layout).
     pub(super) viewport: f32,
@@ -53,6 +136,20 @@ pub(super) struct ListState {
     /// Cross-axis size the cells were last laid out at.
     pub(super) cells_cross: f32,
     end_reached_at: Option<u32>,
+    /// Inverted lists: `content_len - viewport` when the offset was last
+    /// anchored (NaN before the first layout).
+    anchored_end: f32,
+    /// Scrolls issued to the platform (`ScrollBy` items and `ScrollTo`
+    /// commands); platforms count the ones they applied.
+    issued: u32,
+    /// Issued scrolls by number, oldest first, until a report shows them
+    /// applied.
+    pending: Vec<(u32, PendingScroll)>,
+    /// Cells whose item moved to another index (a splice): the runtime
+    /// learns their new index with the next bindings.
+    moved: Vec<(u32, u32)>,
+    /// Scroll that keeps the visible content in place after a splice.
+    splice_anchor: f32,
 }
 
 impl ListState {
@@ -60,31 +157,313 @@ impl ListState {
         Self {
             count: 0,
             estimated: 50.0,
+            columns: 1,
             sizes: Vec::new(),
-            offsets: Fenwick::default(),
+            rows: Fenwick::default(),
             slots: Vec::new(),
             by_index: FxHashMap::default(),
             free: Vec::new(),
+            extras: [Extra::NONE; 3],
+            content: ListContentStyle::default(),
+            horizontal: false,
+            inverted: false,
+            sticky: Vec::new(),
+            sent_sticky: Vec::new(),
+            viewability: Viewability::default(),
+            viewable: None,
+            end_threshold: END_THRESHOLD,
             offset: 0.0,
             viewport: 0.0,
             dirty: true,
             cells_cross: f32::NAN,
             end_reached_at: None,
+            anchored_end: f32::NAN,
+            issued: 0,
+            pending: Vec::new(),
+            moved: Vec::new(),
+            splice_anchor: 0.0,
         }
     }
 
-    fn effective(&self, i: usize) -> f64 {
-        let s = self.sizes[i];
-        if s.is_nan() {
-            self.estimated as f64
-        } else {
-            s as f64
+    /// The items changed: `removed` items at `at` were replaced by
+    /// `inserted` new ones. Measurements and cells follow the items that
+    /// stay, and when the change is above the first visible item the
+    /// visible content keeps its place.
+    pub(super) fn splice(&mut self, at: u32, removed: u32, inserted: u32) {
+        let at = at.min(self.count);
+        let removed = removed.min(self.count - at);
+        if removed == 0 && inserted == 0 {
+            return;
         }
+        // The first visible item and where it is in the viewport.
+        let anchor = (!self.inverted && self.count > 0 && self.viewport > 0.0).then(|| {
+            let top = self.natural_offset();
+            let body = self.blocks().body;
+            let row = self.rows.find((top - body).max(0.0) as f64) as u32;
+            let index = (row * self.columns).min(self.count - 1);
+            (index, self.item_at(index) - top)
+        });
+        let end = (at + removed) as usize;
+        self.sizes.splice(
+            at as usize..end,
+            std::iter::repeat_n(f32::NAN, inserted as usize),
+        );
+        self.count = self.count - removed + inserted;
+        let shift = |i: u32| -> Option<u32> {
+            if i < at {
+                Some(i)
+            } else if i >= at + removed {
+                Some(i - removed + inserted)
+            } else {
+                None
+            }
+        };
+        self.by_index.clear();
+        for (slot, s) in self.slots.iter_mut().enumerate() {
+            let Some(old) = s.index else { continue };
+            match shift(old) {
+                Some(new) => {
+                    s.index = Some(new);
+                    if s.rendered == Some(old) {
+                        s.rendered = Some(new);
+                    }
+                    if new != old {
+                        self.moved.push((slot as u32, new));
+                    }
+                    self.by_index.insert(new, slot as u32);
+                }
+                None => {
+                    s.index = None;
+                    s.rendered = None;
+                    self.free.push(slot as u32);
+                }
+            }
+        }
+        self.free.sort_unstable();
+        self.free.dedup();
+        self.rebuild_offsets();
+        if self.end_reached_at.is_some() {
+            self.end_reached_at = None;
+        }
+        if let Some((index, from_top)) = anchor
+            && index >= at + removed
+        {
+            let moved_to = index - removed + inserted;
+            let delta = self.item_at(moved_to) - from_top - self.natural_offset();
+            self.offset += delta;
+            self.splice_anchor += delta;
+        }
+    }
+
+    /// The scroll a splice asked for, once.
+    pub(super) fn take_splice_anchor(&mut self) -> f32 {
+        std::mem::take(&mut self.splice_anchor)
+    }
+
+    /// Records a `ScrollBy` sent to the platform.
+    pub(super) fn issue_scroll_by(&mut self, delta: f32) {
+        self.issued += 1;
+        self.pending.push((self.issued, PendingScroll::By(delta)));
+    }
+
+    /// Records a `ScrollTo` sent to the platform.
+    pub(super) fn issue_scroll_to(&mut self, offset: f32) {
+        self.issued += 1;
+        self.pending.push((self.issued, PendingScroll::To(offset)));
+    }
+
+    /// The platform reports its offset after applying `applied` of the
+    /// issued scrolls: scrolls it has not applied yet still count, so a
+    /// report that predates them does not move the window backwards.
+    pub(super) fn reported(&mut self, offset: f32, applied: u32) {
+        self.pending.retain(|&(n, _)| n > applied);
+        let mut at = offset;
+        for &(_, scroll) in &self.pending {
+            match scroll {
+                PendingScroll::By(d) => at += d,
+                PendingScroll::To(t) => at = t,
+            }
+        }
+        if at != self.offset {
+            self.offset = at;
+            self.dirty = true;
+        }
+    }
+
+    // --- Geometry ----------------------------------------------------------
+
+    fn effective(&self, i: usize) -> f32 {
+        let s = self.sizes[i];
+        if s.is_nan() { self.estimated } else { s }
+    }
+
+    fn row_count(&self) -> u32 {
+        self.count.div_ceil(self.columns)
+    }
+
+    fn row_of(&self, i: u32) -> u32 {
+        i / self.columns
+    }
+
+    /// Size of row `r`: its largest item.
+    fn row_size(&self, r: u32) -> f32 {
+        let start = (r * self.columns) as usize;
+        let end = (start + self.columns as usize).min(self.sizes.len());
+        (start..end).map(|i| self.effective(i)).fold(0.0, f32::max)
+    }
+
+    /// The gap between rows along the main axis.
+    fn main_gap(&self) -> f32 {
+        if self.horizontal {
+            self.content.column_gap
+        } else {
+            self.content.row_gap
+        }
+    }
+
+    /// The gap between columns.
+    pub(super) fn cross_gap(&self) -> f32 {
+        if self.horizontal {
+            self.content.row_gap
+        } else {
+            self.content.column_gap
+        }
+    }
+
+    /// Padding at the start / end of the main axis and of the cross axis.
+    fn main_padding(&self) -> (f32, f32) {
+        let p = &self.content.padding;
+        if self.horizontal {
+            (p.left, p.right)
+        } else {
+            (p.top, p.bottom)
+        }
+    }
+
+    pub(super) fn cross_padding(&self) -> (f32, f32) {
+        let p = &self.content.padding;
+        if self.horizontal {
+            (p.top, p.bottom)
+        } else {
+            (p.left, p.right)
+        }
+    }
+
+    fn rows_changed(&mut self) {
+        self.dirty = true;
     }
 
     fn rebuild_offsets(&mut self) {
-        self.offsets = Fenwick::from_sizes((0..self.sizes.len()).map(|i| self.effective(i)));
+        let gap = self.main_gap() as f64;
+        let rows = (0..self.row_count()).map(|r| self.row_size(r) as f64 + gap);
+        self.rows = Fenwick::from_sizes(rows.collect::<Vec<_>>().into_iter());
+        self.dirty = true;
     }
+
+    /// Length of the item rows (no trailing gap).
+    fn items_len(&self) -> f32 {
+        if self.count == 0 {
+            0.0
+        } else {
+            self.rows.total() as f32 - self.main_gap()
+        }
+    }
+
+    /// Start of each block of content, in natural coordinates.
+    pub(super) fn blocks(&self) -> Blocks {
+        let gap = self.main_gap();
+        let (start, end) = self.main_padding();
+        let [header, footer, empty] = &self.extras;
+        let mut at = start;
+        let mut any = false;
+        let mut place = |present: bool, size: f32| {
+            if !present {
+                return at;
+            }
+            if any {
+                at += gap;
+            }
+            any = true;
+            let here = at;
+            at += size;
+            here
+        };
+        let header_at = place(header.present(), header.size);
+        let body_at = if self.count > 0 {
+            place(true, self.items_len())
+        } else {
+            place(empty.present(), empty.size)
+        };
+        let footer_at = place(footer.present(), footer.size);
+        Blocks {
+            header: header_at,
+            body: body_at,
+            footer: footer_at,
+            total: at + end,
+        }
+    }
+
+    /// Total content length along the main axis (what the platform
+    /// scrolls).
+    pub(super) fn content_len(&self) -> f32 {
+        let total = self.blocks().total;
+        if self.inverted {
+            total.max(self.viewport)
+        } else {
+            total
+        }
+    }
+
+    /// Content coordinate of a span at natural position `at` of length
+    /// `size`.
+    pub(super) fn to_content(&self, at: f32, size: f32) -> f32 {
+        if self.inverted {
+            self.content_len() - at - size
+        } else {
+            at
+        }
+    }
+
+    /// The viewport's start in natural coordinates.
+    fn natural_offset(&self) -> f32 {
+        if self.inverted {
+            self.content_len() - self.offset - self.viewport
+        } else {
+            self.offset
+        }
+    }
+
+    /// Natural position of item `i` (its row's start).
+    pub(super) fn item_at(&self, i: u32) -> f32 {
+        self.blocks().body + self.rows.prefix(self.row_of(i) as usize) as f32
+    }
+
+    /// Size and position of each cell across the main axis: `(offset,
+    /// size)` of column `col`.
+    pub(super) fn column(&self, cross: f32, col: u32) -> (f32, f32) {
+        let (start, end) = self.cross_padding();
+        let gap = self.cross_gap();
+        let n = self.columns as f32;
+        let width = ((cross - start - end - gap * (n - 1.0)) / n).max(0.0);
+        (start + col as f32 * (width + gap), width)
+    }
+
+    /// The cross-axis span of extras: the content width inside padding.
+    pub(super) fn full_width(&self, cross: f32) -> (f32, f32) {
+        let (start, end) = self.cross_padding();
+        (start, (cross - start - end).max(0.0))
+    }
+
+    /// Main-axis size of item `i`'s row.
+    pub(super) fn row_extent(&self, i: u32) -> f32 {
+        self.row_size(self.row_of(i))
+    }
+
+    pub(super) fn column_of(&self, i: u32) -> u32 {
+        i % self.columns
+    }
+
+    // --- Updates -----------------------------------------------------------
 
     pub(super) fn set_count(&mut self, count: u32) {
         if count == self.count {
@@ -93,8 +472,6 @@ impl ListState {
         self.count = count;
         self.sizes.resize(count as usize, f32::NAN);
         self.rebuild_offsets();
-        // Items past the end lose their slots on the next window update.
-        self.dirty = true;
         if self.end_reached_at.is_some_and(|c| c != count) {
             self.end_reached_at = None;
         }
@@ -104,45 +481,184 @@ impl ListState {
         if estimated > 0.0 && estimated != self.estimated {
             self.estimated = estimated;
             self.rebuild_offsets();
+        }
+    }
+
+    pub(super) fn set_columns(&mut self, columns: u32) {
+        let columns = columns.max(1);
+        if columns != self.columns {
+            self.columns = columns;
+            // Cells change width: their sizes are measured again.
+            self.sizes.fill(f32::NAN);
+            self.cells_cross = f32::NAN;
+            self.rebuild_offsets();
+        }
+    }
+
+    pub(super) fn set_content(&mut self, content: ListContentStyle) {
+        if content != self.content {
+            let cross_changed = self.cross_padding() != {
+                let p = &content.padding;
+                if self.horizontal {
+                    (p.top, p.bottom)
+                } else {
+                    (p.left, p.right)
+                }
+            } || self.cross_gap()
+                != if self.horizontal {
+                    content.row_gap
+                } else {
+                    content.column_gap
+                };
+            self.content = content;
+            if cross_changed {
+                self.cells_cross = f32::NAN;
+            }
+            self.rebuild_offsets();
+        }
+    }
+
+    pub(super) fn set_horizontal(&mut self, horizontal: bool) {
+        if horizontal != self.horizontal {
+            self.horizontal = horizontal;
+            self.sizes.fill(f32::NAN);
+            self.rebuild_offsets();
+        }
+    }
+
+    pub(super) fn set_inverted(&mut self, inverted: bool) {
+        if inverted != self.inverted {
+            self.inverted = inverted;
+            self.anchored_end = f32::NAN;
             self.dirty = true;
         }
     }
 
-    /// Forgets all measurements (orientation change).
-    pub(super) fn clear_sizes(&mut self) {
-        self.sizes.fill(f32::NAN);
-        self.rebuild_offsets();
-        self.dirty = true;
-    }
-
-    /// Offset of item `i` along the main axis.
-    pub(super) fn offset_of(&self, i: u32) -> f32 {
-        self.offsets.prefix(i as usize) as f32
-    }
-
-    /// Total content length along the main axis.
-    pub(super) fn total(&self) -> f32 {
-        self.offsets.total() as f32
+    pub(super) fn set_sticky(&mut self, mut sticky: Vec<u32>) {
+        sticky.sort_unstable();
+        sticky.dedup();
+        if sticky != self.sticky {
+            self.sticky = sticky;
+            self.dirty = true;
+        }
     }
 
     /// Records a measured size. Returns the change if the item lies
-    /// entirely above the viewport (the caller scrolls by it so the
+    /// entirely before the viewport (the caller scrolls by it so the
     /// visible content stays put).
     pub(super) fn measured(&mut self, i: u32, size: f32) -> f32 {
         let idx = i as usize;
         if idx >= self.sizes.len() || self.sizes[idx] == size {
             return 0.0;
         }
-        let delta = size as f64 - self.effective(idx);
-        let above_viewport = self.offset_of(i + 1) <= self.offset;
+        let row = self.row_of(i);
+        let before = self.row_size(row);
+        let row_start = self.item_at(i);
+        let natural = self.natural_offset();
+        let above_viewport = row_start < natural && row_start + before <= natural;
         self.sizes[idx] = size;
-        self.offsets.add(idx, delta);
+        let delta = self.row_size(row) - before;
+        if delta != 0.0 {
+            self.rows.add(row as usize, delta as f64);
+        }
         self.dirty = true;
-        if above_viewport { delta as f32 } else { 0.0 }
+        if above_viewport && !self.inverted {
+            delta
+        } else {
+            0.0
+        }
     }
 
-    pub(super) fn add_slot_cell(&mut self, slot: u32, cell: u32) {
-        let s = slot as usize;
+    /// Records the size of an extra cell; returns the anchoring change as
+    /// [`ListState::measured`] does.
+    pub(super) fn measured_extra(&mut self, kind: ExtraKind, size: f32) -> f32 {
+        let blocks = self.blocks();
+        let extra = &mut self.extras[kind as usize];
+        if extra.size == size {
+            return 0.0;
+        }
+        let delta = size - extra.size;
+        extra.size = size;
+        self.rows_changed();
+        let at = match kind {
+            ExtraKind::Header => blocks.header,
+            ExtraKind::Footer => blocks.footer,
+            ExtraKind::Empty => blocks.body,
+        };
+        // Inverted lists keep their distance from the end instead
+        // (`anchor_end`). Otherwise: an extra entirely before the
+        // viewport's start (not one that was empty at the top, with the
+        // list at the top).
+        let old_end = at + size - delta;
+        if !self.inverted && at < self.offset && old_end <= self.offset {
+            delta
+        } else {
+            0.0
+        }
+    }
+
+    /// Inverted lists keep their distance from the end of the content:
+    /// returns how far to scroll after content or viewport changes (and
+    /// starts at the end).
+    pub(super) fn anchor_end(&mut self) -> f32 {
+        if !self.inverted || self.viewport <= 0.0 {
+            return 0.0;
+        }
+        let end = (self.content_len() - self.viewport).max(0.0);
+        let delta = if self.anchored_end.is_nan() {
+            end - self.offset
+        } else {
+            end - self.anchored_end
+        };
+        self.anchored_end = end;
+        self.offset += delta;
+        delta
+    }
+
+    /// The platform is about to scroll to `offset` (a command): the window
+    /// follows it right away, and inverted lists anchor to it.
+    pub(super) fn jump(&mut self, offset: f32) {
+        self.offset = offset;
+        if self.inverted {
+            self.anchored_end = (self.content_len() - self.viewport).max(0.0);
+        }
+        self.dirty = true;
+    }
+
+    /// The content offset that shows item `index` at `view_position` (0:
+    /// start of the viewport, 1: end) shifted by `view_offset`, clamped to
+    /// the content.
+    pub(super) fn offset_for_index(&self, index: u32, view_position: f32, view_offset: f32) -> f32 {
+        let index = index.min(self.count.saturating_sub(1));
+        let size = self.row_size(self.row_of(index));
+        let at = self.to_content(self.item_at(index), size);
+        let free = self.viewport - size;
+        let offset = if self.inverted {
+            // Mirrored like the inverted list itself.
+            at - (1.0 - view_position) * free + view_offset
+        } else {
+            at - view_position * free - view_offset
+        };
+        offset.clamp(0.0, (self.content_len() - self.viewport).max(0.0))
+    }
+
+    pub(super) fn end_offset(&self) -> f32 {
+        if self.inverted {
+            0.0
+        } else {
+            (self.content_len() - self.viewport).max(0.0)
+        }
+    }
+
+    // --- Cells -------------------------------------------------------------
+
+    pub(super) fn add_slot_cell(&mut self, slot: CellSlot, cell: u32) {
+        let s = match slot {
+            CellSlot::Item(s) => s as usize,
+            CellSlot::Header => return self.set_extra(ExtraKind::Header, cell),
+            CellSlot::Footer => return self.set_extra(ExtraKind::Footer, cell),
+            CellSlot::Empty => return self.set_extra(ExtraKind::Empty, cell),
+        };
         if s >= self.slots.len() {
             self.slots.resize(
                 s + 1,
@@ -157,11 +673,22 @@ impl ListState {
         self.dirty = true;
     }
 
+    fn set_extra(&mut self, kind: ExtraKind, cell: u32) {
+        self.extras[kind as usize] = Extra { cell, size: 0.0 };
+        self.dirty = true;
+    }
+
     pub(super) fn remove_cell(&mut self, cell: u32) {
         for slot in &mut self.slots {
             if slot.cell == cell {
                 slot.cell = u32::MAX;
                 slot.rendered = None;
+                self.dirty = true;
+            }
+        }
+        for extra in &mut self.extras {
+            if extra.cell == cell {
+                *extra = Extra::NONE;
                 self.dirty = true;
             }
         }
@@ -174,6 +701,71 @@ impl ListState {
         }
     }
 
+    // --- Window ------------------------------------------------------------
+
+    /// Item range `first..=last` of rows overlapping the natural span
+    /// `[start, end]`, or `None`.
+    fn items_in(&self, start: f32, end: f32) -> Option<(u32, u32)> {
+        if self.count == 0 {
+            return None;
+        }
+        let body = self.blocks().body;
+        if end < body || start > body + self.items_len() {
+            return None;
+        }
+        let first_row = self.rows.find((start - body).max(0.0) as f64) as u32;
+        let last_row =
+            (self.rows.find((end - body).max(0.0) as f64) as u32).min(self.row_count() - 1);
+        let first = first_row * self.columns;
+        let last = ((last_row + 1) * self.columns - 1).min(self.count - 1);
+        Some((first, last))
+    }
+
+    /// The span of content (main axis, content coordinates) whose items
+    /// are rendered: the viewport and the overscan around it.
+    pub(super) fn render_window(&self) -> (f32, f32) {
+        let overscan = self.viewport * OVERSCAN;
+        (
+            self.offset - overscan,
+            self.offset + self.viewport + overscan,
+        )
+    }
+
+    /// The sticky item currently pinned to the viewport's start: the last
+    /// one that starts before it.
+    pub(super) fn active_sticky(&self) -> Option<u32> {
+        if !self.sticky_enabled() {
+            return None;
+        }
+        let at = self.natural_offset();
+        let mut active = None;
+        for &s in &self.sticky {
+            if s >= self.count || self.item_at(s) > at {
+                break;
+            }
+            active = Some(s);
+        }
+        active
+    }
+
+    /// Sticky items need one column and a list that is not inverted (as in
+    /// React Native).
+    pub(super) fn sticky_enabled(&self) -> bool {
+        !self.sticky.is_empty() && self.columns == 1 && !self.inverted
+    }
+
+    /// The travel range of sticky item `index`: from its position to where
+    /// the next sticky item pushes it out.
+    pub(super) fn sticky_range(&self, index: u32, cell: u32, size: f32) -> StickyRange {
+        let start = self.item_at(index);
+        let next = self.sticky.iter().find(|&&s| s > index && s < self.count);
+        let end = match next {
+            Some(&n) => (self.item_at(n) - size).max(start),
+            None => f32::INFINITY,
+        };
+        StickyRange { cell, start, end }
+    }
+
     /// Recomputes the render window. New `(slot, index)` bindings are
     /// pushed to `binds`. Returns true if `onEndReached` should fire.
     pub(super) fn update_window(&mut self, binds: &mut Vec<(u32, u32)>) -> bool {
@@ -184,40 +776,51 @@ impl ListState {
             }
             return false;
         }
+        // Cells whose item moved: the runtime learns their new index.
+        binds.append(&mut self.moved);
+        let at = self.natural_offset();
         let overscan = self.viewport * OVERSCAN;
-        let start = (self.offset - overscan).max(0.0);
-        let end = self.offset + self.viewport + overscan;
-        let first = self.offsets.find(start as f64) as u32;
-        let last = (self.offsets.find(end as f64) as u32).min(self.count - 1);
+        let range = self.items_in(at - overscan, at + self.viewport + overscan);
+        let sticky = self.active_sticky();
+        let wanted = |i: u32| range.is_some_and(|(f, l)| (f..=l).contains(&i)) || sticky == Some(i);
 
         for slot in 0..self.slots.len() as u32 {
             if let Some(i) = self.slots[slot as usize].index
-                && !(first..=last).contains(&i)
+                && !wanted(i)
             {
                 self.unbind(slot);
             }
         }
-        for i in first..=last {
-            if self.by_index.contains_key(&i) {
-                continue;
+        let mut bind = |this: &mut Self, i: u32| {
+            if this.by_index.contains_key(&i) {
+                return;
             }
-            let slot = match self.free.pop() {
+            let slot = match this.free.pop() {
                 Some(slot) => slot,
                 None => {
-                    self.slots.push(Slot {
+                    this.slots.push(Slot {
                         cell: u32::MAX,
                         index: None,
                         rendered: None,
                     });
-                    self.slots.len() as u32 - 1
+                    this.slots.len() as u32 - 1
                 }
             };
-            self.slots[slot as usize].index = Some(i);
-            self.by_index.insert(i, slot);
+            this.slots[slot as usize].index = Some(i);
+            this.by_index.insert(i, slot);
             binds.push((slot, i));
+        };
+        if let Some((first, last)) = range {
+            for i in first..=last {
+                bind(self, i);
+            }
+        }
+        if let Some(s) = sticky {
+            bind(self, s);
         }
 
-        let near_end = self.offset + self.viewport >= self.total() - self.viewport * END_THRESHOLD;
+        let total = self.blocks().total;
+        let near_end = at + self.viewport >= total - self.viewport * self.end_threshold;
         if near_end && self.end_reached_at != Some(self.count) {
             self.end_reached_at = Some(self.count);
             return true;
@@ -231,11 +834,61 @@ impl ListState {
             self.free.push(slot);
         }
     }
+
+    /// The viewable items under the list's viewability rules (React
+    /// Native's `ViewabilityHelper`): `first..=last`, or `None`.
+    pub(super) fn viewable_items(&self) -> Option<(u32, u32)> {
+        if self.viewport <= 0.0 {
+            return None;
+        }
+        let top = self.natural_offset();
+        let bottom = top + self.viewport;
+        let (first, last) = self.items_in(top, bottom)?;
+        let viewable = |row: u32| {
+            let start = self.item_at(row * self.columns);
+            let size = self.row_size(row);
+            let end = start + size;
+            if start >= top && end <= bottom {
+                return true;
+            }
+            let pixels = (end.min(bottom) - start.max(top)).max(0.0);
+            let (percent, threshold) = match (
+                self.viewability.view_area_percent,
+                self.viewability.item_visible_percent,
+            ) {
+                (Some(t), _) => (100.0 * pixels / self.viewport, t),
+                (None, Some(t)) => (100.0 * pixels / size.max(f32::EPSILON), t),
+                (None, None) => return pixels > 0.0,
+            };
+            if threshold > 0.0 {
+                percent >= threshold
+            } else {
+                pixels > 0.0
+            }
+        };
+        let (mut first_row, mut last_row) = (self.row_of(first), self.row_of(last));
+        while first_row <= last_row && !viewable(first_row) {
+            first_row += 1;
+        }
+        while last_row >= first_row && !viewable(last_row) {
+            if last_row == 0 {
+                return None;
+            }
+            last_row -= 1;
+        }
+        (first_row <= last_row).then(|| {
+            (
+                first_row * self.columns,
+                ((last_row + 1) * self.columns - 1).min(self.count - 1),
+            )
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::props::EdgeInsets;
 
     fn list(count: u32, estimated: f32, viewport: f32) -> ListState {
         let mut l = ListState::new();
@@ -271,8 +924,8 @@ mod tests {
         l.offset = 1000.0;
         // Item 0 is above the viewport: growing it must scroll by the same.
         assert_eq!(l.measured(0, 80.0), 30.0);
-        assert_eq!(l.offset_of(1), 80.0);
-        assert_eq!(l.total(), 100.0 * 50.0 + 30.0);
+        assert_eq!(l.item_at(1), 80.0);
+        assert_eq!(l.blocks().total, 100.0 * 50.0 + 30.0);
         // Item 30 is in view: no anchoring.
         assert_eq!(l.measured(30, 10.0), 0.0);
     }
@@ -300,5 +953,186 @@ mod tests {
         binds.clear();
         l.update_window(&mut binds);
         assert_eq!(l.slots.iter().filter(|s| s.index.is_some()).count(), 3);
+    }
+
+    #[test]
+    fn columns_share_rows() {
+        let mut l = list(10, 50.0, 1000.0);
+        l.set_columns(3);
+        // 4 rows of 50.
+        assert_eq!(l.blocks().total, 200.0);
+        assert_eq!(l.item_at(4), 50.0);
+        assert_eq!(l.column_of(4), 1);
+        // A row is as tall as its tallest item.
+        l.measured(4, 80.0);
+        assert_eq!(l.item_at(6), 130.0);
+        assert_eq!(l.column(320.0, 2), (320.0 * 2.0 / 3.0, 320.0 / 3.0));
+        let mut binds = Vec::new();
+        l.update_window(&mut binds);
+        assert_eq!(binds.len(), 10);
+    }
+
+    #[test]
+    fn padding_gaps_and_extras() {
+        let mut l = list(3, 50.0, 1000.0);
+        l.set_content(ListContentStyle {
+            padding: EdgeInsets {
+                top: 10.0,
+                right: 16.0,
+                bottom: 20.0,
+                left: 16.0,
+            },
+            row_gap: 8.0,
+            column_gap: 0.0,
+        });
+        l.add_slot_cell(CellSlot::Header, 7);
+        l.measured_extra(ExtraKind::Header, 30.0);
+        l.add_slot_cell(CellSlot::Footer, 8);
+        l.measured_extra(ExtraKind::Footer, 40.0);
+        let b = l.blocks();
+        assert_eq!(b.header, 10.0);
+        assert_eq!(b.body, 10.0 + 30.0 + 8.0);
+        // Three items with two gaps between them.
+        assert_eq!(b.footer, b.body + 3.0 * 50.0 + 2.0 * 8.0 + 8.0);
+        assert_eq!(b.total, b.footer + 40.0 + 20.0);
+        assert_eq!(l.full_width(400.0), (16.0, 368.0));
+        // No items: the empty placeholder takes their place.
+        l.set_count(0);
+        l.add_slot_cell(CellSlot::Empty, 9);
+        l.measured_extra(ExtraKind::Empty, 100.0);
+        let b = l.blocks();
+        assert_eq!(b.footer, b.body + 100.0 + 8.0);
+    }
+
+    #[test]
+    fn inverted_lists_start_at_the_end_and_keep_their_distance_from_it() {
+        let mut l = list(100, 50.0, 400.0);
+        l.set_inverted(true);
+        // Starts scrolled to the end; item 0 is at the bottom.
+        assert_eq!(l.anchor_end(), 5000.0 - 400.0);
+        assert_eq!(l.to_content(l.item_at(0), 50.0), 4950.0);
+        let mut binds = Vec::new();
+        l.update_window(&mut binds);
+        assert_eq!(binds.first().map(|b| b.1), Some(0));
+        assert!(binds.iter().all(|b| b.1 <= 16));
+        // Older items load (appended): the visible content stays put.
+        l.set_count(120);
+        assert_eq!(l.anchor_end(), 1000.0);
+        assert_eq!(l.offset, 5600.0);
+        assert_eq!(l.to_content(l.item_at(0), 50.0), 5950.0);
+        // A short list sits at the bottom.
+        let mut s = list(2, 50.0, 400.0);
+        s.set_inverted(true);
+        s.anchor_end();
+        assert_eq!(s.offset, 0.0);
+        assert_eq!(s.to_content(s.item_at(0), 50.0), 350.0);
+    }
+
+    #[test]
+    fn sticky_items_stay_rendered_and_travel_until_the_next() {
+        let mut l = list(100, 50.0, 400.0);
+        l.set_sticky(vec![30, 0]);
+        l.offset = 1000.0;
+        assert_eq!(l.active_sticky(), Some(0));
+        let mut binds = Vec::new();
+        l.update_window(&mut binds);
+        assert!(binds.iter().any(|b| b.1 == 0), "{binds:?}");
+        assert_eq!(
+            l.sticky_range(0, 1, 50.0),
+            StickyRange {
+                cell: 1,
+                start: 0.0,
+                end: 1450.0
+            }
+        );
+        assert_eq!(l.sticky_range(30, 1, 50.0).end, f32::INFINITY);
+        l.offset = 1600.0;
+        assert_eq!(l.active_sticky(), Some(30));
+    }
+
+    #[test]
+    fn viewability_thresholds() {
+        let mut l = list(100, 100.0, 400.0);
+        l.offset = 50.0;
+        // Any visible pixel: items 0..=4.
+        assert_eq!(l.viewable_items(), Some((0, 4)));
+        l.viewability.item_visible_percent = Some(60.0);
+        assert_eq!(l.viewable_items(), Some((1, 3)));
+        l.viewability.item_visible_percent = Some(50.0);
+        assert_eq!(l.viewable_items(), Some((0, 4)));
+    }
+
+    #[test]
+    fn stale_offset_reports_keep_pending_scrolls() {
+        let mut l = list(100, 50.0, 400.0);
+        l.offset = 500.0;
+        l.issue_scroll_by(30.0);
+        // Reported before the platform applied the shift.
+        l.reported(500.0, 0);
+        assert_eq!(l.offset, 530.0);
+        l.issue_scroll_to(1000.0);
+        l.reported(531.0, 1);
+        assert_eq!(l.offset, 1000.0);
+        l.reported(1002.0, 2);
+        assert_eq!(l.offset, 1002.0);
+        assert!(l.pending.is_empty());
+    }
+
+    #[test]
+    fn extras_at_the_top_do_not_scroll_the_list() {
+        let mut l = list(0, 50.0, 400.0);
+        l.add_slot_cell(CellSlot::Empty, 3);
+        assert_eq!(l.measured_extra(ExtraKind::Empty, 65.0), 0.0);
+        let mut l = list(100, 50.0, 400.0);
+        l.add_slot_cell(CellSlot::Header, 3);
+        assert_eq!(l.measured_extra(ExtraKind::Header, 30.0), 0.0);
+        // Scrolled past it: the visible content keeps its place.
+        l.offset = 500.0;
+        assert_eq!(l.measured_extra(ExtraKind::Header, 40.0), 10.0);
+        // Inverted lists anchor to their end instead.
+        l.set_inverted(true);
+        assert_eq!(l.measured_extra(ExtraKind::Header, 50.0), 0.0);
+    }
+
+    #[test]
+    fn splices_keep_measurements_cells_and_the_visible_content() {
+        let mut l = list(100, 50.0, 400.0);
+        let mut binds = Vec::new();
+        l.offset = 1000.0;
+        l.update_window(&mut binds);
+        for (slot, index) in binds.drain(..) {
+            l.add_slot_cell(CellSlot::Item(slot), 100 + slot);
+            l.rendered(100 + slot, index);
+        }
+        l.measured(25, 80.0);
+        // Three items arrive at the top: item 20 (the first visible) keeps
+        // its place on screen.
+        let before = l.item_at(20) - l.offset;
+        l.splice(0, 0, 3);
+        assert_eq!(l.count, 103);
+        assert_eq!(l.item_at(23) - l.offset, before);
+        assert_eq!(l.take_splice_anchor(), 150.0);
+        // Item 25's measurement moved with it.
+        assert_eq!(l.row_extent(28), 80.0);
+        // Cells follow their items, and the runtime is told.
+        l.update_window(&mut binds);
+        assert!(binds.iter().any(|&(_, i)| i == 28));
+        assert!(l.slots.iter().any(|s| s.ready() == Some(28)));
+        // A change below the viewport moves nothing.
+        let offset = l.offset;
+        l.splice(90, 2, 0);
+        assert_eq!(l.offset, offset);
+        assert_eq!(l.count, 101);
+    }
+
+    #[test]
+    fn scroll_to_index() {
+        let mut l = list(100, 50.0, 400.0);
+        assert_eq!(l.offset_for_index(10, 0.0, 0.0), 500.0);
+        assert_eq!(l.offset_for_index(10, 0.5, 0.0), 500.0 - 175.0);
+        assert_eq!(l.offset_for_index(99, 0.0, 0.0), 5000.0 - 400.0);
+        l.set_inverted(true);
+        // Item 0 at the bottom of the viewport.
+        assert_eq!(l.offset_for_index(0, 0.0, 0.0), 4600.0);
     }
 }

@@ -21,7 +21,13 @@ yf-dev = { workspace = true, features = ["server"] }
 yf-js.workspace = true
 crossbeam-channel.workspace = true
 anyhow.workspace = true
-clap.workspace = true
+clap = { workspace = true, features = ["env"] }
 notify.workspace = true
 log.workspace = true
 libc.workspace = true
+ureq.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+plist.workspace = true
+zip.workspace = true
+image.workspace = true

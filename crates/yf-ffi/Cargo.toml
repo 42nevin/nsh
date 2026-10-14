@@ -1,0 +1,28 @@
+[package]
+name = "yf-ffi"
+description = "C ABI for embedding yf apps in existing iOS apps (static library + header)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "yf"
+crate-type = ["staticlib", "rlib"]
+
+[features]
+# Loading from a `yf dev` server, with on-screen errors and log forwarding.
+dev = ["yf-platform-apple/dev"]
+
+[dependencies]
+log.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+yf-platform-apple.workspace = true
+yf-engine.workspace = true
+objc2.workspace = true
+objc2-core-foundation.workspace = true
+objc2-ui-kit.workspace = true

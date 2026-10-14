@@ -1,0 +1,31 @@
+[package]
+name = "yf-platform-android"
+description = "Android backend: JNI glue, StaticLayout text engine, mount batch encoding, native animation driver."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "yf"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Development support: dev server client, log forwarding, error overlay.
+dev = ["dep:yf-dev"]
+
+[dependencies]
+log.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni.workspace = true
+yf-core.workspace = true
+yf-engine.workspace = true
+yf-anim.workspace = true
+rustc-hash.workspace = true
+ttf-parser.workspace = true
+libc.workspace = true
+yf-dev = { workspace = true, features = ["client"], optional = true }

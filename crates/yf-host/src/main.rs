@@ -9,7 +9,7 @@
 
 #[cfg(target_os = "ios")]
 fn main() {
-    use std::{env, fs, path::PathBuf};
+    use std::{env, path::PathBuf};
 
     use yf_platform_apple::{AppOptions, AppSource, AssetBase, Bundle, dev, run_app};
 
@@ -23,24 +23,13 @@ fn main() {
             "--dev-server" => source = args.next().map(AppSource::DevServer),
             "--bundle" => {
                 let path = PathBuf::from(args.next().unwrap_or_default());
-                let bytes = match fs::read(&path) {
-                    Ok(bytes) => bytes,
+                let bundle = match Bundle::read(&path) {
+                    Ok(bundle) => bundle,
                     Err(err) => {
                         log::error!("cannot read bundle {}: {err}", path.display());
                         std::process::exit(1);
                     }
                 };
-                let mut bundle = if path.extension().is_some_and(|e| e == "qbc") {
-                    Bundle::bytecode(bytes)
-                } else {
-                    Bundle::source(String::from_utf8_lossy(&bytes).into_owned())
-                };
-                // `out/bundle.qbc` -> `out/bundle.js.map`, written by `yf build`.
-                if let Ok(map) = fs::read_to_string(path.with_file_name("bundle.js.map"))
-                    && !map.is_empty()
-                {
-                    bundle = bundle.with_source_map(map);
-                }
                 // `yf build` copies imported assets next to the bundle.
                 asset_base = path
                     .parent()
@@ -48,6 +37,10 @@ fn main() {
                 source = Some(AppSource::Bundle(bundle));
             }
             "--trace" => trace = true,
+            // Foundation reads `-Key value` pairs as user defaults.
+            other if other.starts_with('-') && !other.starts_with("--") => {
+                args.next();
+            }
             other => log::warn!("unknown argument {other}"),
         }
     }

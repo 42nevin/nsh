@@ -1,7 +1,8 @@
 //! QuickJS host for yf.
 //!
 //! [`Host`] owns one QuickJS runtime and context, installs the host APIs the
-//! runtime needs (`console`, timers, the op bridge), decodes the op buffer
+//! runtime needs (`console`, timers, the op bridge, web APIs such as
+//! `fetch`), decodes the op buffer
 //! produced by `js/runtime/index.ts` into [`yf_core::Op`]s and dispatches
 //! native events back into JS.
 //!
@@ -10,13 +11,18 @@
 
 mod bytecode;
 mod console;
+mod env;
 mod error;
 mod host;
+mod net;
 mod protocol;
 mod timers;
+mod web;
 
 pub use crate::{
     bytecode::{BUNDLE_NAME, BYTECODE_VERSION, compile_bytecode},
+    env::{ColorScheme, Environment, Insets},
     error::JsError,
     host::{ErrorHandler, Host},
+    net::{HttpRequest, HttpResponse, NetworkQueue, RequestId},
 };

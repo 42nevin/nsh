@@ -1,0 +1,20 @@
+[package]
+name = "yf-app"
+description = "Release app runner: the executable of packaged yf apps (no development features)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "yf-app"
+path = "src/main.rs"
+
+[dependencies]
+log.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+yf-platform-apple.workspace = true

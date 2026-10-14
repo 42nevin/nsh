@@ -74,6 +74,18 @@ impl Animator {
     }
 }
 
+/// A paused display link calling `frame:` on `target`, unpaused for one
+/// frame when JS calls `requestAnimationFrame`.
+pub(crate) fn frame_link(target: &EventTarget) -> Retained<CADisplayLink> {
+    // SAFETY: `frame:` is implemented by `EventTarget`, which outlives the
+    // link (the mounter invalidates it when dropped).
+    let link = unsafe { CADisplayLink::displayLinkWithTarget_selector(target, sel!(frame:)) };
+    link.setPaused(true);
+    // SAFETY: the main run loop and standard modes.
+    unsafe { link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes) };
+    link
+}
+
 impl Drop for Animator {
     fn drop(&mut self) {
         self.link.invalidate();

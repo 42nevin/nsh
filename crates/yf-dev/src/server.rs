@@ -41,10 +41,18 @@ struct Bundle {
     source_map: Option<axum::body::Bytes>,
 }
 
+struct Patch {
+    version: u64,
+    base: u64,
+    code: axum::body::Bytes,
+    source_map: Option<axum::body::Bytes>,
+}
+
 #[derive(Clone)]
 enum Event {
     Building,
     Failed(Arc<str>),
+    Patch(Arc<Patch>),
     Bundle(Arc<Bundle>),
 }
 
@@ -119,13 +127,32 @@ impl DevServer {
         let _ = self.shared.events.send(Event::Building);
     }
 
-    /// Publishes a new bundle (and its source map) to every client.
-    pub fn publish(&self, bytecode: Vec<u8>, source: String, source_map: Option<String>) {
+    /// Publishes a new bundle (and its source map) to every client. With a
+    /// `patch` (a hot update script from the previous bundle, and its source
+    /// map), clients running the previous bundle update in place.
+    pub fn publish(
+        &self,
+        bytecode: Vec<u8>,
+        source: String,
+        source_map: Option<String>,
+        patch: Option<(String, Option<String>)>,
+    ) {
         let version = {
             let mut next = self.next_version.lock().expect("version lock");
             *next += 1;
             *next
         };
+        if let Some((code, map)) = patch
+            && version > 1
+        {
+            // Only for clients connected now: new clients get the bundle.
+            let _ = self.shared.events.send(Event::Patch(Arc::new(Patch {
+                version,
+                base: version - 1,
+                code: code.into(),
+                source_map: map.map(Into::into),
+            })));
+        }
         self.set(Event::Bundle(Arc::new(Bundle {
             version,
             bytecode: bytecode.into(),
@@ -300,6 +327,22 @@ async fn send_event(
                 },
             )
             .await
+        }
+        Event::Patch(patch) => {
+            send(
+                socket,
+                &ServerMessage::Patch {
+                    version: patch.version,
+                    base: patch.base,
+                    source_map: patch.source_map.is_some(),
+                },
+            )
+            .await?;
+            socket.send(Message::Binary(patch.code.clone())).await?;
+            if let Some(map) = &patch.source_map {
+                socket.send(Message::Binary(map.clone())).await?;
+            }
+            Ok(())
         }
         Event::Bundle(bundle) => {
             send(

@@ -9,7 +9,14 @@ use rquickjs::{Array, Ctx, Exception, Object, Type, Value};
 use rustc_hash::FxHashSet;
 use yf_anim::{AnimOp, AnimProp, Driver, Easing, Extrapolate, MathOp, Operand, Output};
 use yf_core::{
-    Color, EventKind, ImageSource, NodeId, Op, Prop, ResizeMode, Style, StyleError, StyleValue, Tag,
+    AccessibilityActionDef, AccessibilityProp, AccessibilityRole, AccessibilityState,
+    AccessibilityValue, AutoCapitalize, CellSlot, Checked, Color, Command, Dialog, DialogButton,
+    DialogButtonStyle, EdgeInsets, EllipsizeMode, EventKind, HeaderSlot, ImageSource,
+    KeyboardDismissMode, KeyboardTaps, KeyboardType, LayoutAnimation, LayoutCurve, LayoutProperty,
+    LayoutTransition, ListContentStyle, LiveRegion, ModalAnimation, ModalPresentation, ModalProp,
+    NativeProp, NodeId, Op, PointerEvents, Prop, ResizeMode, ReturnKeyType, ScreenAnimation,
+    ScreenProp, ScrollProp, SnapAlignment, StatusBarConfig, StatusBarStyle, Style, StyleError,
+    StyleValue, Tag, TransformKind, Viewability, WebSource,
 };
 
 // Must match the constants in `js/runtime/index.ts`.
@@ -21,6 +28,7 @@ const OP_INSERT: i32 = 4;
 const OP_REMOVE: i32 = 5;
 const OP_RELEASE: i32 = 6;
 const OP_ANIM: i32 = 7;
+const OP_COMMAND: i32 = 8;
 
 // Sub-opcodes of `OP_ANIM`.
 const ANIM_VALUE: i32 = 0;
@@ -171,6 +179,95 @@ pub(crate) fn decode<'js>(
             },
             OP_RELEASE => Op::Release { id: r.id()? },
             OP_ANIM => Op::Anim(decode_anim(&mut r)?),
+            OP_COMMAND => {
+                let id = r.id()?;
+                let name = r.string()?;
+                let arg = r.value()?;
+                let command = match name.as_str() {
+                    "focus" => Command::Focus,
+                    "blur" => Command::Blur,
+                    "exitApp" => Command::ExitApp,
+                    "reload" => Command::Reload,
+                    "goBack" => Command::GoBack,
+                    "goForward" => Command::GoForward,
+                    "stopLoading" => Command::StopLoading,
+                    "injectJavaScript" => Command::InjectJavaScript(string(&arg)?),
+                    "postMessage" => Command::PostMessage(string(&arg)?),
+                    "seek" => Command::Seek(arg.as_number().unwrap_or(0.0)),
+                    "statusBar" => {
+                        let o = arg.as_object();
+                        let flag = |key: &str| {
+                            o.and_then(|o| o.get::<_, Option<bool>>(key).ok().flatten())
+                                .unwrap_or(false)
+                        };
+                        let text = |key: &str| {
+                            o.and_then(|o| o.get::<_, Option<String>>(key).ok().flatten())
+                        };
+                        Command::StatusBar(StatusBarConfig {
+                            style: match text("barStyle").as_deref() {
+                                Some("light-content") => StatusBarStyle::Light,
+                                Some("dark-content") => StatusBarStyle::Dark,
+                                _ => StatusBarStyle::Default,
+                            },
+                            hidden: flag("hidden"),
+                            animated: flag("animated"),
+                            background: text("backgroundColor").and_then(|c| Color::parse(&c)),
+                        })
+                    }
+                    "dialog" => Command::Dialog(Box::new(decode_dialog(&arg)?)),
+                    "toast" => {
+                        let o = arg.as_object();
+                        Command::Toast {
+                            text: o
+                                .and_then(|o| o.get::<_, Option<String>>("text").ok().flatten())
+                                .unwrap_or_default(),
+                            long: o
+                                .and_then(|o| o.get::<_, Option<bool>>("long").ok().flatten())
+                                .unwrap_or(false),
+                        }
+                    }
+                    "scrollToIndex" => {
+                        let o = arg.as_object();
+                        let f = |key: &str| -> rquickjs::Result<Option<f32>> {
+                            o.map_or(Ok(None), |o| field_f32(o, key))
+                        };
+                        Command::ScrollToIndex {
+                            index: f("index")?.unwrap_or(0.0).max(0.0) as u32,
+                            animated: o
+                                .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
+                                .unwrap_or(true),
+                            view_position: f("viewPosition")?.unwrap_or(0.0),
+                            view_offset: f("viewOffset")?.unwrap_or(0.0),
+                        }
+                    }
+                    "scrollToEnd" => Command::ScrollToEnd {
+                        animated: arg
+                            .as_object()
+                            .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
+                            .unwrap_or(true),
+                    },
+                    "layoutAnimation" => Command::LayoutAnimation(decode_layout_animation(&arg)?),
+                    "scrollTo" => {
+                        let field = |key: &str| {
+                            arg.as_object()
+                                .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
+                        };
+                        Command::ScrollTo {
+                            x: field("x").unwrap_or(0.0) as f32,
+                            y: field("y").unwrap_or(0.0) as f32,
+                            animated: arg
+                                .as_object()
+                                .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
+                                .unwrap_or(true),
+                        }
+                    }
+                    other => {
+                        warnings.warn(format!("unknown command `{other}`"));
+                        continue;
+                    }
+                };
+                Op::Command { id, command }
+            }
             other => {
                 return Err(Exception::throw_type(
                     ctx,
@@ -196,6 +293,191 @@ fn number(value: &Value<'_>) -> Option<f32> {
     value.as_number().map(|n| n as f32)
 }
 
+/// A string prop; anything else (null, undefined) is the empty string.
+fn string(value: &Value<'_>) -> rquickjs::Result<String> {
+    match value.as_string() {
+        Some(s) => s.to_string(),
+        None => Ok(String::new()),
+    }
+}
+
+/// A string prop; `null` / `undefined` / `""` are `None`.
+fn opt_string(value: &Value<'_>) -> rquickjs::Result<Option<std::sync::Arc<str>>> {
+    Ok(match value.as_string() {
+        Some(s) => {
+            let s = s.to_string()?;
+            (!s.is_empty()).then(|| s.into())
+        }
+        None => None,
+    })
+}
+
+/// The native value in field `key` of an object prop (`pinch={{ scale }}`).
+fn field_value(value: &Value<'_>, key: &str) -> Option<yf_anim::NodeId> {
+    value
+        .as_object()
+        .and_then(|o| o.get::<_, Value>(key).ok())
+        .and_then(|v| native_value(&v))
+}
+
+fn field_f32(obj: &Object<'_>, key: &str) -> rquickjs::Result<Option<f32>> {
+    Ok(obj.get::<_, Option<f64>>(key)?.map(|v| v as f32))
+}
+
+/// A list's `contentContainerStyle`: the padding properties (numbers) and
+/// `gap` / `rowGap` / `columnGap`.
+fn list_content(value: &Value<'_>) -> rquickjs::Result<ListContentStyle> {
+    let Some(o) = value.as_object() else {
+        return Ok(ListContentStyle::default());
+    };
+    let all = field_f32(o, "padding")?.unwrap_or(0.0);
+    let horizontal = field_f32(o, "paddingHorizontal")?.unwrap_or(all);
+    let vertical = field_f32(o, "paddingVertical")?.unwrap_or(all);
+    let gap = field_f32(o, "gap")?.unwrap_or(0.0);
+    Ok(ListContentStyle {
+        padding: EdgeInsets {
+            top: field_f32(o, "paddingTop")?.unwrap_or(vertical),
+            right: field_f32(o, "paddingRight")?.unwrap_or(horizontal),
+            bottom: field_f32(o, "paddingBottom")?.unwrap_or(vertical),
+            left: field_f32(o, "paddingLeft")?.unwrap_or(horizontal),
+        },
+        row_gap: field_f32(o, "rowGap")?.unwrap_or(gap),
+        column_gap: field_f32(o, "columnGap")?.unwrap_or(gap),
+    })
+}
+
+/// `{ top, right, bottom, left }` (missing edges are 0).
+fn insets(value: &Value<'_>) -> rquickjs::Result<EdgeInsets> {
+    let Some(o) = value.as_object() else {
+        return Ok(EdgeInsets::default());
+    };
+    Ok(EdgeInsets {
+        top: field_f32(o, "top")?.unwrap_or(0.0),
+        right: field_f32(o, "right")?.unwrap_or(0.0),
+        bottom: field_f32(o, "bottom")?.unwrap_or(0.0),
+        left: field_f32(o, "left")?.unwrap_or(0.0),
+    })
+}
+
+fn a11y_state(value: &Value<'_>) -> rquickjs::Result<AccessibilityState> {
+    let Some(o) = value.as_object() else {
+        return Ok(AccessibilityState::default());
+    };
+    let flag = |key: &str| -> rquickjs::Result<bool> {
+        Ok(o.get::<_, Option<bool>>(key)
+            .ok()
+            .flatten()
+            .unwrap_or(false))
+    };
+    let checked: Value = o.get("checked")?;
+    Ok(AccessibilityState {
+        disabled: flag("disabled")?,
+        selected: flag("selected")?,
+        checked: match checked.as_bool() {
+            Some(true) => Some(Checked::True),
+            Some(false) => Some(Checked::False),
+            None if checked
+                .as_string()
+                .and_then(|s| s.to_string().ok())
+                .as_deref()
+                == Some("mixed") =>
+            {
+                Some(Checked::Mixed)
+            }
+            None => None,
+        },
+        busy: flag("busy")?,
+        expanded: o.get::<_, Option<bool>>("expanded").ok().flatten(),
+    })
+}
+
+fn a11y_value(value: &Value<'_>) -> rquickjs::Result<Option<AccessibilityValue>> {
+    let Some(o) = value.as_object() else {
+        return Ok(None);
+    };
+    let text: Value = o.get("text")?;
+    Ok(Some(AccessibilityValue {
+        min: field_f32(o, "min")?,
+        max: field_f32(o, "max")?,
+        now: field_f32(o, "now")?,
+        text: opt_string(&text)?,
+    }))
+}
+
+fn a11y_actions(value: &Value<'_>) -> rquickjs::Result<Vec<AccessibilityActionDef>> {
+    let Some(items) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items.iter::<Object>() {
+        let item = item?;
+        let name: Value = item.get("name")?;
+        let label: Value = item.get("label")?;
+        if let Some(name) = opt_string(&name)? {
+            out.push(AccessibilityActionDef {
+                name,
+                label: opt_string(&label)?,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// `LayoutAnimation.configureNext(config)`: `{ duration, create, update,
+/// delete }`, each part `{ type, property, duration, delay, springDamping }`.
+fn decode_layout_animation(config: &Value<'_>) -> rquickjs::Result<LayoutAnimation> {
+    let Some(c) = config.as_object() else {
+        return Ok(LayoutAnimation {
+            create: None,
+            update: None,
+            delete: None,
+        });
+    };
+    let duration = field_f32(c, "duration")?.unwrap_or(300.0);
+    let part = |key: &str,
+                default_property: LayoutProperty|
+     -> rquickjs::Result<Option<LayoutTransition>> {
+        let Some(p) = c.get::<_, Option<Object>>(key)? else {
+            return Ok(None);
+        };
+        let kind: Option<String> = p.get("type")?;
+        let property: Option<String> = p.get("property")?;
+        Ok(Some(LayoutTransition {
+            curve: match kind.as_deref() {
+                Some("linear") => LayoutCurve::Linear,
+                Some("easeIn") => LayoutCurve::EaseIn,
+                Some("easeOut") => LayoutCurve::EaseOut,
+                Some("spring") => LayoutCurve::Spring {
+                    damping: field_f32(&p, "springDamping")?
+                        .unwrap_or(0.7)
+                        .clamp(0.01, 1.0),
+                },
+                _ => LayoutCurve::EaseInEaseOut,
+            },
+            property: match property.as_deref() {
+                Some("scaleXY") | Some("scale") => LayoutProperty::Scale,
+                Some("opacity") => LayoutProperty::Opacity,
+                _ => default_property,
+            },
+            duration_ms: field_f32(&p, "duration")?.unwrap_or(duration),
+            delay_ms: field_f32(&p, "delay")?.unwrap_or(0.0),
+        }))
+    };
+    Ok(LayoutAnimation {
+        create: part("create", LayoutProperty::Opacity)?,
+        update: part("update", LayoutProperty::Opacity)?,
+        delete: part("delete", LayoutProperty::Opacity)?,
+    })
+}
+
+fn prop_color(value: &Value<'_>) -> rquickjs::Result<Option<Color>> {
+    Ok(value
+        .as_string()
+        .map(|s| s.to_string())
+        .transpose()?
+        .and_then(|s| Color::parse(&s)))
+}
+
 fn decode_prop<'js>(
     id: NodeId,
     name: &str,
@@ -204,10 +486,9 @@ fn decode_prop<'js>(
 ) -> rquickjs::Result<Option<Op>> {
     let prop = match name {
         "style" => {
-            let style = match value.as_object() {
-                Some(obj) => decode_style(obj, warnings)?,
-                None => Box::default(),
-            };
+            let mut entries = Vec::new();
+            style_entries(&value, &mut entries)?;
+            let style = decode_style(entries, warnings)?;
             return Ok(Some(Op::SetStyle { id, style }));
         }
         "src" => Prop::Source(decode_source(&value)?),
@@ -229,9 +510,307 @@ fn decode_prop<'js>(
         "refreshing" => Prop::Refreshing(value.as_bool().unwrap_or(false)),
         "count" => Prop::Count(number(&value).unwrap_or(0.0).max(0.0) as u32),
         "estimatedItemSize" => Prop::EstimatedItemSize(number(&value).unwrap_or(50.0)),
-        "slot" => Prop::Slot(number(&value).unwrap_or(0.0) as u32),
+        "slot" => Prop::Slot(match value.as_string() {
+            Some(role) => match role.to_string()?.as_str() {
+                "header" => CellSlot::Header,
+                "footer" => CellSlot::Footer,
+                _ => CellSlot::Empty,
+            },
+            None => CellSlot::Item(number(&value).unwrap_or(0.0) as u32),
+        }),
+        "splice" => {
+            let at = |i: u32| {
+                value
+                    .as_array()
+                    .and_then(|a| a.get::<f64>(i as usize).ok())
+                    .unwrap_or(0.0)
+                    .max(0.0) as u32
+            };
+            Prop::Splice(at(0), at(1), at(2))
+        }
+        "numColumns" => Prop::Columns(number(&value).unwrap_or(1.0).max(1.0) as u32),
+        "inverted" => Prop::Inverted(value.as_bool().unwrap_or(false)),
+        "stickyHeaderIndices" => Prop::StickyIndices(match value.as_array() {
+            Some(a) => a
+                .iter::<f64>()
+                .filter_map(|v| v.ok())
+                .filter(|v| *v >= 0.0)
+                .map(|v| v as u32)
+                .collect(),
+            None => Vec::new(),
+        }),
+        "contentContainerStyle" => Prop::ListContent(list_content(&value)?),
+        "viewabilityConfig" => Prop::Viewability(match value.as_object() {
+            Some(o) => Viewability {
+                view_area_percent: field_f32(o, "viewAreaCoveragePercentThreshold")?,
+                item_visible_percent: field_f32(o, "itemVisiblePercentThreshold")?,
+            },
+            None => Viewability::default(),
+        }),
+        "endReachedThreshold" => Prop::EndReachedThreshold(number(&value).unwrap_or(1.0)),
+        // Switches take booleans, sliders numbers, inputs strings.
+        "value" if value.is_bool() => {
+            Prop::Native(NativeProp::SwitchValue(value.as_bool().unwrap_or(false)))
+        }
+        "value" if value.is_number() => {
+            Prop::Native(NativeProp::SliderValue(number(&value).unwrap_or(0.0)))
+        }
+        "value" => Prop::Value(string(&value)?),
+        "disabled" => Prop::Native(NativeProp::Disabled(value.as_bool().unwrap_or(false))),
+        "trackColor" => {
+            let side = |key: &str| -> rquickjs::Result<Option<Color>> {
+                match value.as_object() {
+                    Some(o) => prop_color(&o.get::<_, Value>(key)?),
+                    None => Ok(None),
+                }
+            };
+            Prop::Native(NativeProp::TrackColors(side("true")?, side("false")?))
+        }
+        "thumbColor" | "thumbTintColor" => Prop::Native(NativeProp::Thumb(prop_color(&value)?)),
+        "minimumTrackTintColor" => Prop::Native(NativeProp::TrackOn(prop_color(&value)?)),
+        "maximumTrackTintColor" => Prop::Native(NativeProp::TrackOff(prop_color(&value)?)),
+        "minimumValue" => Prop::Native(NativeProp::Minimum(number(&value).unwrap_or(0.0))),
+        "maximumValue" => Prop::Native(NativeProp::Maximum(number(&value).unwrap_or(1.0))),
+        "step" => Prop::Native(NativeProp::Step(number(&value).unwrap_or(0.0))),
+        "animating" => Prop::Native(NativeProp::Animating(value.as_bool().unwrap_or(true))),
+        "color" => Prop::Native(NativeProp::Color(prop_color(&value)?)),
+        "size" => Prop::Native(NativeProp::Large(
+            value
+                .as_string()
+                .map(|s| s.to_string())
+                .transpose()?
+                .as_deref()
+                == Some("large"),
+        )),
+        "hidesWhenStopped" => Prop::Native(NativeProp::HidesWhenStopped(
+            value.as_bool().unwrap_or(true),
+        )),
+        "source" => Prop::Native(NativeProp::Source(web_source(&value)?)),
+        "injectedJavaScript" => Prop::Native(NativeProp::InjectedJavaScript(opt_string(&value)?)),
+        "injectedJavaScriptBeforeContentLoaded" => {
+            Prop::Native(NativeProp::InjectedJavaScriptBefore(opt_string(&value)?))
+        }
+        "userAgent" => Prop::Native(NativeProp::UserAgent(opt_string(&value)?)),
+        "scrollEnabled" => Prop::Native(NativeProp::ScrollEnabled(value.as_bool().unwrap_or(true))),
+        "javaScriptEnabled" => Prop::Native(NativeProp::JavaScriptEnabled(
+            value.as_bool().unwrap_or(true),
+        )),
+        "allowsBackForwardNavigationGestures" => Prop::Native(NativeProp::BackForwardGestures(
+            value.as_bool().unwrap_or(false),
+        )),
+        "paused" => Prop::Native(NativeProp::Paused(value.as_bool().unwrap_or(false))),
+        "muted" => Prop::Native(NativeProp::Muted(value.as_bool().unwrap_or(false))),
+        "volume" => Prop::Native(NativeProp::Volume(number(&value).unwrap_or(1.0))),
+        "rate" => Prop::Native(NativeProp::Rate(number(&value).unwrap_or(1.0))),
+        "repeat" => Prop::Native(NativeProp::Repeat(value.as_bool().unwrap_or(false))),
+        "controls" => Prop::Native(NativeProp::Controls(value.as_bool().unwrap_or(false))),
+        "progressUpdateInterval" => Prop::Native(NativeProp::ProgressInterval(
+            number(&value).unwrap_or(250.0),
+        )),
+        "defaultValue" => Prop::DefaultValue(string(&value)?),
+        "placeholder" => Prop::Placeholder(string(&value)?),
+        "placeholderTextColor" => Prop::PlaceholderColor(prop_color(&value)?),
+        "selectionColor" => Prop::SelectionColor(prop_color(&value)?),
+        "secureTextEntry" => Prop::Secure(value.as_bool().unwrap_or(false)),
+        "autoCorrect" => Prop::AutoCorrect(value.as_bool().unwrap_or(true)),
+        "multiline" => Prop::Multiline(value.as_bool().unwrap_or(false)),
+        "editable" => Prop::Editable(value.as_bool().unwrap_or(true)),
+        "blurOnSubmit" => Prop::BlurOnSubmit(value.as_bool().unwrap_or(true)),
+        "autoFocus" => Prop::AutoFocus(value.as_bool().unwrap_or(false)),
+        "maxLength" => Prop::MaxLength(number(&value).map(|n| n.max(0.0) as u32)),
+        "keyboardType" => Prop::KeyboardType(match string(&value)?.as_str() {
+            "number-pad" | "numeric" => KeyboardType::Number,
+            "decimal-pad" => KeyboardType::Decimal,
+            "email-address" => KeyboardType::Email,
+            "phone-pad" => KeyboardType::Phone,
+            "url" => KeyboardType::Url,
+            _ => KeyboardType::Default,
+        }),
+        "returnKeyType" => Prop::ReturnKeyType(match string(&value)?.as_str() {
+            "done" => ReturnKeyType::Done,
+            "go" => ReturnKeyType::Go,
+            "next" => ReturnKeyType::Next,
+            "search" => ReturnKeyType::Search,
+            "send" => ReturnKeyType::Send,
+            _ => ReturnKeyType::Default,
+        }),
+        "autoCapitalize" => Prop::AutoCapitalize(match string(&value)?.as_str() {
+            "none" => AutoCapitalize::None,
+            "words" => AutoCapitalize::Words,
+            "characters" => AutoCapitalize::Characters,
+            _ => AutoCapitalize::Sentences,
+        }),
+        "keyboardDismissMode" => Prop::KeyboardDismissMode(match string(&value)?.as_str() {
+            "on-drag" => KeyboardDismissMode::OnDrag,
+            "interactive" => KeyboardDismissMode::Interactive,
+            _ => KeyboardDismissMode::None,
+        }),
+        "numberOfLines" => Prop::NumberOfLines(number(&value).unwrap_or(0.0).max(0.0) as u32),
+        "ellipsizeMode" => Prop::EllipsizeMode(
+            match value
+                .as_string()
+                .map(|s| s.to_string())
+                .transpose()?
+                .as_deref()
+            {
+                Some("head") => EllipsizeMode::Head,
+                Some("middle") => EllipsizeMode::Middle,
+                Some("clip") => EllipsizeMode::Clip,
+                _ => EllipsizeMode::Tail,
+            },
+        ),
         "cellIndex" => Prop::CellIndex(number(&value).unwrap_or(0.0) as u32),
+        "title" => Prop::Screen(ScreenProp::Title(opt_string(&value)?)),
+        "headerShown" => Prop::Screen(ScreenProp::HeaderShown(value.as_bool().unwrap_or(true))),
+        "headerLargeTitle" => Prop::Screen(ScreenProp::HeaderLargeTitle(
+            value.as_bool().unwrap_or(false),
+        )),
+        "headerTransparent" => Prop::Screen(ScreenProp::HeaderTransparent(
+            value.as_bool().unwrap_or(false),
+        )),
+        "headerTintColor" => Prop::Screen(ScreenProp::HeaderTintColor(prop_color(&value)?)),
+        "headerBackgroundColor" => {
+            Prop::Screen(ScreenProp::HeaderBackgroundColor(prop_color(&value)?))
+        }
+        "headerTitleColor" => Prop::Screen(ScreenProp::HeaderTitleColor(prop_color(&value)?)),
+        "headerBackTitle" => Prop::Screen(ScreenProp::HeaderBackTitle(opt_string(&value)?)),
+        "headerBackVisible" => Prop::Screen(ScreenProp::HeaderBackVisible(
+            value.as_bool().unwrap_or(true),
+        )),
+        "gestureEnabled" => {
+            Prop::Screen(ScreenProp::GestureEnabled(value.as_bool().unwrap_or(true)))
+        }
+        "animation" => Prop::Screen(ScreenProp::Animation(match string(&value)?.as_str() {
+            "fade" => ScreenAnimation::Fade,
+            "none" => ScreenAnimation::None,
+            _ => ScreenAnimation::Default,
+        })),
+        "animationType" => Prop::Modal(ModalProp::Animation(match string(&value)?.as_str() {
+            "fade" => ModalAnimation::Fade,
+            "none" => ModalAnimation::None,
+            _ => ModalAnimation::Slide,
+        })),
+        "presentationStyle" => {
+            Prop::Modal(ModalProp::Presentation(match string(&value)?.as_str() {
+                "pageSheet" => ModalPresentation::PageSheet,
+                "formSheet" => ModalPresentation::FormSheet,
+                _ => ModalPresentation::FullScreen,
+            }))
+        }
+        "transparent" => Prop::Modal(ModalProp::Transparent(value.as_bool().unwrap_or(false))),
+        "headerSlot" => Prop::HeaderSlot(match string(&value)?.as_str() {
+            "right" => HeaderSlot::Right,
+            "title" => HeaderSlot::Title,
+            _ => HeaderSlot::Left,
+        }),
+        "pointerEvents" => Prop::PointerEvents(match string(&value)?.as_str() {
+            "none" => PointerEvents::None,
+            "box-none" => PointerEvents::BoxNone,
+            "box-only" => PointerEvents::BoxOnly,
+            _ => PointerEvents::Auto,
+        }),
+        "hitSlop" => Prop::HitSlop(match number(&value) {
+            Some(n) => EdgeInsets::all(n),
+            None => insets(&value)?,
+        }),
+        "activeOpacity" => Prop::ActiveOpacity(number(&value).map(|n| n.clamp(0.0, 1.0))),
+        "testID" => Prop::TestId(opt_string(&value)?),
+        "allowFontScaling" => Prop::AllowFontScaling(value.as_bool().unwrap_or(true)),
+        "maxFontSizeMultiplier" => {
+            Prop::MaxFontSizeMultiplier(number(&value).unwrap_or(0.0).max(0.0))
+        }
+        "pinch" => Prop::PinchValue(field_value(&value, "scale")),
+        "rotation" => Prop::RotationValue(field_value(&value, "angle")),
+        "accessible" => Prop::Accessibility(AccessibilityProp::Accessible(value.as_bool())),
+        "accessibilityLabel" => Prop::Accessibility(AccessibilityProp::Label(opt_string(&value)?)),
+        "accessibilityHint" => Prop::Accessibility(AccessibilityProp::Hint(opt_string(&value)?)),
+        "accessibilityRole" | "role" => {
+            let name = string(&value)?;
+            Prop::Accessibility(AccessibilityProp::Role(
+                AccessibilityRole::parse(&name).unwrap_or_else(|| {
+                    if !name.is_empty() {
+                        warnings.warn(format!("unknown accessibilityRole `{name}`"));
+                    }
+                    AccessibilityRole::None
+                }),
+            ))
+        }
+        "accessibilityState" => Prop::Accessibility(AccessibilityProp::State(a11y_state(&value)?)),
+        "accessibilityValue" => Prop::Accessibility(AccessibilityProp::Value(a11y_value(&value)?)),
+        "accessibilityElementsHidden" => {
+            Prop::Accessibility(AccessibilityProp::Hidden(value.as_bool().unwrap_or(false)))
+        }
+        "importantForAccessibility" => Prop::Accessibility(match string(&value)?.as_str() {
+            "yes" => AccessibilityProp::Important(Some(true), false),
+            "no" => AccessibilityProp::Important(Some(false), false),
+            "no-hide-descendants" => AccessibilityProp::Important(Some(false), true),
+            _ => AccessibilityProp::Important(None, false),
+        }),
+        "accessibilityLiveRegion" => Prop::Accessibility(AccessibilityProp::LiveRegion(
+            match string(&value)?.as_str() {
+                "polite" => LiveRegion::Polite,
+                "assertive" => LiveRegion::Assertive,
+                _ => LiveRegion::None,
+            },
+        )),
+        "accessibilityActions" => {
+            Prop::Accessibility(AccessibilityProp::Actions(a11y_actions(&value)?))
+        }
         "scrollValue" => Prop::ScrollValue(native_value(&value)),
+        "pagingEnabled" => Prop::Scroll(ScrollProp::Paging(value.as_bool().unwrap_or(false))),
+        "snapToInterval" => Prop::Scroll(ScrollProp::SnapInterval(number(&value).unwrap_or(0.0))),
+        "snapToOffsets" => Prop::Scroll(ScrollProp::SnapOffsets(match value.as_array() {
+            Some(a) => a
+                .iter::<f64>()
+                .filter_map(|v| v.ok())
+                .map(|v| v as f32)
+                .collect(),
+            None => Vec::new(),
+        })),
+        "snapToAlignment" => {
+            Prop::Scroll(ScrollProp::SnapAlignment(match string(&value)?.as_str() {
+                "center" => SnapAlignment::Center,
+                "end" => SnapAlignment::End,
+                _ => SnapAlignment::Start,
+            }))
+        }
+        // React Native's iOS rates: velocity kept per millisecond.
+        "decelerationRate" => Prop::Scroll(ScrollProp::Deceleration(match value.as_string() {
+            Some(s) => match s.to_string()?.as_str() {
+                "fast" => 0.99,
+                "normal" => 0.998,
+                _ => 0.0,
+            },
+            None => number(&value).unwrap_or(0.0),
+        })),
+        "bounces" => Prop::Scroll(ScrollProp::Bounces(value.as_bool().unwrap_or(true))),
+        "disableIntervalMomentum" => Prop::Scroll(ScrollProp::DisableIntervalMomentum(
+            value.as_bool().unwrap_or(false),
+        )),
+        "contentInset" => Prop::Scroll(ScrollProp::ContentInset(insets(&value)?)),
+        "contentOffset" => {
+            let field = |key: &str| {
+                value
+                    .as_object()
+                    .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
+                    .unwrap_or(0.0) as f32
+            };
+            Prop::Scroll(ScrollProp::ContentOffset(field("x"), field("y")))
+        }
+        "keyboardShouldPersistTaps" => {
+            Prop::Scroll(ScrollProp::KeyboardTaps(match value.as_bool() {
+                Some(true) => KeyboardTaps::Always,
+                Some(false) => KeyboardTaps::Never,
+                None => match string(&value)?.as_str() {
+                    "always" => KeyboardTaps::Always,
+                    "handled" => KeyboardTaps::Handled,
+                    _ => KeyboardTaps::Never,
+                },
+            }))
+        }
+        "scrollEventThrottle" => {
+            Prop::Scroll(ScrollProp::EventThrottle(number(&value).unwrap_or(0.0)))
+        }
         "pan" => {
             let axis = |key: &str| {
                 value
@@ -254,6 +833,28 @@ fn decode_prop<'js>(
         }
     };
     Ok(Some(Op::SetProp { id, prop }))
+}
+
+/// A web view / video `source`: `"https://…"`, `{ uri }` or
+/// `{ html, baseUrl }`.
+fn web_source(value: &Value<'_>) -> rquickjs::Result<WebSource> {
+    if let Some(s) = value.as_string() {
+        return Ok(WebSource::Uri(s.to_string()?.into()));
+    }
+    let Some(o) = value.as_object() else {
+        return Ok(WebSource::None);
+    };
+    if let Some(html) = o.get::<_, Option<String>>("html")? {
+        let base: Value = o.get("baseUrl")?;
+        return Ok(WebSource::Html {
+            html: html.into(),
+            base_url: opt_string(&base)?,
+        });
+    }
+    Ok(match o.get::<_, Option<String>>("uri")? {
+        Some(uri) => WebSource::Uri(uri.into()),
+        None => WebSource::None,
+    })
 }
 
 /// `"https://…"` or a bundled asset `{ uri, width, height }`.
@@ -284,12 +885,85 @@ fn decode_source(value: &Value<'_>) -> rquickjs::Result<Option<ImageSource>> {
     }))
 }
 
-fn decode_style<'js>(obj: &Object<'js>, warnings: &mut Warnings) -> rquickjs::Result<Box<Style>> {
+/// `{ id, title, message, buttons: [{ text, style }], cancelable, sheet }`.
+fn decode_dialog(arg: &Value<'_>) -> rquickjs::Result<Dialog> {
+    let Some(o) = arg.as_object() else {
+        return Ok(Dialog {
+            id: 0,
+            title: None,
+            message: None,
+            buttons: Vec::new(),
+            cancelable: true,
+            sheet: false,
+        });
+    };
+    let text = |key: &str| o.get::<_, Option<String>>(key).ok().flatten();
+    let mut buttons = Vec::new();
+    if let Some(items) = o.get::<_, Option<rquickjs::Array>>("buttons")? {
+        for item in items.iter::<Object>() {
+            let item = item?;
+            buttons.push(DialogButton {
+                text: item.get::<_, Option<String>>("text")?.unwrap_or_default(),
+                style: match item.get::<_, Option<String>>("style")?.as_deref() {
+                    Some("cancel") => DialogButtonStyle::Cancel,
+                    Some("destructive") => DialogButtonStyle::Destructive,
+                    _ => DialogButtonStyle::Default,
+                },
+            });
+        }
+    }
+    Ok(Dialog {
+        id: o.get::<_, Option<f64>>("id")?.unwrap_or(0.0) as u32,
+        title: text("title"),
+        message: text("message"),
+        buttons,
+        cancelable: o.get::<_, Option<bool>>("cancelable")?.unwrap_or(true),
+        sheet: o.get::<_, Option<bool>>("sheet")?.unwrap_or(false),
+    })
+}
+
+/// The properties of a style: an object, or (React Native style) an array
+/// of styles, possibly nested, merged left to right; falsy entries are
+/// skipped. A property set by a later style replaces it whole.
+fn style_entries<'js>(
+    value: &Value<'js>,
+    out: &mut Vec<(String, Value<'js>)>,
+) -> rquickjs::Result<()> {
+    if let Some(items) = value.as_array() {
+        for item in items.iter::<Value>() {
+            style_entries(&item?, out)?;
+        }
+    } else if let Some(obj) = value.as_object() {
+        for prop in obj.props::<String, Value>() {
+            let (key, value) = prop?;
+            match out.iter_mut().find(|(k, _)| *k == key) {
+                Some(entry) => entry.1 = value,
+                None => out.push((key, value)),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_style<'js>(
+    entries: Vec<(String, Value<'js>)>,
+    warnings: &mut Warnings,
+) -> rquickjs::Result<Box<Style>> {
     let mut style = Box::<Style>::default();
-    for prop in obj.props::<String, Value>() {
-        let (key, value) = prop?;
+    for (key, value) in entries {
         if key == "transform" {
             decode_transform(&value, &mut style, warnings)?;
+            continue;
+        }
+        if key == "textShadowOffset" {
+            let offset = match value.as_object() {
+                Some(o) => Some((
+                    o.get::<_, Option<f64>>("width")?.unwrap_or(0.0) as f32,
+                    o.get::<_, Option<f64>>("height")?.unwrap_or(0.0) as f32,
+                )),
+                None => None,
+            };
+            style.set_text_shadow_offset(offset);
             continue;
         }
         if key == "shadowOffset" {
@@ -355,20 +1029,37 @@ fn decode_transform(
     for item in items.iter::<Object>() {
         for entry in item?.props::<String, Value>() {
             let (key, value) = entry?;
-            if let Some(node) = native_value(&value) {
-                match AnimProp::from_name(&key) {
-                    Some(prop) => style.animated.push((prop, node)),
-                    None => warnings.warn(format!("transform `{key}` cannot be animated natively")),
-                }
+            let Some(kind) = TransformKind::parse(&key) else {
+                warnings.warn(format!("unsupported transform `{key}`"));
                 continue;
-            }
-            let amount = match value.as_string() {
-                Some(s) => parse_angle(&s.to_string()?),
-                None => number(&value),
             };
-            match amount.map(|v| style.set_transform(&key, v)) {
-                Some(Ok(())) => {}
-                _ => warnings.warn(format!("invalid transform `{key}`")),
+            // Animated entries keep their place in the list; the native value
+            // replaces the placeholder amount.
+            let (amount, node) = match native_value(&value) {
+                Some(node) => (Some(kind.identity()), Some(node)),
+                None => (
+                    match value.as_string() {
+                        Some(s) if kind.is_angle() => parse_angle(&s.to_string()?),
+                        Some(s) => s.to_string()?.trim().parse().ok(),
+                        None => number(&value),
+                    },
+                    None,
+                ),
+            };
+            let Some(amount) = amount else {
+                warnings.warn(format!("invalid transform `{key}`"));
+                continue;
+            };
+            match style.push_transform(&key, amount) {
+                Ok(index) => {
+                    if let Some(node) = node {
+                        style.animated.push((AnimProp::Transform(index), node));
+                    }
+                }
+                Err(_) => warnings.warn(format!(
+                    "too many transforms (at most {})",
+                    yf_core::MAX_TRANSFORMS
+                )),
             }
         }
     }

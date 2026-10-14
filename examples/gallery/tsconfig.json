@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "preserve",
+    "jsxImportSource": "yf",
+    "strict": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "types": [],
+    "paths": {
+      "yf": ["./.yf/types/yf/index.d.ts"],
+      "yf/jsx-runtime": ["./.yf/types/yf/jsx-runtime.d.ts"],
+      "solid-js": ["./.yf/types/solid-js/types/index.d.ts"],
+      "solid-js/universal": ["./.yf/types/solid-js/types/universal/index.d.ts"]
+    }
+  },
+  "include": ["**/*.ts", "**/*.tsx", ".yf/types/yf/globals.d.ts"]
+}

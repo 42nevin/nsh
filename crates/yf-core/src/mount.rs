@@ -4,9 +4,14 @@ use yf_anim::{AnimOp, AnimProp};
 
 use crate::{
     geometry::{Rect, Size},
-    ops::{EventMask, ImageSource, NodeId, ResizeMode},
-    style::ViewStyle,
-    text::{AttributedText, TextLayout},
+    ops::{
+        AutoCapitalize, Command, EventMask, ImageSource, KeyboardDismissMode, KeyboardTaps,
+        KeyboardType, ModalAnimation, ModalPresentation, NodeId, ResizeMode, ReturnKeyType,
+        ScreenAnimation, SnapAlignment, WebSource,
+    },
+    props::{EdgeInsets, GestureValues, LayoutAnimation, ViewProps},
+    style::{Color, TextAlign, ViewStyle},
+    text::{AttributedText, ResolvedTextStyle, TextLayout},
 };
 
 /// Kind of native view to create.
@@ -20,6 +25,474 @@ pub enum ViewKind {
     Image,
     /// A scroll view (also used by lists).
     Scroll,
+    /// A text input.
+    Input,
+    /// A navigation stack: its children are screens, pushed and popped
+    /// natively.
+    Stack,
+    /// A screen of a stack (its root view; the platform also makes its
+    /// header).
+    Screen,
+    /// The root view of a modal: inserting it presents the modal, removing
+    /// it dismisses it.
+    Modal,
+    /// A view shown in a screen's header (its slot is in the screen's
+    /// [`ScreenConfig`]).
+    HeaderItem,
+    /// An on / off switch.
+    Switch,
+    /// A slider.
+    Slider,
+    /// An activity indicator.
+    ActivityIndicator,
+    /// A web view.
+    WebView,
+    /// A video player.
+    Video,
+}
+
+/// Natural sizes of the platform's controls, which the core lays them out
+/// at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ControlSizes {
+    /// A switch.
+    pub switch: Size,
+    /// A small activity indicator.
+    pub activity_small: Size,
+    /// A large activity indicator.
+    pub activity_large: Size,
+    /// The height of a slider (its width follows the layout).
+    pub slider_height: f32,
+}
+
+impl Default for ControlSizes {
+    /// UIKit's sizes.
+    fn default() -> Self {
+        Self {
+            switch: Size::new(51.0, 31.0),
+            activity_small: Size::new(20.0, 20.0),
+            activity_large: Size::new(37.0, 37.0),
+            slider_height: 31.0,
+        }
+    }
+}
+
+/// A switch.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SwitchProps {
+    /// On.
+    pub value: bool,
+    /// The user cannot toggle it.
+    pub disabled: bool,
+    /// Track color when on.
+    pub track_on: Option<Color>,
+    /// Track color when off.
+    pub track_off: Option<Color>,
+    /// Thumb color.
+    pub thumb: Option<Color>,
+}
+
+/// A slider.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SliderProps {
+    /// Current value.
+    pub value: f32,
+    /// Minimum.
+    pub min: f32,
+    /// Maximum.
+    pub max: f32,
+    /// Step between values; 0 is continuous.
+    pub step: f32,
+    /// The user cannot move it.
+    pub disabled: bool,
+    /// Track color below the thumb.
+    pub min_track: Option<Color>,
+    /// Track color above the thumb.
+    pub max_track: Option<Color>,
+    /// Thumb color.
+    pub thumb: Option<Color>,
+}
+
+impl Default for SliderProps {
+    fn default() -> Self {
+        Self {
+            value: 0.0,
+            min: 0.0,
+            max: 1.0,
+            step: 0.0,
+            disabled: false,
+            min_track: None,
+            max_track: None,
+            thumb: None,
+        }
+    }
+}
+
+/// An activity indicator.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActivityProps {
+    /// Spinning.
+    pub animating: bool,
+    /// Color; the platform's default when `None`.
+    pub color: Option<Color>,
+    /// The large size.
+    pub large: bool,
+    /// Hidden while not animating.
+    pub hides_when_stopped: bool,
+}
+
+impl Default for ActivityProps {
+    fn default() -> Self {
+        Self {
+            animating: true,
+            color: None,
+            large: false,
+            hides_when_stopped: true,
+        }
+    }
+}
+
+/// A web view.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WebProps {
+    /// What it shows.
+    pub source: WebSource,
+    /// Script run after each page loads.
+    pub injected_js: Option<Arc<str>>,
+    /// Script run before each page's own scripts.
+    pub injected_js_before: Option<Arc<str>>,
+    /// User agent; the platform's when `None`.
+    pub user_agent: Option<Arc<str>>,
+    /// The page scrolls.
+    pub scroll_enabled: bool,
+    /// The page may run JavaScript.
+    pub javascript_enabled: bool,
+    /// Swipes go back and forward (iOS).
+    pub back_forward_gestures: bool,
+}
+
+impl Default for WebProps {
+    fn default() -> Self {
+        Self {
+            source: WebSource::None,
+            injected_js: None,
+            injected_js_before: None,
+            user_agent: None,
+            scroll_enabled: true,
+            javascript_enabled: true,
+            back_forward_gestures: false,
+        }
+    }
+}
+
+/// A video player.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VideoProps {
+    /// The video's URL (or `asset:/` URI).
+    pub source: Option<Arc<str>>,
+    /// Paused.
+    pub paused: bool,
+    /// Muted.
+    pub muted: bool,
+    /// Volume, 0..1.
+    pub volume: f32,
+    /// Playback rate.
+    pub rate: f32,
+    /// Loop.
+    pub repeat: bool,
+    /// How the picture fits the view.
+    pub resize_mode: ResizeMode,
+    /// Show the platform's playback controls.
+    pub controls: bool,
+    /// Milliseconds between `onProgress` events.
+    pub progress_interval_ms: f32,
+}
+
+impl Default for VideoProps {
+    fn default() -> Self {
+        Self {
+            source: None,
+            paused: false,
+            muted: false,
+            volume: 1.0,
+            rate: 1.0,
+            repeat: false,
+            resize_mode: ResizeMode::Contain,
+            controls: false,
+            progress_interval_ms: 250.0,
+        }
+    }
+}
+
+/// The properties of a native control.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NativeProps {
+    /// A switch.
+    Switch(SwitchProps),
+    /// A slider.
+    Slider(SliderProps),
+    /// An activity indicator.
+    Activity(ActivityProps),
+    /// A web view.
+    WebView(Box<WebProps>),
+    /// A video player.
+    Video(Box<VideoProps>),
+}
+
+/// How a scroll view scrolls (React Native's ScrollView props).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScrollBehavior {
+    /// Stops at multiples of the viewport.
+    pub paging: bool,
+    /// Stops at multiples of this length (0: off).
+    pub snap_interval: f32,
+    /// Stops at these offsets.
+    pub snap_offsets: Vec<f32>,
+    /// Which point of a snap page aligns with the viewport.
+    pub snap_alignment: SnapAlignment,
+    /// Velocity kept per millisecond after a fling (0: platform default).
+    pub deceleration: f32,
+    /// The user can scroll it.
+    pub enabled: bool,
+    /// It overscrolls past its edges.
+    pub bounces: bool,
+    /// Room around the content.
+    pub content_inset: EdgeInsets,
+    /// Whether taps dismiss the keyboard.
+    pub keyboard_taps: KeyboardTaps,
+    /// A fling moves one snap point at most (`disableIntervalMomentum`).
+    pub one_step: bool,
+}
+
+impl Default for ScrollBehavior {
+    fn default() -> Self {
+        Self {
+            paging: false,
+            snap_interval: 0.0,
+            snap_offsets: Vec::new(),
+            snap_alignment: SnapAlignment::Start,
+            deceleration: 0.0,
+            enabled: true,
+            bounces: true,
+            content_inset: EdgeInsets::default(),
+            keyboard_taps: KeyboardTaps::Never,
+            one_step: false,
+        }
+    }
+}
+
+impl ScrollBehavior {
+    /// Whether flings end at snap points.
+    pub fn snaps(&self) -> bool {
+        self.snap_interval > 0.0 || !self.snap_offsets.is_empty()
+    }
+
+    /// The snap point a fling ends at, as in React Native: `offset` is
+    /// where the drag ended, `projected` where the fling would glide to
+    /// (both along the main axis, points) and `velocity` its speed (points
+    /// per millisecond), for a viewport of `viewport` and content of
+    /// `content` points. Pages (and `one_step`) move one snap point; other
+    /// snapping rounds the projected offset in the fling's direction.
+    /// `None` without snapping.
+    pub fn snap_target(
+        &self,
+        offset: f32,
+        projected: f32,
+        velocity: f32,
+        viewport: f32,
+        content: f32,
+    ) -> Option<f32> {
+        let max = (content - viewport).max(0.0);
+        let points: Vec<f32> = if self.snap_interval > 0.0 {
+            let interval = self.snap_interval;
+            // Aligns the item at `k * interval` with the viewport.
+            let shift = match self.snap_alignment {
+                SnapAlignment::Start => 0.0,
+                SnapAlignment::Center => (viewport - interval) / 2.0,
+                SnapAlignment::End => viewport - interval,
+            };
+            let n = ((max + shift) / interval).ceil().max(0.0) as usize;
+            (0..=n)
+                .map(|i| (i as f32 * interval - shift).clamp(0.0, max))
+                .collect()
+        } else if !self.snap_offsets.is_empty() {
+            self.snap_offsets
+                .iter()
+                .map(|o| o.clamp(0.0, max))
+                .collect()
+        } else if self.paging {
+            let page = viewport.max(1.0);
+            (0..=(max / page).ceil() as usize)
+                .map(|i| (i as f32 * page).min(max))
+                .collect()
+        } else {
+            return None;
+        };
+        // Slower releases (points per ms) settle at the nearest point.
+        const SLOW: f32 = 0.3;
+        let step = self.one_step || (self.paging && !self.snaps());
+        let target = if step {
+            if velocity > SLOW {
+                points.iter().copied().find(|&p| p > offset + 0.5)
+            } else if velocity < -SLOW {
+                points.iter().rev().copied().find(|&p| p < offset - 0.5)
+            } else {
+                nearest(&points, offset)
+            }
+        } else if velocity > SLOW {
+            points.iter().copied().find(|&p| p >= projected - 0.5)
+        } else if velocity < -SLOW {
+            points.iter().rev().copied().find(|&p| p <= projected + 0.5)
+        } else {
+            nearest(&points, projected)
+        };
+        Some(target.unwrap_or(if velocity > 0.0 { max } else { 0.0 }))
+    }
+}
+
+fn nearest(points: &[f32], to: f32) -> Option<f32> {
+    points
+        .iter()
+        .copied()
+        .min_by(|a, b| (a - to).abs().total_cmp(&(b - to).abs()))
+}
+
+/// A list cell that sticks to the start of the viewport.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StickyCell {
+    /// The cell.
+    pub cell: NodeId,
+    /// Its position along the main axis (content coordinates).
+    pub start: f32,
+    /// Where the next sticky cell pushes it out (may be infinite).
+    pub end: f32,
+}
+
+/// Options of a screen: its header and transitions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenConfig {
+    /// Title in the header.
+    pub title: Option<Arc<str>>,
+    /// Show the native header.
+    pub header_shown: bool,
+    /// Large title (iOS; the content scrolls under the header).
+    pub large_title: bool,
+    /// The content extends under the header.
+    pub header_transparent: bool,
+    /// Color of the back button and bar buttons.
+    pub tint_color: Option<Color>,
+    /// Header background.
+    pub background_color: Option<Color>,
+    /// Title color.
+    pub title_color: Option<Color>,
+    /// Label of the back button leading back to this screen.
+    pub back_title: Option<Arc<str>>,
+    /// Show the back button.
+    pub back_visible: bool,
+    /// The user can pop the screen (swipe back, back button).
+    pub gesture_enabled: bool,
+    /// Push / pop transition.
+    pub animation: ScreenAnimation,
+    /// Leading header item view.
+    pub left: Option<NodeId>,
+    /// Trailing header item view.
+    pub right: Option<NodeId>,
+    /// Custom title view.
+    pub title_view: Option<NodeId>,
+    /// Height of the header area at the top of the screen (status bar
+    /// included), as the core laid the content out below it.
+    pub header_height: f32,
+}
+
+impl Default for ScreenConfig {
+    fn default() -> Self {
+        Self {
+            title: None,
+            header_shown: true,
+            large_title: false,
+            header_transparent: false,
+            tint_color: None,
+            background_color: None,
+            title_color: None,
+            back_title: None,
+            back_visible: true,
+            gesture_enabled: true,
+            animation: ScreenAnimation::Default,
+            left: None,
+            right: None,
+            title_view: None,
+            header_height: 0.0,
+        }
+    }
+}
+
+/// Options of a modal.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ModalConfig {
+    /// How it appears.
+    pub animation: ModalAnimation,
+    /// How it covers the screen.
+    pub presentation: ModalPresentation,
+    /// The background shows what is behind.
+    pub transparent: bool,
+}
+
+/// Everything about a text input except its text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputConfig {
+    /// Font and color of the text.
+    pub style: ResolvedTextStyle,
+    /// Alignment of the text.
+    pub align: TextAlign,
+    /// Shown while the text is empty.
+    pub placeholder: String,
+    /// Placeholder color; the platform's default when `None`.
+    pub placeholder_color: Option<Color>,
+    /// Hide the characters (passwords).
+    pub secure: bool,
+    /// Keyboard layout.
+    pub keyboard: KeyboardType,
+    /// Label of the return key.
+    pub return_key: ReturnKeyType,
+    /// Automatic capitalization.
+    pub auto_capitalize: AutoCapitalize,
+    /// Autocorrection.
+    pub auto_correct: bool,
+    /// Several lines (return inserts a line break).
+    pub multiline: bool,
+    /// Maximum length in UTF-16 units.
+    pub max_length: Option<u32>,
+    /// The user can edit the text.
+    pub editable: bool,
+    /// Return unfocuses a single-line input (React Native's
+    /// `blurOnSubmit`).
+    pub blur_on_submit: bool,
+    /// Focus once on screen.
+    pub auto_focus: bool,
+    /// Caret and selection color.
+    pub selection_color: Option<Color>,
+}
+
+impl Default for InputConfig {
+    fn default() -> Self {
+        Self {
+            style: ResolvedTextStyle::default(),
+            align: TextAlign::Auto,
+            placeholder: String::new(),
+            placeholder_color: None,
+            secure: false,
+            keyboard: KeyboardType::Default,
+            return_key: ReturnKeyType::Default,
+            auto_capitalize: AutoCapitalize::Sentences,
+            auto_correct: true,
+            multiline: false,
+            max_length: None,
+            editable: true,
+            blur_on_submit: true,
+            auto_focus: false,
+            selection_color: None,
+        }
+    }
 }
 
 /// One instruction for the platform backend.
@@ -107,6 +580,8 @@ pub enum MountItem {
         shows_indicator: bool,
         /// Native animation value fed with the main-axis offset.
         scroll_value: Option<yf_anim::NodeId>,
+        /// When dragging dismisses the keyboard.
+        keyboard_dismiss: KeyboardDismissMode,
     },
     /// Set the scrollable content size.
     ScrollContent {
@@ -125,6 +600,22 @@ pub enum MountItem {
         /// Vertical shift.
         dy: f32,
     },
+    /// The sticky cells of a list (replaces the previous set): each one
+    /// is translated along the main axis by `clamp(offset - start, 0,
+    /// end - start)` on every scroll, natively.
+    StickyCells {
+        /// The list.
+        id: NodeId,
+        /// Cells and their travel.
+        cells: Vec<StickyCell>,
+    },
+    /// Set how a scroll view or list scrolls.
+    ScrollBehavior {
+        /// Scroll view.
+        id: NodeId,
+        /// The behavior.
+        behavior: Box<ScrollBehavior>,
+    },
     /// Show or hide the pull-to-refresh spinner.
     Refreshing {
         /// Scroll view.
@@ -139,17 +630,79 @@ pub enum MountItem {
         /// Property bindings (replaces the previous set).
         bindings: Vec<(AnimProp, yf_anim::NodeId)>,
     },
-    /// Drive native animation values from a drag on the view.
-    PanValues {
+    /// Drive native animation values from gestures on the view.
+    Gestures {
         /// View.
         id: NodeId,
-        /// Horizontal value.
-        x: Option<yf_anim::NodeId>,
-        /// Vertical value.
-        y: Option<yf_anim::NodeId>,
+        /// The driven values.
+        values: GestureValues,
     },
+    /// Set touch, accessibility and test properties.
+    ViewProps {
+        /// View.
+        id: NodeId,
+        /// The properties (replace the previous ones).
+        props: Box<ViewProps>,
+    },
+    /// Animate the frame changes, insertions and removals that follow in
+    /// this batch.
+    LayoutAnimation(LayoutAnimation),
     /// An animation graph change, in order with the other items.
     Anim(AnimOp),
+    /// Configure a text input.
+    Input {
+        /// Input view.
+        id: NodeId,
+        /// The configuration; boxed because it is large.
+        config: Box<InputConfig>,
+    },
+    /// Set the text of an input (from JS).
+    InputValue {
+        /// Input view.
+        id: NodeId,
+        /// The text.
+        text: String,
+        /// The input's edit count this value is based on: the platform drops
+        /// it if the user typed since (see [`crate::EventPayload::Text`]).
+        count: u32,
+    },
+    /// Where the text of an input goes (inside padding and border).
+    InputContent {
+        /// Input view.
+        id: NodeId,
+        /// Content box relative to the view.
+        content: Rect,
+    },
+    /// Configure a screen (sent before the screen is inserted into its
+    /// stack, and on every change).
+    ScreenConfig {
+        /// Screen.
+        id: NodeId,
+        /// The options.
+        config: Box<ScreenConfig>,
+    },
+    /// Configure a native control (switch, slider, activity indicator, web
+    /// view, video).
+    NativeProps {
+        /// The control.
+        id: NodeId,
+        /// All its properties.
+        props: NativeProps,
+    },
+    /// Configure a modal (sent before it is presented, and on changes).
+    ModalConfig {
+        /// Modal root view.
+        id: NodeId,
+        /// The options.
+        config: ModalConfig,
+    },
+    /// An imperative call (`focus()`, `scrollTo()`...).
+    Command {
+        /// View; [`crate::ROOT_ID`] for surface-wide calls.
+        id: NodeId,
+        /// The call.
+        command: Command,
+    },
 }
 
 /// All mount items produced by one commit.
@@ -157,4 +710,74 @@ pub enum MountItem {
 pub struct MountBatch {
     /// Items, to be applied in order within one UI frame.
     pub items: Vec<MountItem>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snap_targets() {
+        let paging = ScrollBehavior {
+            paging: true,
+            ..Default::default()
+        };
+        // Pages of 300 in 1000 points of content (the last page is short):
+        // one page per fling, wherever the fling would glide.
+        assert_eq!(
+            paging.snap_target(100.0, 100.0, 0.0, 300.0, 1000.0),
+            Some(0.0)
+        );
+        assert_eq!(
+            paging.snap_target(100.0, 900.0, 1.0, 300.0, 1000.0),
+            Some(300.0)
+        );
+        assert_eq!(
+            paging.snap_target(650.0, 900.0, 1.0, 300.0, 1000.0),
+            Some(700.0)
+        );
+        assert_eq!(
+            paging.snap_target(250.0, 0.0, -1.0, 300.0, 1000.0),
+            Some(0.0)
+        );
+        let interval = ScrollBehavior {
+            snap_interval: 120.0,
+            snap_alignment: SnapAlignment::Center,
+            ..Default::default()
+        };
+        // Items of 120 centered in a 300 viewport: k * 120 - 90.
+        assert_eq!(
+            interval.snap_target(200.0, 200.0, 0.0, 300.0, 2000.0),
+            Some(150.0)
+        );
+        // A fast fling glides past several items, rounded forward.
+        assert_eq!(
+            interval.snap_target(200.0, 700.0, 2.0, 300.0, 2000.0),
+            Some(750.0)
+        );
+        let one = ScrollBehavior {
+            one_step: true,
+            ..interval.clone()
+        };
+        assert_eq!(
+            one.snap_target(200.0, 700.0, 2.0, 300.0, 2000.0),
+            Some(270.0)
+        );
+        let offsets = ScrollBehavior {
+            snap_offsets: vec![0.0, 500.0, 900.0],
+            ..Default::default()
+        };
+        assert_eq!(
+            offsets.snap_target(520.0, 600.0, 2.0, 300.0, 2000.0),
+            Some(900.0)
+        );
+        assert_eq!(
+            offsets.snap_target(520.0, 520.0, 0.0, 300.0, 2000.0),
+            Some(500.0)
+        );
+        assert_eq!(
+            ScrollBehavior::default().snap_target(10.0, 10.0, 1.0, 300.0, 2000.0),
+            None
+        );
+    }
 }

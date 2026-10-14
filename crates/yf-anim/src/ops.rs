@@ -10,33 +10,18 @@ pub type AnimId = u32;
 pub enum AnimProp {
     /// `opacity`, 0..1.
     Opacity,
-    /// `transform: [{ translateX }]`, points.
-    TranslateX,
-    /// `transform: [{ translateY }]`, points.
-    TranslateY,
-    /// `transform: [{ scale }]`.
-    Scale,
-    /// `transform: [{ scaleX }]`.
-    ScaleX,
-    /// `transform: [{ scaleY }]`.
-    ScaleY,
-    /// `transform: [{ rotate }]`, degrees.
-    Rotate,
     /// `backgroundColor`, from a color interpolation.
     BackgroundColor,
+    /// The value of entry `n` of the view's `transform` list (translations
+    /// in points, rotations and skews in degrees).
+    Transform(u8),
 }
 
 impl AnimProp {
-    /// Parses a style key (or transform key).
+    /// Parses a style key (transform entries are addressed by position).
     pub fn from_name(name: &str) -> Option<AnimProp> {
         Some(match name {
             "opacity" => AnimProp::Opacity,
-            "translateX" => AnimProp::TranslateX,
-            "translateY" => AnimProp::TranslateY,
-            "scale" => AnimProp::Scale,
-            "scaleX" => AnimProp::ScaleX,
-            "scaleY" => AnimProp::ScaleY,
-            "rotate" => AnimProp::Rotate,
             "backgroundColor" => AnimProp::BackgroundColor,
             _ => return None,
         })

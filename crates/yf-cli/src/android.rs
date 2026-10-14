@@ -1,0 +1,356 @@
+//! Android apps without Gradle: the APK is assembled from the prebuilt
+//! runtime (`classes.dex`, `libyf.so` per ABI) and the app bundle with the
+//! SDK's build tools (`aapt2`, `zipalign`, `apksigner`).
+
+use std::{
+    env, fs,
+    io::{Read as _, Write as _},
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use anyhow::{Context as _, bail};
+
+/// Minimum Android version (API 28, Android 9), as the runtime is built.
+pub(crate) const MIN_SDK: u32 = 28;
+const TARGET_SDK: u32 = 35;
+
+/// The Android SDK.
+pub(crate) struct Sdk {
+    root: PathBuf,
+    build_tools: PathBuf,
+}
+
+impl Sdk {
+    pub(crate) fn find() -> anyhow::Result<Sdk> {
+        let root = ["ANDROID_HOME", "ANDROID_SDK_ROOT"]
+            .iter()
+            .find_map(env::var_os)
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Android/sdk")))
+            .filter(|p| p.exists())
+            .context("Android SDK not found: install it and set ANDROID_HOME")?;
+        let build_tools = newest(&root.join("build-tools"))
+            .context("no SDK build-tools: install them with `sdkmanager \"build-tools;35.0.1\"`")?;
+        Ok(Sdk { root, build_tools })
+    }
+
+    fn android_jar(&self) -> anyhow::Result<PathBuf> {
+        let jar = self
+            .root
+            .join(format!("platforms/android-{TARGET_SDK}/android.jar"));
+        if !jar.exists() {
+            bail!(
+                "{} missing: install it with `sdkmanager \"platforms;android-{TARGET_SDK}\"`",
+                jar.display()
+            );
+        }
+        Ok(jar)
+    }
+
+    pub(crate) fn adb(&self) -> PathBuf {
+        self.root.join("platform-tools/adb")
+    }
+
+    fn tool(&self, name: &str) -> PathBuf {
+        self.build_tools.join(name)
+    }
+}
+
+fn newest(dir: &Path) -> Option<PathBuf> {
+    let mut versions: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir())
+        .collect();
+    versions.sort_by_key(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .split(['.', '-'])
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    });
+    versions.pop()
+}
+
+/// What goes into an APK.
+pub(crate) struct Apk<'a> {
+    pub(crate) package: &'a str,
+    pub(crate) label: &'a str,
+    pub(crate) version_name: &'a str,
+    pub(crate) version_code: u32,
+    /// `dev.yf.DevActivity` or `dev.yf.AppActivity`.
+    pub(crate) activity: &'a str,
+    /// Development builds: debuggable, cleartext HTTP (the dev server).
+    pub(crate) dev: bool,
+    /// `classes.dex` and `lib/<abi>/libyf.so`.
+    pub(crate) runtime: &'a Path,
+    /// Launcher icon (square PNG).
+    pub(crate) icon: Option<&'a Path>,
+    /// Files under `assets/` in the APK: (path in the APK, contents).
+    pub(crate) assets: Vec<(String, Vec<u8>)>,
+    pub(crate) signing: Signing,
+}
+
+/// How to sign the APK.
+pub(crate) enum Signing {
+    /// `~/.android/debug.keystore`, created if missing.
+    Debug,
+    /// A release keystore.
+    Keystore {
+        path: PathBuf,
+        alias: String,
+        password: String,
+    },
+}
+
+pub(crate) fn build_apk(sdk: &Sdk, apk: &Apk<'_>, out: &Path) -> anyhow::Result<()> {
+    let work = out.with_extension("apk-work");
+    if work.exists() {
+        fs::remove_dir_all(&work)?;
+    }
+    fs::create_dir_all(&work)?;
+
+    // Resources: only the launcher icon.
+    let mut flat = Vec::new();
+    if let Some(icon) = apk.icon {
+        let res = work.join("res/mipmap-xxxhdpi");
+        fs::create_dir_all(&res)?;
+        resize_png(icon, &res.join("ic_launcher.png"), 192)?;
+        let compiled = work.join("compiled");
+        fs::create_dir_all(&compiled)?;
+        run(Command::new(sdk.tool("aapt2"))
+            .arg("compile")
+            .arg(res.join("ic_launcher.png"))
+            .arg("-o")
+            .arg(&compiled))?;
+        for entry in fs::read_dir(&compiled)? {
+            flat.push(entry?.path());
+        }
+    }
+
+    let manifest = work.join("AndroidManifest.xml");
+    fs::write(&manifest, manifest_xml(apk))?;
+    let base = work.join("base.apk");
+    let mut link = Command::new(sdk.tool("aapt2"));
+    link.arg("link")
+        .arg("-o")
+        .arg(&base)
+        .arg("-I")
+        .arg(sdk.android_jar()?)
+        .arg("--manifest")
+        .arg(&manifest)
+        .args(["--min-sdk-version", &MIN_SDK.to_string()])
+        .args(["--target-sdk-version", &TARGET_SDK.to_string()])
+        .args(["--version-code", &apk.version_code.to_string()])
+        .args(["--version-name", apk.version_name]);
+    if apk.dev {
+        link.arg("--debug-mode");
+    }
+    link.args(&flat);
+    run(&mut link)?;
+
+    // Code, native libraries and app files.
+    let unaligned = work.join("unaligned.apk");
+    add_files(&base, &unaligned, apk)?;
+    let aligned = work.join("aligned.apk");
+    // `-P 16`: shared libraries on 16 KB pages (Android 15 devices).
+    run(Command::new(sdk.tool("zipalign"))
+        .args(["-P", "16", "-f", "4"])
+        .arg(&unaligned)
+        .arg(&aligned))?;
+    sign(sdk, &apk.signing, &aligned)?;
+    fs::rename(&aligned, out)?;
+    fs::remove_dir_all(&work)?;
+    Ok(())
+}
+
+fn manifest_xml(apk: &Apk<'_>) -> String {
+    let icon = if apk.icon.is_some() {
+        r#" android:icon="@mipmap/ic_launcher""#
+    } else {
+        ""
+    };
+    let cleartext = if apk.dev {
+        r#" android:usesCleartextTraffic="true""#
+    } else {
+        ""
+    };
+    let label = apk
+        .label
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;");
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{package}">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application android:label="{label}"{icon}{cleartext}
+        android:extractNativeLibs="false"
+        android:enableOnBackInvokedCallback="true"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity android:name="{activity}" android:exported="true"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+"#,
+        package = apk.package,
+        activity = apk.activity,
+    )
+}
+
+/// Copies `base` (manifest, resources) and adds the dex, the libraries
+/// (stored: the system maps them in place) and the assets.
+fn add_files(base: &Path, out: &Path, apk: &Apk<'_>) -> anyhow::Result<()> {
+    use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
+    let mut input = ZipArchive::new(fs::File::open(base)?)?;
+    let mut zip = ZipWriter::new(fs::File::create(out)?);
+    for i in 0..input.len() {
+        zip.raw_copy_file(input.by_index_raw(i)?)?;
+    }
+    let deflate = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    zip.start_file("classes.dex", deflate)?;
+    let mut dex = Vec::new();
+    fs::File::open(apk.runtime.join("classes.dex"))
+        .context("runtime classes.dex missing")?
+        .read_to_end(&mut dex)?;
+    zip.write_all(&dex)?;
+    let libs = apk.runtime.join("lib");
+    let mut abis = 0;
+    for entry in fs::read_dir(&libs).with_context(|| format!("read {}", libs.display()))? {
+        let abi_dir = entry?.path();
+        let so = abi_dir.join("libyf.so");
+        if !so.exists() {
+            continue;
+        }
+        let abi = abi_dir
+            .file_name()
+            .context("abi")?
+            .to_string_lossy()
+            .into_owned();
+        zip.start_file(format!("lib/{abi}/libyf.so"), stored)?;
+        zip.write_all(&fs::read(&so)?)?;
+        abis += 1;
+    }
+    if abis == 0 {
+        bail!("no libyf.so in {}", libs.display());
+    }
+    for (path, bytes) in &apk.assets {
+        // Bytecode and images are compressed already or small.
+        zip.start_file(format!("assets/{path}"), deflate)?;
+        zip.write_all(bytes)?;
+    }
+    zip.finish()?;
+    Ok(())
+}
+
+fn sign(sdk: &Sdk, signing: &Signing, apk: &Path) -> anyhow::Result<()> {
+    let (keystore, alias, password) = match signing {
+        Signing::Debug => (
+            debug_keystore()?,
+            "androiddebugkey".to_owned(),
+            "android".to_owned(),
+        ),
+        Signing::Keystore {
+            path,
+            alias,
+            password,
+        } => (path.clone(), alias.clone(), password.clone()),
+    };
+    run(Command::new(sdk.tool("apksigner"))
+        .args(["sign", "--ks"])
+        .arg(&keystore)
+        .args(["--ks-key-alias", &alias])
+        .args(["--ks-pass", &format!("pass:{password}")])
+        .args(["--key-pass", &format!("pass:{password}")])
+        .arg(apk))
+}
+
+/// The standard debug keystore, created like Android Studio does.
+fn debug_keystore() -> anyhow::Result<PathBuf> {
+    let dir = PathBuf::from(env::var_os("HOME").context("HOME")?).join(".android");
+    let path = dir.join("debug.keystore");
+    if !path.exists() {
+        fs::create_dir_all(&dir)?;
+        run(Command::new("keytool")
+            .args(["-genkeypair", "-keystore"])
+            .arg(&path)
+            .args([
+                "-storepass",
+                "android",
+                "-alias",
+                "androiddebugkey",
+                "-keypass",
+                "android",
+                "-keyalg",
+                "RSA",
+                "-keysize",
+                "2048",
+                "-validity",
+                "10000",
+                "-dname",
+                "CN=Android Debug,O=Android,C=US",
+            ]))
+        .context("create the debug keystore (is a JDK installed?)")?;
+    }
+    Ok(path)
+}
+
+fn resize_png(src: &Path, dest: &Path, size: u32) -> anyhow::Result<()> {
+    let image = image::open(src).with_context(|| format!("read {}", src.display()))?;
+    image
+        .resize_exact(size, size, image::imageops::FilterType::Lanczos3)
+        .save(dest)?;
+    Ok(())
+}
+
+fn run(cmd: &mut Command) -> anyhow::Result<()> {
+    let output = cmd
+        .output()
+        .with_context(|| format!("run {:?}", cmd.get_program()))?;
+    if !output.status.success() {
+        bail!(
+            "{} failed:\n{}{}",
+            Path::new(cmd.get_program()).display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// The serial of a running device or emulator (the first one).
+pub(crate) fn device(sdk: &Sdk) -> anyhow::Result<String> {
+    let output = Command::new(sdk.adb()).arg("devices").output()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .skip(1)
+        .filter_map(|l| l.split_once('\t'))
+        .find(|(_, state)| *state == "device")
+        .map(|(serial, _)| serial.to_owned())
+        .context("no Android device or emulator connected (see `adb devices`)")
+}
+
+pub(crate) fn adb(sdk: &Sdk, serial: &str, args: &[&str]) -> anyhow::Result<String> {
+    let output = Command::new(sdk.adb())
+        .args(["-s", serial])
+        .args(args)
+        .output()
+        .context("run adb")?;
+    if !output.status.success() {
+        bail!(
+            "adb {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}

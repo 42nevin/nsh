@@ -1,18 +1,30 @@
 use std::{
     cell::{Cell, RefCell},
     io,
+    ptr::NonNull,
     sync::Arc,
 };
 
+use block2::RcBlock;
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::{
-    DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, rc::Retained,
+    DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
+    rc::{Retained, Weak},
+    runtime::ProtocolObject,
 };
 use objc2_core_foundation::{CGRect, CGSize};
-use objc2_foundation::NSObject;
-use objc2_ui_kit::{UIResponder, UIView};
+use objc2_foundation::{
+    NSNotification, NSNotificationCenter, NSNumber, NSObject, NSObjectProtocol, NSOperationQueue,
+    NSValue,
+};
+use objc2_ui_kit::{
+    NSValueUIGeometryExtensions, UIFont, UIFontTextStyleBody,
+    UIKeyboardAnimationDurationUserInfoKey, UIKeyboardFrameEndUserInfoKey,
+    UIKeyboardWillChangeFrameNotification, UIKeyboardWillHideNotification, UIResponder,
+    UITraitCollection, UITraitEnvironment, UIUserInterfaceStyle, UIView,
+};
 use yf_core::{MountBatch, Size};
-use yf_engine::{Bundle, Engine, EngineConfig, MountSink};
+use yf_engine::{Bundle, ColorScheme, Engine, EngineConfig, Environment, Insets, MountSink};
 
 use crate::{
     image::AssetBase,
@@ -22,12 +34,14 @@ use crate::{
 
 type ErrorHandler = Box<dyn Fn(&str)>;
 type SharedErrorHandler = Arc<MainThreadBound<RefCell<Option<ErrorHandler>>>>;
+type SharedHandler = Arc<MainThreadBound<RefCell<Option<Box<dyn Fn()>>>>>;
 
 /// Forwards mount batches and errors from the engine thread to the main
 /// thread.
 struct MainThreadSink {
     mounter: SharedMounter,
     on_error: SharedErrorHandler,
+    on_hot_failed: SharedHandler,
 }
 
 impl MountSink for MainThreadSink {
@@ -37,6 +51,26 @@ impl MountSink for MainThreadSink {
             let mtm = MainThreadMarker::new().expect("main queue runs on the main thread");
             if let Some(mounter) = mounter.get(mtm).borrow_mut().as_mut() {
                 mounter.apply(batch);
+            }
+        });
+    }
+
+    fn request_frame(&self) {
+        let mounter = self.mounter.clone();
+        DispatchQueue::main().exec_async(move || {
+            let mtm = MainThreadMarker::new().expect("main queue runs on the main thread");
+            if let Some(mounter) = mounter.get(mtm).borrow().as_ref() {
+                mounter.request_frame();
+            }
+        });
+    }
+
+    fn hot_update_failed(&self) {
+        let handler = self.on_hot_failed.clone();
+        DispatchQueue::main().exec_async(move || {
+            let mtm = MainThreadMarker::new().expect("main queue runs on the main thread");
+            if let Some(handler) = handler.get(mtm).borrow().as_ref() {
+                handler();
             }
         });
     }
@@ -66,6 +100,14 @@ pub(crate) struct RootViewIvars {
     size: Cell<CGSize>,
     options: SurfaceOptions,
     on_error: SharedErrorHandler,
+    /// A development update could not be applied in place.
+    on_hot_failed: SharedHandler,
+    /// Keyboard height over the view and its animation duration.
+    keyboard: Cell<(f32, f32)>,
+    /// Last environment sent to the engine.
+    environment: Cell<Option<Environment>>,
+    /// Keyboard notification registrations.
+    observers: RefCell<Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>>,
 }
 
 define_class!(
@@ -89,12 +131,27 @@ define_class!(
             let viewport = Size::new(size.width as f32, size.height as f32);
             if let Some(running) = self.ivars().running.borrow().as_ref() {
                 running.engine.control().resize(viewport);
+                self.publish_environment();
                 return;
             }
             let pending = self.ivars().pending.borrow_mut().take();
             if let Some(bundle) = pending {
                 self.start(bundle, viewport);
             }
+        }
+
+        #[unsafe(method(safeAreaInsetsDidChange))]
+        fn safe_area_insets_did_change(&self) {
+            // SAFETY: calling the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), safeAreaInsetsDidChange] };
+            self.publish_environment();
+        }
+
+        #[unsafe(method(traitCollectionDidChange:))]
+        fn trait_collection_did_change(&self, previous: Option<&UITraitCollection>) {
+            // SAFETY: calling the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), traitCollectionDidChange: previous] };
+            self.publish_environment();
         }
     }
 );
@@ -112,9 +169,159 @@ impl RootView {
             size: Cell::new(CGSize::new(0.0, 0.0)),
             options,
             on_error: Arc::new(MainThreadBound::new(RefCell::new(None), mtm)),
+            on_hot_failed: Arc::new(MainThreadBound::new(RefCell::new(None), mtm)),
+            keyboard: Cell::new((0.0, 0.25)),
+            environment: Cell::new(None),
+            observers: RefCell::new(Vec::new()),
         });
         // SAFETY: UIView's designated initializer.
         unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    /// What JS sees through `windowSize()`, `safeArea()`, `keyboard()`...
+    fn environment(&self) -> Environment {
+        let size = self.bounds().size;
+        let insets = self.safeAreaInsets();
+        let (keyboard_height, keyboard_duration) = self.ivars().keyboard.get();
+        // SAFETY: plain getters.
+        let (style, body) = unsafe {
+            (
+                self.traitCollection().userInterfaceStyle(),
+                UIFont::preferredFontForTextStyle(UIFontTextStyleBody).pointSize(),
+            )
+        };
+        Environment {
+            window: (size.width as f32, size.height as f32),
+            safe_area: Insets {
+                top: insets.top as f32,
+                right: insets.right as f32,
+                bottom: insets.bottom as f32,
+                left: insets.left as f32,
+            },
+            keyboard_height,
+            keyboard_duration,
+            color_scheme: if style == UIUserInterfaceStyle::Dark {
+                ColorScheme::Dark
+            } else {
+                ColorScheme::Light
+            },
+            // The body text style is 17pt at the default size.
+            font_scale: (body / 17.0) as f32,
+        }
+    }
+
+    /// Sends the environment to the engine if it changed.
+    fn publish_environment(&self) {
+        let running = self.ivars().running.borrow();
+        let Some(running) = running.as_ref() else {
+            return;
+        };
+        let env = self.environment();
+        if self.ivars().environment.get() != Some(env) {
+            self.ivars().environment.set(Some(env));
+            running.engine.control().set_environment(env);
+        }
+    }
+
+    /// Tracks the software keyboard: JS sees its height, and the mounter
+    /// keeps the focused input clear of it.
+    fn observe_keyboard(this: &Retained<Self>) {
+        let center = NSNotificationCenter::defaultCenter();
+        let weak = Weak::from_retained(this);
+        let block = RcBlock::new(move |note: NonNull<NSNotification>| {
+            let Some(view) = weak.load() else { return };
+            // SAFETY: a valid notification for the duration of the call.
+            view.keyboard_changed(unsafe { note.as_ref() });
+        });
+        // SAFETY: UIKit notification names; the block only touches the view
+        // on the main queue it is delivered on.
+        let names = unsafe {
+            [
+                UIKeyboardWillChangeFrameNotification,
+                UIKeyboardWillHideNotification,
+            ]
+        };
+        let mut observers = this.ivars().observers.borrow_mut();
+        for name in names {
+            // SAFETY: as above; the observer is removed when the view stops.
+            observers.push(unsafe {
+                center.addObserverForName_object_queue_usingBlock(
+                    Some(name),
+                    None,
+                    Some(&NSOperationQueue::mainQueue()),
+                    &block,
+                )
+            });
+        }
+    }
+
+    fn keyboard_changed(&self, note: &NSNotification) {
+        let Some(info) = note.userInfo() else { return };
+        // SAFETY: UIKit documents these user info keys and their value types
+        // (NSValue of a CGRect in screen coordinates, NSNumber of seconds).
+        let (frame, duration) = unsafe {
+            let frame = info
+                .objectForKey(UIKeyboardFrameEndUserInfoKey)
+                .and_then(|v| v.downcast::<NSValue>().ok())
+                .map(|v| v.CGRectValue());
+            let duration = info
+                .objectForKey(UIKeyboardAnimationDurationUserInfoKey)
+                .and_then(|v| v.downcast::<NSNumber>().ok())
+                .map_or(0.25, |n| n.doubleValue());
+            (frame, duration)
+        };
+        let hiding = note.name().isEqualToString(
+            // SAFETY: an immutable UIKit constant.
+            unsafe { UIKeyboardWillHideNotification },
+        );
+        let height = match (frame, self.window().and_then(|w| w.windowScene())) {
+            (Some(frame), Some(scene)) if !hiding => {
+                let space = scene.screen().coordinateSpace();
+                // SAFETY: `convertRect:fromCoordinateSpace:` of UICoordinateSpace.
+                let frame: CGRect =
+                    unsafe { msg_send![self, convertRect: frame, fromCoordinateSpace: &*space] };
+                let bounds = self.bounds();
+                let overlaps =
+                    frame.origin.x < bounds.size.width && frame.origin.x + frame.size.width > 0.0;
+                if overlaps {
+                    (bounds.size.height - frame.origin.y).clamp(0.0, bounds.size.height)
+                } else {
+                    0.0
+                }
+            }
+            _ => 0.0,
+        };
+        self.ivars().keyboard.set((height as f32, duration as f32));
+        self.publish_environment();
+        let Some(mounter) = self
+            .ivars()
+            .running
+            .borrow()
+            .as_ref()
+            .map(|r| r.mounter.clone())
+        else {
+            return;
+        };
+        let height = height as f32;
+        // Focusing an input while a batch is applied can post this
+        // synchronously: then run it on the next main-queue turn.
+        let busy = match mounter.get(self.mtm()).try_borrow_mut() {
+            Ok(mut m) => {
+                if let Some(m) = m.as_mut() {
+                    m.keyboard_changed(height, duration);
+                }
+                false
+            }
+            Err(_) => true,
+        };
+        if busy {
+            DispatchQueue::main().exec_async(move || {
+                let mtm = MainThreadMarker::new().expect("main queue");
+                if let Some(m) = mounter.get(mtm).borrow_mut().as_mut() {
+                    m.keyboard_changed(height, duration);
+                }
+            });
+        }
     }
 
     fn start(&self, bundle: Bundle, viewport: Size) {
@@ -124,10 +331,18 @@ impl RootView {
             bundle,
             viewport,
             trace: self.ivars().options.trace,
+            network: Some(crate::net::network()),
+            assets: Some(Arc::new(crate::image::AssetReader(
+                self.ivars().options.asset_base.clone(),
+            ))),
+            environment: self.environment(),
+            header_heights: header_heights(mtm),
+            control_sizes: crate::controls::sizes(mtm),
         };
         let sink = MainThreadSink {
             mounter: mounter.clone(),
             on_error: self.ivars().on_error.clone(),
+            on_hot_failed: self.ivars().on_hot_failed.clone(),
         };
         let engine = match Engine::start(config, CoreTextEngine::default, sink) {
             Ok(engine) => engine,
@@ -145,6 +360,7 @@ impl RootView {
             asset_base,
         ));
         *self.ivars().running.borrow_mut() = Some(Running { engine, mounter });
+        self.ivars().environment.set(Some(self.environment()));
     }
 
     /// Stops the engine and removes all native views.
@@ -159,6 +375,16 @@ impl RootView {
             view.removeFromSuperview();
         }
     }
+}
+
+/// Height of a navigation bar (status bar excluded), normal and with a
+/// large title, as UIKit lays them out on this device.
+fn header_heights(mtm: MainThreadMarker) -> (f32, f32) {
+    let bar = objc2_ui_kit::UINavigationBar::new(mtm);
+    let normal = bar.sizeThatFits(CGSize::new(390.0, 0.0)).height as f32;
+    let normal = if normal > 0.0 { normal } else { 44.0 };
+    // Large titles add a 52pt row below the bar.
+    (normal, normal + 52.0)
 }
 
 /// Options of a [`Surface`].
@@ -192,9 +418,9 @@ impl Surface {
         std::thread::Builder::new()
             .name("yf-prewarm".into())
             .spawn(crate::text::prewarm)?;
-        Ok(Surface {
-            view: RootView::new(mtm, frame, bundle, options),
-        })
+        let view = RootView::new(mtm, frame, bundle, options);
+        RootView::observe_keyboard(&view);
+        Ok(Surface { view })
     }
 
     /// The root view to add to a hierarchy.
@@ -206,6 +432,32 @@ impl Surface {
     /// exceptions) on the main thread. Errors are logged either way.
     pub fn set_error_handler(&self, handler: impl Fn(&str) + 'static) {
         *self.view.ivars().on_error.get(self.view.mtm()).borrow_mut() = Some(Box::new(handler));
+    }
+
+    /// Applies a development update to the running app in place. Returns
+    /// false when no app runs yet. If the update cannot be applied, the
+    /// handler set with [`Surface::set_hot_failed_handler`] runs.
+    #[cfg(feature = "dev")]
+    pub(crate) fn hot_update(&self, update: yf_engine::HotUpdate) -> bool {
+        match self.view.ivars().running.borrow().as_ref() {
+            Some(running) => {
+                running.engine.control().hot_update(update);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Runs `handler` on the main thread when a development update could
+    /// not be applied in place.
+    #[cfg(feature = "dev")]
+    pub(crate) fn set_hot_failed_handler(&self, handler: impl Fn() + 'static) {
+        *self
+            .view
+            .ivars()
+            .on_hot_failed
+            .get(self.view.mtm())
+            .borrow_mut() = Some(Box::new(handler));
     }
 
     /// Replaces the running app with `bundle` (state is reset).
@@ -224,5 +476,10 @@ impl Surface {
 impl Drop for Surface {
     fn drop(&mut self) {
         self.view.stop();
+        let center = NSNotificationCenter::defaultCenter();
+        for observer in self.view.ivars().observers.borrow_mut().drain(..) {
+            // SAFETY: an observer token returned by this center.
+            unsafe { center.removeObserver(observer.as_ref()) };
+        }
     }
 }

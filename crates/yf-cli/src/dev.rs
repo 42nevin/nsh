@@ -22,6 +22,9 @@ pub(crate) struct DevSession {
     src_dir: PathBuf,
     release: bool,
     server: DevServer,
+    /// The modules of the last good development build: updates are
+    /// computed against it.
+    hot: std::cell::RefCell<Option<yf_bundler::HotBundle>>,
 }
 
 impl DevSession {
@@ -40,12 +43,18 @@ impl DevSession {
             src_dir,
             release,
             server,
+            hot: Default::default(),
         };
         session.rebuild();
         Ok(session)
     }
 
     /// WebSocket URL for hosts on this machine.
+    /// The port the dev server listens on.
+    pub(crate) fn port(&self) -> u16 {
+        self.server.local_addr().port()
+    }
+
     pub(crate) fn local_url(&self) -> String {
         format!(
             "ws://127.0.0.1:{}{WS_PATH}",
@@ -97,15 +106,42 @@ impl DevSession {
 
     fn rebuild(&self) {
         self.server.building();
-        match build::compile(&self.entry, self.release) {
-            Ok(built) => self
-                .server
-                .publish(built.bytecode, built.code, built.source_map),
-            Err(err) => {
-                log::error!("build failed:\n{}", err.colored);
-                self.server.publish_error(err.plain);
+        if self.release {
+            match build::compile(&self.entry, true) {
+                Ok(built) => {
+                    self.server
+                        .publish(built.bytecode, built.code, built.source_map, None)
+                }
+                Err(err) => self.failed(err),
             }
+            return;
         }
+        match build::compile_hot(&self.entry) {
+            Ok((built, hot)) => {
+                let patch = self
+                    .hot
+                    .borrow()
+                    .as_ref()
+                    .map(|previous| hot.patch(previous));
+                let patch = match patch {
+                    Some(yf_bundler::HotPatch::Update { code, source_map }) => {
+                        Some((code, source_map))
+                    }
+                    // Nothing to replace; hosts still clear a build error.
+                    Some(yf_bundler::HotPatch::Unchanged) => Some(("true".to_owned(), None)),
+                    Some(yf_bundler::HotPatch::Reload) | None => None,
+                };
+                self.server
+                    .publish(built.bytecode, built.code, built.source_map, patch);
+                *self.hot.borrow_mut() = Some(hot);
+            }
+            Err(err) => self.failed(err),
+        }
+    }
+
+    fn failed(&self, err: build::BuildError) {
+        log::error!("build failed:\n{}", err.colored);
+        self.server.publish_error(err.plain);
     }
 }
 

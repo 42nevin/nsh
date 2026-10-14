@@ -29,6 +29,7 @@ fn bundles_errors_and_logs_round_trip() {
         vec![1, 2, 3],
         "source v1".into(),
         Some("{\"version\":3}".into()),
+        None,
     );
     let url = format!("ws://{}{WS_PATH}", server.local_addr());
 
@@ -55,8 +56,26 @@ fn bundles_errors_and_logs_round_trip() {
     server.publish_error("syntax error at App.tsx:3");
     assert!(matches!(next_non_status(&rx), DevEvent::BuildFailed(m) if m.contains("App.tsx:3")));
 
+    // A hot update reaches connected clients before its bundle.
     server.building();
-    server.publish(vec![4], "source v2".into(), None);
+    server.publish(
+        vec![4],
+        "source v2".into(),
+        None,
+        Some(("patch v2".into(), Some("{}".into()))),
+    );
+    match next_non_status(&rx) {
+        DevEvent::Patch {
+            version: 2,
+            base: 1,
+            code,
+            source_map,
+        } => {
+            assert_eq!(code, "patch v2");
+            assert_eq!(source_map.as_deref(), Some("{}"));
+        }
+        other => panic!("{other:?}"),
+    }
     assert!(matches!(
         next_non_status(&rx),
         DevEvent::Bundle { version: 2, .. }

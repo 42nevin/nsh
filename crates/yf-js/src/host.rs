@@ -8,13 +8,16 @@ use rquickjs::{
     Array, CatchResultExt, Context, Ctx, Function, Module, Persistent, Runtime, Value,
     function::Opt,
 };
-use yf_core::{EventKind, EventPayload, NodeId, Op};
+use yf_core::{EventKind, EventPayload, NodeId, Op, PayloadValue};
 
 use crate::{
     console,
+    env::{ColorScheme, Environment},
     error::JsError,
+    net::{HttpResponse, NetworkQueue, RequestId},
     protocol::{self, Warnings},
     timers::Timers,
+    web,
 };
 
 /// Receives uncaught JS exceptions.
@@ -23,10 +26,16 @@ pub type ErrorHandler = Box<dyn Fn(&JsError)>;
 /// State shared between the host and the native functions installed in JS.
 /// Only touched on the JS thread.
 #[derive(Default)]
-struct Shared {
+pub(crate) struct Shared {
     ops: RefCell<Vec<Op>>,
     timers: RefCell<Timers>,
     warnings: RefCell<Warnings>,
+    pub(crate) net: RefCell<NetworkQueue>,
+    /// Font assets imported by the app, not yet registered.
+    fonts: RefCell<Vec<String>>,
+    /// `requestAnimationFrame` callbacks waiting for the next frame.
+    frames: RefCell<Vec<(u32, Persistent<Function<'static>>)>>,
+    next_frame_id: std::cell::Cell<u32>,
 }
 
 /// One QuickJS runtime + context with the yf host APIs installed.
@@ -55,6 +64,14 @@ impl Host {
         })
     }
 
+    /// Aborts running JS (with an uncatchable exception) once `stop` is
+    /// set: an engine shutting down never waits for a long-running script.
+    pub fn set_stop_flag(&self, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.rt.set_interrupt_handler(Some(Box::new(move || {
+            stop.load(std::sync::atomic::Ordering::Relaxed)
+        })));
+    }
+
     /// Sets the handler for uncaught exceptions (in event handlers, timers and
     /// promise jobs). Without a handler they are logged.
     pub fn set_error_handler(&mut self, handler: ErrorHandler) {
@@ -72,6 +89,25 @@ impl Host {
         })?;
         self.run_jobs();
         Ok(())
+    }
+
+    /// Evaluates a classic script named `name` (for stack traces) and
+    /// returns whether its completion value is `true`: development updates
+    /// report whether they could be applied.
+    pub fn eval_script(&self, name: &str, source: &str) -> Result<bool, JsError> {
+        let applied = self.ctx.with(|ctx| -> Result<bool, JsError> {
+            let mut options = rquickjs::context::EvalOptions::default();
+            options.global = true;
+            options.strict = false;
+            options.filename = Some(name.to_owned());
+            let value: rquickjs::Value<'_> = ctx
+                .eval_with_options(source, options)
+                .catch(&ctx)
+                .map_err(JsError::caught)?;
+            Ok(value.as_bool() == Some(true))
+        })?;
+        self.run_jobs();
+        Ok(applied)
     }
 
     /// Evaluates a bundle compiled with [`crate::compile_bytecode`].
@@ -92,7 +128,15 @@ impl Host {
     /// Delivers a native event (and its data) to the node's JS handler.
     pub fn dispatch_event(&self, id: NodeId, event: EventKind, payload: &EventPayload) {
         self.ctx.with(|ctx| {
-            let result = payload_object(&ctx, payload).and_then(|payload| {
+            let payload = match (event, payload) {
+                // `onChangeText` receives the text itself, as in React Native.
+                (EventKind::ChangeText, EventPayload::Text { text, .. }) => {
+                    rquickjs::String::from_str(ctx.clone(), text).map(|s| s.into_value())
+                }
+                (_, EventPayload::Value(value)) => payload_value(&ctx, value),
+                _ => payload_object(&ctx, payload),
+            };
+            let result = payload.and_then(|payload| {
                 ctx.globals()
                     .get::<_, Function>("__yf_dispatch")?
                     .call::<_, ()>((id, event.prop_name(), payload))
@@ -181,6 +225,75 @@ impl Host {
         }
     }
 
+    /// Moves the network requests and cancellations made since the last
+    /// call into `out`.
+    pub fn take_network(&self, out: &mut NetworkQueue) {
+        let mut net = self.shared.net.borrow_mut();
+        out.requests.append(&mut net.requests);
+        out.cancels.append(&mut net.cancels);
+    }
+
+    /// Publishes the surface's environment to JS. Call once before
+    /// evaluating the bundle (the runtime reads the initial value), then on
+    /// every change.
+    pub fn set_environment(&self, env: &Environment) {
+        self.ctx.with(|ctx| {
+            let result = (|| {
+                let value = environment_object(&ctx, env)?;
+                let globals = ctx.globals();
+                globals.set("__yf_env_value", value.clone())?;
+                if let Ok(update) = globals.get::<_, Function>("__yf_env") {
+                    update.call::<_, ()>((value,))?;
+                }
+                Ok(())
+            })();
+            self.report(&ctx, result);
+        });
+        self.run_jobs();
+    }
+
+    /// True if JS asked for a display frame (`requestAnimationFrame`).
+    pub fn wants_frame(&self) -> bool {
+        !self.shared.frames.borrow().is_empty()
+    }
+
+    /// Runs the `requestAnimationFrame` callbacks queued so far, with the
+    /// current `performance.now()`. Callbacks requested meanwhile wait for
+    /// the next frame.
+    pub fn run_frame(&self) {
+        let callbacks = std::mem::take(&mut *self.shared.frames.borrow_mut());
+        if callbacks.is_empty() {
+            return;
+        }
+        self.ctx.with(|ctx| {
+            let now = (|| -> rquickjs::Result<f64> {
+                let performance: rquickjs::Object = ctx.globals().get("performance")?;
+                performance.get::<_, Function>("now")?.call(())
+            })()
+            .unwrap_or(0.0);
+            for (_, callback) in callbacks {
+                let result = callback.restore(&ctx).and_then(|f| f.call::<_, ()>((now,)));
+                self.report(&ctx, result);
+            }
+        });
+        self.run_jobs();
+    }
+
+    /// Moves the font assets (`asset:/…` URIs) imported since the last call
+    /// into `out`. They must be registered before the next layout.
+    pub fn take_fonts(&self, out: &mut Vec<String>) {
+        out.append(&mut self.shared.fonts.borrow_mut());
+    }
+
+    /// Settles the `fetch` promise of request `id`.
+    pub fn finish_fetch(&self, id: RequestId, result: Result<HttpResponse, String>) {
+        self.ctx.with(|ctx| {
+            let result = web::finish_fetch(&ctx, id, result);
+            self.report(&ctx, result);
+        });
+        self.run_jobs();
+    }
+
     /// Runs the cycle collector. Call when idle so released nodes are
     /// reported promptly.
     pub fn collect_garbage(&self) {
@@ -208,7 +321,49 @@ impl Drop for Host {
     fn drop(&mut self) {
         // Persistent JS values must be freed before the runtime.
         self.shared.timers.borrow_mut().clear();
+        self.shared.frames.borrow_mut().clear();
     }
+}
+
+fn environment_object<'js>(ctx: &Ctx<'js>, env: &Environment) -> rquickjs::Result<Value<'js>> {
+    let object = |pairs: &[(&str, f32)]| -> rquickjs::Result<rquickjs::Object<'js>> {
+        let o = rquickjs::Object::new(ctx.clone())?;
+        for (k, v) in pairs {
+            o.set(*k, *v)?;
+        }
+        Ok(o)
+    };
+    let obj = rquickjs::Object::new(ctx.clone())?;
+    obj.set(
+        "window",
+        object(&[("width", env.window.0), ("height", env.window.1)])?,
+    )?;
+    let a = env.safe_area;
+    obj.set(
+        "safeArea",
+        object(&[
+            ("top", a.top),
+            ("right", a.right),
+            ("bottom", a.bottom),
+            ("left", a.left),
+        ])?,
+    )?;
+    obj.set(
+        "keyboard",
+        object(&[
+            ("height", env.keyboard_height),
+            ("duration", env.keyboard_duration),
+        ])?,
+    )?;
+    obj.set(
+        "colorScheme",
+        match env.color_scheme {
+            ColorScheme::Light => "light",
+            ColorScheme::Dark => "dark",
+        },
+    )?;
+    obj.set("fontScale", env.font_scale)?;
+    Ok(obj.into_value())
 }
 
 /// The JS object handed to event handlers.
@@ -216,6 +371,23 @@ fn payload_object<'js>(ctx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resu
     let obj = rquickjs::Object::new(ctx.clone())?;
     match payload {
         EventPayload::None => return Ok(Value::new_undefined(ctx.clone())),
+        EventPayload::Value(value) => return payload_value(ctx, value),
+        EventPayload::Map(fields) => {
+            for (key, value) in fields {
+                obj.set(*key, payload_value(ctx, value)?)?;
+            }
+        }
+        EventPayload::Layout {
+            x,
+            y,
+            width,
+            height,
+        } => {
+            obj.set("x", *x)?;
+            obj.set("y", *y)?;
+            obj.set("width", *width)?;
+            obj.set("height", *height)?;
+        }
         EventPayload::Pan {
             translation_x,
             translation_y,
@@ -236,8 +408,18 @@ fn payload_object<'js>(ctx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resu
             obj.set("height", *height)?;
         }
         EventPayload::Error { message } => obj.set("message", message.as_str())?,
+        EventPayload::Text { text, .. } => obj.set("text", text.as_str())?,
     }
     Ok(obj.into_value())
+}
+
+fn payload_value<'js>(ctx: &Ctx<'js>, value: &PayloadValue) -> rquickjs::Result<Value<'js>> {
+    Ok(match value {
+        PayloadValue::Number(n) => Value::new_float(ctx.clone(), *n),
+        PayloadValue::Bool(b) => Value::new_bool(ctx.clone(), *b),
+        PayloadValue::Str(s) => rquickjs::String::from_str(ctx.clone(), s)?.into_value(),
+        PayloadValue::Null => Value::new_null(ctx.clone()),
+    })
 }
 
 fn describe(value: Value<'_>) -> String {
@@ -250,6 +432,7 @@ fn describe(value: Value<'_>) -> String {
 fn install(ctx: &Ctx<'_>, shared: &Rc<Shared>) -> rquickjs::Result<()> {
     let globals = ctx.globals();
     console::install(ctx)?;
+    web::install(ctx, shared)?;
 
     let s = shared.clone();
     globals.set(
@@ -257,6 +440,16 @@ fn install(ctx: &Ctx<'_>, shared: &Rc<Shared>) -> rquickjs::Result<()> {
         Function::new(ctx.clone(), move |buf: Array<'_>| -> rquickjs::Result<()> {
             let mut ops = s.ops.borrow_mut();
             protocol::decode(buf.ctx(), &buf, &mut ops, &mut s.warnings.borrow_mut())
+        })?,
+    )?;
+
+    // `import Inter from "./Inter.ttf"` compiles to `__yf_font(uri, family)`.
+    let s = shared.clone();
+    globals.set(
+        "__yf_font",
+        Function::new(ctx.clone(), move |uri: String, family: String| {
+            s.fonts.borrow_mut().push(uri);
+            family
         })?,
     )?;
 
@@ -279,6 +472,26 @@ fn install(ctx: &Ctx<'_>, shared: &Rc<Shared>) -> rquickjs::Result<()> {
             )?,
         )?;
     }
+    let s = shared.clone();
+    globals.set(
+        "requestAnimationFrame",
+        Function::new(ctx.clone(), move |callback: Function<'_>| -> u32 {
+            let id = s.next_frame_id.get().wrapping_add(1).max(1);
+            s.next_frame_id.set(id);
+            let callback = Persistent::save(&callback.ctx().clone(), callback);
+            s.frames.borrow_mut().push((id, callback));
+            id
+        })?,
+    )?;
+    let s = shared.clone();
+    globals.set(
+        "cancelAnimationFrame",
+        Function::new(ctx.clone(), move |id: Opt<u32>| {
+            if let Some(id) = id.0 {
+                s.frames.borrow_mut().retain(|(i, _)| *i != id);
+            }
+        })?,
+    )?;
     for name in ["clearTimeout", "clearInterval"] {
         let s = shared.clone();
         globals.set(

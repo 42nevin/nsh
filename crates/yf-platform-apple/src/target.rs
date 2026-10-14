@@ -1,23 +1,33 @@
 //! The Objective-C object receiving every native callback of a surface:
-//! gesture actions, pull-to-refresh, scroll view delegate calls and display
-//! link ticks. Views are identified by their `tag` (the node id).
+//! gesture actions, pull-to-refresh, scroll view and text input delegate
+//! calls and display link ticks. Views are identified by their `tag` (the node id).
 
 use dispatch2::DispatchQueue;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained};
-use objc2_foundation::{NSObject, NSObjectProtocol};
+use objc2::runtime::ProtocolObject;
+use objc2::{
+    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
+    rc::Retained,
+};
+use objc2_core_foundation::CGPoint;
+use objc2_foundation::{NSObject, NSObjectProtocol, NSRange, NSString};
 use objc2_quartz_core::CADisplayLink;
 use objc2_ui_kit::{
-    UIGestureRecognizer, UIGestureRecognizerState, UIPanGestureRecognizer, UIRefreshControl,
-    UIScrollView, UIScrollViewDelegate,
+    UIControl, UIGestureRecognizer, UIGestureRecognizerDelegate, UIGestureRecognizerState,
+    UIPanGestureRecognizer, UIPinchGestureRecognizer, UIRefreshControl,
+    UIRotationGestureRecognizer, UIScrollView, UIScrollViewDelegate, UITapGestureRecognizer,
+    UITextField, UITextFieldDelegate, UITextView, UITextViewDelegate, UITouch, UIView,
 };
-use yf_core::{EventKind, EventPayload, NodeId};
+use yf_core::{EventKind, EventPayload, KeyboardTaps, NodeId};
 use yf_engine::EngineControl;
 
-use crate::mount::SharedMounter;
+use crate::{input, mount::SharedMounter, press::PressRecognizer};
 
 pub(crate) struct TargetIvars {
     control: EngineControl,
     mounter: SharedMounter,
+    /// Scrolls the core asked for that each scroll view applied, reported
+    /// with its offsets (`EngineControl::scroll`).
+    scrolls_applied: std::cell::RefCell<rustc_hash::FxHashMap<NodeId, u32>>,
 }
 
 define_class!(
@@ -29,20 +39,56 @@ define_class!(
     unsafe impl NSObjectProtocol for EventTarget {}
 
     impl EventTarget {
-        #[unsafe(method(handleTap:))]
-        fn handle_tap(&self, recognizer: &UIGestureRecognizer) {
-            if let Some(view) = recognizer.view() {
-                self.dispatch(view.tag() as NodeId, EventKind::Press, EventPayload::None);
+        #[unsafe(method(handlePress:))]
+        fn handle_press(&self, recognizer: &PressRecognizer) {
+            if recognizer.state() != UIGestureRecognizerState::Ended {
+                return;
+            }
+            let Some(view) = recognizer.view() else { return };
+            let id = view.tag() as NodeId;
+            // Press out first, then the press, as in React Native.
+            if recognizer.release() {
+                self.with_mounter(move |m| m.pressed(id));
             }
         }
 
-        #[unsafe(method(handleLongPress:))]
-        fn handle_long_press(&self, recognizer: &UIGestureRecognizer) {
-            if recognizer.state() == UIGestureRecognizerState::Began
-                && let Some(view) = recognizer.view()
-            {
-                self.dispatch(view.tag() as NodeId, EventKind::LongPress, EventPayload::None);
-            }
+        #[unsafe(method(handlePinch:))]
+        fn handle_pinch(&self, recognizer: &UIPinchGestureRecognizer) {
+            let Some(view) = recognizer.view() else { return };
+            let (id, state) = (view.tag() as NodeId, recognizer.state());
+            let (scale, velocity) = (recognizer.scale(), recognizer.velocity());
+            self.with_mounter(move |m| m.transform_gesture(id, false, state, scale, velocity));
+        }
+
+        #[unsafe(method(handleRotation:))]
+        fn handle_rotation(&self, recognizer: &UIRotationGestureRecognizer) {
+            let Some(view) = recognizer.view() else { return };
+            let (id, state) = (view.tag() as NodeId, recognizer.state());
+            let (angle, velocity) = (recognizer.rotation(), recognizer.velocity());
+            self.with_mounter(move |m| m.transform_gesture(id, true, state, angle, velocity));
+        }
+
+        #[unsafe(method(handleSwitch:))]
+        fn handle_switch(&self, control: &objc2_ui_kit::UISwitch) {
+            let id = control.tag() as NodeId;
+            self.with_mounter(move |m| m.switch_changed(id));
+        }
+
+        #[unsafe(method(handleSlider:))]
+        fn handle_slider(&self, control: &objc2_ui_kit::UISlider) {
+            let id = control.tag() as NodeId;
+            self.with_mounter(move |m| m.slider_changed(id, false));
+        }
+
+        #[unsafe(method(handleSliderEnd:))]
+        fn handle_slider_end(&self, control: &objc2_ui_kit::UISlider) {
+            let id = control.tag() as NodeId;
+            self.with_mounter(move |m| m.slider_changed(id, true));
+        }
+
+        #[unsafe(method(frame:))]
+        fn frame(&self, _link: &CADisplayLink) {
+            self.with_mounter(|m| m.frame());
         }
 
         #[unsafe(method(handlePan:))]
@@ -63,9 +109,121 @@ define_class!(
             }
         }
 
+        #[unsafe(method(dismissKeyboard:))]
+        fn dismiss_keyboard(&self, _recognizer: &UITapGestureRecognizer) {
+            self.with_mounter(|m| m.dismiss_keyboard());
+        }
+
         #[unsafe(method(tick:))]
         fn tick(&self, _link: &CADisplayLink) {
             self.with_mounter(|m| m.tick());
+        }
+
+        #[unsafe(method(handleEditingChanged:))]
+        fn handle_editing_changed(&self, field: &UITextField) {
+            // Read now: a deferred call must report this edit's text.
+            let text = field.text().map(|t| t.to_string()).unwrap_or_default();
+            let id = field.tag() as NodeId;
+            self.with_mounter(move |m| m.input_changed(id, text));
+        }
+    }
+
+    unsafe impl UITextFieldDelegate for EventTarget {
+        #[unsafe(method(textFieldDidBeginEditing:))]
+        fn text_field_did_begin(&self, field: &UITextField) {
+            let id = field.tag() as NodeId;
+            self.with_mounter(move |m| m.input_focused(id, true));
+        }
+
+        #[unsafe(method(textFieldDidEndEditing:))]
+        fn text_field_did_end(&self, field: &UITextField) {
+            let id = field.tag() as NodeId;
+            self.with_mounter(move |m| m.input_focused(id, false));
+        }
+
+        #[unsafe(method(textFieldShouldReturn:))]
+        fn text_field_should_return(&self, field: &UITextField) -> bool {
+            let text = field.text().map(|t| t.to_string()).unwrap_or_default();
+            let id = field.tag() as NodeId;
+            self.with_mounter(move |m| m.input_submitted(id, text));
+            false
+        }
+
+        #[unsafe(method(textField:shouldChangeCharactersInRange:replacementString:))]
+        fn text_field_should_change(
+            &self,
+            field: &UITextField,
+            range: NSRange,
+            replacement: &NSString,
+        ) -> bool {
+            let current = field.text().unwrap_or_default();
+            input::fits(&current, range, replacement, input::max_length(field))
+        }
+    }
+
+    unsafe impl UITextViewDelegate for EventTarget {
+        #[unsafe(method(textViewDidChange:))]
+        fn text_view_did_change(&self, view: &UITextView) {
+            let text = view.text().to_string();
+            let id = view.tag() as NodeId;
+            self.with_mounter(move |m| m.input_changed(id, text));
+        }
+
+        #[unsafe(method(textViewDidBeginEditing:))]
+        fn text_view_did_begin(&self, view: &UITextView) {
+            let id = view.tag() as NodeId;
+            self.with_mounter(move |m| m.input_focused(id, true));
+        }
+
+        #[unsafe(method(textViewDidEndEditing:))]
+        fn text_view_did_end(&self, view: &UITextView) {
+            let id = view.tag() as NodeId;
+            self.with_mounter(move |m| m.input_focused(id, false));
+        }
+
+        #[unsafe(method(textView:shouldChangeTextInRange:replacementText:))]
+        fn text_view_should_change(
+            &self,
+            view: &UITextView,
+            range: NSRange,
+            replacement: &NSString,
+        ) -> bool {
+            input::fits(&view.text(), range, replacement, input::max_length(view))
+        }
+    }
+
+    unsafe impl UIGestureRecognizerDelegate for EventTarget {
+        /// Pans, pinches and rotations on the same view work together.
+        #[unsafe(method(gestureRecognizer:shouldRecognizeSimultaneouslyWithGestureRecognizer:))]
+        fn should_recognize_simultaneously(
+            &self,
+            a: &UIGestureRecognizer,
+            b: &UIGestureRecognizer,
+        ) -> bool {
+            let transform = |r: &UIGestureRecognizer| {
+                r.isKindOfClass(UIPanGestureRecognizer::class())
+                    || r.isKindOfClass(UIPinchGestureRecognizer::class())
+                    || r.isKindOfClass(UIRotationGestureRecognizer::class())
+            };
+            match (a.view(), b.view()) {
+                (Some(va), Some(vb)) => {
+                    std::ptr::eq::<objc2_ui_kit::UIView>(&*va, &*vb) && transform(a) && transform(b)
+                }
+                _ => false,
+            }
+        }
+
+        #[unsafe(method(gestureRecognizerShouldBegin:))]
+        fn should_begin(&self, recognizer: &UIGestureRecognizer) -> bool {
+            self.pan_should_begin(recognizer)
+        }
+
+        /// The keyboard tap of scroll views only sees taps that dismiss the
+        /// keyboard (`keyboardShouldPersistTaps`).
+        #[unsafe(method(gestureRecognizer:shouldReceiveTouch:))]
+        fn should_receive_touch(&self, recognizer: &UIGestureRecognizer, touch: &UITouch) -> bool {
+            !recognizer.isKindOfClass(UITapGestureRecognizer::class())
+                || self.tap_dismisses_keyboard(touch)
         }
     }
 
@@ -75,25 +233,125 @@ define_class!(
             let id = scroll.tag() as NodeId;
             let offset = scroll.contentOffset();
             // Lists need offsets to pick rows; the engine coalesces them.
-            self.ivars().control.scroll(id, offset.x as f32, offset.y as f32);
+            let applied = self.ivars().scrolls_applied.borrow().get(&id).copied().unwrap_or(0);
+            self.ivars()
+                .control
+                .scroll(id, offset.x as f32, offset.y as f32, applied);
             self.with_mounter(move |m| m.scrolled(id, offset));
         }
 
         #[unsafe(method(scrollViewDidEndDecelerating:))]
         fn scroll_view_did_end_decelerating(&self, scroll: &UIScrollView) {
-            self.scroll_ended(scroll);
+            self.scroll_event(scroll, EventKind::MomentumScrollEnd);
+            self.scroll_event(scroll, EventKind::ScrollEnd);
         }
 
-                #[unsafe(method(scrollViewDidEndDragging:willDecelerate:))]
+        #[unsafe(method(scrollViewWillBeginDragging:))]
+        fn scroll_view_will_begin_dragging(&self, scroll: &UIScrollView) {
+            // Caught while gliding: the glide ended.
+            if scroll.isDecelerating() {
+                self.scroll_event(scroll, EventKind::MomentumScrollEnd);
+            }
+            self.scroll_event(scroll, EventKind::ScrollBeginDrag);
+        }
+
+        /// Snaps a fling to `snapToInterval` / `snapToOffsets` / pages.
+        #[unsafe(method(scrollViewWillEndDragging:withVelocity:targetContentOffset:))]
+        fn scroll_view_will_end_dragging(
+            &self,
+            scroll: &UIScrollView,
+            velocity: CGPoint,
+            target: std::ptr::NonNull<CGPoint>,
+        ) {
+            let id = scroll.tag() as NodeId;
+            // SAFETY: UIKit passes a valid pointer for the call's duration.
+            let proposed = unsafe { target.read() };
+            let snapped = match self.ivars().mounter.get(self.mtm()).try_borrow() {
+                // UIKit's velocity is in points per millisecond.
+                Ok(m) => m.as_ref().and_then(|m| m.snap_target(id, velocity, proposed)),
+                Err(_) => None,
+            };
+            if let Some(p) = snapped {
+                // SAFETY: as above.
+                unsafe { target.write(p) };
+            }
+        }
+
+        #[unsafe(method(scrollViewDidEndDragging:willDecelerate:))]
         fn scroll_view_did_end_dragging(&self, scroll: &UIScrollView, decelerate: bool) {
             let (id, offset) = (scroll.tag() as NodeId, scroll.contentOffset());
             self.with_mounter(move |m| m.drag_ended(id, offset));
-            if !decelerate {
-                self.scroll_ended(scroll);
+            self.scroll_event(scroll, EventKind::ScrollEndDrag);
+            if decelerate {
+                self.scroll_event(scroll, EventKind::MomentumScrollBegin);
+            } else {
+                self.scroll_event(scroll, EventKind::ScrollEnd);
             }
         }
     }
 );
+
+/// A tap on a scroll view that dismisses the keyboard; its delegate
+/// (`gestureRecognizer:shouldReceiveTouch:`) lets through only taps that
+/// should.
+pub(crate) fn keyboard_tap_recognizer(
+    mtm: MainThreadMarker,
+    target: &Retained<EventTarget>,
+) -> Retained<UITapGestureRecognizer> {
+    // SAFETY: `dismissKeyboard:` is implemented by the target, which
+    // outlives the scroll view.
+    let tap = unsafe {
+        UITapGestureRecognizer::initWithTarget_action(
+            UITapGestureRecognizer::alloc(mtm),
+            Some(target),
+            Some(objc2::sel!(dismissKeyboard:)),
+        )
+    };
+    tap.setCancelsTouchesInView(false);
+    tap.setDelegate(Some(ProtocolObject::from_ref(&**target)));
+    tap
+}
+
+/// Whether `view` is (in) a text input.
+fn on_input(view: &UIView) -> bool {
+    let mut current = Some(view.retain());
+    while let Some(v) = current {
+        if v.isKindOfClass(UITextField::class()) || v.isKindOfClass(UITextView::class()) {
+            return true;
+        }
+        if v.isKindOfClass(UIScrollView::class()) {
+            return false;
+        }
+        current = v.superview();
+    }
+    false
+}
+
+/// Whether something under the touch handles it: a pressable, a control
+/// or an input.
+fn handles_touches(view: &UIView) -> bool {
+    let mut current = Some(view.retain());
+    while let Some(v) = current {
+        if v.isKindOfClass(UIControl::class())
+            || v.isKindOfClass(UITextField::class())
+            || v.isKindOfClass(UITextView::class())
+        {
+            return true;
+        }
+        if let Some(recognizers) = v.gestureRecognizers()
+            && recognizers
+                .iter()
+                .any(|r| r.isEnabled() && r.isKindOfClass(PressRecognizer::class()))
+        {
+            return true;
+        }
+        if v.isKindOfClass(UIScrollView::class()) {
+            return false;
+        }
+        current = v.superview();
+    }
+    false
+}
 
 impl EventTarget {
     pub(crate) fn new(
@@ -101,20 +359,90 @@ impl EventTarget {
         control: EngineControl,
         mounter: SharedMounter,
     ) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(TargetIvars { control, mounter });
+        let this = Self::alloc(mtm).set_ivars(TargetIvars {
+            control,
+            mounter,
+            scrolls_applied: Default::default(),
+        });
         // SAFETY: NSObject's designated initializer.
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// Counts a scroll the core asked for, before applying it (UIKit
+    /// reports the new offset synchronously).
+    pub(crate) fn scroll_applied(&self, id: NodeId) {
+        *self
+            .ivars()
+            .scrolls_applied
+            .borrow_mut()
+            .entry(id)
+            .or_default() += 1;
+    }
+
+    /// Forgets a deleted scroll view.
+    pub(crate) fn scroll_deleted(&self, id: NodeId) {
+        self.ivars().scrolls_applied.borrow_mut().remove(&id);
     }
 
     fn dispatch(&self, id: NodeId, event: EventKind, payload: EventPayload) {
         self.ivars().control.dispatch_event(id, event, payload);
     }
 
-    fn scroll_ended(&self, scroll: &UIScrollView) {
+    fn pan_should_begin(&self, recognizer: &UIGestureRecognizer) -> bool {
+        let Some(pan) = recognizer.downcast_ref::<UIPanGestureRecognizer>() else {
+            return true;
+        };
+        let Some(view) = pan.view() else { return true };
+        let velocity = pan.velocityInView(Some(&view));
+        let id = view.tag() as NodeId;
+        match self.ivars().mounter.get(self.mtm()).try_borrow() {
+            Ok(m) => m.as_ref().is_none_or(|m| m.pan_should_begin(id, velocity)),
+            Err(_) => true,
+        }
+    }
+
+    /// A finger went down on (or left) pressable view `id`.
+    pub(crate) fn press_changed(&self, id: NodeId, pressed: bool) {
+        self.with_mounter(move |m| m.press_changed(id, pressed));
+    }
+
+    /// A press on view `id` was held long enough.
+    pub(crate) fn long_press(&self, id: NodeId) {
+        self.with_mounter(move |m| m.long_pressed(id));
+    }
+
+    fn keyboard_tap(&self, view: &UIView) -> Option<KeyboardTaps> {
+        match self.ivars().mounter.get(self.mtm()).try_borrow() {
+            Ok(m) => m.as_ref().and_then(|m| m.keyboard_tap(view)),
+            Err(_) => None,
+        }
+    }
+
+    /// Whether a tap dismisses the keyboard (when it ends without
+    /// scrolling), as `keyboardShouldPersistTaps` says: "never" on anything
+    /// but an input, "handled" when nothing under it handles taps.
+    fn tap_dismisses_keyboard(&self, touch: &UITouch) -> bool {
+        let Some(view) = touch.view() else {
+            return false;
+        };
+        match self.keyboard_tap(&view) {
+            Some(KeyboardTaps::Never) => !on_input(&view),
+            Some(KeyboardTaps::Handled) => !handles_touches(&view),
+            Some(KeyboardTaps::Always) | None => false,
+        }
+    }
+
+    /// A press starts on `view`: false while the keyboard is up and taps
+    /// only dismiss it (`keyboardShouldPersistTaps` "never").
+    pub(crate) fn press_allowed(&self, view: &UIView) -> bool {
+        self.keyboard_tap(view) != Some(KeyboardTaps::Never) || on_input(view)
+    }
+
+    fn scroll_event(&self, scroll: &UIScrollView, event: EventKind) {
         let offset = scroll.contentOffset();
         self.dispatch(
             scroll.tag() as NodeId,
-            EventKind::ScrollEnd,
+            event,
             EventPayload::Scroll {
                 x: offset.x as f32,
                 y: offset.y as f32,

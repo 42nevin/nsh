@@ -57,8 +57,10 @@ fn write_line(color: bool, level: Level, source: &str, message: &str) {
 
 impl Log for Logger {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        // Dependencies (rolldown, axum, ...) only when they are loud.
-        metadata.target().starts_with("yf") || metadata.level() <= Level::Warn
+        // Ours and the app's (`js`); dependencies (rolldown, axum, ...) only
+        // when they are loud.
+        let target = metadata.target();
+        target.starts_with("yf") || target == "js" || metadata.level() <= Level::Warn
     }
 
     fn log(&self, record: &Record<'_>) {

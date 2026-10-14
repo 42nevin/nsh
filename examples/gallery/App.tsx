@@ -1,263 +1,89 @@
-import { createSignal, Match, Switch } from "solid-js";
-import { createNativeValue, List, render, root } from "yf";
-import logo from "./logo@2x.png";
+import { For } from "solid-js";
+import { render, root, Screen, Stack } from "yf";
+import { Controls } from "./demos/Controls";
+import { Form } from "./demos/Form";
+import { Gestures } from "./demos/Gestures";
+import { Images } from "./demos/Images";
+import { Lists } from "./demos/Lists";
+import { Media } from "./demos/Media";
+import { Navigation } from "./demos/Navigation";
+import { Photos } from "./demos/Photos";
+import { Physics } from "./demos/Physics";
+import { Scrolling } from "./demos/Scrolling";
+import { Styles } from "./demos/Styles";
+import { System } from "./demos/System";
+import { TextDemo } from "./demos/TextDemo";
+import { type DemoEntry, nav } from "./nav";
+import { colors } from "./ui";
 
-type Photo = { id: number; title: string; author: string };
+const demos: DemoEntry[] = [
+  { name: "Photos", detail: "A long recycled list: images, pull to refresh, paging", screen: Photos },
+  { name: "Lists", detail: "Columns, sticky sections, a chat, horizontal lists", screen: Lists },
+  { name: "Scrolling", detail: "Paging, snapping, scroll events, prepending, keyboard taps", screen: Scrolling },
+  { name: "Navigation", detail: "Header options, modals, the back button, safe areas", screen: Navigation },
+  { name: "Form", detail: "Inputs, keyboard types, the keyboard over the content", screen: Form },
+  { name: "Controls", detail: "Switch, slider, spinner, layout animation, sheet", screen: Controls },
+  { name: "Gestures", detail: "Pinch, rotate, press states, hit slop, pointer events", screen: Gestures },
+  { name: "Physics", detail: "Drags and springs on the UI thread", screen: Physics },
+  { name: "Images", detail: "Resize modes, tint, load and error events", screen: Images },
+  { name: "Styles", detail: "Corners, borders, shadows, clipping, 3D transforms", screen: Styles },
+  { name: "Text", detail: "Fonts, spans, decorations, truncation, shadows", screen: TextDemo },
+  { name: "Web and video", detail: "WKWebView / WebView, AVPlayer / MediaPlayer", screen: Media },
+  { name: "System", detail: "Status bar, alerts, action sheets, environment, timers, fetch", screen: System },
+];
 
-function makePhotos(from: number, count: number): Photo[] {
-  return Array.from({ length: count }, (_, i) => {
-    const id = from + i;
-    return { id, title: `Photo #${id}`, author: ["Ada", "Linus", "Grace", "Ken", "Barbara"][id % 5] };
-  });
-}
-
-function Row(props: { photo: Photo }) {
+function Home() {
   return (
-    <view style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, paddingVertical: 8 }}>
-      <image
-        src={`https://picsum.photos/seed/${props.photo.id}/96/96`}
-        style={{ width: 48, height: 48, borderRadius: 8, backgroundColor: "#e1e4e8" }}
-      />
-      <view style={{ flex: 1, gap: 2 }}>
-        <text style={{ fontSize: 16, fontWeight: "600", color: "#1f2328" }}>{props.photo.title}</text>
-        <text style={{ fontSize: 13, color: "#6e7781" }}>by {props.photo.author}</text>
-      </view>
-    </view>
-  );
-}
-
-function Photos() {
-  const [photos, setPhotos] = createSignal(makePhotos(1, 1000));
-  const [refreshing, setRefreshing] = createSignal(false);
-  // Scroll offset, fed natively: the header fades without any JS per frame.
-  const scrollY = createNativeValue(0);
-
-  const refresh = () => {
-    setRefreshing(true);
-    setTimeout(() => {
-      setPhotos(makePhotos(1, 1000));
-      setRefreshing(false);
-    }, 800);
-  };
-  const loadMore = () => {
-    const current = photos();
-    console.log("loading more after", current.length);
-    setPhotos([...current, ...makePhotos(current.length + 1, 200)]);
-  };
-
-  return (
-    <view style={{ flex: 1 }}>
-      <view
-        style={{
-          paddingHorizontal: 16,
-          paddingVertical: 10,
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 10,
-          opacity: scrollY.interpolate({ inputRange: [0, 120], outputRange: [1, 0.35] }),
-          transform: [{ translateY: scrollY.interpolate({ inputRange: [0, 120], outputRange: [0, -6] }) }],
-        }}
-      >
-        <image src={logo} />
-        <text style={{ fontSize: 22, fontWeight: "bold", color: "#1f2328" }}>{photos().length} photos</text>
-      </view>
-      <List
-        each={photos()}
-        estimatedItemSize={64}
-        style={{ flex: 1, backgroundColor: "#ffffff" }}
-        scrollValue={scrollY}
-        refreshing={refreshing()}
-        onRefresh={refresh}
-        onEndReached={loadMore}
-      >
-        {(photo) => <Row photo={photo()} />}
-      </List>
-    </view>
-  );
-}
-
-function Physics() {
-  const x = createNativeValue(0);
-  const y = createNativeValue(0);
-  const pressed = createNativeValue(0);
-  const [releases, setReleases] = createSignal(0);
-
-  const release = (e: { velocityX: number; velocityY: number }) => {
-    setReleases(releases() + 1);
-    x.spring(0, { velocity: e.velocityX, stiffness: 180, damping: 14 });
-    y.spring(0, { velocity: e.velocityY, stiffness: 180, damping: 14 });
-  };
-  const pulse = async () => {
-    await pressed.timing(1, { duration: 120, easing: "easeOut" });
-    await pressed.timing(0, { duration: 260, easing: "easeInOut" });
-  };
-
-  return (
-    <view style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 24 }}>
-      <text style={{ fontSize: 15, color: "#6e7781" }}>Drag the card, tap it to pulse, long-press to reset</text>
-      <view
-        pan={{ x, y }}
-        onPanEnd={release}
-        onPress={pulse}
-        onLongPress={() => setReleases(0)}
-        style={{
-          width: 160,
-          height: 160,
-          borderRadius: 28,
-          alignItems: "center",
-          justifyContent: "center",
-          backgroundColor: pressed.interpolate({ inputRange: [0, 1], outputRange: ["#8250df", "#bf3989"] }),
-          transform: [
-            { translateX: x },
-            { translateY: y },
-            { scale: pressed.interpolate({ inputRange: [0, 1], outputRange: [1, 1.12] }) },
-            { rotate: x.interpolate({ inputRange: [-200, 200], outputRange: [-12, 12] }) },
-          ],
-        }}
-      >
-        <text style={{ color: "#ffffff", fontSize: 20, fontWeight: "bold" }}>Drag me</text>
-      </view>
-      <text style={{ fontSize: 13, color: "#6e7781" }}>Released {releases()} times</text>
-    </view>
-  );
-}
-
-const card = {
-  width: 150,
-  height: 110,
-  alignItems: "center",
-  justifyContent: "center",
-  backgroundColor: "#ffffff",
-} as const;
-
-function Label(props: { children: string }) {
-  return <text style={{ fontSize: 13, fontWeight: "600", color: "#1f2328" }}>{props.children}</text>;
-}
-
-function Styles() {
-  const [clip, setClip] = createSignal(true);
-  return (
-    <view style={{ flex: 1, flexDirection: "row", flexWrap: "wrap", gap: 24, padding: 24, justifyContent: "center" }}>
-      <view style={{ ...card, borderRadius: 16, shadowOpacity: 0.18, shadowRadius: 12, shadowOffset: { width: 0, height: 6 } }}>
-        <Label>Shadow</Label>
-      </view>
-      <view
-        style={{
-          ...card,
-          borderTopLeftRadius: 28,
-          borderTopRightRadius: 28,
-          borderWidth: 2,
-          borderColor: "#8250df",
-        }}
-      >
-        <Label>Top corners</Label>
-      </view>
-      <view
-        style={{
-          ...card,
-          backgroundColor: "#ddf4ff",
-          borderTopLeftRadius: 44,
-          borderTopRightRadius: 6,
-          borderBottomRightRadius: 28,
-          borderWidth: 3,
-          borderColor: "#0969da",
-          shadowColor: "#0969da",
-          shadowOpacity: 0.35,
-          shadowRadius: 10,
-          shadowOffset: { width: 4, height: 8 },
-        }}
-      >
-        <Label>Mixed radii</Label>
-      </view>
-      <view
-        onPress={() => setClip(!clip())}
-        style={{
-          ...card,
-          backgroundColor: "#fff8c5",
-          borderRadius: 24,
-          borderWidth: 2,
-          borderColor: "#9a6700",
-          overflow: clip() ? "hidden" : "visible",
-          shadowOpacity: 0.3,
-          shadowRadius: 8,
-          shadowOffset: { width: 0, height: 4 },
-        }}
-      >
-        <view style={{ position: "absolute", left: -30, top: -30, width: 90, height: 90, borderRadius: 45, backgroundColor: "#bf3989" }} />
-        <Label>{clip() ? "Clipped (tap)" : "Visible (tap)"}</Label>
-      </view>
-      <image
-        src="https://picsum.photos/seed/yf/300/220"
-        style={{
-          width: 150,
-          height: 110,
-          borderTopLeftRadius: 36,
-          borderBottomRightRadius: 36,
-          backgroundColor: "#e1e4e8",
-          shadowOpacity: 0.3,
-          shadowRadius: 10,
-          shadowOffset: { width: 0, height: 6 },
-        }}
-      />
-      <view style={{ ...card, backgroundColor: "transparent", shadowOpacity: 0.5, shadowRadius: 3, shadowOffset: { width: 2, height: 2 } }}>
-        <text style={{ fontSize: 22, fontWeight: "bold", color: "#1f2328" }}>Text shadow</text>
-      </view>
-      <view style={{ width: 150, alignItems: "center" }}>
-        <text
-          style={{
-            fontSize: 15,
-            color: "#ffffff",
-            backgroundColor: "#1a7f37",
-            borderTopLeftRadius: 14,
-            borderBottomRightRadius: 14,
-            paddingHorizontal: 12,
-            paddingVertical: 6,
-          }}
-        >
-          Text corners
-        </text>
-      </view>
-    </view>
+    <Screen title="Gallery">
+      <scroll style={{ flex: 1, backgroundColor: colors.background }}>
+        <view style={{ margin: 16, borderRadius: 12, backgroundColor: colors.surface, overflow: "hidden" }}>
+          <For each={demos}>
+            {(demo, i) => (
+              <view
+                onPress={() => nav.push({ name: "demo", demo })}
+                activeOpacity={0.5}
+                accessibilityRole="button"
+                style={{
+                  paddingHorizontal: 16,
+                  paddingVertical: 12,
+                  gap: 2,
+                  borderTopWidth: i() === 0 ? 0 : 1,
+                  borderTopColor: "#eaeef2",
+                }}
+              >
+                <text style={{ fontSize: 17, color: colors.text }}>{demo.name}</text>
+                <text style={{ fontSize: 13, color: colors.muted }}>{demo.detail}</text>
+              </view>
+            )}
+          </For>
+        </view>
+      </scroll>
+    </Screen>
   );
 }
 
 function App() {
-  const [tab, setTab] = createSignal<"photos" | "physics" | "styles">("photos");
-  const Tab = (props: { id: "photos" | "physics" | "styles"; label: string }) => (
-    <view
-      onPress={() => setTab(props.id)}
-      style={{
-        flex: 1,
-        paddingVertical: 8,
-        alignItems: "center",
-        borderRadius: 8,
-        backgroundColor: tab() === props.id ? "#ffffff" : "transparent",
-      }}
-    >
-      <text style={{ fontSize: 14, fontWeight: "600", color: tab() === props.id ? "#1f2328" : "#6e7781" }}>
-        {props.label}
-      </text>
-    </view>
-  );
   return (
-    <view style={{ flex: 1, backgroundColor: "#f4f5f7", paddingTop: 52 }}>
-      <view style={{ flexDirection: "row", marginHorizontal: 16, marginBottom: 8, padding: 3, borderRadius: 10, backgroundColor: "#e1e4e8" }}>
-        <Tab id="photos" label="Photos" />
-        <Tab id="physics" label="Physics" />
-        <Tab id="styles" label="Styles" />
-      </view>
-      <Switch>
-        <Match when={tab() === "photos"}>
-          <Photos />
-        </Match>
-        <Match when={tab() === "physics"}>
-          <Physics />
-        </Match>
-        <Match when={tab() === "styles"}>
-          <Styles />
-        </Match>
-      </Switch>
-    </view>
+    <Stack navigator={nav} style={{ flex: 1 }}>
+      {(route) => {
+        switch (route.name) {
+          case "home":
+            return <Home />;
+          case "demo": {
+            const Demo = route.demo.screen;
+            return (
+              <Screen title={route.demo.name}>
+                <Demo />
+              </Screen>
+            );
+          }
+          case "page": {
+            const Page = route.page;
+            return <Page />;
+          }
+        }
+      }}
+    </Stack>
   );
 }
 

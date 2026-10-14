@@ -12,7 +12,8 @@ use objc2_core_foundation::{
     CFData, CFDictionary, CFNumber, CFString, CFType, CGFloat, kCFBooleanTrue,
 };
 use objc2_foundation::{
-    NSCache, NSData, NSError, NSString, NSURL, NSURLResponse, NSURLSession, NSURLSessionDataTask,
+    NSCache, NSData, NSDataReadingOptions, NSError, NSString, NSURL, NSURLResponse, NSURLSession,
+    NSURLSessionDataTask,
 };
 use objc2_image_io::{
     CGImageSource, kCGImageSourceCreateThumbnailFromImageAlways,
@@ -40,6 +41,30 @@ pub enum AssetBase {
     Http(String),
     /// A directory on disk (built app resources).
     Directory(std::path::PathBuf),
+}
+
+/// Reads `asset:/…` files for the engine (fonts): synchronously, on the
+/// engine thread.
+pub(crate) struct AssetReader(pub(crate) Option<AssetBase>);
+
+impl yf_engine::Assets for AssetReader {
+    fn read(&self, uri: &str) -> Result<Vec<u8>, String> {
+        let path = uri
+            .strip_prefix("asset:/")
+            .ok_or_else(|| format!("not an asset URI: {uri}"))?;
+        match &self.0 {
+            Some(AssetBase::Directory(dir)) => {
+                std::fs::read(dir.join(path)).map_err(|e| e.to_string())
+            }
+            Some(AssetBase::Http(base)) => {
+                let url = url(&format!("{base}{path}")).ok_or("bad asset URL")?;
+                NSData::dataWithContentsOfURL_options_error(&url, NSDataReadingOptions::empty())
+                    .map(|d| d.to_vec())
+                    .map_err(|e| e.localizedDescription().to_string())
+            }
+            None => Err("no asset location configured".to_owned()),
+        }
+    }
 }
 
 enum Source {

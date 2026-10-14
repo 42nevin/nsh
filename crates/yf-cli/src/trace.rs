@@ -1,16 +1,34 @@
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use anyhow::{Context as _, bail};
 use crossbeam_channel::{Receiver, Sender};
 use yf_bundler::BundleOptions;
 use yf_core::{ApproxTextEngine, EventKind, MountBatch, MountItem, Size};
-use yf_engine::{Bundle, Engine, EngineConfig, MountSink};
+use yf_engine::{Bundle, Engine, EngineConfig, EngineControl, MountSink};
 
-struct ChannelSink(Sender<MountBatch>);
+struct ChannelSink {
+    batches: Sender<MountBatch>,
+    /// Set once the engine runs; drives `requestAnimationFrame` at 60 Hz.
+    control: Arc<OnceLock<EngineControl>>,
+}
 
 impl MountSink for ChannelSink {
     fn submit(&self, batch: MountBatch) {
-        let _ = self.0.send(batch);
+        let _ = self.batches.send(batch);
+    }
+
+    fn request_frame(&self) {
+        let control = self.control.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_micros(16_667));
+            if let Some(control) = control.get() {
+                control.frame();
+            }
+        });
     }
 }
 
@@ -44,8 +62,21 @@ pub(crate) fn trace(
         },
         viewport: Size::new(width, height),
         trace: true,
+        network: Some(std::sync::Arc::new(crate::net::UreqNetwork::new())),
+        assets: Some(std::sync::Arc::new(crate::net::DirectoryAssets(
+            entry.parent().unwrap_or(Path::new(".")).to_path_buf(),
+        ))),
+        environment: Default::default(),
+        header_heights: (44.0, 96.0),
+        control_sizes: Default::default(),
     };
-    let engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx))?;
+    let control = Arc::new(OnceLock::new());
+    let sink = ChannelSink {
+        batches: tx,
+        control: control.clone(),
+    };
+    let engine = Engine::start(config, || ApproxTextEngine, sink)?;
+    let _ = control.set(engine.control());
 
     let first = next(&rx).context("the app rendered nothing")?;
     print_batch("initial render", &first);
@@ -64,7 +95,8 @@ pub(crate) fn trace(
         let mut y = 0.0;
         while y < distance {
             y += 10.0;
-            engine.control().scroll(id, 0.0, y);
+            // The simulated platform applied every scroll the core asked for.
+            engine.control().scroll(id, 0.0, y, u32::MAX);
             // Frames that need nothing produce no batch.
             if let Ok(batch) = rx.recv_timeout(Duration::from_millis(50)) {
                 print_batch(&format!("scroll to {y}"), &batch);

@@ -646,7 +646,7 @@ fn render_binds(
                         Op::Create { id, tag: Tag::Cell },
                         Op::SetProp {
                             id,
-                            prop: Prop::Slot(cells.len() as u32),
+                            prop: Prop::Slot(CellSlot::Item(cells.len() as u32)),
                         },
                         Op::Insert {
                             parent: bind.list,
@@ -727,13 +727,13 @@ fn list_renders_window_and_recycles_cells() {
 
     // Scroll far down into unmeasured (50 pt estimated) rows: the window
     // needs 25 rows; all 17 existing cells are reused and 8 are added.
-    c.set_scroll_offset(2, 0.0, 10_000.0);
+    c.set_scroll_offset(2, 0.0, 10_000.0, u32::MAX);
     c.commit();
     assert_eq!(render_binds(&mut c, &mut next_id, &mut cells, 50.0), 25);
     assert_eq!(cells.len(), 25);
     c.commit();
     // Scrolling on reuses cells only.
-    c.set_scroll_offset(2, 0.0, 20_000.0);
+    c.set_scroll_offset(2, 0.0, 20_000.0, u32::MAX);
     c.commit();
     assert_eq!(render_binds(&mut c, &mut next_id, &mut cells, 50.0), 25);
     assert_eq!(cells.len(), 25);
@@ -772,13 +772,13 @@ fn list_keeps_visible_content_anchored() {
     );
     c.commit();
     // Jump into the middle before anything above was measured.
-    c.set_scroll_offset(2, 0.0, 2000.0);
+    c.set_scroll_offset(2, 0.0, 2000.0, u32::MAX);
     c.commit();
     let (mut next_id, mut cells) = (100, Vec::new());
     render_binds(&mut c, &mut next_id, &mut cells, 50.0);
     c.commit();
     // Scroll back up so rows above the old position get rendered at 80 pt.
-    c.set_scroll_offset(2, 0.0, 1200.0);
+    c.set_scroll_offset(2, 0.0, 1200.0, u32::MAX);
     c.commit();
     render_binds(&mut c, &mut next_id, &mut cells, 80.0);
     let batch = c.commit().unwrap();
@@ -1079,7 +1079,7 @@ fn bench_cell_relayout() {
         },
         Op::SetProp {
             id: 10,
-            prop: Prop::Slot(0),
+            prop: Prop::Slot(CellSlot::Item(0)),
         },
         Op::Insert {
             parent: 2,
@@ -1205,4 +1205,531 @@ fn bench_cell_relayout() {
             total / n as u32
         );
     }
+}
+
+fn input_core() -> Core<FakeEngine> {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::Input,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Placeholder("Name".into()),
+            },
+            Op::SetStyle {
+                id: 2,
+                style: style(&[("padding", StyleValue::Number(6.0))]),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    c
+}
+
+#[test]
+fn input_measures_its_placeholder_and_reports_its_content_box() {
+    let mut c = input_core();
+    let batch = c.commit().unwrap();
+    // One line of text (16pt) plus padding, stretched across the root.
+    assert_eq!(frame_of(&batch, 2).map(|f| f.height), Some(28.0));
+    assert!(batch.items.iter().any(|i| matches!(i,
+        MountItem::Input { id: 2, config } if config.placeholder == "Name" && !config.multiline)));
+    assert!(batch.items.iter().any(|i| matches!(i,
+        MountItem::InputContent { id: 2, content } if *content == Rect { x: 6.0, y: 6.0, width: 308.0, height: 16.0 })));
+    // No text yet: nothing to send.
+    assert!(
+        !batch
+            .items
+            .iter()
+            .any(|i| matches!(i, MountItem::InputValue { .. }))
+    );
+}
+
+#[test]
+fn input_values_from_js_and_native_edits() {
+    let mut c = input_core();
+    c.commit();
+    // The user types; JS echoes the same text: nothing goes back.
+    c.input_changed(2, "ab", 2);
+    c.apply(Op::SetProp {
+        id: 2,
+        prop: Prop::Value("ab".into()),
+    })
+    .unwrap();
+    assert!(c.commit().is_none());
+    // JS transforms the text: it is sent with the edit count it is based on.
+    c.apply(Op::SetProp {
+        id: 2,
+        prop: Prop::Value("AB".into()),
+    })
+    .unwrap();
+    let batch = c.commit().unwrap();
+    assert!(batch.items.iter().any(|i| matches!(i,
+        MountItem::InputValue { id: 2, text, count: 2 } if text == "AB")));
+    // `defaultValue` no longer applies once a value was set.
+    c.apply(Op::SetProp {
+        id: 2,
+        prop: Prop::DefaultValue("x".into()),
+    })
+    .unwrap();
+    assert!(c.commit().is_none());
+}
+
+#[test]
+fn multiline_inputs_grow_with_their_text() {
+    let mut c = input_core();
+    c.apply(Op::SetProp {
+        id: 2,
+        prop: Prop::Multiline(true),
+    })
+    .unwrap();
+    c.commit();
+    // 50 characters at 8pt in 308pt: two lines.
+    c.input_changed(2, &"x".repeat(50), 1);
+    let batch = c.commit().unwrap();
+    assert_eq!(frame_of(&batch, 2).map(|f| f.height), Some(44.0));
+    // A trailing line break starts an empty line that still takes space.
+    c.input_changed(2, "x\n", 2);
+    let batch = c.commit().unwrap();
+    assert_eq!(frame_of(&batch, 2).map(|f| f.height), Some(28.0));
+}
+
+#[test]
+fn commands_reach_created_views_only() {
+    let mut c = input_core();
+    c.apply(Op::Command {
+        id: 2,
+        command: crate::Command::Focus,
+    })
+    .unwrap();
+    let batch = c.commit().unwrap();
+    assert!(matches!(
+        batch.items.last(),
+        Some(MountItem::Command {
+            id: 2,
+            command: crate::Command::Focus
+        })
+    ));
+    c.apply(Op::Create {
+        id: 3,
+        tag: Tag::Input,
+    })
+    .unwrap();
+    c.apply(Op::Command {
+        id: 3,
+        command: crate::Command::Focus,
+    })
+    .unwrap();
+    assert!(c.commit().is_none());
+}
+
+fn insert_items(batch: &MountBatch) -> Vec<(NodeId, NodeId, Option<NodeId>)> {
+    batch
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            MountItem::Insert {
+                parent,
+                child,
+                before,
+            } => Some((*parent, *child, *before)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn z_index_orders_native_views() {
+    let mut c = core();
+    let z = |v: f32| style(&[("zIndex", StyleValue::Number(v))]);
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::Create {
+                id: 3,
+                tag: Tag::View,
+            },
+            Op::Create {
+                id: 4,
+                tag: Tag::View,
+            },
+            Op::SetStyle {
+                id: 2,
+                style: z(5.0),
+            },
+            Op::Insert {
+                parent: 1,
+                child: 2,
+                before: None,
+            },
+            Op::Insert {
+                parent: 1,
+                child: 3,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    // 3 (z 0) goes below 2 (z 5) although it comes later in the tree.
+    assert_eq!(insert_items(&batch), vec![(1, 2, None), (1, 3, Some(2))]);
+    // Raising 3 above 2 moves it to the top.
+    apply(
+        &mut c,
+        vec![Op::SetStyle {
+            id: 3,
+            style: z(9.0),
+        }],
+    );
+    let batch = c.commit().unwrap();
+    assert_eq!(insert_items(&batch), vec![(1, 3, None)]);
+    // A new child with the default z index goes below both.
+    apply(
+        &mut c,
+        vec![Op::Insert {
+            parent: 1,
+            child: 4,
+            before: None,
+        }],
+    );
+    let batch = c.commit().unwrap();
+    assert_eq!(insert_items(&batch), vec![(1, 4, Some(2))]);
+}
+
+#[test]
+fn layout_events_carry_frames_and_late_listeners_get_one() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::SetStyle {
+                id: 2,
+                style: style(&[("height", StyleValue::Number(40.0))]),
+            },
+            Op::Listen {
+                id: 2,
+                event: EventKind::Layout,
+                enabled: true,
+            },
+            Op::Insert {
+                parent: 1,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    c.commit().unwrap();
+    let mut events = Vec::new();
+    c.take_events(&mut events);
+    assert_eq!(
+        events,
+        vec![(
+            2,
+            EventKind::Layout,
+            EventPayload::Layout {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 40.0
+            }
+        )]
+    );
+    // Unchanged frames report nothing; a listener added later learns the
+    // current frame.
+    apply(
+        &mut c,
+        vec![
+            Op::Listen {
+                id: 2,
+                event: EventKind::Layout,
+                enabled: false,
+            },
+            Op::Listen {
+                id: 2,
+                event: EventKind::Layout,
+                enabled: true,
+            },
+        ],
+    );
+    c.commit();
+    events.clear();
+    c.take_events(&mut events);
+    assert_eq!(events.len(), 1);
+}
+
+#[test]
+fn font_scale_scales_text_that_allows_it() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::Text,
+            },
+            Op::CreateText {
+                id: 3,
+                text: "abc".into(),
+            },
+            Op::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            Op::Insert {
+                parent: 1,
+                child: 2,
+                before: None,
+            },
+            Op::Create {
+                id: 4,
+                tag: Tag::Text,
+            },
+            Op::CreateText {
+                id: 5,
+                text: "abc".into(),
+            },
+            Op::SetProp {
+                id: 4,
+                prop: Prop::AllowFontScaling(false),
+            },
+            Op::Insert {
+                parent: 4,
+                child: 5,
+                before: None,
+            },
+            Op::Insert {
+                parent: 1,
+                child: 4,
+                before: None,
+            },
+        ],
+    );
+    c.commit().unwrap();
+    c.set_font_scale(2.0);
+    let batch = c.commit().unwrap();
+    let size = |id| {
+        batch.items.iter().find_map(|i| match i {
+            MountItem::Text { id: i, text, .. } if *i == id => Some(text.spans[0].style.font_size),
+            _ => None,
+        })
+    };
+    assert_eq!(size(2), Some(28.0));
+    assert_eq!(size(4), None, "text without font scaling is unchanged");
+}
+
+#[test]
+fn layout_animation_leads_the_batch() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::Insert {
+                parent: 1,
+                child: 2,
+                before: None,
+            },
+            Op::Command {
+                id: 1,
+                command: Command::LayoutAnimation(crate::LayoutAnimation {
+                    create: None,
+                    update: None,
+                    delete: None,
+                }),
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    assert!(
+        matches!(batch.items[0], MountItem::LayoutAnimation(_)),
+        "{:?}",
+        batch.items
+    );
+}
+
+#[test]
+fn view_props_and_gestures_reach_the_platform() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::HitSlop(crate::EdgeInsets::all(10.0)),
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::PinchValue(Some(7)),
+            },
+            Op::Insert {
+                parent: 1,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    assert!(
+        batch.items.iter().any(
+            |i| matches!(i, MountItem::ViewProps { id: 2, props } if props.hit_slop.top == 10.0)
+        )
+    );
+    assert!(
+        batch
+            .items
+            .iter()
+            .any(|i| matches!(i, MountItem::Gestures { id: 2, values } if values.pinch == Some(7)))
+    );
+}
+
+#[test]
+fn screens_fill_their_stack_below_the_header() {
+    let mut c = core();
+    c.set_safe_area(crate::EdgeInsets {
+        top: 20.0,
+        ..Default::default()
+    });
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::Stack,
+            },
+            Op::SetStyle {
+                id: 2,
+                style: style(&[("flex", StyleValue::Number(1.0))]),
+            },
+            Op::Create {
+                id: 3,
+                tag: Tag::Screen,
+            },
+            Op::Create {
+                id: 4,
+                tag: Tag::View,
+            },
+            Op::SetStyle {
+                id: 4,
+                style: style(&[("flex", StyleValue::Number(1.0))]),
+            },
+            Op::Insert {
+                parent: 3,
+                child: 4,
+                before: None,
+            },
+            Op::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            Op::Insert {
+                parent: 1,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    // The screen fills the stack; its content starts below the status bar
+    // and the 44pt bar.
+    assert_eq!(
+        frame_of(&batch, 3),
+        Some(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 320.0,
+            height: 480.0
+        })
+    );
+    assert_eq!(
+        frame_of(&batch, 4),
+        Some(Rect {
+            x: 0.0,
+            y: 64.0,
+            width: 320.0,
+            height: 416.0
+        })
+    );
+    assert!(batch.items.iter().any(
+        |i| matches!(i, MountItem::ScreenConfig { id: 3, config } if config.header_height == 64.0)
+    ));
+    // Without a header, the content starts at the top.
+    apply(
+        &mut c,
+        vec![Op::SetProp {
+            id: 3,
+            prop: Prop::Screen(crate::ScreenProp::HeaderShown(false)),
+        }],
+    );
+    let batch = c.commit().unwrap();
+    assert_eq!(
+        frame_of(&batch, 4),
+        Some(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 320.0,
+            height: 480.0
+        })
+    );
+}
+
+#[test]
+fn modals_lay_out_at_the_reported_size() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::Modal,
+            },
+            Op::Create {
+                id: 3,
+                tag: Tag::View,
+            },
+            Op::SetStyle {
+                id: 3,
+                style: style(&[("flex", StyleValue::Number(1.0))]),
+            },
+            Op::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            Op::Insert {
+                parent: 1,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    // The viewport until the platform reports the presented size.
+    assert_eq!(frame_of(&batch, 3).map(|f| f.height), Some(480.0));
+    c.set_root_size(2, Size::new(320.0, 400.0), crate::EdgeInsets::default());
+    let batch = c.commit().unwrap();
+    assert_eq!(frame_of(&batch, 3).map(|f| f.height), Some(400.0));
 }

@@ -1,20 +1,16 @@
 use std::{cell::RefCell, sync::Mutex};
 
-use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, rc::Retained};
+use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained};
 use objc2_core_foundation::CGSize;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 use objc2_ui_kit::{
     UIApplication, UIApplicationDelegate, UIResponder, UIScene, UISceneConfiguration,
-    UISceneConnectionOptions, UISceneDelegate, UISceneSession, UIView, UIViewAutoresizing,
-    UIViewController, UIWindow, UIWindowScene, UIWindowSceneDelegate,
-    UIWindowSceneSessionRoleApplication,
+    UISceneConnectionOptions, UISceneDelegate, UISceneSession, UIViewController, UIWindow,
+    UIWindowScene, UIWindowSceneDelegate, UIWindowSceneSessionRoleApplication,
 };
 use yf_engine::Bundle;
 
-use crate::{
-    image::AssetBase,
-    surface::{Surface, SurfaceOptions},
-};
+use crate::{image::AssetBase, surface::SurfaceOptions, view::AppView};
 
 /// Size of the Mac Catalyst window: an iPhone-sized simulator.
 const CATALYST_WINDOW: CGSize = CGSize {
@@ -48,47 +44,13 @@ pub struct AppOptions {
 static LAUNCH: Mutex<Option<(AppSource, AppOptions)>> = Mutex::new(None);
 
 /// Main-thread state of the standalone app.
-pub(crate) struct AppState {
+struct AppState {
     _window: Retained<UIWindow>,
-    /// Hosts the surface and, in development, overlays above it.
-    pub(crate) container: Retained<UIView>,
-    surface: Option<Surface>,
-    options: AppOptions,
+    _view: AppView,
 }
 
 thread_local! {
     static APP: RefCell<Option<AppState>> = const { RefCell::new(None) };
-}
-
-/// Runs `f` with the app state (main thread only).
-pub(crate) fn with_app<R>(f: impl FnOnce(&mut AppState) -> R) -> Option<R> {
-    APP.with(|app| app.borrow_mut().as_mut().map(f))
-}
-
-impl AppState {
-    /// Shows `bundle`, replacing the running app if there is one.
-    pub(crate) fn load(&mut self, bundle: Bundle) {
-        if let Some(surface) = &self.surface {
-            return surface.reload(bundle);
-        }
-        let mtm = self.container.mtm();
-        let options = SurfaceOptions {
-            trace: self.options.trace,
-            asset_base: self.options.asset_base.clone(),
-        };
-        let surface = match Surface::new(mtm, bundle, self.container.bounds(), options) {
-            Ok(surface) => surface,
-            Err(err) => return log::error!("failed to start the engine: {err}"),
-        };
-        surface.view().setAutoresizingMask(
-            UIViewAutoresizing::FlexibleWidth | UIViewAutoresizing::FlexibleHeight,
-        );
-        #[cfg(feature = "dev")]
-        surface.set_error_handler(|message| crate::dev::show_error("Uncaught error", message));
-        // Below development overlays.
-        self.container.insertSubview_atIndex(surface.view(), 0);
-        self.surface = Some(surface);
-    }
 }
 
 define_class!(
@@ -147,6 +109,37 @@ define_class!(
     unsafe impl UIWindowSceneDelegate for SceneDelegate {}
 );
 
+define_class!(
+    /// The window's root controller: shows the status bar the app sets.
+    #[unsafe(super(UIViewController, UIResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    struct RootController;
+
+    impl RootController {
+        #[unsafe(method(preferredStatusBarStyle))]
+        fn preferred_status_bar_style(&self) -> objc2_ui_kit::UIStatusBarStyle {
+            crate::system::preferred_status_bar_style()
+        }
+
+        #[unsafe(method(prefersStatusBarHidden))]
+        fn prefers_status_bar_hidden(&self) -> bool {
+            crate::system::prefers_status_bar_hidden()
+        }
+
+        #[unsafe(method(preferredStatusBarUpdateAnimation))]
+        fn preferred_status_bar_update_animation(&self) -> objc2_ui_kit::UIStatusBarAnimation {
+            crate::system::status_bar_animation()
+        }
+    }
+);
+
+impl RootController {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        // SAFETY: UIViewController's designated initializer.
+        unsafe { msg_send![Self::alloc(mtm), init] }
+    }
+}
+
 fn connect(mtm: MainThreadMarker, scene: &UIWindowScene) {
     let Some((source, options)) = LAUNCH.lock().expect("launch lock").take() else {
         return log::error!("no app to launch");
@@ -157,35 +150,33 @@ fn connect(mtm: MainThreadMarker, scene: &UIWindowScene) {
         restrictions.setMaximumSize(CATALYST_WINDOW);
     }
     let window = UIWindow::initWithWindowScene(UIWindow::alloc(mtm), scene);
-    let controller = UIViewController::new(mtm);
-    let container = controller.view().expect("view controller has a view");
+    let controller = RootController::new(mtm);
+    let root = controller.view().expect("view controller has a view");
+    // Behind an app that sets no background: white, as in React Native (a
+    // window shows black otherwise, and text defaults to black).
+    root.setBackgroundColor(Some(&objc2_ui_kit::UIColor::whiteColor()));
     window.setRootViewController(Some(&controller));
     window.makeKeyAndVisible();
+    let view = AppView::new(
+        mtm,
+        root.bounds(),
+        SurfaceOptions {
+            trace: options.trace,
+            asset_base: options.asset_base,
+        },
+    );
+    root.addSubview(view.view());
+    match source {
+        AppSource::Bundle(bundle) => view.load(bundle),
+        #[cfg(feature = "dev")]
+        AppSource::DevServer(url) => view.connect_dev_server(url),
+    }
     APP.with(|app| {
         *app.borrow_mut() = Some(AppState {
             _window: window,
-            container,
-            surface: None,
-            options,
+            _view: view,
         })
     });
-    match source {
-        AppSource::Bundle(bundle) => {
-            with_app(|app| app.load(bundle));
-        }
-        #[cfg(feature = "dev")]
-        AppSource::DevServer(url) => {
-            // `ws://host:port/ws` -> assets at `http://host:port/assets/`.
-            if let Some(rest) = url.strip_prefix("ws://")
-                && let Some((host, _)) = rest.split_once('/')
-            {
-                with_app(|app| {
-                    app.options.asset_base = Some(AssetBase::Http(format!("http://{host}/assets/")))
-                });
-            }
-            crate::dev::connect(mtm, url)
-        }
-    }
 }
 
 /// Runs a standalone app full-window. Never returns.

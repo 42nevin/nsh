@@ -75,6 +75,11 @@ fn list_scrolls_with_recycled_cells() {
         bundle: Bundle::bytecode(bytecode),
         viewport: Size::new(320.0, 500.0),
         trace: false,
+        network: None,
+        assets: None,
+        environment: Default::default(),
+        header_heights: (44.0, 96.0),
+        control_sizes: Default::default(),
     };
     let engine = Engine::start(config, || ApproxTextEngine, Sink(tx)).unwrap();
     let first = rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -96,7 +101,7 @@ fn list_scrolls_with_recycled_cells() {
 
     // Scroll to row 40: rows 30..=60 are needed; cells are recycled, so the
     // update re-renders text in existing views instead of creating them.
-    engine.control().scroll(list, 0.0, 2000.0);
+    engine.control().scroll(list, 0.0, 2000.0, u32::MAX);
     let batch = rx.recv_timeout(Duration::from_secs(5)).unwrap();
     let shown = texts(&batch);
     assert!(shown.contains(&"row 40".to_owned()), "{shown:?}");
@@ -107,7 +112,7 @@ fn list_scrolls_with_recycled_cells() {
     );
 
     // Near the end: `onEndReached` appends rows; the content grows.
-    engine.control().scroll(list, 0.0, 4600.0);
+    engine.control().scroll(list, 0.0, 4600.0, u32::MAX);
     let mut grew = false;
     while let Ok(batch) = rx.recv_timeout(Duration::from_secs(2)) {
         grew |= batch

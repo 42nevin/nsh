@@ -25,7 +25,7 @@ enum Gap {
 #[ignore]
 fn bench_gallery_scroll() {
     let entry =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/gallery/App.tsx");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/gallery/Bench.tsx");
     let bundle = yf_bundler::bundle(&yf_bundler::BundleOptions {
         entry,
         minify: false,
@@ -33,6 +33,11 @@ fn bench_gallery_scroll() {
     .unwrap();
     let bytecode = yf_js::compile_bytecode(&bundle.code, true).unwrap();
     let host = Host::new().unwrap();
+    // The runtime reads the environment while it loads.
+    host.set_environment(&yf_js::Environment {
+        window: (390.0, 844.0),
+        ..Default::default()
+    });
     host.eval_bytecode(&bytecode).unwrap();
     let mut core = Core::new(ApproxTextEngine, Size::new(390.0, 844.0));
     let mut ops = Vec::new();
@@ -88,7 +93,7 @@ fn bench_gallery_scroll() {
         let mut y = 0.0;
         for _ in 0..2000 {
             y += 8.0;
-            core.set_scroll_offset(list, 0.0, y);
+            core.set_scroll_offset(list, 0.0, y, u32::MAX);
             let Some((t, j)) = frame(&mut core, &mut binds) else {
                 continue;
             };
@@ -109,7 +114,7 @@ fn bench_gallery_scroll() {
             }
         }
         // Scroll back to the top for the next run.
-        core.set_scroll_offset(list, 0.0, 0.0);
+        core.set_scroll_offset(list, 0.0, 0.0, u32::MAX);
         frame(&mut core, &mut binds);
         println!(
             "{label}: {n} rebinding frames, {:?}/frame (js {:?})",

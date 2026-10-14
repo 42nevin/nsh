@@ -1,0 +1,7 @@
+{
+  "name": "Gallery",
+  "id": "dev.yf.gallery",
+  "version": "1.0.0",
+  "build": 1,
+  "icon": "icon.png"
+}

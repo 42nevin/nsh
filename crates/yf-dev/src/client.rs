@@ -21,6 +21,18 @@ pub enum DevEvent {
     Building,
     /// The build failed.
     BuildFailed(String),
+    /// A hot update for hosts running bundle `base` (see
+    /// [`ServerMessage::Patch`]); the bundle of `version` follows.
+    Patch {
+        /// Build number after the update.
+        version: u64,
+        /// Build number the update applies to.
+        base: u64,
+        /// The update script.
+        code: String,
+        /// Its source map (JSON).
+        source_map: Option<String>,
+    },
     /// A new bundle.
     Bundle {
         /// Build number.
@@ -34,8 +46,8 @@ pub enum DevEvent {
     },
 }
 
-/// Connects a dev host to a dev server, reconnecting forever, and forwards
-/// log lines to it.
+/// Connects a dev host to a dev server, reconnecting until dropped, and
+/// forwards log lines to it.
 pub struct DevClient {
     logs: SyncSender<ClientMessage>,
 }
@@ -64,6 +76,10 @@ impl DevClient {
             .spawn(move || {
                 let mut backoff = Duration::from_millis(100);
                 loop {
+                    // Dropped while disconnected: stop retrying.
+                    if let Err(TryRecvError::Disconnected) = log_rx.try_recv() {
+                        return;
+                    }
                     match tungstenite::connect(url.as_str()) {
                         Ok((socket, _)) => {
                             backoff = Duration::from_millis(100);
@@ -110,9 +126,12 @@ fn session(
         let _ = stream.set_nodelay(true);
     }
     send(&mut socket, hello)?;
-    /// A bundle announced by a text frame, waiting for its binary frames.
+    /// A bundle or patch announced by a text frame, waiting for its binary
+    /// frames.
     struct Pending {
         version: u64,
+        /// `Some(base)` for a patch.
+        base: Option<u64>,
         format: BundleFormat,
         source_map: bool,
         bytes: Option<Vec<u8>>,
@@ -149,7 +168,21 @@ fn session(
                 }) => {
                     pending = Some(Pending {
                         version,
+                        base: None,
                         format,
+                        source_map,
+                        bytes: None,
+                    })
+                }
+                Ok(ServerMessage::Patch {
+                    version,
+                    base,
+                    source_map,
+                }) => {
+                    pending = Some(Pending {
+                        version,
+                        base: Some(base),
+                        format: BundleFormat::Source,
                         source_map,
                         bytes: None,
                     })
@@ -170,12 +203,23 @@ fn session(
                     None => (frame.to_vec(), None),
                     Some(bytes) => (bytes, String::from_utf8(frame.to_vec()).ok()),
                 };
-                on_event(DevEvent::Bundle {
-                    version: p.version,
-                    format: p.format,
-                    bytes,
-                    source_map,
-                });
+                match p.base {
+                    Some(base) => match String::from_utf8(bytes) {
+                        Ok(code) => on_event(DevEvent::Patch {
+                            version: p.version,
+                            base,
+                            code,
+                            source_map,
+                        }),
+                        Err(_) => log::warn!("dev server sent a non-UTF-8 patch"),
+                    },
+                    None => on_event(DevEvent::Bundle {
+                        version: p.version,
+                        format: p.format,
+                        bytes,
+                        source_map,
+                    }),
+                }
             }
             Message::Close(_) => return Err(SessionEnd::Disconnected),
             _ => {}

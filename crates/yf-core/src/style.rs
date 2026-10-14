@@ -3,6 +3,8 @@ use taffy::{
     LengthPercentageAuto, Position,
 };
 
+use crate::transform::{Transform, TransformKind};
+
 /// An sRGB color packed as `0xRRGGBBAA`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Color(pub u32);
@@ -130,42 +132,105 @@ pub enum TextAlign {
     Justify,
 }
 
-/// A 2D transform, applied around the view's center (React Native
-/// semantics: translate, then scale, then rotate).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Transform {
-    /// Horizontal translation in points.
-    pub translate_x: f32,
-    /// Vertical translation in points.
-    pub translate_y: f32,
-    /// Horizontal scale.
-    pub scale_x: f32,
-    /// Vertical scale.
-    pub scale_y: f32,
-    /// Rotation in degrees, clockwise.
-    pub rotate: f32,
-}
+/// A font family name, interned: copying and comparing one is free, so
+/// resolved text styles stay `Copy` and cheap to hash.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FontFamily(u32);
 
-impl Transform {
-    /// The identity transform.
-    pub const IDENTITY: Transform = Transform {
-        translate_x: 0.0,
-        translate_y: 0.0,
-        scale_x: 1.0,
-        scale_y: 1.0,
-        rotate: 0.0,
-    };
+static FAMILIES: std::sync::Mutex<Vec<std::sync::Arc<str>>> = std::sync::Mutex::new(Vec::new());
 
-    /// True for the identity.
-    pub fn is_identity(&self) -> bool {
-        *self == Self::IDENTITY
+impl FontFamily {
+    /// Interns `name`. Apps use a handful of families, so the table is a
+    /// small vector scanned linearly.
+    pub fn new(name: &str) -> FontFamily {
+        let mut families = FAMILIES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = families.iter().position(|f| &**f == name) {
+            return FontFamily(i as u32);
+        }
+        families.push(name.into());
+        FontFamily(families.len() as u32 - 1)
+    }
+
+    /// The family name.
+    pub fn name(self) -> std::sync::Arc<str> {
+        FAMILIES.lock().unwrap_or_else(|e| e.into_inner())[self.0 as usize].clone()
     }
 }
 
-impl Default for Transform {
-    fn default() -> Self {
-        Self::IDENTITY
+impl std::fmt::Debug for FontFamily {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FontFamily({:?})", self.name())
     }
+}
+
+/// Lines drawn through or under text (`textDecorationLine`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct TextDecoration {
+    /// Underline.
+    pub underline: bool,
+    /// Strikethrough.
+    pub line_through: bool,
+}
+
+impl TextDecoration {
+    /// True if no line is drawn.
+    #[inline]
+    pub const fn is_none(self) -> bool {
+        !self.underline && !self.line_through
+    }
+}
+
+/// Case changes applied to text (`textTransform`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextTransform {
+    /// As written.
+    #[default]
+    None,
+    /// UPPER CASE.
+    Uppercase,
+    /// lower case.
+    Lowercase,
+    /// First Letter Of Each Word.
+    Capitalize,
+}
+
+impl TextTransform {
+    /// Applies the transform to `s`.
+    pub fn apply<'a>(self, s: &'a str) -> std::borrow::Cow<'a, str> {
+        match self {
+            TextTransform::None => s.into(),
+            TextTransform::Uppercase => s.to_uppercase().into(),
+            TextTransform::Lowercase => s.to_lowercase().into(),
+            TextTransform::Capitalize => {
+                let mut out = String::with_capacity(s.len());
+                let mut start = true;
+                for c in s.chars() {
+                    if start && c.is_alphanumeric() {
+                        out.extend(c.to_uppercase());
+                        start = false;
+                    } else {
+                        out.push(c);
+                        start |= c.is_whitespace();
+                    }
+                }
+                out.into()
+            }
+        }
+    }
+}
+
+/// Where text that does not fit `numberOfLines` is cut (`ellipsizeMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum EllipsizeMode {
+    /// "Lorem ips…" (default).
+    #[default]
+    Tail,
+    /// "…sum dolor".
+    Head,
+    /// "Lorem…dolor".
+    Middle,
+    /// Cut without an ellipsis.
+    Clip,
 }
 
 /// Corner radii in points, clockwise from the top left.
@@ -295,6 +360,57 @@ impl Default for Shadow {
     }
 }
 
+/// How borders are drawn (`borderStyle`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BorderStyle {
+    /// A solid line (default).
+    #[default]
+    Solid,
+    /// Dashes.
+    Dashed,
+    /// Dots.
+    Dotted,
+}
+
+/// Border widths and colors, per side.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Borders {
+    /// Widths in points: top, right, bottom, left.
+    pub widths: [f32; 4],
+    /// Colors: top, right, bottom, left.
+    pub colors: [Color; 4],
+    /// Line style.
+    pub style: BorderStyle,
+}
+
+impl Borders {
+    /// No border.
+    pub const NONE: Borders = Borders {
+        widths: [0.0; 4],
+        colors: [Color::BLACK; 4],
+        style: BorderStyle::Solid,
+    };
+
+    /// True if some side draws something.
+    pub fn is_visible(&self) -> bool {
+        (0..4).any(|i| self.widths[i] > 0.0 && !self.colors[i].is_transparent())
+    }
+
+    /// `(width, color)` when every side is the same.
+    pub fn uniform(&self) -> Option<(f32, Color)> {
+        let [w, ..] = self.widths;
+        let [c, ..] = self.colors;
+        (self.widths.iter().all(|&x| x == w) && self.colors.iter().all(|&x| x == c))
+            .then_some((w, c))
+    }
+}
+
+impl Default for Borders {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 /// Visual (non-layout) properties of a native view.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewStyle {
@@ -305,18 +421,18 @@ pub struct ViewStyle {
     /// `borderTopLeftRadius` etc., clockwise from the top left; they
     /// override `border_radius`.
     pub corner_radius: [Option<f32>; 4],
-    /// Border width in points (also affects layout).
-    pub border_width: f32,
-    /// Border color.
-    pub border_color: Color,
+    /// Borders (their widths also affect layout).
+    pub borders: Borders,
     /// Opacity in `0.0..=1.0`.
     pub opacity: f32,
     /// Clip children to the (rounded) bounds.
     pub overflow_hidden: bool,
     /// Drop shadow.
     pub shadow: Shadow,
-    /// Static transform.
+    /// Static transform, around the view's center.
     pub transform: Transform,
+    /// `tintColor`: recolors an image's opaque pixels.
+    pub tint_color: Option<Color>,
 }
 
 impl ViewStyle {
@@ -341,14 +457,27 @@ impl Default for ViewStyle {
             background_color: Color::TRANSPARENT,
             border_radius: 0.0,
             corner_radius: [None; 4],
-            border_width: 0.0,
-            border_color: Color::BLACK,
+            borders: Borders::NONE,
             opacity: 1.0,
             overflow_hidden: false,
             shadow: Shadow::DEFAULT,
             transform: Transform::IDENTITY,
+            tint_color: None,
         }
     }
+}
+
+/// A shadow behind text (`textShadow*`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextShadow {
+    /// Color.
+    pub color: Color,
+    /// Horizontal offset in points.
+    pub offset_x: f32,
+    /// Vertical offset in points.
+    pub offset_y: f32,
+    /// Blur radius in points.
+    pub radius: f32,
 }
 
 /// Text properties as written on a node; unset values are inherited from
@@ -365,6 +494,48 @@ pub struct TextStyle {
     pub line_height: Option<f32>,
     /// Block alignment (only meaningful on a text block).
     pub text_align: Option<TextAlign>,
+    /// Font family; `None` inherits (the system font at the root).
+    pub font_family: Option<FontFamily>,
+    /// Italic (`fontStyle`).
+    pub italic: Option<bool>,
+    /// Extra space between characters in points.
+    pub letter_spacing: Option<f32>,
+    /// Underline / strikethrough.
+    pub decoration: Option<TextDecoration>,
+    /// Color of the decoration lines; the text color by default.
+    pub decoration_color: Option<Color>,
+    /// Case transform.
+    pub transform: Option<TextTransform>,
+    /// `textShadowColor`.
+    pub shadow_color: Option<Color>,
+    /// `textShadowOffset`.
+    pub shadow_offset: Option<(f32, f32)>,
+    /// `textShadowRadius`.
+    pub shadow_radius: Option<f32>,
+}
+
+impl TextStyle {
+    /// The text shadow these properties describe, if any. Like NSShadow, an
+    /// offset or radius without a color uses black at a third of opacity.
+    pub fn shadow(&self) -> Option<TextShadow> {
+        if self.shadow_color.is_none()
+            && self.shadow_offset.is_none()
+            && self.shadow_radius.is_none()
+        {
+            return None;
+        }
+        let color = self.shadow_color.unwrap_or(Color(0x0000_0055));
+        if color.is_transparent() {
+            return None;
+        }
+        let (offset_x, offset_y) = self.shadow_offset.unwrap_or((0.0, 0.0));
+        Some(TextShadow {
+            color,
+            offset_x,
+            offset_y,
+            radius: self.shadow_radius.unwrap_or(0.0).max(0.0),
+        })
+    }
 }
 
 /// A complete node style, split by consumer.
@@ -379,6 +550,8 @@ pub struct Style {
     /// Visual properties driven by native animation nodes; they override
     /// the static values while bound.
     pub animated: Vec<(yf_anim::AnimProp, yf_anim::NodeId)>,
+    /// `zIndex`: stacking order among siblings (higher on top).
+    pub z_index: i32,
 }
 
 impl Default for Style {
@@ -397,6 +570,7 @@ impl Default for Style {
             view: ViewStyle::default(),
             text: TextStyle::default(),
             animated: Vec::new(),
+            z_index: 0,
         }
     }
 }
@@ -554,20 +728,15 @@ fn font_weight(v: StyleValue<'_>) -> Result<Option<u16>, StyleError> {
 }
 
 impl Style {
-    /// Sets one entry of the `transform` array (`translateX`, `scale`, ...).
-    /// Rotations are degrees; `"45deg"` strings are parsed by the caller.
-    pub fn set_transform(&mut self, key: &str, value: f32) -> Result<(), StyleError> {
-        let t = &mut self.view.transform;
-        match key {
-            "translateX" => t.translate_x = value,
-            "translateY" => t.translate_y = value,
-            "scale" => (t.scale_x, t.scale_y) = (value, value),
-            "scaleX" => t.scale_x = value,
-            "scaleY" => t.scale_y = value,
-            "rotate" | "rotateZ" => t.rotate = value,
-            _ => return Err(StyleError::UnknownProperty),
-        }
-        Ok(())
+    /// Appends an entry to the `transform` list (`translateX`, `scale`,
+    /// ...); rotations and skews are degrees (`"45deg"` strings are parsed
+    /// by the caller). Returns the entry's index.
+    pub fn push_transform(&mut self, key: &str, value: f32) -> Result<u8, StyleError> {
+        let kind = TransformKind::parse(key).ok_or(StyleError::UnknownProperty)?;
+        self.view
+            .transform
+            .push(kind, value)
+            .ok_or(StyleError::InvalidValue)
     }
 
     /// Sets `shadowOffset: { width, height }`; `None` restores the default.
@@ -575,6 +744,43 @@ impl Style {
         let (x, y) = offset.unwrap_or((Shadow::DEFAULT.offset_x, Shadow::DEFAULT.offset_y));
         self.view.shadow.offset_x = x;
         self.view.shadow.offset_y = y;
+    }
+
+    /// Sets `textShadowOffset: { width, height }`.
+    pub fn set_text_shadow_offset(&mut self, offset: Option<(f32, f32)>) {
+        self.text.shadow_offset = offset;
+    }
+
+    fn set_border_width(
+        &mut self,
+        sides: &[usize],
+        value: StyleValue<'_>,
+    ) -> Result<(), StyleError> {
+        let w = number(value, 0.0)?.max(0.0);
+        let v = LengthPercentage::length(w);
+        for &side in sides {
+            self.view.borders.widths[side] = w;
+            let b = &mut self.layout.border;
+            match side {
+                0 => b.top = v,
+                1 => b.right = v,
+                2 => b.bottom = v,
+                _ => b.left = v,
+            }
+        }
+        Ok(())
+    }
+
+    fn set_border_color(
+        &mut self,
+        sides: &[usize],
+        value: StyleValue<'_>,
+    ) -> Result<(), StyleError> {
+        let c = color(value)?.unwrap_or(Color::BLACK);
+        for &side in sides {
+            self.view.borders.colors[side] = c;
+        }
+        Ok(())
     }
 
     /// Sets one property using its React Native name.
@@ -704,17 +910,12 @@ impl Style {
             }
             "rowGap" => l.gap.height = lp_or_zero(value)?,
             "columnGap" => l.gap.width = lp_or_zero(value)?,
-            "borderWidth" => {
-                let w = number(value, 0.0)?;
-                let v = LengthPercentage::length(w);
-                l.border = taffy::Rect {
-                    left: v,
-                    right: v,
-                    top: v,
-                    bottom: v,
-                };
-                self.view.border_width = w;
-            }
+            "borderWidth" => self.set_border_width(&[0, 1, 2, 3], value)?,
+            "borderTopWidth" => self.set_border_width(&[0], value)?,
+            "borderRightWidth" => self.set_border_width(&[1], value)?,
+            "borderBottomWidth" => self.set_border_width(&[2], value)?,
+            "borderLeftWidth" => self.set_border_width(&[3], value)?,
+            "zIndex" => self.z_index = number(value, 0.0)? as i32,
 
             // View
             "backgroundColor" => {
@@ -734,7 +935,20 @@ impl Style {
             "shadowRadius" => {
                 self.view.shadow.radius = number(value, Shadow::DEFAULT.radius)?.max(0.0)
             }
-            "borderColor" => self.view.border_color = color(value)?.unwrap_or(Color::BLACK),
+            "borderColor" => self.set_border_color(&[0, 1, 2, 3], value)?,
+            "borderTopColor" => self.set_border_color(&[0], value)?,
+            "borderRightColor" => self.set_border_color(&[1], value)?,
+            "borderBottomColor" => self.set_border_color(&[2], value)?,
+            "borderLeftColor" => self.set_border_color(&[3], value)?,
+            "borderStyle" => {
+                self.view.borders.style = match keyword(value)? {
+                    None | Some("solid") => BorderStyle::Solid,
+                    Some("dashed") => BorderStyle::Dashed,
+                    Some("dotted") => BorderStyle::Dotted,
+                    Some(_) => return Err(StyleError::InvalidValue),
+                }
+            }
+            "tintColor" => self.view.tint_color = color(value)?,
             "opacity" => self.view.opacity = number(value, 1.0)?.clamp(0.0, 1.0),
             "overflow" => {
                 self.view.overflow_hidden = match keyword(value)? {
@@ -749,6 +963,48 @@ impl Style {
             "fontSize" => self.text.font_size = opt_number(value)?,
             "fontWeight" => self.text.font_weight = font_weight(value)?,
             "lineHeight" => self.text.line_height = opt_number(value)?,
+            "fontFamily" => {
+                self.text.font_family = keyword(value)?.map(|name| FontFamily::new(name.trim()))
+            }
+            "fontStyle" => {
+                self.text.italic = match keyword(value)? {
+                    None => None,
+                    Some("normal") => Some(false),
+                    Some("italic") => Some(true),
+                    Some(_) => return Err(StyleError::InvalidValue),
+                }
+            }
+            "letterSpacing" => self.text.letter_spacing = opt_number(value)?,
+            "textDecorationLine" => {
+                self.text.decoration = match keyword(value)? {
+                    None => None,
+                    Some(words) => {
+                        let mut d = TextDecoration::default();
+                        for word in words.split_whitespace() {
+                            match word {
+                                "none" => {}
+                                "underline" => d.underline = true,
+                                "line-through" => d.line_through = true,
+                                _ => return Err(StyleError::InvalidValue),
+                            }
+                        }
+                        Some(d)
+                    }
+                }
+            }
+            "textDecorationColor" => self.text.decoration_color = color(value)?,
+            "textShadowColor" => self.text.shadow_color = color(value)?,
+            "textShadowRadius" => self.text.shadow_radius = opt_number(value)?,
+            "textTransform" => {
+                self.text.transform = match keyword(value)? {
+                    None => None,
+                    Some("none") => Some(TextTransform::None),
+                    Some("uppercase") => Some(TextTransform::Uppercase),
+                    Some("lowercase") => Some(TextTransform::Lowercase),
+                    Some("capitalize") => Some(TextTransform::Capitalize),
+                    Some(_) => return Err(StyleError::InvalidValue),
+                }
+            }
             "textAlign" => {
                 self.text.text_align = match keyword(value)? {
                     None => None,
@@ -857,6 +1113,38 @@ mod tests {
         assert!(!s.view.shadow.is_visible());
         s.set_shadow_offset(None);
         assert_eq!(s.view.shadow.offset_y, -3.0);
+    }
+
+    #[test]
+    fn text_styles_parse() {
+        let mut s = Style::default();
+        s.set("fontFamily", StyleValue::Str("Inter")).unwrap();
+        s.set("fontStyle", StyleValue::Str("italic")).unwrap();
+        s.set(
+            "textDecorationLine",
+            StyleValue::Str("underline line-through"),
+        )
+        .unwrap();
+        s.set("textTransform", StyleValue::Str("capitalize"))
+            .unwrap();
+        assert_eq!(s.text.font_family, Some(FontFamily::new("Inter")));
+        assert_eq!(&*s.text.font_family.unwrap().name(), "Inter");
+        assert_eq!(s.text.italic, Some(true));
+        assert_eq!(
+            s.text.decoration,
+            Some(TextDecoration {
+                underline: true,
+                line_through: true
+            })
+        );
+        assert_eq!(
+            TextTransform::Capitalize.apply("hello wörld-x  ünd"),
+            "Hello Wörld-x  Ünd"
+        );
+        assert_eq!(
+            s.set("fontStyle", StyleValue::Str("oblique")),
+            Err(StyleError::InvalidValue)
+        );
     }
 
     #[test]

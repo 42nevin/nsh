@@ -16,3 +16,7 @@ yf-anim.workspace = true
 rquickjs.workspace = true
 rustc-hash.workspace = true
 thiserror.workspace = true
+url.workspace = true
+
+[build-dependencies]
+rquickjs.workspace = true

@@ -37,15 +37,36 @@ pub(crate) struct YfPlugin {
     pub(crate) error: Arc<Mutex<Option<String>>>,
     /// Asset files imported by the app (absolute paths).
     pub(crate) assets: Arc<Mutex<Vec<PathBuf>>>,
+    /// Development bundle with hot module replacement: components and
+    /// contexts of app modules are registered with the hot runtime.
+    pub(crate) hot: bool,
 }
 
 /// File types imported as image assets.
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "heic"];
 
-fn is_image(path: &Path) -> bool {
+/// File types imported as fonts.
+const FONT_EXTENSIONS: &[&str] = &["ttf", "otf"];
+
+fn has_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| IMAGE_EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(e)))
+        .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)))
+}
+
+/// The family name a font registers under: the typographic family (name
+/// 16) when present, else the legacy family (name 1).
+fn font_family(data: &[u8]) -> Result<String, String> {
+    let face = ttf_parser::Face::parse(data, 0).map_err(|e| e.to_string())?;
+    let name = |id| {
+        face.names()
+            .into_iter()
+            .filter(|n| n.name_id == id && n.is_unicode())
+            .find_map(|n| n.to_string())
+    };
+    name(ttf_parser::name_id::TYPOGRAPHIC_FAMILY)
+        .or_else(|| name(ttf_parser::name_id::FAMILY))
+        .ok_or_else(|| "the font has no family name".to_owned())
 }
 
 /// `logo@2x.png` -> 2.0: the pixel density encoded in the file name.
@@ -102,7 +123,32 @@ impl Plugin for YfPlugin {
             }));
         }
         let path = Path::new(args.id);
-        if !is_image(path) {
+        let rel = path
+            .strip_prefix(&self.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if has_extension(path, FONT_EXTENSIONS) {
+            // A font import is its family name; the runtime registers the
+            // font before the first frame.
+            let data = std::fs::read(path).map_err(|e| self.fail(path, &e.to_string()))?;
+            let family = font_family(&data)
+                .map_err(|e| self.fail(path, &format!("cannot read font: {e}")))?;
+            self.assets
+                .lock()
+                .expect("assets lock")
+                .push(path.to_path_buf());
+            let code = format!(
+                "export default __yf_font({uri:?}, {family:?});",
+                uri = format!("asset:/{rel}"),
+            );
+            return Ok(Some(HookLoadOutput {
+                code: code.into(),
+                module_type: Some(ModuleType::Js),
+                ..Default::default()
+            }));
+        }
+        if !has_extension(path, IMAGE_EXTENSIONS) {
             return Ok(None);
         }
         // An image import is an asset descriptor; the natural size (in
@@ -110,11 +156,6 @@ impl Plugin for YfPlugin {
         let dim = imagesize::size(path)
             .map_err(|e| self.fail(path, &format!("cannot read image: {e}")))?;
         let scale = density(path);
-        let rel = path
-            .strip_prefix(&self.root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
         self.assets
             .lock()
             .expect("assets lock")
@@ -137,12 +178,37 @@ impl Plugin for YfPlugin {
         _ctx: SharedTransformPluginContext,
         args: &HookTransformArgs<'_>,
     ) -> HookTransformReturn {
-        if !matches!(args.module_type, ModuleType::Tsx | ModuleType::Jsx) {
+        let jsx_module = matches!(args.module_type, ModuleType::Tsx | ModuleType::Jsx);
+        let app_module = !args.id.starts_with('\0');
+        let script = matches!(args.module_type, ModuleType::Ts | ModuleType::Js);
+        if !(jsx_module || self.hot && app_module && script) {
             return Ok(None);
         }
         let path = Path::new(args.id);
-        let (jsx, jsx_map) =
-            strip_types(path, args.code).map_err(|detail| self.fail(path, &detail))?;
+        let hot_key = (self.hot && app_module).then(|| {
+            path.strip_prefix(&self.root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/")
+        });
+        // By module type, not file name: asset modules (`logo.png`) are JS.
+        let source_type = match args.module_type {
+            ModuleType::Tsx => SourceType::tsx(),
+            ModuleType::Jsx => SourceType::jsx(),
+            ModuleType::Ts => SourceType::ts(),
+            _ => SourceType::mjs(),
+        };
+        let (jsx, jsx_map) = strip_types(path, source_type, args.code, hot_key.as_deref())
+            .map_err(|detail| self.fail(path, &detail))?;
+        if !jsx_module {
+            // A hot TS / JS module: contexts only, no JSX to compile.
+            return Ok(Some(HookTransformOutput {
+                code: Some(jsx),
+                map: jsx_map.into(),
+                module_type: Some(ModuleType::Js),
+                ..Default::default()
+            }));
+        }
         let out = compile(
             &jsx,
             &CompileOptions {
@@ -170,11 +236,16 @@ impl Plugin for YfPlugin {
 }
 
 /// TSX -> JSX: removes TypeScript syntax and keeps JSX for the Solid
-/// compiler, which only accepts JavaScript. Errors are rendered with a code
-/// frame.
-fn strip_types(path: &Path, source: &str) -> Result<(String, SourceMap<'static>), String> {
+/// compiler, which only accepts JavaScript, and with `hot_key` makes the
+/// module's components hot ([`crate::hot`]). Errors are rendered with a
+/// code frame.
+fn strip_types(
+    path: &Path,
+    source_type: SourceType,
+    source: &str,
+    hot_key: Option<&str>,
+) -> Result<(String, SourceMap<'static>), String> {
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path).map_err(|e| format!("{e:?}"))?;
     let parsed = Parser::new(&allocator, source, source_type).parse();
     if let Some(err) = parsed.diagnostics.into_iter().next() {
         return Err(err.render_with_source_code(source.to_owned()));
@@ -192,6 +263,9 @@ fn strip_types(path: &Path, source: &str) -> Result<(String, SourceMap<'static>)
         Transformer::new(&allocator, path, &options).build_with_scoping(scoping, &mut program);
     if let Some(err) = ret.diagnostics.into_iter().next() {
         return Err(err.render_with_source_code(source.to_owned()));
+    }
+    if let Some(key) = hot_key {
+        crate::hot::transform(&allocator, &mut program, source, key);
     }
     let out = Codegen::new()
         .with_options(CodegenOptions {

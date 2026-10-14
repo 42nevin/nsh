@@ -5,14 +5,17 @@
 use std::{
     cell::RefCell,
     io::Write,
+    rc::Rc,
     sync::{
-        OnceLock,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
 
-use dispatch2::DispatchQueue;
-use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained, sel};
+use dispatch2::{DispatchQueue, MainThreadBound};
+use objc2::{
+    DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained, sel,
+};
 use objc2_core_foundation::{CGFloat, CGSize};
 use objc2_foundation::{NSObject, NSString};
 use objc2_ui_kit::{
@@ -22,9 +25,10 @@ use objc2_ui_kit::{
 use yf_dev::{DevClient, DevEvent, protocol::BundleFormat};
 use yf_engine::{BYTECODE_VERSION, Bundle};
 
-use crate::app::with_app;
+use crate::view::Inner;
 
-static CLIENT: OnceLock<DevClient> = OnceLock::new();
+/// The client of the most recent session: logs go there.
+static CLIENT: Mutex<Weak<DevClient>> = Mutex::new(Weak::new());
 /// While connected, logs go to the dev server only (the developer's
 /// terminal); otherwise to stderr.
 static CONNECTED: AtomicBool = AtomicBool::new(false);
@@ -43,7 +47,8 @@ impl log::Log for DevLogger {
             return;
         }
         let message = record.args().to_string();
-        match CLIENT.get() {
+        let client = CLIENT.lock().ok().and_then(|c| c.upgrade());
+        match client {
             Some(client) if CONNECTED.load(Ordering::Relaxed) => {
                 client.log(record.level().into(), record.target(), &message)
             }
@@ -70,56 +75,108 @@ pub fn init_logging() {
     }
 }
 
+/// A connection to a dev server, loading its bundles into one view.
+pub(crate) struct DevSession {
+    /// Keeps the client (and its thread) alive.
+    _client: Arc<DevClient>,
+    ui: Rc<RefCell<DevUi>>,
+}
+
+impl DevSession {
+    /// Connects; bundles go to `view` for as long as it exists.
+    pub(crate) fn start(view: std::rc::Weak<Inner>, url: String) -> Option<DevSession> {
+        let container = view.upgrade()?.container.clone();
+        let mtm = container.mtm();
+        let ui = Rc::new(RefCell::new(DevUi::default()));
+        show_status(&ui, &container, &format!("Connecting to {url}…"));
+        let target = MainThreadBound::new((view, ui.clone()), mtm);
+        let target = Arc::new(target);
+        let started = DevClient::start(
+            url,
+            device_name(mtm),
+            BYTECODE_VERSION.to_owned(),
+            move |event| {
+                match event {
+                    DevEvent::Connected => CONNECTED.store(true, Ordering::Relaxed),
+                    DevEvent::Disconnected => CONNECTED.store(false, Ordering::Relaxed),
+                    _ => {}
+                }
+                let target = target.clone();
+                DispatchQueue::main().exec_async(move || {
+                    let mtm = MainThreadMarker::new().expect("main queue");
+                    let (view, ui) = target.get(mtm);
+                    if let Some(view) = view.upgrade() {
+                        handle(&view, ui, event);
+                    }
+                });
+            },
+        );
+        match started {
+            Ok(client) => {
+                let client = Arc::new(client);
+                *CLIENT.lock().unwrap_or_else(|e| e.into_inner()) = Arc::downgrade(&client);
+                Some(DevSession {
+                    _client: client,
+                    ui,
+                })
+            }
+            Err(err) => {
+                log::error!("cannot start the dev client: {err}");
+                None
+            }
+        }
+    }
+
+    pub(crate) fn show_error(&self, container: &UIView, title: &str, message: &str) {
+        show_error(&self.ui, container, title, message);
+    }
+
+    /// A hot update failed: loads the latest bundle from scratch.
+    pub(crate) fn reload(view: &Rc<Inner>) {
+        let latest = view
+            .dev()
+            .as_ref()
+            .and_then(|d| d.ui.borrow().latest.clone());
+        if let Some(bundle) = latest {
+            log::info!("reloading after an update that could not be applied in place");
+            Inner::load(view, bundle);
+        }
+    }
+}
+
 #[derive(Default)]
 struct DevUi {
+    /// Build the app runs (loaded, or reached by hot updates).
+    running: Option<u64>,
+    /// The latest bundle, for reloads.
+    latest: Option<Bundle>,
     status: Option<Retained<UILabel>>,
     overlay: Option<Retained<UIView>>,
     target: Option<Retained<DismissTarget>>,
-}
-
-thread_local! {
-    static UI: RefCell<DevUi> = RefCell::new(DevUi::default());
 }
 
 define_class!(
     /// Dismisses the error overlay on tap.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
+    #[ivars = std::rc::Weak<RefCell<DevUi>>]
     struct DismissTarget;
 
     impl DismissTarget {
         #[unsafe(method(dismiss:))]
         fn dismiss(&self, _sender: &UITapGestureRecognizer) {
-            hide_error();
+            if let Some(ui) = self.ivars().upgrade() {
+                hide_error(&ui);
+            }
         }
     }
 );
 
 impl DismissTarget {
-    fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(());
+    fn new(mtm: MainThreadMarker, ui: std::rc::Weak<RefCell<DevUi>>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ui);
         // SAFETY: NSObject's designated initializer.
         unsafe { msg_send![super(this), init] }
-    }
-}
-
-/// Starts the dev client (main thread, after the app state exists).
-pub(crate) fn connect(mtm: MainThreadMarker, url: String) {
-    let device = device_name(mtm);
-    show_status(&format!("Connecting to {url}…"));
-    let started = DevClient::start(url, device, BYTECODE_VERSION.to_owned(), |event| {
-        match event {
-            DevEvent::Connected => CONNECTED.store(true, Ordering::Relaxed),
-            DevEvent::Disconnected => CONNECTED.store(false, Ordering::Relaxed),
-            _ => {}
-        }
-        DispatchQueue::main().exec_async(move || handle(event));
-    });
-    match started {
-        Ok(client) => {
-            let _ = CLIENT.set(client);
-        }
-        Err(err) => log::error!("cannot start the dev client: {err}"),
     }
 }
 
@@ -134,12 +191,15 @@ fn device_name(mtm: MainThreadMarker) -> String {
     }
 }
 
-fn handle(event: DevEvent) {
+fn handle(view: &Rc<Inner>, ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
+    let container = &view.container;
     match event {
-        DevEvent::Connected => hide_status(),
-        DevEvent::Disconnected => show_status("Dev server disconnected — reconnecting…"),
+        DevEvent::Connected => hide_status(ui),
+        DevEvent::Disconnected => {
+            show_status(ui, container, "Dev server disconnected — reconnecting…")
+        }
         DevEvent::Building => {}
-        DevEvent::BuildFailed(message) => show_error("Build failed", &message),
+        DevEvent::BuildFailed(message) => show_error(ui, container, "Build failed", &message),
         DevEvent::Bundle {
             version,
             format,
@@ -152,6 +212,8 @@ fn handle(event: DevEvent) {
                     Ok(code) => Bundle::source(code),
                     Err(_) => {
                         return show_error(
+                            ui,
+                            container,
                             "Invalid bundle",
                             "the dev server sent non-UTF-8 source",
                         );
@@ -161,24 +223,46 @@ fn handle(event: DevEvent) {
             if let Some(map) = source_map {
                 bundle = bundle.with_source_map(map);
             }
+            hide_status(ui);
+            let running = {
+                let mut ui = ui.borrow_mut();
+                ui.latest = Some(bundle.clone());
+                ui.running.replace(version)
+            };
+            // Already there through a hot update.
+            if running == Some(version) {
+                return;
+            }
             log::info!("loading build {version}");
-            hide_error();
-            hide_status();
-            with_app(|app| app.load(bundle));
+            hide_error(ui);
+            Inner::load(view, bundle);
+        }
+        DevEvent::Patch {
+            version,
+            base,
+            code,
+            source_map,
+        } => {
+            if ui.borrow().running != Some(base) {
+                return;
+            }
+            let update = yf_engine::HotUpdate {
+                name: format!("hot-{version}.js"),
+                code,
+                source_map: source_map.map(Into::into),
+            };
+            if view.hot_update(update) {
+                log::info!("updating to build {version}");
+                ui.borrow_mut().running = Some(version);
+                hide_error(ui);
+            }
         }
     }
 }
 
-fn container() -> Option<Retained<UIView>> {
-    with_app(|app| app.container.clone())
-}
-
-fn show_status(text: &str) {
-    let Some(container) = container() else {
-        return;
-    };
+fn show_status(ui: &RefCell<DevUi>, container: &UIView, text: &str) {
     let mtm = container.mtm();
-    UI.with(|ui| {
+    {
         let mut ui = ui.borrow_mut();
         let label = ui.status.get_or_insert_with(|| {
             let label = UILabel::new(mtm);
@@ -220,22 +304,19 @@ fn show_status(text: &str) {
         } else {
             container.bringSubviewToFront(label);
         }
-    });
+    }
 }
 
-fn hide_status() {
-    UI.with(|ui| {
-        if let Some(label) = ui.borrow_mut().status.take() {
-            label.removeFromSuperview();
-        }
-    });
+fn hide_status(ui: &RefCell<DevUi>) {
+    if let Some(label) = ui.borrow_mut().status.take() {
+        label.removeFromSuperview();
+    }
 }
 
 /// Shows a full-screen error over the app; tap to dismiss.
-pub(crate) fn show_error(title: &str, message: &str) {
-    let Some(container) = container() else { return };
+fn show_error(ui: &Rc<RefCell<DevUi>>, container: &UIView, title: &str, message: &str) {
     let mtm = container.mtm();
-    hide_error();
+    hide_error(ui);
     let overlay = UIView::initWithFrame(UIView::alloc(mtm), container.bounds());
     overlay.setAutoresizingMask(
         UIViewAutoresizing::FlexibleWidth | UIViewAutoresizing::FlexibleHeight,
@@ -257,11 +338,13 @@ pub(crate) fn show_error(title: &str, message: &str) {
         12.0,
         unsafe { UIFontWeightRegular },
     )));
+    // Clear of the status bar / notch / title bar.
+    let safe = container.safeAreaInsets();
     text.setTextContainerInset(UIEdgeInsets {
-        top: 48.0,
-        left: 16.0,
-        bottom: 24.0,
-        right: 16.0,
+        top: safe.top + 16.0,
+        left: safe.left + 16.0,
+        bottom: safe.bottom + 24.0,
+        right: safe.right + 16.0,
     });
     text.setText(Some(&NSString::from_str(&format!(
         "{title}\n\n{message}\n\n(tap to dismiss)"
@@ -272,12 +355,9 @@ pub(crate) fn show_error(title: &str, message: &str) {
     container_text.setSize(CGSize::new(4000.0, CGFloat::MAX));
     overlay.addSubview(&text);
 
-    UI.with(|ui| {
+    {
+        let target = DismissTarget::new(mtm, std::rc::Rc::downgrade(ui));
         let mut ui = ui.borrow_mut();
-        let target = ui
-            .target
-            .get_or_insert_with(|| DismissTarget::new(mtm))
-            .clone();
         // SAFETY: `dismiss:` is implemented by `DismissTarget`, kept alive in `UI`.
         let tap = unsafe {
             UITapGestureRecognizer::initWithTarget_action(
@@ -289,13 +369,12 @@ pub(crate) fn show_error(title: &str, message: &str) {
         overlay.addGestureRecognizer(&tap);
         container.addSubview(&overlay);
         ui.overlay = Some(overlay);
-    });
+        ui.target = Some(target);
+    }
 }
 
-fn hide_error() {
-    UI.with(|ui| {
-        if let Some(overlay) = ui.borrow_mut().overlay.take() {
-            overlay.removeFromSuperview();
-        }
-    });
+fn hide_error(ui: &RefCell<DevUi>) {
+    if let Some(overlay) = ui.borrow_mut().overlay.take() {
+        overlay.removeFromSuperview();
+    }
 }
