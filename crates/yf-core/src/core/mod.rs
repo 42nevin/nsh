@@ -975,7 +975,7 @@ impl<M: TextEngine> Core<M> {
             if flags & dirty::VIEW != 0 {
                 self.mount.push(MountItem::ViewStyle {
                     id,
-                    style: node.view_style,
+                    style: Box::new(node.view_style),
                 });
             }
             if flags & dirty::EVENTS != 0 {

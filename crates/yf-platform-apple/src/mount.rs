@@ -7,11 +7,11 @@ use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained, runtime::ProtocolObject, sel};
 use objc2_core_foundation::{CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize};
 use objc2_ui_kit::{
-    UIActivityIndicatorView, UIActivityIndicatorViewStyle, UIColor, UIControlEvents, UIDevice,
-    UIGestureRecognizer, UIGestureRecognizerState, UIImage, UIImageView,
-    UILongPressGestureRecognizer, UIPanGestureRecognizer, UIRefreshControl, UIScrollView,
+    UIActivityIndicatorView, UIActivityIndicatorViewStyle, UIControlEvents, UIDevice,
+    UIGestureRecognizer, UIGestureRecognizerState, UIImage, UILongPressGestureRecognizer,
+    UIPanGestureRecognizer, UIRefreshControl, UIScrollView,
     UIScrollViewContentInsetAdjustmentBehavior, UITapGestureRecognizer, UIUserInterfaceIdiom,
-    UIView, UIViewContentMode,
+    UIView,
 };
 use yf_anim::{AnimProp, AnimValue};
 use yf_core::{
@@ -22,6 +22,7 @@ use yf_engine::EngineControl;
 
 use crate::{
     anim::Animator,
+    decor::{self, Decor},
     image::{AssetBase, DecodedImage, ImageLoader, Request},
     target::EventTarget,
     text_view::TextView,
@@ -33,7 +34,8 @@ pub(crate) type SharedMounter = Arc<MainThreadBound<RefCell<Option<Mounter>>>>;
 enum Native {
     View(Retained<UIView>),
     Text(Retained<TextView>),
-    Image(Retained<UIImageView>),
+    /// The image itself is in [`Decor`]'s image layer.
+    Image(Retained<UIView>),
     Scroll(Retained<UIScrollView>),
 }
 
@@ -45,6 +47,15 @@ impl Native {
             Native::Text(t) => t,
             Native::Image(i) => i,
             Native::Scroll(s) => s,
+        }
+    }
+
+    fn kind(&self) -> decor::Kind {
+        match self {
+            Native::View(_) => decor::Kind::View,
+            Native::Text(_) => decor::Kind::Text,
+            Native::Image(_) => decor::Kind::Image,
+            Native::Scroll(_) => decor::Kind::Scroll,
         }
     }
 }
@@ -80,6 +91,7 @@ fn place_spinner(spinner: &UIActivityIndicatorView, width: f32) {
 struct Slot {
     native: Native,
     style: ViewStyle,
+    decor: Decor,
     events: EventMask,
     gestures: Gestures,
     bindings: Vec<(AnimProp, yf_anim::NodeId)>,
@@ -97,6 +109,10 @@ struct Slot {
 impl Slot {
     fn new(native: Native) -> Self {
         Self {
+            decor: match native {
+                Native::Image(_) => Decor::for_image(),
+                _ => Decor::default(),
+            },
             native,
             style: ViewStyle::default(),
             events: EventMask::default(),
@@ -187,12 +203,7 @@ impl Mounter {
                 let native = match kind {
                     ViewKind::View => Native::View(UIView::new(self.mtm)),
                     ViewKind::Text => Native::Text(TextView::new(self.mtm)),
-                    ViewKind::Image => {
-                        let image = UIImageView::new(self.mtm);
-                        image.setClipsToBounds(true);
-                        image.setContentMode(UIViewContentMode::ScaleAspectFill);
-                        Native::Image(image)
-                    }
+                    ViewKind::Image => Native::Image(UIView::new(self.mtm)),
                     ViewKind::Scroll => {
                         let scroll = UIScrollView::new(self.mtm);
                         // Layout already accounts for safe areas.
@@ -222,7 +233,7 @@ impl Mounter {
                 before,
             } => {
                 if let (Some(p), Some(c)) = (self.slot(parent), self.slot(child)) {
-                    let (p, c) = (p.native.view(), c.native.view());
+                    let (p, c) = (p.decor.container(p.native.view()), c.native.view());
                     match before.and_then(|b| self.slot(b)) {
                         Some(b) => p.insertSubview_belowSubview(c, b.native.view()),
                         None => p.addSubview(c),
@@ -249,14 +260,18 @@ impl Mounter {
                     if let Some(Refresh::Custom { spinner, .. }) = &s.gestures.refresh {
                         place_spinner(spinner, frame.width);
                     }
+                    if s.decor.sized() {
+                        self.decorate(id);
+                    }
                 }
             }
             MountItem::ViewStyle { id, style } => {
-                let animator = &self.animator;
-                if let Some(s) = self.views.get_mut(id as usize).and_then(Option::as_mut) {
-                    s.style = style;
-                    apply_static_style(s.native.view(), &style);
-                    apply_dynamic(s, animator);
+                if let Some(s) = self.slot_mut(id) {
+                    s.style = *style;
+                    self.decorate(id);
+                    if let Some(s) = self.slot(id) {
+                        apply_dynamic(s, &self.animator);
+                    }
                 }
             }
             MountItem::Text {
@@ -323,13 +338,12 @@ impl Mounter {
                     s.bindings = bindings;
                     let bound = !s.bindings.is_empty();
                     self.animated.retain(|&v| v != id);
+                    // An animated background changes how the shadow is drawn.
+                    self.decorate(id);
                     if bound {
                         self.animated.push(id);
-                    } else {
-                        let animator = &self.animator;
-                        if let Some(s) = self.views.get(id as usize).and_then(Option::as_ref) {
-                            apply_dynamic(s, animator);
-                        }
+                    } else if let Some(s) = self.slot(id) {
+                        apply_dynamic(s, &self.animator);
                     }
                     return true;
                 }
@@ -349,21 +363,37 @@ impl Mounter {
         false
     }
 
-    fn set_image(&mut self, id: NodeId, source: Option<ImageSource>, resize_mode: ResizeMode) {
-        let Some(s) = self.slot_mut(id) else { return };
-        let Native::Image(view) = &s.native else {
+    /// Reshapes a view's background, border, corners, clipping and shadow.
+    fn decorate(&mut self, id: NodeId) {
+        let (mtm, animator) = (self.mtm, &self.animator);
+        let Some(s) = self.views.get_mut(id as usize).and_then(Option::as_mut) else {
             return;
         };
-        view.setContentMode(match resize_mode {
-            ResizeMode::Cover => UIViewContentMode::ScaleAspectFill,
-            ResizeMode::Contain => UIViewContentMode::ScaleAspectFit,
-            ResizeMode::Stretch => UIViewContentMode::ScaleToFill,
-            ResizeMode::Center => UIViewContentMode::Center,
-        });
+        let mut background = s.style.background_color;
+        let mut animated = false;
+        for &(prop, node) in &s.bindings {
+            if prop == AnimProp::BackgroundColor {
+                animated = true;
+                if let AnimValue::Color(c) = animator.eval(node) {
+                    background = Color(c);
+                }
+            }
+        }
+        let kind = s.native.kind();
+        s.decor
+            .apply(s.native.view(), kind, &s.style, background, animated, mtm);
+    }
+
+    fn set_image(&mut self, id: NodeId, source: Option<ImageSource>, resize_mode: ResizeMode) {
+        let Some(s) = self.slot_mut(id) else { return };
+        if !matches!(s.native, Native::Image(_)) {
+            return;
+        }
+        s.decor.set_resize_mode(resize_mode);
         if s.image.as_ref().map(|src| &src.uri) == source.as_ref().map(|src| &src.uri) {
             return;
         }
-        view.setImage(None);
+        s.decor.set_image(None);
         let old_key = s.image_key.take();
         s.image = source;
         let wants = s.image.is_some();
@@ -398,10 +428,8 @@ impl Mounter {
             };
             match self.images.request(id, &uri, max_pixels, scale, done) {
                 Request::Ready(image) => {
-                    if let Some(s) = self.slot(id)
-                        && let Native::Image(view) = &s.native
-                    {
-                        view.setImage(Some(&image));
+                    if let Some(s) = self.slot(id) {
+                        s.decor.set_image(Some(&image));
                     }
                     self.image_event(id, Ok(&image));
                 }
@@ -423,9 +451,7 @@ impl Mounter {
             s.image_key = None;
             match &result {
                 Ok(DecodedImage(image)) => {
-                    if let Native::Image(view) = &s.native {
-                        view.setImage(Some(image));
-                    }
+                    s.decor.set_image(Some(image));
                     self.image_event(id, Ok(image));
                 }
                 Err(message) => {
@@ -741,26 +767,6 @@ fn set_frame(view: &UIView, frame: Rect) {
     ));
 }
 
-fn ui_color(color: Color) -> Retained<UIColor> {
-    let (r, g, b, a) = color.to_f64();
-    UIColor::colorWithRed_green_blue_alpha(r, g, b, a)
-}
-
-/// Properties that never animate natively. Image views always clip.
-fn apply_static_style(view: &UIView, style: &ViewStyle) {
-    let layer = view.layer();
-    layer.setCornerRadius(style.border_radius as CGFloat);
-    layer.setBorderWidth(style.border_width as CGFloat);
-    if style.border_width > 0.0 {
-        // SAFETY: the returned CGColor is retained for the call.
-        let color = unsafe { ui_color(style.border_color).CGColor() };
-        layer.setBorderColor(Some(&color));
-    }
-    if style.overflow_hidden {
-        view.setClipsToBounds(true);
-    }
-}
-
 /// Opacity, background color and transform: static values overridden by
 /// animated bindings.
 fn apply_dynamic(slot: &Slot, animator: &Animator) {
@@ -788,11 +794,7 @@ fn apply_dynamic(slot: &Slot, animator: &Animator) {
         }
     }
     view.setAlpha(opacity as CGFloat);
-    if background.is_transparent() {
-        view.setBackgroundColor(None);
-    } else {
-        view.setBackgroundColor(Some(&ui_color(background)));
-    }
+    slot.decor.set_background(view, background);
     // Scale, then rotate, then translate (React Native order), around the
     // view's center.
     let (sin, cos) = (t.rotate as CGFloat).to_radians().sin_cos();

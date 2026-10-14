@@ -168,23 +168,171 @@ impl Default for Transform {
     }
 }
 
+/// Corner radii in points, clockwise from the top left.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct CornerRadii {
+    /// Top left.
+    pub top_left: f32,
+    /// Top right.
+    pub top_right: f32,
+    /// Bottom right.
+    pub bottom_right: f32,
+    /// Bottom left.
+    pub bottom_left: f32,
+}
+
+impl CornerRadii {
+    /// The same radius on every corner.
+    pub const fn all(r: f32) -> Self {
+        Self {
+            top_left: r,
+            top_right: r,
+            bottom_right: r,
+            bottom_left: r,
+        }
+    }
+
+    /// `[top_left, top_right, bottom_right, bottom_left]`.
+    #[inline]
+    pub const fn to_array(self) -> [f32; 4] {
+        [
+            self.top_left,
+            self.top_right,
+            self.bottom_right,
+            self.bottom_left,
+        ]
+    }
+
+    /// True if no corner is rounded.
+    #[inline]
+    pub fn is_zero(&self) -> bool {
+        self.to_array().iter().all(|&r| r <= 0.0)
+    }
+
+    /// The radius shared by every rounded corner, if they all share one.
+    /// Platforms render such shapes with a single radius plus a mask of
+    /// the rounded corners (no paths).
+    pub fn shared(&self) -> Option<f32> {
+        let mut shared = 0.0;
+        for r in self.to_array() {
+            if r > 0.0 {
+                if shared > 0.0 && r != shared {
+                    return None;
+                }
+                shared = r;
+            }
+        }
+        Some(shared)
+    }
+
+    /// Scales the radii down so adjacent corners do not overlap on a
+    /// `width` x `height` box (CSS rule).
+    pub fn fit(self, width: f32, height: f32) -> Self {
+        let ratio = |side: f32, a: f32, b: f32| if a + b > side { side / (a + b) } else { 1.0 };
+        let f = ratio(width, self.top_left, self.top_right)
+            .min(ratio(width, self.bottom_left, self.bottom_right))
+            .min(ratio(height, self.top_left, self.bottom_left))
+            .min(ratio(height, self.top_right, self.bottom_right))
+            .max(0.0);
+        if f >= 1.0 {
+            return self;
+        }
+        Self {
+            top_left: self.top_left * f,
+            top_right: self.top_right * f,
+            bottom_right: self.bottom_right * f,
+            bottom_left: self.bottom_left * f,
+        }
+    }
+
+    /// The radii of a curve `d` points inside this one (e.g. the inner edge
+    /// of a border).
+    pub fn inset(self, d: f32) -> Self {
+        Self {
+            top_left: (self.top_left - d).max(0.0),
+            top_right: (self.top_right - d).max(0.0),
+            bottom_right: (self.bottom_right - d).max(0.0),
+            bottom_left: (self.bottom_left - d).max(0.0),
+        }
+    }
+}
+
+/// A drop shadow (React Native's `shadow*` properties).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shadow {
+    /// Shadow color; its alpha is multiplied by `opacity`.
+    pub color: Color,
+    /// Horizontal offset in points.
+    pub offset_x: f32,
+    /// Vertical offset in points.
+    pub offset_y: f32,
+    /// Opacity in `0.0..=1.0`; 0 (the default) means no shadow.
+    pub opacity: f32,
+    /// Blur radius in points.
+    pub radius: f32,
+}
+
+impl Shadow {
+    /// React Native's defaults: black, offset `(0, -3)`, radius 3, opacity 0.
+    pub const DEFAULT: Shadow = Shadow {
+        color: Color::BLACK,
+        offset_x: 0.0,
+        offset_y: -3.0,
+        opacity: 0.0,
+        radius: 3.0,
+    };
+
+    /// True if the shadow draws anything.
+    #[inline]
+    pub fn is_visible(&self) -> bool {
+        self.opacity > 0.0 && !self.color.is_transparent()
+    }
+}
+
+impl Default for Shadow {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// Visual (non-layout) properties of a native view.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewStyle {
     /// Background fill.
     pub background_color: Color,
-    /// Corner radius in points.
+    /// `borderRadius`: the radius of corners without their own.
     pub border_radius: f32,
+    /// `borderTopLeftRadius` etc., clockwise from the top left; they
+    /// override `border_radius`.
+    pub corner_radius: [Option<f32>; 4],
     /// Border width in points (also affects layout).
     pub border_width: f32,
     /// Border color.
     pub border_color: Color,
     /// Opacity in `0.0..=1.0`.
     pub opacity: f32,
-    /// Clip children to the bounds.
+    /// Clip children to the (rounded) bounds.
     pub overflow_hidden: bool,
+    /// Drop shadow.
+    pub shadow: Shadow,
     /// Static transform.
     pub transform: Transform,
+}
+
+impl ViewStyle {
+    /// The radius of each corner (before fitting them to a size with
+    /// [`CornerRadii::fit`]).
+    pub fn radii(&self) -> CornerRadii {
+        let [tl, tr, br, bl] = self
+            .corner_radius
+            .map(|r| r.unwrap_or(self.border_radius).max(0.0));
+        CornerRadii {
+            top_left: tl,
+            top_right: tr,
+            bottom_right: br,
+            bottom_left: bl,
+        }
+    }
 }
 
 impl Default for ViewStyle {
@@ -192,10 +340,12 @@ impl Default for ViewStyle {
         Self {
             background_color: Color::TRANSPARENT,
             border_radius: 0.0,
+            corner_radius: [None; 4],
             border_width: 0.0,
             border_color: Color::BLACK,
             opacity: 1.0,
             overflow_hidden: false,
+            shadow: Shadow::DEFAULT,
             transform: Transform::IDENTITY,
         }
     }
@@ -420,6 +570,13 @@ impl Style {
         Ok(())
     }
 
+    /// Sets `shadowOffset: { width, height }`; `None` restores the default.
+    pub fn set_shadow_offset(&mut self, offset: Option<(f32, f32)>) {
+        let (x, y) = offset.unwrap_or((Shadow::DEFAULT.offset_x, Shadow::DEFAULT.offset_y));
+        self.view.shadow.offset_x = x;
+        self.view.shadow.offset_y = y;
+    }
+
     /// Sets one property using its React Native name.
     pub fn set(&mut self, key: &str, value: StyleValue<'_>) -> Result<(), StyleError> {
         let l = &mut self.layout;
@@ -564,6 +721,19 @@ impl Style {
                 self.view.background_color = color(value)?.unwrap_or(Color::TRANSPARENT)
             }
             "borderRadius" => self.view.border_radius = number(value, 0.0)?,
+            "borderTopLeftRadius" => self.view.corner_radius[0] = opt_number(value)?,
+            "borderTopRightRadius" => self.view.corner_radius[1] = opt_number(value)?,
+            "borderBottomRightRadius" => self.view.corner_radius[2] = opt_number(value)?,
+            "borderBottomLeftRadius" => self.view.corner_radius[3] = opt_number(value)?,
+            "shadowColor" => {
+                self.view.shadow.color = color(value)?.unwrap_or(Shadow::DEFAULT.color)
+            }
+            "shadowOpacity" => {
+                self.view.shadow.opacity = number(value, Shadow::DEFAULT.opacity)?.clamp(0.0, 1.0)
+            }
+            "shadowRadius" => {
+                self.view.shadow.radius = number(value, Shadow::DEFAULT.radius)?.max(0.0)
+            }
             "borderColor" => self.view.border_color = color(value)?.unwrap_or(Color::BLACK),
             "opacity" => self.view.opacity = number(value, 1.0)?.clamp(0.0, 1.0),
             "overflow" => {
@@ -629,6 +799,64 @@ mod tests {
         assert_eq!(s.layout.flex_grow, 2.0);
         assert_eq!(s.layout.flex_shrink, 1.0);
         assert_eq!(s.layout.flex_basis, Dimension::length(0.0));
+    }
+
+    #[test]
+    fn corner_radii_override_the_shorthand_in_any_order() {
+        let mut s = Style::default();
+        s.set("borderTopLeftRadius", StyleValue::Number(4.0))
+            .unwrap();
+        s.set("borderRadius", StyleValue::Number(10.0)).unwrap();
+        let r = s.view.radii();
+        assert_eq!(r.to_array(), [4.0, 10.0, 10.0, 10.0]);
+        assert_eq!(r.shared(), None);
+        s.set("borderTopLeftRadius", StyleValue::Null).unwrap();
+        assert_eq!(s.view.radii().shared(), Some(10.0));
+    }
+
+    #[test]
+    fn shared_radius_ignores_square_corners() {
+        let r = CornerRadii {
+            top_left: 12.0,
+            top_right: 12.0,
+            ..CornerRadii::default()
+        };
+        assert_eq!(r.shared(), Some(12.0));
+        assert_eq!(CornerRadii::default().shared(), Some(0.0));
+        assert!(CornerRadii::default().is_zero());
+    }
+
+    #[test]
+    fn radii_fit_the_box() {
+        // 100 + 300 on a 200 wide box: everything scales by 0.5.
+        let r = CornerRadii {
+            top_left: 100.0,
+            top_right: 300.0,
+            bottom_right: 0.0,
+            bottom_left: 0.0,
+        }
+        .fit(200.0, 1000.0);
+        assert_eq!(r.to_array(), [50.0, 150.0, 0.0, 0.0]);
+        let fits = CornerRadii::all(10.0);
+        assert_eq!(fits.fit(100.0, 100.0), fits);
+        assert_eq!(fits.inset(4.0), CornerRadii::all(6.0));
+        assert_eq!(fits.inset(40.0), CornerRadii::all(0.0));
+    }
+
+    #[test]
+    fn shadow_defaults_follow_react_native() {
+        let mut s = Style::default();
+        assert!(!s.view.shadow.is_visible());
+        s.set("shadowOpacity", StyleValue::Number(0.3)).unwrap();
+        s.set("shadowRadius", StyleValue::Number(8.0)).unwrap();
+        s.set_shadow_offset(Some((0.0, 4.0)));
+        assert!(s.view.shadow.is_visible());
+        assert_eq!(s.view.shadow.offset_y, 4.0);
+        s.set("shadowColor", StyleValue::Str("transparent"))
+            .unwrap();
+        assert!(!s.view.shadow.is_visible());
+        s.set_shadow_offset(None);
+        assert_eq!(s.view.shadow.offset_y, -3.0);
     }
 
     #[test]

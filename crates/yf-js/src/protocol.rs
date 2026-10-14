@@ -292,6 +292,22 @@ fn decode_style<'js>(obj: &Object<'js>, warnings: &mut Warnings) -> rquickjs::Re
             decode_transform(&value, &mut style, warnings)?;
             continue;
         }
+        if key == "shadowOffset" {
+            // `{ width, height }`; null / undefined restores the default.
+            let offset = match value.as_object() {
+                Some(o) => Some((
+                    o.get::<_, Option<f64>>("width")?.unwrap_or(0.0) as f32,
+                    o.get::<_, Option<f64>>("height")?.unwrap_or(0.0) as f32,
+                )),
+                None if value.is_null() || value.is_undefined() => None,
+                None => {
+                    warnings.warn("style `shadowOffset` must be `{ width, height }`".to_owned());
+                    continue;
+                }
+            };
+            style.set_shadow_offset(offset);
+            continue;
+        }
         if let Some(node) = native_value(&value) {
             match AnimProp::from_name(&key) {
                 Some(prop) => style.animated.push((prop, node)),

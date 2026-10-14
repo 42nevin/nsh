@@ -25,6 +25,9 @@ pub use crate::{
     ops::{
         EventKind, EventMask, EventPayload, ImageSource, NodeId, Op, Prop, ROOT_ID, ResizeMode, Tag,
     },
-    style::{Color, Style, StyleError, StyleValue, TextAlign, TextStyle, Transform, ViewStyle},
+    style::{
+        Color, CornerRadii, Shadow, Style, StyleError, StyleValue, TextAlign, TextStyle, Transform,
+        ViewStyle,
+    },
     text::{ApproxTextEngine, AttributedText, ResolvedTextStyle, TextEngine, TextLayout, TextSpan},
 };

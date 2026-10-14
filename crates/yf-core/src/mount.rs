@@ -68,7 +68,7 @@ pub enum MountItem {
         /// View.
         id: NodeId,
         /// New style.
-        style: ViewStyle,
+        style: Box<ViewStyle>,
     },
     /// Set the content of a text view.
     Text {

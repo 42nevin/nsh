@@ -13,6 +13,7 @@
 
 mod anim;
 mod app;
+mod decor;
 #[cfg(feature = "dev")]
 pub mod dev;
 mod image;

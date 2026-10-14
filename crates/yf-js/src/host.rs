@@ -366,6 +366,34 @@ mod tests {
     }
 
     #[test]
+    fn decodes_shadow_and_corner_styles() {
+        let host = Host::new().unwrap();
+        host.eval_source(
+            r##"__yf_commit([
+                3, 2, "style", {
+                    shadowColor: "#000", shadowOffset: { width: 2, height: 6 },
+                    shadowOpacity: 0.25, shadowRadius: 10,
+                    borderRadius: 12, borderBottomLeftRadius: 0,
+                },
+                3, 3, "style", { shadowOffset: null },
+            ]);"##,
+        )
+        .unwrap();
+        let ops = ops(&host);
+        let Op::SetStyle { style, .. } = &ops[0] else {
+            panic!("{:?}", ops[0])
+        };
+        let shadow = style.view.shadow;
+        assert_eq!((shadow.offset_x, shadow.offset_y), (2.0, 6.0));
+        assert_eq!((shadow.opacity, shadow.radius), (0.25, 10.0));
+        assert_eq!(style.view.radii().to_array(), [12.0, 12.0, 12.0, 0.0]);
+        let Op::SetStyle { style, .. } = &ops[1] else {
+            panic!("{:?}", ops[1])
+        };
+        assert_eq!(style.view.shadow, yf_core::Shadow::DEFAULT);
+    }
+
+    #[test]
     fn bad_buffer_throws_in_js() {
         let host = Host::new().unwrap();
         let err = host.eval_source(r#"__yf_commit([42]);"#).unwrap_err();

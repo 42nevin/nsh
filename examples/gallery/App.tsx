@@ -1,4 +1,4 @@
-import { createSignal, Show } from "solid-js";
+import { createSignal, Match, Switch } from "solid-js";
 import { createNativeValue, List, render, root } from "yf";
 import logo from "./logo@2x.png";
 
@@ -122,9 +122,108 @@ function Physics() {
   );
 }
 
+const card = {
+  width: 150,
+  height: 110,
+  alignItems: "center",
+  justifyContent: "center",
+  backgroundColor: "#ffffff",
+} as const;
+
+function Label(props: { children: string }) {
+  return <text style={{ fontSize: 13, fontWeight: "600", color: "#1f2328" }}>{props.children}</text>;
+}
+
+function Styles() {
+  const [clip, setClip] = createSignal(true);
+  return (
+    <view style={{ flex: 1, flexDirection: "row", flexWrap: "wrap", gap: 24, padding: 24, justifyContent: "center" }}>
+      <view style={{ ...card, borderRadius: 16, shadowOpacity: 0.18, shadowRadius: 12, shadowOffset: { width: 0, height: 6 } }}>
+        <Label>Shadow</Label>
+      </view>
+      <view
+        style={{
+          ...card,
+          borderTopLeftRadius: 28,
+          borderTopRightRadius: 28,
+          borderWidth: 2,
+          borderColor: "#8250df",
+        }}
+      >
+        <Label>Top corners</Label>
+      </view>
+      <view
+        style={{
+          ...card,
+          backgroundColor: "#ddf4ff",
+          borderTopLeftRadius: 44,
+          borderTopRightRadius: 6,
+          borderBottomRightRadius: 28,
+          borderWidth: 3,
+          borderColor: "#0969da",
+          shadowColor: "#0969da",
+          shadowOpacity: 0.35,
+          shadowRadius: 10,
+          shadowOffset: { width: 4, height: 8 },
+        }}
+      >
+        <Label>Mixed radii</Label>
+      </view>
+      <view
+        onPress={() => setClip(!clip())}
+        style={{
+          ...card,
+          backgroundColor: "#fff8c5",
+          borderRadius: 24,
+          borderWidth: 2,
+          borderColor: "#9a6700",
+          overflow: clip() ? "hidden" : "visible",
+          shadowOpacity: 0.3,
+          shadowRadius: 8,
+          shadowOffset: { width: 0, height: 4 },
+        }}
+      >
+        <view style={{ position: "absolute", left: -30, top: -30, width: 90, height: 90, borderRadius: 45, backgroundColor: "#bf3989" }} />
+        <Label>{clip() ? "Clipped (tap)" : "Visible (tap)"}</Label>
+      </view>
+      <image
+        src="https://picsum.photos/seed/yf/300/220"
+        style={{
+          width: 150,
+          height: 110,
+          borderTopLeftRadius: 36,
+          borderBottomRightRadius: 36,
+          backgroundColor: "#e1e4e8",
+          shadowOpacity: 0.3,
+          shadowRadius: 10,
+          shadowOffset: { width: 0, height: 6 },
+        }}
+      />
+      <view style={{ ...card, backgroundColor: "transparent", shadowOpacity: 0.5, shadowRadius: 3, shadowOffset: { width: 2, height: 2 } }}>
+        <text style={{ fontSize: 22, fontWeight: "bold", color: "#1f2328" }}>Text shadow</text>
+      </view>
+      <view style={{ width: 150, alignItems: "center" }}>
+        <text
+          style={{
+            fontSize: 15,
+            color: "#ffffff",
+            backgroundColor: "#1a7f37",
+            borderTopLeftRadius: 14,
+            borderBottomRightRadius: 14,
+            paddingHorizontal: 12,
+            paddingVertical: 6,
+          }}
+        >
+          Text corners
+        </text>
+      </view>
+    </view>
+  );
+}
+
 function App() {
-  const [tab, setTab] = createSignal<"photos" | "physics">("photos");
-  const Tab = (props: { id: "photos" | "physics"; label: string }) => (
+  const [tab, setTab] = createSignal<"photos" | "physics" | "styles">("photos");
+  const Tab = (props: { id: "photos" | "physics" | "styles"; label: string }) => (
     <view
       onPress={() => setTab(props.id)}
       style={{
@@ -145,10 +244,19 @@ function App() {
       <view style={{ flexDirection: "row", marginHorizontal: 16, marginBottom: 8, padding: 3, borderRadius: 10, backgroundColor: "#e1e4e8" }}>
         <Tab id="photos" label="Photos" />
         <Tab id="physics" label="Physics" />
+        <Tab id="styles" label="Styles" />
       </view>
-      <Show when={tab() === "photos"} fallback={<Physics />}>
-        <Photos />
-      </Show>
+      <Switch>
+        <Match when={tab() === "photos"}>
+          <Photos />
+        </Match>
+        <Match when={tab() === "physics"}>
+          <Physics />
+        </Match>
+        <Match when={tab() === "styles"}>
+          <Styles />
+        </Match>
+      </Switch>
     </view>
   );
 }
