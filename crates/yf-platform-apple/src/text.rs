@@ -5,17 +5,19 @@ use std::{cell::RefCell, ffi::c_void, ptr::NonNull};
 
 use objc2::rc::Retained;
 use objc2_core_foundation::{
-    CFAttributedString, CFDictionary, CFIndex, CFMutableAttributedString, CFNumber, CFRange,
-    CFRetained, CFString, CFType, CFURL, CGFloat, CGPoint, CGRect, CGSize,
+    CFArray, CFAttributedString, CFDictionary, CFIndex, CFMutableAttributedString, CFNumber,
+    CFRange, CFRetained, CFString, CFType, CFURL, CGFloat, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{CGColor, CGPath};
 use objc2_core_text::{
     CTFont, CTFontDescriptor, CTFontManagerRegisterFontsForURL, CTFontManagerScope,
     CTFontSymbolicTraits, CTFrame, CTFramesetter, CTLine, CTLineTruncationType, CTParagraphStyle,
     CTParagraphStyleSetting, CTParagraphStyleSpecifier, CTTextAlignment, CTTypesetter,
-    kCTFontAttributeName, kCTFontFamilyNameAttribute, kCTFontTraitsAttribute, kCTFontWeightTrait,
-    kCTForegroundColorAttributeName, kCTKernAttributeName, kCTParagraphStyleAttributeName,
-    kCTUnderlineColorAttributeName, kCTUnderlineStyleAttributeName,
+    CTWritingDirection, kCTFontAttributeName, kCTFontFamilyNameAttribute,
+    kCTFontFeatureSettingsAttribute, kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue,
+    kCTFontTraitsAttribute, kCTFontWeightTrait, kCTForegroundColorAttributeName,
+    kCTKernAttributeName, kCTParagraphStyleAttributeName, kCTUnderlineColorAttributeName,
+    kCTUnderlineStyleAttributeName,
 };
 use objc2_ui_kit::{
     UIFont, UIFontWeight, UIFontWeightBlack, UIFontWeightBold, UIFontWeightHeavy,
@@ -42,8 +44,8 @@ unsafe impl Send for CFStringKey {}
 // SAFETY: as above.
 unsafe impl Sync for CFStringKey {}
 
-/// Identifies a font: size bits, weight, family, italic.
-type FontKey = (u32, u16, Option<FontFamily>, bool);
+/// Identifies a font: size bits, weight, family, italic, OpenType features.
+type FontKey = (u32, u16, Option<FontFamily>, bool, u8);
 
 /// Caches fonts. Bounded: an app animating `fontSize` would otherwise grow
 /// it without limit.
@@ -61,6 +63,7 @@ impl FontCache {
             style.font_weight,
             style.font_family,
             style.italic,
+            style.font_variant.0,
         );
         let mut fonts = self.fonts.borrow_mut();
         if let Some(font) = fonts.get(&key) {
@@ -85,15 +88,44 @@ fn make_font(style: &ResolvedTextStyle) -> CFRetained<CTFont> {
         .font_family
         .and_then(|family| family_font(&family.name(), size, style.font_weight))
         .unwrap_or_else(|| system_font(size, style.font_weight));
-    if !style.italic {
+    let font = if style.italic {
+        let italic = CTFontSymbolicTraits::TraitItalic;
+        // SAFETY: a valid font; size 0 keeps the size, null matrix keeps it.
+        unsafe { font.copy_with_symbolic_traits(0.0, std::ptr::null(), italic, italic) }
+            // No italic face: keep the upright one, as web browsers do (they
+            // synthesize an oblique; CoreText cannot).
+            .unwrap_or(font)
+    } else {
+        font
+    };
+    with_features(font, style.font_variant)
+}
+
+/// `font` with the OpenType features of `variant` (`fontVariant`).
+fn with_features(font: CFRetained<CTFont>, variant: yf_core::FontVariant) -> CFRetained<CTFont> {
+    if variant.0 == 0 {
         return font;
     }
-    let italic = CTFontSymbolicTraits::TraitItalic;
-    // SAFETY: a valid font; size 0 keeps the size, null matrix keeps it.
-    unsafe { font.copy_with_symbolic_traits(0.0, std::ptr::null(), italic, italic) }
-        // No italic face: keep the upright one, as web browsers do (they
-        // synthesize an oblique; CoreText cannot).
-        .unwrap_or(font)
+    let one = CFNumber::new_i32(1);
+    let features: Vec<CFRetained<CFDictionary<CFString, CFType>>> = variant
+        .tags()
+        .map(|tag| {
+            let tag = CFString::from_str(tag);
+            // SAFETY: immutable CoreText constants.
+            let keys = unsafe { [kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue] };
+            CFDictionary::from_slices(&keys, &[tag.as_ref(), one.as_ref()])
+        })
+        .collect();
+    let features = CFArray::from_retained_objects(&features);
+    // SAFETY: an immutable CoreText constant.
+    let key = unsafe { kCTFontFeatureSettingsAttribute };
+    let attributes = CFDictionary::<CFString, CFType>::from_slices(&[key], &[features.as_ref()]);
+    // SAFETY: attribute values have the types CoreText documents; size 0
+    // and a null matrix keep the font's.
+    unsafe {
+        let descriptor = CTFontDescriptor::with_attributes(attributes.as_opaque());
+        font.copy_with_attributes(0.0, std::ptr::null(), Some(&descriptor))
+    }
 }
 
 /// The font of `style` as a `UIFont` (toll-free bridged with `CTFont`), for
@@ -287,6 +319,8 @@ impl CoreTextEngine {
 
 fn paragraph_style(text: &AttributedText) -> CFRetained<CTParagraphStyle> {
     let alignment = match text.align {
+        // React Native: the right side in right-to-left layouts.
+        TextAlign::Auto if text.rtl => CTTextAlignment::Right,
         TextAlign::Auto => CTTextAlignment::Natural,
         TextAlign::Left => CTTextAlignment::Left,
         TextAlign::Center => CTTextAlignment::Center,
@@ -299,11 +333,24 @@ fn paragraph_style(text: &AttributedText) -> CFRetained<CTParagraphStyle> {
         valueSize: size,
         value: NonNull::new(value.cast_mut()).expect("non-null setting"),
     };
-    let mut settings = vec![setting(
-        CTParagraphStyleSpecifier::Alignment,
-        (&raw const alignment).cast(),
-        size_of::<CTTextAlignment>(),
-    )];
+    // `writingDirection`; natural (from the content) by default.
+    let direction = match text.writing_direction {
+        None => CTWritingDirection::Natural,
+        Some(false) => CTWritingDirection::LeftToRight,
+        Some(true) => CTWritingDirection::RightToLeft,
+    };
+    let mut settings = vec![
+        setting(
+            CTParagraphStyleSpecifier::Alignment,
+            (&raw const alignment).cast(),
+            size_of::<CTTextAlignment>(),
+        ),
+        setting(
+            CTParagraphStyleSpecifier::BaseWritingDirection,
+            (&raw const direction).cast(),
+            size_of::<CTWritingDirection>(),
+        ),
+    ];
     if line_height > 0.0 {
         for spec in [
             CTParagraphStyleSpecifier::MinimumLineHeight,

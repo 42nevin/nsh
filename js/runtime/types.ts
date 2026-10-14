@@ -80,6 +80,15 @@ export interface LayoutStyle {
   columnGap?: LengthValue;
   /** Order among siblings (stable); also the native stacking order. */
   zIndex?: number;
+  /** Layout direction; inherited by default. Right to left, `left` and `right` properties mean start and end (as in React Native). */
+  direction?: "inherit" | "ltr" | "rtl";
+  /** Left in left-to-right layouts, right in right-to-left ones. */
+  start?: DimensionValue;
+  end?: DimensionValue;
+  marginStart?: DimensionValue;
+  marginEnd?: DimensionValue;
+  paddingStart?: LengthValue;
+  paddingEnd?: LengthValue;
 }
 
 /** Styles of views (and of text, images and inputs, which are views). */
@@ -98,12 +107,26 @@ export interface ViewStyle extends LayoutStyle {
   borderRightColor?: ColorValue;
   borderBottomColor?: ColorValue;
   borderLeftColor?: ColorValue;
+  borderStartWidth?: number;
+  borderEndWidth?: number;
+  borderStartColor?: ColorValue;
+  borderEndColor?: ColorValue;
   borderStyle?: "solid" | "dashed" | "dotted";
   borderRadius?: number;
   borderTopLeftRadius?: number;
   borderTopRightRadius?: number;
   borderBottomRightRadius?: number;
   borderBottomLeftRadius?: number;
+  borderTopStartRadius?: number;
+  borderTopEndRadius?: number;
+  borderBottomStartRadius?: number;
+  borderBottomEndRadius?: number;
+  /** The point `transform` acts around: keywords, percentages and lengths ("top left", "50% 0", `[10, 20]`). Default the center. */
+  transformOrigin?: string | (number | string)[];
+  /** `"hidden"`: invisible while turned away (3D rotations). */
+  backfaceVisibility?: "visible" | "hidden";
+  /** Android's material shadow (ignored on iOS, as in React Native). */
+  elevation?: number;
   shadowColor?: ColorValue;
   /** Default `{ width: 0, height: -3 }`, as in React Native. */
   shadowOffset?: { width: number; height: number };
@@ -129,6 +152,10 @@ export interface TextStyle extends ViewStyle {
   textShadowColor?: ColorValue;
   textShadowOffset?: { width: number; height: number };
   textShadowRadius?: number;
+  /** OpenType number and letter forms. */
+  fontVariant?: ("small-caps" | "oldstyle-nums" | "lining-nums" | "tabular-nums" | "proportional-nums")[];
+  /** Base direction of the text; `auto` takes it from the content. */
+  writingDirection?: "auto" | "ltr" | "rtl";
 }
 
 /** Styles of images. */
@@ -169,8 +196,124 @@ export interface AccessibilityState {
   expanded?: boolean;
 }
 
+/** A finger of a touch event (points). */
+export interface TouchPoint {
+  /** Identifies the finger while it is down. */
+  identifier: number;
+  /** Position in the view the finger went down on (`target`). */
+  locationX: number;
+  locationY: number;
+  /** Position in the surface. */
+  pageX: number;
+  pageY: number;
+  /** Id of the view the finger went down on. */
+  target: number;
+  /** Milliseconds. */
+  timestamp: number;
+}
+
+/** A touch or responder event: the finger it is about, the fingers down
+ * and those that changed (React Native's `nativeEvent`, which it also is). */
+export interface GestureResponderEvent extends TouchPoint {
+  touches: TouchPoint[];
+  changedTouches: TouchPoint[];
+  nativeEvent: GestureResponderEvent;
+  /** Touch handlers (`onTouchStart`…): views further out do not see it. */
+  stopPropagation(): void;
+}
+
+/** Raw touches and the gesture responder system (React Native semantics). */
+export interface TouchProps {
+  onTouchStart?: (e: GestureResponderEvent) => void;
+  onTouchMove?: (e: GestureResponderEvent) => void;
+  onTouchEnd?: (e: GestureResponderEvent) => void;
+  onTouchCancel?: (e: GestureResponderEvent) => void;
+  onTouchStartCapture?: (e: GestureResponderEvent) => void;
+  onTouchMoveCapture?: (e: GestureResponderEvent) => void;
+  onTouchEndCapture?: (e: GestureResponderEvent) => void;
+  onTouchCancelCapture?: (e: GestureResponderEvent) => void;
+  /** Become the responder when a finger goes down (asked from the target outwards). */
+  onStartShouldSetResponder?: (e: GestureResponderEvent) => boolean;
+  /** Become the responder when a finger moves. */
+  onMoveShouldSetResponder?: (e: GestureResponderEvent) => boolean;
+  /** As above, asked from the outside in, before the bubbling ones. */
+  onStartShouldSetResponderCapture?: (e: GestureResponderEvent) => boolean;
+  onMoveShouldSetResponderCapture?: (e: GestureResponderEvent) => boolean;
+  /** This view is the responder now. Return true to keep native scroll views from taking the touches. */
+  onResponderGrant?: (e: GestureResponderEvent) => boolean | void;
+  /** Another view is the responder and would not let go. */
+  onResponderReject?: (e: GestureResponderEvent) => void;
+  onResponderStart?: (e: GestureResponderEvent) => void;
+  onResponderMove?: (e: GestureResponderEvent) => void;
+  onResponderEnd?: (e: GestureResponderEvent) => void;
+  /** The last finger lifted. */
+  onResponderRelease?: (e: GestureResponderEvent) => void;
+  /** Another view (or a native gesture) took the touches. */
+  onResponderTerminate?: (e: GestureResponderEvent) => void;
+  /** Another view wants the touches: return false to keep them (default true). */
+  onResponderTerminationRequest?: (e: GestureResponderEvent) => boolean;
+}
+
+export type AutoComplete =
+  | "off"
+  | "username"
+  | "password"
+  | "current-password"
+  | "new-password"
+  | "one-time-code"
+  | "sms-otp"
+  | "email"
+  | "tel"
+  | "name"
+  | "given-name"
+  | "family-name"
+  | "additional-name"
+  | "nickname"
+  | "organization"
+  | "street-address"
+  | "address-line1"
+  | "address-line2"
+  | "address-level1"
+  | "address-level2"
+  | "postal-code"
+  | "country"
+  | "cc-number"
+  | "cc-exp"
+  | "cc-csc"
+  | "cc-name"
+  | "url"
+  | "birthdate-full";
+
+export type TextContentType =
+  | "none"
+  | "username"
+  | "password"
+  | "newPassword"
+  | "oneTimeCode"
+  | "emailAddress"
+  | "telephoneNumber"
+  | "name"
+  | "givenName"
+  | "middleName"
+  | "familyName"
+  | "nickname"
+  | "organizationName"
+  | "fullStreetAddress"
+  | "streetAddressLine1"
+  | "streetAddressLine2"
+  | "addressCity"
+  | "addressState"
+  | "postalCode"
+  | "countryName"
+  | "creditCardNumber"
+  | "creditCardExpiration"
+  | "creditCardSecurityCode"
+  | "creditCardName"
+  | "URL"
+  | "birthdate";
+
 /** Props every host element accepts. */
-export interface CommonProps {
+export interface CommonProps extends TouchProps {
   ref?: YNode | ((node: YNode) => void);
   children?: JSX.Element;
   /** Touch handling of the view and its children (React Native semantics). */
@@ -179,6 +322,10 @@ export interface CommonProps {
   hitSlop?: number | { top?: number; right?: number; bottom?: number; left?: number };
   /** Opacity while pressed (native, no JS round trip). */
   activeOpacity?: number;
+  /** Milliseconds before a press becomes a long press (default 500). */
+  delayLongPress?: number;
+  /** Android's ripple while pressed (ignored elsewhere). */
+  android_ripple?: { color?: ColorValue; borderless?: boolean; radius?: number; foreground?: boolean };
   testID?: string;
   onPress?: () => void;
   onLongPress?: () => void;
@@ -317,6 +464,15 @@ export interface InputProps extends CommonProps {
   placeholder?: string;
   placeholderTextColor?: ColorValue;
   selectionColor?: ColorValue;
+  /** Controlled selection (UTF-16 units; `end` defaults to `start`, a caret). */
+  selection?: { start: number; end?: number };
+  onSelectionChange?: (e: { start: number; end: number }) => void;
+  /** Before the text changes: `key` is the typed text, `Backspace` or `Enter`. */
+  onKeyPress?: (e: { key: string }) => void;
+  /** What the input holds, for autofill (React Native's values, e.g. "username", "current-password", "new-password", "one-time-code", "email", "tel", "postal-code", "cc-number", "off"). */
+  autoComplete?: AutoComplete;
+  /** iOS names of the same (`autoComplete` covers both platforms). */
+  textContentType?: TextContentType;
   secureTextEntry?: boolean;
   keyboardType?: "default" | "number-pad" | "numeric" | "decimal-pad" | "email-address" | "phone-pad" | "url";
   returnKeyType?: "default" | "done" | "go" | "next" | "search" | "send";
@@ -362,4 +518,47 @@ export declare namespace JSX {
   }
   // Used by solid-js's own types.
   interface HTMLAttributes<T> {}
+}
+
+/** The state of a pan gesture (React Native's `PanResponderGestureState`). */
+export interface PanResponderGestureState {
+  stateID: number;
+  /** Latest position of the touches' centroid (surface points). */
+  moveX: number;
+  moveY: number;
+  /** Where the centroid was when the responder was granted. */
+  x0: number;
+  y0: number;
+  /** Distance moved since the grant. */
+  dx: number;
+  dy: number;
+  /** Velocity (points per millisecond). */
+  vx: number;
+  vy: number;
+  numberActiveTouches: number;
+}
+
+type PanHandler<R = void> = (e: GestureResponderEvent, gestureState: PanResponderGestureState) => R;
+
+/** `PanResponder.create` callbacks. */
+export interface PanResponderCallbacks {
+  onStartShouldSetPanResponder?: PanHandler<boolean>;
+  onStartShouldSetPanResponderCapture?: PanHandler<boolean>;
+  onMoveShouldSetPanResponder?: PanHandler<boolean>;
+  onMoveShouldSetPanResponderCapture?: PanHandler<boolean>;
+  onPanResponderGrant?: PanHandler;
+  onPanResponderReject?: PanHandler;
+  onPanResponderStart?: PanHandler;
+  onPanResponderMove?: PanHandler;
+  onPanResponderEnd?: PanHandler;
+  onPanResponderRelease?: PanHandler;
+  onPanResponderTerminate?: PanHandler;
+  onPanResponderTerminationRequest?: PanHandler<boolean>;
+  /** Keep native scroll views from taking the touches (default true). */
+  onShouldBlockNativeResponder?: PanHandler<boolean>;
+}
+
+/** What `PanResponder.create` returns: spread `panHandlers` on a view. */
+export interface PanResponderInstance {
+  panHandlers: TouchProps;
 }

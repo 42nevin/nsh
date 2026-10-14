@@ -13,6 +13,7 @@ import {
   children as resolveChildren,
   createContext,
   createMemo,
+  createRenderEffect,
   createRoot,
   createSignal,
   getOwner,
@@ -24,7 +25,18 @@ import {
   useContext,
 } from "solid-js";
 import { createRenderer } from "solid-js/universal";
-import type { JSX, ScrollBehaviorProps, StyleProp, ViewProps, ViewStyle } from "./types";
+import type {
+  GestureResponderEvent,
+  JSX,
+  PanResponderCallbacks,
+  PanResponderGestureState,
+  PanResponderInstance,
+  ScrollBehaviorProps,
+  StyleProp,
+  TouchPoint,
+  ViewProps,
+  ViewStyle,
+} from "./types";
 
 export type * from "./types";
 
@@ -77,6 +89,11 @@ export class YNode {
   /** Focuses an `<input>` (shows the keyboard). */
   focus(): void {
     command(this.id, "focus");
+  }
+
+  /** Inputs: selects `start..end` (UTF-16 units; a caret without `end`). */
+  setSelection(start: number, end: number = start): void {
+    command(this.id, "setSelection", { start, end });
   }
 
   /** Unfocuses an `<input>`. */
@@ -496,6 +513,23 @@ const renderer = createRenderer<YNode>({
   setProperty(node: YNode, name: string, value: any) {
     if (name.charCodeAt(0) === 111 /* o */ && name.charCodeAt(1) === 110 /* n */ && name.length > 2) {
       const handlers = node.handlers ?? (node.handlers = {});
+      if (touchProps.has(name)) {
+        // Touch and responder handlers live in JS; the native view only
+        // needs to know that touches on it matter (`onTouch`).
+        const before = listensToTouches(handlers);
+        if (typeof value === "function") {
+          handlers[name] = value;
+          listening.set(node.id, new WeakRef(node));
+        } else {
+          delete handlers[name];
+        }
+        const after = listensToTouches(handlers);
+        if (before !== after) {
+          ops.push(OP_SET_PROP, node.id, "onTouch", after);
+          schedule();
+        }
+        return;
+      }
       if (typeof value === "function") {
         handlers[name] = value;
         listening.set(node.id, new WeakRef(node));
@@ -728,6 +762,8 @@ interface Environment {
   keyboard: { height: number; duration: number };
   colorScheme: "light" | "dark";
   fontScale: number;
+  /** The user's language is written right to left. */
+  rtl: boolean;
 }
 
 const [environment, setEnvironment] = createSignal<Environment>((globalThis as any).__yf_env_value, {
@@ -763,6 +799,43 @@ export const keyboard: Accessor<Environment["keyboard"]> = parts[2];
 export const colorScheme: Accessor<Environment["colorScheme"]> = parts[3];
 /** The user's preferred text size relative to the default (reactive). */
 export const fontScale: Accessor<number> = parts[4];
+
+// --- Right to left ------------------------------------------------------------
+
+const [allowRTL, setAllowRTL] = createSignal(true);
+const [forceRTL, setForceRTL] = createSignal(false);
+const isRTL = createRoot(() => {
+  const rtl = createMemo(() => (allowRTL() && environment().rtl) || forceRTL());
+  // The surface's direction; the core lays every view out by it.
+  createRenderEffect(() => {
+    ops.push(OP_SET_PROP, 1, "layoutDirectionRtl", rtl());
+    schedule();
+  });
+  return rtl;
+});
+
+/** Right-to-left layout (React Native's `I18nManager`). Right to left,
+ * rows run from the right and `left` / `right` style properties mean start
+ * and end. Changes apply at once (no restart). */
+export const I18nManager = {
+  /** Whether the app lays out right to left (reactive). */
+  get isRTL(): boolean {
+    return isRTL();
+  },
+  /** `left` and `right` swap right to left (always, as React Native's default). */
+  doLeftAndRightSwapInRTL: true as const,
+  /** Follow right-to-left languages (default true). */
+  allowRTL(allow: boolean): void {
+    setAllowRTL(allow);
+  },
+  /** Lay out right to left whatever the language. */
+  forceRTL(force: boolean): void {
+    setForceRTL(force);
+  },
+  getConstants(): { isRTL: boolean; doLeftAndRightSwapInRTL: boolean } {
+    return { isRTL: isRTL(), doLeftAndRightSwapInRTL: true };
+  },
+};
 
 // --- Pressable --------------------------------------------------------------
 
@@ -1573,8 +1646,302 @@ export function SectionList<S extends Section<unknown>>(props: SectionListProps<
 
 (globalThis as any).__yf_list = (id: number, flat: number[]) => lists.get(id)?.(flat);
 
+// --- Touches and the gesture responder system ------------------------------
+//
+// Native views whose node has a touch or responder handler listen to
+// `onTouch`; their touches (and those on views inside them) arrive here with
+// the path of listening views from the target outwards. Handlers then run
+// as in React Native: touch handlers capture inwards and bubble outwards,
+// and the responder is negotiated with the `…ShouldSetResponder` handlers.
+
+const touchProps = new Set([
+  "onTouchStart",
+  "onTouchMove",
+  "onTouchEnd",
+  "onTouchCancel",
+  "onTouchStartCapture",
+  "onTouchMoveCapture",
+  "onTouchEndCapture",
+  "onTouchCancelCapture",
+  "onStartShouldSetResponder",
+  "onMoveShouldSetResponder",
+  "onStartShouldSetResponderCapture",
+  "onMoveShouldSetResponderCapture",
+  "onResponderGrant",
+  "onResponderReject",
+  "onResponderStart",
+  "onResponderMove",
+  "onResponderEnd",
+  "onResponderRelease",
+  "onResponderTerminate",
+  "onResponderTerminationRequest",
+]);
+
+function listensToTouches(handlers: Record<string, Handler>): boolean {
+  for (const name in handlers) if (touchProps.has(name)) return true;
+  return false;
+}
+
+interface NativeTouch extends TouchPoint {
+  path: number[];
+  changed: boolean;
+}
+
+interface NativeTouches {
+  phase: "start" | "move" | "end" | "cancel";
+  timestamp: number;
+  points: NativeTouch[];
+}
+
+/** Listening views around each finger, innermost first. */
+const touchPaths = new Map<number, YNode[]>();
+let responder: YNode | null = null;
+/** The responder keeps native scroll views from taking the touches. */
+let responderBlocks = false;
+
+type TouchEventImpl = GestureResponderEvent & { stopped: boolean };
+
+function touchEvent(about: TouchPoint, touches: TouchPoint[], changed: TouchPoint[]): TouchEventImpl {
+  const e = {
+    identifier: about.identifier,
+    locationX: about.locationX,
+    locationY: about.locationY,
+    pageX: about.pageX,
+    pageY: about.pageY,
+    target: about.target,
+    timestamp: about.timestamp,
+    touches,
+    changedTouches: changed,
+    stopped: false,
+    stopPropagation() {
+      e.stopped = true;
+    },
+  } as TouchEventImpl;
+  e.nativeEvent = e;
+  return e;
+}
+
+function call(node: YNode, name: string, e: GestureResponderEvent): unknown {
+  const handler = node.handlers?.[name] as ((e: GestureResponderEvent) => unknown) | undefined;
+  return handler?.(e);
+}
+
+/** `name` on `path` (innermost first): capture outside in, then bubble. */
+function dispatchTwoPhase(path: YNode[], name: string, e: TouchEventImpl) {
+  for (let i = path.length - 1; i >= 0 && !e.stopped; i--) call(path[i], name + "Capture", e);
+  for (let i = 0; i < path.length && !e.stopped; i++) call(path[i], name, e);
+}
+
+function isAncestor(node: YNode, of: YNode): boolean {
+  for (let n: YNode | null = of; n !== null; n = n.parent) if (n === node) return true;
+  return false;
+}
+
+/** Asks `path` whether a view wants to become the responder (`kind` is
+ * "onStartShouldSetResponder" or "onMoveShouldSetResponder"), from the
+ * views around both the target and the current responder, the responder
+ * itself excluded. */
+function negotiate(kind: string, path: YNode[], e: TouchEventImpl) {
+  let from = 0;
+  if (responder !== null) {
+    while (from < path.length && !isAncestor(path[from], responder)) from++;
+    if (path[from] === responder) from++;
+  }
+  let wanting: YNode | null = null;
+  for (let i = path.length - 1; i >= from && wanting === null; i--) {
+    if (call(path[i], kind + "Capture", e) === true) wanting = path[i];
+  }
+  for (let i = from; i < path.length && wanting === null; i++) {
+    if (call(path[i], kind, e) === true) wanting = path[i];
+  }
+  if (wanting === null || wanting === responder) return;
+  if (responder !== null) {
+    const handler = responder.handlers?.onResponderTerminationRequest as ((e: GestureResponderEvent) => boolean) | undefined;
+    if (handler && handler(e) === false) {
+      call(wanting, "onResponderReject", e);
+      return;
+    }
+    call(responder, "onResponderTerminate", e);
+  }
+  grant(wanting, e);
+}
+
+function grant(node: YNode, e: GestureResponderEvent) {
+  responder = node;
+  const block = call(node, "onResponderGrant", e) === true;
+  if (block) {
+    command(node.id, "setJsResponder", true);
+  } else if (responderBlocks) {
+    command(1, "clearJsResponder");
+  }
+  responderBlocks = block;
+}
+
+function releaseResponder() {
+  responder = null;
+  if (responderBlocks) {
+    responderBlocks = false;
+    command(1, "clearJsResponder");
+  }
+}
+
+function onTouch(native: NativeTouches) {
+  const { phase, points } = native;
+  for (const p of points) {
+    if (phase === "start" && p.changed) {
+      const path: YNode[] = [];
+      for (const id of p.path) {
+        const node = listening.get(id)?.deref();
+        if (node) path.push(node);
+      }
+      touchPaths.set(p.identifier, path);
+    }
+  }
+  const lifted = phase === "end" || phase === "cancel";
+  const touches = lifted ? points.filter((p) => !p.changed) : points;
+  const changed = points.filter((p) => p.changed);
+  if (changed.length === 0) return;
+  const about = changed[0];
+  const path = touchPaths.get(about.identifier) ?? [];
+  const e = touchEvent(about, touches, changed);
+  const raw = { start: "onTouchStart", move: "onTouchMove", end: "onTouchEnd", cancel: "onTouchCancel" }[phase];
+  dispatchTwoPhase(path, raw, e);
+  e.stopped = false;
+  if (phase === "start") negotiate("onStartShouldSetResponder", path, e);
+  else if (phase === "move") negotiate("onMoveShouldSetResponder", path, e);
+  if (responder !== null) {
+    if (phase === "cancel") {
+      call(responder, "onResponderTerminate", e);
+      releaseResponder();
+    } else {
+      call(responder, phase === "start" ? "onResponderStart" : phase === "move" ? "onResponderMove" : "onResponderEnd", e);
+      if (phase === "end" && touches.length === 0) {
+        const node = responder;
+        releaseResponder();
+        call(node, "onResponderRelease", e);
+      }
+    }
+  }
+  if (lifted) for (const p of changed) touchPaths.delete(p.identifier);
+}
+
+let panStates = 0;
+
+/** Pan gestures on top of the responder system (React Native's
+ * `PanResponder`). */
+export const PanResponder = {
+  create(config: PanResponderCallbacks): PanResponderInstance {
+    const gs: PanResponderGestureState = {
+      stateID: ++panStates,
+      moveX: 0,
+      moveY: 0,
+      x0: 0,
+      y0: 0,
+      dx: 0,
+      dy: 0,
+      vx: 0,
+      vy: 0,
+      numberActiveTouches: 0,
+    };
+    // The centroid and time of the last update, and the touches it had.
+    let lastX = 0;
+    let lastY = 0;
+    let lastTime = 0;
+    let lastCount = 0;
+    const centroid = (touches: TouchPoint[]) => {
+      let x = 0;
+      let y = 0;
+      for (const t of touches) {
+        x += t.pageX;
+        y += t.pageY;
+      }
+      const n = Math.max(1, touches.length);
+      return [x / n, y / n];
+    };
+    const reset = (e: GestureResponderEvent) => {
+      const [x, y] = centroid(e.touches);
+      Object.assign(gs, { moveX: x, moveY: y, x0: x, y0: y, dx: 0, dy: 0, vx: 0, vy: 0 });
+      gs.numberActiveTouches = e.touches.length;
+      lastX = x;
+      lastY = y;
+      lastTime = e.timestamp;
+      lastCount = e.touches.length;
+    };
+    const update = (e: GestureResponderEvent) => {
+      if (e.timestamp === lastTime && e.touches.length === lastCount) return;
+      const [x, y] = centroid(e.touches);
+      gs.numberActiveTouches = e.touches.length;
+      // A finger went down or up: the centroid jumps, which is no movement.
+      if (e.touches.length === lastCount) {
+        const dt = Math.max(1, e.timestamp - lastTime);
+        gs.dx += x - lastX;
+        gs.dy += y - lastY;
+        // Smoothed over a few samples.
+        gs.vx = gs.vx * 0.3 + ((x - lastX) / dt) * 0.7;
+        gs.vy = gs.vy * 0.3 + ((y - lastY) / dt) * 0.7;
+      }
+      gs.moveX = x;
+      gs.moveY = y;
+      lastX = x;
+      lastY = y;
+      lastTime = e.timestamp;
+      lastCount = e.touches.length;
+    };
+    return {
+      panHandlers: {
+        onStartShouldSetResponderCapture: (e) => {
+          if (e.touches.length === 1) reset(e);
+          gs.numberActiveTouches = e.touches.length;
+          return config.onStartShouldSetPanResponderCapture?.(e, gs) ?? false;
+        },
+        onStartShouldSetResponder: (e) => config.onStartShouldSetPanResponder?.(e, gs) ?? false,
+        onMoveShouldSetResponderCapture: (e) => {
+          update(e);
+          return config.onMoveShouldSetPanResponderCapture?.(e, gs) ?? false;
+        },
+        onMoveShouldSetResponder: (e) => {
+          update(e);
+          return config.onMoveShouldSetPanResponder?.(e, gs) ?? false;
+        },
+        onResponderGrant: (e) => {
+          gs.x0 = gs.moveX = lastX = centroid(e.touches)[0];
+          gs.y0 = gs.moveY = lastY = centroid(e.touches)[1];
+          gs.dx = gs.dy = gs.vx = gs.vy = 0;
+          lastTime = e.timestamp;
+          lastCount = e.touches.length;
+          config.onPanResponderGrant?.(e, gs);
+          return config.onShouldBlockNativeResponder?.(e, gs) ?? true;
+        },
+        onResponderReject: (e) => config.onPanResponderReject?.(e, gs),
+        onResponderStart: (e) => {
+          update(e);
+          config.onPanResponderStart?.(e, gs);
+        },
+        onResponderMove: (e) => {
+          update(e);
+          config.onPanResponderMove?.(e, gs);
+        },
+        onResponderEnd: (e) => {
+          update(e);
+          config.onPanResponderEnd?.(e, gs);
+        },
+        onResponderRelease: (e) => {
+          config.onPanResponderRelease?.(e, gs);
+          gs.stateID = ++panStates;
+        },
+        onResponderTerminate: (e) => {
+          config.onPanResponderTerminate?.(e, gs);
+          gs.stateID = ++panStates;
+        },
+        onResponderTerminationRequest: (e) => config.onPanResponderTerminationRequest?.(e, gs) ?? true,
+      },
+    };
+  },
+};
+
 // Called by the engine for native input events.
 (globalThis as any).__yf_dispatch = (id: number, name: string, payload: unknown) => {
+  if (name === "onTouch") return onTouch(payload as NativeTouches);
   const node = listening.get(id)?.deref();
   const handler = node?.handlers?.[name];
   if (handler) handler(payload);

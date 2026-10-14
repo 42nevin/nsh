@@ -1,4 +1,5 @@
 import { createSignal, For } from "solid-js";
+import { createNativeValue, I18nManager, List } from "yf";
 
 const card = {
   width: 150,
@@ -10,6 +11,92 @@ const card = {
 
 function Label(props: { children: string }) {
   return <text style={{ fontSize: 13, fontWeight: "600", color: "#1f2328" }}>{props.children}</text>;
+}
+
+/** Two faces back to back: each hides while turned away. */
+function FlipCard() {
+  const angle = createNativeValue(0);
+  let flipped = false;
+  const flip = () => {
+    flipped = !flipped;
+    angle.timing(flipped ? 180 : 0, { duration: 500, easing: "easeInOut" });
+  };
+  const face = { ...card, position: "absolute", left: 0, top: 0, borderRadius: 14, backfaceVisibility: "hidden" } as const;
+  return (
+    <view onPress={flip} style={{ width: 150, height: 110 }}>
+      <view style={{ ...face, backgroundColor: "#ddf4ff", transform: [{ perspective: 600 }, { rotateY: angle }] }}>
+        <Label>Front (tap)</Label>
+      </view>
+      <view
+        style={{
+          ...face,
+          backgroundColor: "#fff8c5",
+          transform: [{ perspective: 600 }, { rotateY: angle.interpolate({ inputRange: [0, 180], outputRange: [180, 360] }) }],
+        }}
+      >
+        <Label>Back: backfaceVisibility</Label>
+      </view>
+    </view>
+  );
+}
+
+/** Rows, `marginStart` and text under a right-to-left layout. */
+function RightToLeft() {
+  return (
+    <view style={{ width: "100%", gap: 10, padding: 14, backgroundColor: "#ffffff", borderRadius: 12 }}>
+      <view style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <text style={{ flex: 1, fontWeight: "600" }}>{I18nManager.isRTL ? "Right to left" : "Left to right"}</text>
+        <text
+          onPress={() => I18nManager.forceRTL(!I18nManager.isRTL)}
+          style={{ color: "#ffffff", backgroundColor: "#0969da", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, overflow: "hidden" }}
+        >
+          Flip
+        </text>
+      </view>
+      <view style={{ flexDirection: "row", gap: 8 }}>
+        <For each={["1", "2", "3"]}>
+          {(n, i) => (
+            <view
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: 8,
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: ["#fd8c73", "#54aeff", "#4ac26b"][i()],
+                marginStart: i() === 0 ? 16 : 0,
+                borderTopStartRadius: 22,
+              }}
+            >
+              <text style={{ color: "#ffffff", fontWeight: "700" }}>{n}</text>
+            </view>
+          )}
+        </For>
+      </view>
+      <text>Text aligns to the start side; the first box has marginStart 16 and a round top-start corner.</text>
+      <text style={{ fontSize: 13, color: "#6e7781" }}>A horizontal scroll view and a horizontal list start at the start side:</text>
+      <scroll horizontal showsIndicator={false} style={{ height: 40 }}>
+        <view style={{ flexDirection: "row", gap: 6, paddingHorizontal: 4 }}>
+          <For each={Array.from({ length: 12 }, (_, i) => i + 1)}>
+            {(n) => (
+              <view style={{ width: 40, height: 40, borderRadius: 6, backgroundColor: "#ddf4ff", alignItems: "center", justifyContent: "center" }}>
+                <text>{String(n)}</text>
+              </view>
+            )}
+          </For>
+        </view>
+      </scroll>
+      <List each={Array.from({ length: 30 }, (_, i) => i + 1)} horizontal estimatedItemSize={46} showsIndicator={false} style={{ height: 40 }}>
+        {(n) => (
+          <view style={{ width: 40, height: 40, marginEnd: 6, borderRadius: 6, backgroundColor: "#fff8c5", alignItems: "center", justifyContent: "center" }}>
+            <text>{String(n())}</text>
+          </view>
+        )}
+      </List>
+      <text style={{ textAlign: "left", color: "#6e7781" }}>textAlign left (the start side right to left)</text>
+      <text style={{ writingDirection: "rtl", color: "#6e7781" }}>مرحبا بالعالم — writingDirection rtl</text>
+    </view>
+  );
 }
 
 export function Styles() {
@@ -153,6 +240,40 @@ export function Styles() {
       <view style={{ ...card, backgroundColor: "#1f2328", opacity: 0.45 }}>
         <text style={{ color: "#ffffff", fontWeight: "600" }}>opacity 0.45</text>
       </view>
+      <view style={{ ...card, borderRadius: 16, elevation: 10 }}>
+        <Label>elevation 10 (Android)</Label>
+      </view>
+      <view style={{ ...card, backgroundColor: "transparent" }}>
+        <view style={{ width: 60, height: 60, borderWidth: 1, borderColor: "#d0d7de", borderStyle: "dashed", position: "absolute", left: 45, top: 15 }} />
+        <view
+          style={{
+            width: 60,
+            height: 60,
+            position: "absolute",
+            left: 45,
+            top: 15,
+            backgroundColor: "rgba(130,80,223,0.6)",
+            transformOrigin: "top left",
+            transform: [{ rotate: "30deg" }],
+          }}
+        />
+        <view style={{ position: "absolute", bottom: -18 }}>
+          <Label>transformOrigin top left</Label>
+        </view>
+      </view>
+      <FlipCard />
+      <view style={{ ...card, alignItems: "flex-start", paddingHorizontal: 16, gap: 2 }}>
+        <text style={{ fontSize: 13, color: "#6e7781" }}>Proportional / tabular</text>
+        <text style={{ fontSize: 18 }}>1,111.11</text>
+        <text style={{ fontSize: 18 }}>8,888.88</text>
+        <text style={{ fontSize: 18, fontVariant: ["tabular-nums"] }}>1,111.11</text>
+        <text style={{ fontSize: 18, fontVariant: ["tabular-nums"] }}>8,888.88</text>
+      </view>
+      <view style={{ ...card }}>
+        <text style={{ fontSize: 18, fontVariant: ["small-caps"] }}>Small Caps</text>
+        <text style={{ fontSize: 18, fontVariant: ["oldstyle-nums"] }}>Oldstyle 1234567890</text>
+      </view>
+      <RightToLeft />
     </view>
     </scroll>
   );

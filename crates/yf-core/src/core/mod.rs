@@ -21,7 +21,7 @@ use crate::{
         ResizeMode, ScreenProp, ScrollProp, Tag,
     },
     props::{AccessibilityProp, EdgeInsets, GestureValues, LayoutAnimation, ViewProps},
-    style::{EllipsizeMode, Style, TextStyle, ViewStyle},
+    style::{EllipsizeMode, Style, TextAlign, TextStyle, ViewStyle},
     text::{AttributedText, MeasureCache, ResolvedTextStyle, TextEngine, TextLayout},
 };
 
@@ -272,6 +272,12 @@ struct Node {
     events: EventMask,
     /// `zIndex`: native views are ordered by it (stable) among siblings.
     z_index: i32,
+    /// Laid out right to left (the resolved `direction`).
+    rtl: bool,
+    /// `direction`: `None` inherits.
+    direction: Option<bool>,
+    /// Start / end properties, if any.
+    logical: Option<Box<crate::style::Logical>>,
     /// Touch, accessibility and test properties; most views have none.
     props: Option<Box<ViewProps>>,
     /// Raw text content.
@@ -317,6 +323,9 @@ impl Node {
             animated: Vec::new(),
             events: EventMask::default(),
             z_index: 0,
+            rtl: false,
+            direction: None,
+            logical: None,
             props: None,
             text: String::new(),
             paragraph: Paragraph::default(),
@@ -726,7 +735,12 @@ impl<M: TextEngine> Core<M> {
                     }
                 }
                 if node.events != before {
+                    let relink = node.inline && (pressable(before) || pressable(node.events));
                     self.mark(key, dirty::EVENTS);
+                    // Pressable spans are part of their block's text.
+                    if relink {
+                        self.mark_text_block(key);
+                    }
                 }
                 Ok(())
             }
@@ -998,6 +1012,14 @@ impl<M: TextEngine> Core<M> {
                 if horizontal {
                     style.flex_direction = taffy::FlexDirection::Row;
                     style.overflow.x = Overflow::Scroll;
+                    if node.rtl {
+                        // Laid out left to right (with the authored sides)
+                        // and mirrored by `emit_frames`: right to left, a
+                        // row would overflow to negative offsets.
+                        std::mem::swap(&mut style.padding.left, &mut style.padding.right);
+                        std::mem::swap(&mut style.border.left, &mut style.border.right);
+                        style.direction = taffy::Direction::Ltr;
+                    }
                 } else {
                     style.overflow.y = Overflow::Scroll;
                 }
@@ -1034,12 +1056,23 @@ impl<M: TextEngine> Core<M> {
         let key = self.key(id)?;
         let node = &mut self.nodes[key as usize];
         let Style {
-            layout,
-            view,
+            mut layout,
+            mut view,
             text,
             animated,
             z_index,
+            direction,
+            logical,
         } = style;
+        if key != self.root {
+            node.direction = direction;
+        }
+        node.logical = (!logical.is_empty()).then(|| Box::new(logical));
+        let rtl = self.resolved_rtl(key);
+        crate::style::apply_direction(&mut layout, &mut view, &logical, rtl);
+        let node = &mut self.nodes[key as usize];
+        let flipped = node.rtl != rtl;
+        node.rtl = rtl;
         let view_changed = node.view_style != view;
         let text_changed = node.text_style != text;
         let anim_changed = node.animated != animated;
@@ -1069,7 +1102,7 @@ impl<M: TextEngine> Core<M> {
         if flags != 0 {
             self.mark(key, flags);
         }
-        if text_changed {
+        if text_changed || flipped {
             match self.nodes[key as usize].kind {
                 Kind::Text => self.mark_text_block(key),
                 Kind::Input => {
@@ -1079,7 +1112,97 @@ impl<M: TextEngine> Core<M> {
                 _ => {}
             }
         }
+        if flipped {
+            self.update_children_direction(key);
+        }
         Ok(())
+    }
+
+    /// The direction `key` lays out in: its own, else its parent's (the
+    /// root's while detached).
+    fn resolved_rtl(&self, key: Key) -> bool {
+        let node = &self.nodes[key as usize];
+        if let Some(rtl) = node.direction {
+            return rtl;
+        }
+        match node.parent {
+            NO_KEY => key != self.root && self.nodes[self.root as usize].rtl,
+            parent => self.nodes[parent as usize].rtl,
+        }
+    }
+
+    /// Re-resolves the direction of `key` (moved, or its parent's changed)
+    /// and of the nodes inheriting it.
+    fn update_direction(&mut self, key: Key) {
+        let rtl = self.resolved_rtl(key);
+        if self.nodes[key as usize].rtl == rtl {
+            return;
+        }
+        self.flip_direction(key, rtl);
+        self.update_children_direction(key);
+    }
+
+    fn update_children_direction(&mut self, key: Key) {
+        let children = self.nodes[key as usize].children.clone();
+        for child in children {
+            self.update_direction(child);
+        }
+    }
+
+    /// Lays `key` out in the other direction: its left and right properties
+    /// trade places (their start / end ones with them).
+    fn flip_direction(&mut self, key: Key, rtl: bool) {
+        let direction = if rtl {
+            taffy::Direction::Rtl
+        } else {
+            taffy::Direction::Ltr
+        };
+        let node = &mut self.nodes[key as usize];
+        node.rtl = rtl;
+        let mut view = node.view_style;
+        let kind = node.kind;
+        if let Some(base) = node.base_layout.as_deref_mut() {
+            crate::style::swap_sides(base, &mut view);
+            base.direction = direction;
+            node.view_style = view;
+            self.sync_layout_style(key);
+        } else if let Some(l) = node.layout {
+            let mut layout = self.layout.style(l).expect("taffy style").clone();
+            crate::style::swap_sides(&mut layout, &mut view);
+            layout.direction = direction;
+            self.nodes[key as usize].view_style = view;
+            self.layout.set_style(l, layout).expect("taffy style");
+            self.needs_layout = true;
+        }
+        self.mark(key, dirty::VIEW);
+        let node = &mut self.nodes[key as usize];
+        let id = node.id;
+        if let Some(scroll) = node.scroll.as_mut()
+            && scroll.horizontal
+        {
+            // Back to the start side: the right end right to left (once the
+            // content is known again).
+            scroll.content = None;
+            if !rtl {
+                self.commands.push((
+                    id,
+                    Command::ScrollTo {
+                        x: 0.0,
+                        y: 0.0,
+                        animated: false,
+                    },
+                ));
+            }
+            self.mark(key, dirty::SCROLL);
+        }
+        match kind {
+            Kind::Text => self.mark_text_block(key),
+            Kind::Input => {
+                self.measure_input(key);
+                self.mark(key, dirty::INPUT);
+            }
+            _ => {}
+        }
     }
 
     fn set_prop(&mut self, id: NodeId, prop: Prop) -> Result<(), ApplyError> {
@@ -1302,6 +1425,29 @@ impl<M: TextEngine> Core<M> {
                     flags |= dirty::VIEW_PROPS;
                 }
             }
+            Prop::LayoutDirection(rtl) => {
+                // The surface's direction (the root's): JS's `I18nManager`.
+                if key == self.root && node.direction != Some(rtl) {
+                    node.direction = Some(rtl);
+                    self.mount.push(MountItem::LayoutDirection { rtl });
+                    self.update_direction(key);
+                }
+                return Ok(());
+            }
+            Prop::LongPressDelay(value) => {
+                let props = node.props.get_or_insert_default();
+                if props.long_press_delay != value {
+                    props.long_press_delay = value;
+                    flags |= dirty::VIEW_PROPS;
+                }
+            }
+            Prop::Ripple(value) => {
+                let props = node.props.get_or_insert_default();
+                if props.ripple != value {
+                    props.ripple = value;
+                    flags |= dirty::VIEW_PROPS;
+                }
+            }
             Prop::ActiveOpacity(value) => {
                 let props = node.props.get_or_insert_default();
                 if props.active_opacity != value {
@@ -1490,6 +1636,17 @@ impl<M: TextEngine> Core<M> {
                         c.selection_color = color;
                         false
                     }
+                    Prop::AutoFill(fill) => {
+                        c.auto_fill = fill;
+                        false
+                    }
+                    Prop::Selection(start, end) => {
+                        // Applied after the batch's value.
+                        let id = node.id;
+                        self.commands
+                            .push((id, Command::SetSelection { start, end }));
+                        return Ok(());
+                    }
                     _ => return Ok(()),
                 };
                 flags |= dirty::INPUT;
@@ -1543,6 +1700,7 @@ impl<M: TextEngine> Core<M> {
         self.set_inline(child, inline);
         self.nodes[child as usize].parent = parent;
         self.nodes[parent as usize].children.insert(pos, child);
+        self.update_direction(child);
 
         if inline {
             self.mark_text_block(parent);
@@ -1935,6 +2093,7 @@ impl<M: TextEngine> Core<M> {
                         shows_indicator: scroll.shows_indicator,
                         scroll_value: scroll.scroll_value,
                         keyboard_dismiss: scroll.keyboard_dismiss,
+                        mirrored: node.kind == Kind::List && scroll.horizontal && node.rtl,
                     });
                 }
                 if flags & dirty::SCROLL_BEHAVIOR != 0 {
@@ -2000,7 +2159,9 @@ impl<M: TextEngine> Core<M> {
                         ResolvedTextStyle::default().inherit(&node.text_style),
                         node.paragraph.font_multiplier(self.font_scale),
                     );
-                    config.align = node.text_style.text_align.unwrap_or_default();
+                    config.align =
+                        directed_align(node.text_style.text_align.unwrap_or_default(), node.rtl);
+                    config.rtl = node.text_style.writing_direction.unwrap_or(node.rtl);
                     self.mount.push(MountItem::Input {
                         id,
                         config: Box::new(config),
@@ -2038,7 +2199,9 @@ impl<M: TextEngine> Core<M> {
     fn rebuild_text(&mut self, key: Key) -> bool {
         let node = &self.nodes[key as usize];
         let mut text = AttributedText {
-            align: node.text_style.text_align.unwrap_or_default(),
+            align: directed_align(node.text_style.text_align.unwrap_or_default(), node.rtl),
+            writing_direction: node.text_style.writing_direction,
+            rtl: node.rtl,
             max_lines: node.paragraph.lines,
             ellipsize: node.paragraph.ellipsize,
             shadow: node.text_style.shadow(),
@@ -2076,7 +2239,18 @@ impl<M: TextEngine> Core<M> {
             let child = &self.nodes[c as usize];
             match child.kind {
                 Kind::RawText => out.push(&child.text, style),
-                Kind::Text => self.collect_text(c, style.inherit(&child.text_style), out),
+                Kind::Text => {
+                    let start = out.len_utf16();
+                    self.collect_text(c, style.inherit(&child.text_style), out);
+                    if pressable(child.events) {
+                        out.links.push(crate::text::TextLink {
+                            start,
+                            end: out.len_utf16(),
+                            node: child.id,
+                            events: child.events,
+                        });
+                    }
+                }
                 _ => {}
             }
         }
@@ -2419,12 +2593,25 @@ impl<M: TextEngine> Core<M> {
             return;
         }
         let l = self.layout.layout(layout).expect("taffy layout");
-        let frame = Rect {
+        let mut frame = Rect {
             x: l.location.x,
             y: l.location.y,
             width: l.size.width,
             height: l.size.height,
         };
+        // Children of a right-to-left horizontal scroll view: mirrored in
+        // its content.
+        if let Some(parent) = self.nodes.get(node.parent as usize)
+            && parent.rtl
+            && let Some(ScrollState {
+                horizontal: true,
+                content: Some(content),
+                ..
+            }) = parent.scroll.as_deref()
+            && parent.kind == Kind::Scroll
+        {
+            frame.x = content.width - frame.x - frame.width;
+        }
         self.set_frame(key, frame);
         let kind = self.nodes[key as usize].kind;
         if kind == Kind::Input {
@@ -2492,12 +2679,32 @@ impl<M: TextEngine> Core<M> {
 
     fn set_scroll_content(&mut self, key: Key, size: Size) {
         let node = &mut self.nodes[key as usize];
-        let id = node.id;
+        let (id, rtl, kind, viewport) = (node.id, node.rtl, node.kind, node.frame.width);
         if let Some(scroll) = node.scroll.as_mut()
             && scroll.content != Some(size)
         {
-            scroll.content = Some(size);
+            let old = scroll.content.replace(size);
             self.mount.push(MountItem::ScrollContent { id, size });
+            // Right to left, a horizontal scroll view starts at its right
+            // end and keeps its distance from it as the content changes.
+            if kind == Kind::Scroll && scroll.horizontal && rtl {
+                match old {
+                    None => self.commands.push((
+                        id,
+                        Command::ScrollTo {
+                            x: (size.width - viewport).max(0.0),
+                            y: 0.0,
+                            animated: false,
+                        },
+                    )),
+                    Some(old) if old.width != size.width => self.mount.push(MountItem::ScrollBy {
+                        id,
+                        dx: size.width - old.width,
+                        dy: 0.0,
+                    }),
+                    Some(_) => {}
+                }
+            }
         }
     }
 
@@ -2961,4 +3168,26 @@ fn root_style(viewport: Size) -> taffy::Style {
         },
         ..Style::default().layout
     }
+}
+
+/// `align` in a layout of direction `rtl`: left and right trade places
+/// right to left, as all left / right properties do.
+fn directed_align(align: TextAlign, rtl: bool) -> TextAlign {
+    match (align, rtl) {
+        (TextAlign::Left, true) => TextAlign::Right,
+        (TextAlign::Right, true) => TextAlign::Left,
+        (align, _) => align,
+    }
+}
+
+/// Whether a span with `events` takes presses (a link in its text block).
+fn pressable(events: EventMask) -> bool {
+    [
+        EventKind::Press,
+        EventKind::LongPress,
+        EventKind::PressIn,
+        EventKind::PressOut,
+    ]
+    .iter()
+    .any(|&e| events.contains(e))
 }

@@ -175,6 +175,33 @@ final class Decor extends Drawable {
         path.addPath(inner);
     }
 
+    // `transformOrigin` (fractions, or pixels) and `backfaceVisibility`.
+    float originX = 0.5f, originY = 0.5f;
+    boolean originXFraction = true, originYFraction = true;
+    boolean backfaceHidden;
+
+    /** Sets the pivot of `view`'s transform to the origin (after a resize too). */
+    void applyPivot(View view) {
+        boolean center = originXFraction && originYFraction && originX == 0.5f && originY == 0.5f;
+        if (center) {
+            if (Build.VERSION.SDK_INT >= 28 && view.isPivotSet()) view.resetPivot();
+            return;
+        }
+        view.setPivotX(originXFraction ? originX * view.getWidth() : originX);
+        view.setPivotY(originYFraction ? originY * view.getHeight() : originY);
+    }
+
+    /** Hides `view` while it is turned away, with `backfaceVisibility: hidden`. */
+    void applyBackface(View view) {
+        boolean away = false;
+        if (backfaceHidden) {
+            double rx = Math.toRadians(view.getRotationX()), ry = Math.toRadians(view.getRotationY());
+            away = Math.cos(rx) * Math.cos(ry) < 0;
+        }
+        int visibility = away ? View.INVISIBLE : View.VISIBLE;
+        if (view.getVisibility() != visibility) view.setVisibility(visibility);
+    }
+
     /** Clips `view` to the rounded shape (outline clipping where possible). */
     void clip(View view, boolean clip) {
         view.setClipToOutline(clip && (uniformRadius() || Build.VERSION.SDK_INT >= 33));

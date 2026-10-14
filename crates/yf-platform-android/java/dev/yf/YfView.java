@@ -43,6 +43,15 @@ public class YfView extends FrameLayout {
     private final float density;
     private final Box root;
     private final Mounter mounter;
+    private final TouchTracker touches;
+
+    @Override
+    public boolean dispatchTouchEvent(android.view.MotionEvent e) {
+        boolean tracking = touches.onTouch(e);
+        // A tracked finger went down: hear the rest of the gesture even if
+        // no view takes it.
+        return super.dispatchTouchEvent(e) || tracking;
+    }
     private final Handler main = new Handler(Looper.getMainLooper());
     private ErrorListener errorListener;
     /** Where `asset:/…` files come from: an http base, a directory, or APK assets. */
@@ -64,6 +73,8 @@ public class YfView extends FrameLayout {
         mounter = new Mounter(this, new Images(this::readAsset));
         root = mounter.root;
         addView(root, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+        touches = new TouchTracker(mounter, this);
+        mounter.touchTrackers.add(touches);
         setClipChildren(false);
         // Holds focus when no input does (see InputBox.blur).
         setFocusable(true);
@@ -231,6 +242,7 @@ public class YfView extends FrameLayout {
         safe = new float[] {top / density, right / density, bottom / density, left / density};
         Native.environment(handle, new float[] {
             top / density, right / density, bottom / density, left / density, ime / density, 0.25f, c.fontScale,
+            android.text.TextUtils.getLayoutDirectionFromLocale(java.util.Locale.getDefault()) == LAYOUT_DIRECTION_RTL ? 1 : 0,
         }, dark);
     }
 

@@ -1,3 +1,4 @@
+import { createSignal } from "solid-js";
 import { fontScale } from "yf";
 import pacifico from "../fonts/Pacifico-Regular.ttf";
 
@@ -6,9 +7,27 @@ const LOREM =
 
 export function TextDemo() {
   const caption = { fontSize: 12, color: "#6e7781", marginTop: 10 } as const;
+  const link = { color: "#0969da", textDecorationLine: "underline" } as const;
+  const [tapped, setTapped] = createSignal("Tap a link in the sentence");
   return (
     <scroll style={{ flex: 1 }}>
       <view style={{ padding: 20, gap: 4 }}>
+        <text style={{ fontSize: 16, lineHeight: 24 }} onPress={() => setTapped("the sentence (not a link)")}>
+          {"By continuing you agree to the "}
+          <text style={link} onPress={() => setTapped("Terms of service")} onLongPress={() => setTapped("Terms (long press)")}>
+            Terms of service
+          </text>
+          {" and the "}
+          <text style={link} onPress={() => setTapped("Privacy policy")}>
+            Privacy policy
+          </text>
+          {", which mention "}
+          <text style={{ fontWeight: "700" }}>
+            nested <text style={link} onPress={() => setTapped("a link inside bold text")}>links</text> too
+          </text>
+          .
+        </text>
+        <text style={caption}>{`Pressed: ${tapped()}`}</text>
         <text style={{ fontFamily: pacifico, fontSize: 30, color: "#8250df" }}>Custom fonts</text>
         <text style={caption}>Styles</text>
         <text style={{ fontSize: 17 }}>

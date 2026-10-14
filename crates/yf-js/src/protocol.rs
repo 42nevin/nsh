@@ -10,8 +10,8 @@ use rustc_hash::FxHashSet;
 use yf_anim::{AnimOp, AnimProp, Driver, Easing, Extrapolate, MathOp, Operand, Output};
 use yf_core::{
     AccessibilityActionDef, AccessibilityProp, AccessibilityRole, AccessibilityState,
-    AccessibilityValue, AutoCapitalize, CellSlot, Checked, Color, Command, Dialog, DialogButton,
-    DialogButtonStyle, EdgeInsets, EllipsizeMode, EventKind, HeaderSlot, ImageSource,
+    AccessibilityValue, AutoCapitalize, AutoFill, CellSlot, Checked, Color, Command, Dialog,
+    DialogButton, DialogButtonStyle, EdgeInsets, EllipsizeMode, EventKind, HeaderSlot, ImageSource,
     KeyboardDismissMode, KeyboardTaps, KeyboardType, LayoutAnimation, LayoutCurve, LayoutProperty,
     LayoutTransition, ListContentStyle, LiveRegion, ModalAnimation, ModalPresentation, ModalProp,
     NativeProp, NodeId, Op, PointerEvents, Prop, ResizeMode, ReturnKeyType, ScreenAnimation,
@@ -215,6 +215,22 @@ pub(crate) fn decode<'js>(
                         })
                     }
                     "dialog" => Command::Dialog(Box::new(decode_dialog(&arg)?)),
+                    "setJsResponder" => Command::SetJsResponder {
+                        block: arg.as_bool().unwrap_or(true),
+                    },
+                    "clearJsResponder" => Command::ClearJsResponder,
+                    "setSelection" => {
+                        let field = |key: &str| {
+                            arg.as_object()
+                                .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
+                                .unwrap_or(0.0)
+                                .max(0.0) as u32
+                        };
+                        Command::SetSelection {
+                            start: field("start"),
+                            end: field("end"),
+                        }
+                    }
                     "toast" => {
                         let o = arg.as_object();
                         Command::Toast {
@@ -611,6 +627,33 @@ fn decode_prop<'js>(
         "placeholder" => Prop::Placeholder(string(&value)?),
         "placeholderTextColor" => Prop::PlaceholderColor(prop_color(&value)?),
         "selectionColor" => Prop::SelectionColor(prop_color(&value)?),
+        "autoComplete" | "textContentType" => match value.as_string() {
+            Some(s) => {
+                let text = s.to_string()?;
+                match AutoFill::parse(&text) {
+                    Some(fill) => Prop::AutoFill(fill),
+                    None => {
+                        log::warn!("{text:?} is not a supported {name} value");
+                        Prop::AutoFill(AutoFill::Default)
+                    }
+                }
+            }
+            None => Prop::AutoFill(AutoFill::Default),
+        },
+        "selection" => {
+            let field = |key: &str| {
+                value
+                    .as_object()
+                    .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
+            };
+            match field("start") {
+                Some(start) => {
+                    let start = start.max(0.0) as u32;
+                    Prop::Selection(start, field("end").map_or(start, |e| e.max(0.0) as u32))
+                }
+                None => return Ok(None),
+            }
+        }
         "secureTextEntry" => Prop::Secure(value.as_bool().unwrap_or(false)),
         "autoCorrect" => Prop::AutoCorrect(value.as_bool().unwrap_or(true)),
         "multiline" => Prop::Multiline(value.as_bool().unwrap_or(false)),
@@ -714,6 +757,38 @@ fn decode_prop<'js>(
             None => insets(&value)?,
         }),
         "activeOpacity" => Prop::ActiveOpacity(number(&value).map(|n| n.clamp(0.0, 1.0))),
+        "layoutDirectionRtl" => Prop::LayoutDirection(value.as_bool().unwrap_or(false)),
+        "delayLongPress" => Prop::LongPressDelay(number(&value).map(|n| n.max(0.0))),
+        "android_ripple" => Prop::Ripple(match value.as_object() {
+            Some(o) => {
+                let flag = |key: &str| {
+                    o.get::<_, Option<bool>>(key)
+                        .ok()
+                        .flatten()
+                        .unwrap_or(false)
+                };
+                Some(yf_core::Ripple {
+                    color: match o.get::<_, Option<String>>("color").ok().flatten() {
+                        Some(c) => Some(Color::parse(&c).ok_or_else(|| {
+                            rquickjs::Error::new_from_js_message(
+                                "value",
+                                "color",
+                                format!("invalid color {c:?}"),
+                            )
+                        })?),
+                        None => None,
+                    },
+                    borderless: flag("borderless"),
+                    radius: o
+                        .get::<_, Option<f64>>("radius")
+                        .ok()
+                        .flatten()
+                        .map(|r| r as f32),
+                    foreground: flag("foreground"),
+                })
+            }
+            None => None,
+        }),
         "testID" => Prop::TestId(opt_string(&value)?),
         "allowFontScaling" => Prop::AllowFontScaling(value.as_bool().unwrap_or(true)),
         "maxFontSizeMultiplier" => {
@@ -953,6 +1028,25 @@ fn decode_style<'js>(
     for (key, value) in entries {
         if key == "transform" {
             decode_transform(&value, &mut style, warnings)?;
+            continue;
+        }
+        if (key == "fontVariant" || key == "transformOrigin")
+            && let Some(items) = value.as_array()
+        {
+            // Arrays of names / coordinates: the string form.
+            let mut words = Vec::new();
+            for item in items.iter::<Value>() {
+                let item = item?;
+                if let Some(n) = item.as_number() {
+                    words.push(format!("{n}px"));
+                } else if let Some(s) = item.as_string() {
+                    words.push(s.to_string()?);
+                }
+            }
+            let joined = words.join(" ");
+            if let Err(e) = style.set(&key, StyleValue::Str(&joined)) {
+                warnings.warn(format!("style `{key}`: {e:?}"));
+            }
             continue;
         }
         if key == "textShadowOffset" {

@@ -9,9 +9,10 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     geometry::Size,
+    ops::{EventMask, NodeId},
     style::{
-        Color, EllipsizeMode, FontFamily, TextAlign, TextDecoration, TextShadow, TextStyle,
-        TextTransform,
+        Color, EllipsizeMode, FontFamily, FontVariant, TextAlign, TextDecoration, TextShadow,
+        TextStyle, TextTransform,
     },
 };
 
@@ -38,6 +39,8 @@ pub struct ResolvedTextStyle {
     pub decoration_color: Option<Color>,
     /// Case transform (applied by the core when building the text).
     pub transform: TextTransform,
+    /// OpenType features (`fontVariant`).
+    pub font_variant: FontVariant,
 }
 
 impl Default for ResolvedTextStyle {
@@ -57,6 +60,7 @@ impl Default for ResolvedTextStyle {
             },
             decoration_color: None,
             transform: TextTransform::None,
+            font_variant: FontVariant(0),
         }
     }
 }
@@ -76,6 +80,7 @@ impl ResolvedTextStyle {
             decoration: style.decoration.unwrap_or(self.decoration),
             decoration_color: style.decoration_color.or(self.decoration_color),
             transform: style.transform.unwrap_or(self.transform),
+            font_variant: style.font_variant.unwrap_or(self.font_variant),
         }
     }
 
@@ -89,6 +94,7 @@ impl ResolvedTextStyle {
             && self.font_family == other.font_family
             && self.italic == other.italic
             && self.letter_spacing == other.letter_spacing
+            && self.font_variant == other.font_variant
     }
 }
 
@@ -122,9 +128,44 @@ pub struct AttributedText {
     pub ellipsize: EllipsizeMode,
     /// Shadow behind the whole block (drawing only, not layout).
     pub shadow: Option<TextShadow>,
+    /// Nested `<text>` spans that take presses (they may nest).
+    pub links: Vec<TextLink>,
+    /// `writingDirection`: right to left (`Some(true)`), left to right, or
+    /// from the content (`None`).
+    pub writing_direction: Option<bool>,
+    /// The block is laid out right to left: `auto` alignment is the right
+    /// side.
+    pub rtl: bool,
+}
+
+/// A nested `<text>` span with press listeners: presses on its characters
+/// go to it rather than to the block.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextLink {
+    /// Start offset (UTF-16 units, inclusive).
+    pub start: u32,
+    /// End offset (UTF-16 units, exclusive).
+    pub end: u32,
+    /// The span's node.
+    pub node: NodeId,
+    /// Its listeners.
+    pub events: EventMask,
 }
 
 impl AttributedText {
+    /// Length of the text so far, in UTF-16 units.
+    pub fn len_utf16(&self) -> u32 {
+        self.spans.last().map_or(0, |s| s.end)
+    }
+
+    /// The innermost link containing the UTF-16 offset `index`.
+    pub fn link_at(&self, index: u32) -> Option<&TextLink> {
+        self.links
+            .iter()
+            .filter(|l| index >= l.start && index < l.end)
+            .min_by_key(|l| l.end - l.start)
+    }
+
     /// Appends `s` with `style`, merging with the previous run when the
     /// style is identical.
     pub fn push(&mut self, s: &str, style: ResolvedTextStyle) {
@@ -151,6 +192,8 @@ impl AttributedText {
     /// metrics and alignment. Decorative attributes (colors) are ignored.
     pub fn layout_eq(&self, other: &Self) -> bool {
         self.align == other.align
+            && self.writing_direction == other.writing_direction
+            && self.rtl == other.rtl
             && self.max_lines == other.max_lines
             && self.ellipsize == other.ellipsize
             && self.text == other.text
@@ -167,10 +210,11 @@ impl AttributedText {
     pub fn layout_hash(&self) -> u64 {
         let mut h = std::hash::DefaultHasher::new();
         self.text.hash(&mut h);
-        (self.align as u8, self.max_lines, self.ellipsize).hash(&mut h);
+        (self.align as u8, self.writing_direction, self.rtl).hash(&mut h);
+        (self.max_lines, self.ellipsize).hash(&mut h);
         for s in &self.spans {
             (s.start, s.end, s.style.font_weight).hash(&mut h);
-            (s.style.font_family, s.style.italic).hash(&mut h);
+            (s.style.font_family, s.style.italic, s.style.font_variant).hash(&mut h);
             s.style.font_size.to_bits().hash(&mut h);
             s.style.line_height.to_bits().hash(&mut h);
             s.style.letter_spacing.to_bits().hash(&mut h);

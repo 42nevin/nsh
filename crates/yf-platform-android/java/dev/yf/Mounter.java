@@ -15,6 +15,7 @@ import android.view.animation.AccelerateDecelerateInterpolator;
 import android.view.animation.AccelerateInterpolator;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.LinearInterpolator;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.view.inputmethod.InputMethodManager;
@@ -52,6 +53,9 @@ final class Mounter {
     private static final int NATIVE_PROPS = 23;
     private static final int STICKY_CELLS = 24;
     private static final int SCROLL_BEHAVIOR = 25;
+    private static final int LAYOUT_DIRECTION = 26;
+    /** The surface lays out right to left: native widgets mirror. */
+    boolean rtl;
 
     /** A screen's options (`encode.rs` `screen_config`). */
     static final class ScreenOptions {
@@ -96,6 +100,12 @@ final class Mounter {
     final SparseArray<View> views = new SparseArray<>();
     private final SparseArray<Dynamic> statics = new SparseArray<>();
     private final SparseLongArray events = new SparseLongArray();
+    /** Views listening to touches: the touch trackers run while there are any. */
+    int touchListeners;
+    /** One per root view (the surface, modals). */
+    final java.util.ArrayList<TouchTracker> touchTrackers = new java.util.ArrayList<>();
+    /** Scroll views a JS responder keeps from scrolling. */
+    private final java.util.ArrayList<ScrollBox> blockedScrolls = new java.util.ArrayList<>();
     /** `hitSlop` of views that have one (px: top, right, bottom, left). */
     private final SparseArray<float[]> slops = new SparseArray<>();
     private final SparseArray<A11y> a11y = new SparseArray<>();
@@ -168,14 +178,29 @@ final class Mounter {
                     View v = views.get(b.getInt());
                     Object layout = objects[b.getInt()];
                     float x = b.getFloat(), y = b.getFloat(), w = b.getFloat(), h = b.getFloat();
+                    int links = b.getInt();
+                    int[] linkData = new int[links * 3];
+                    long[] linkEvents = new long[links];
+                    for (int i = 0; i < links; i++) {
+                        linkData[i * 3] = b.getInt();
+                        linkData[i * 3 + 1] = b.getInt();
+                        linkData[i * 3 + 2] = b.getInt();
+                        linkEvents[i] = (b.getInt() & 0xffffffffL) | ((long) b.getInt() << 32);
+                    }
                     if (v instanceof TextBox) {
-                        ((TextBox) v).setLayout((Layout) layout, x * density, y * density, w * density, h * density);
+                        TextBox t = (TextBox) v;
+                        t.setLayout((Layout) layout, x * density, y * density, w * density, h * density);
+                        t.setLinks(linkData, linkEvents);
+                        if (links > 0 && t.press == null) t.press = new Pressable(t, this, t.id);
+                        t.setClickable(links > 0 || (t.press != null && t.press.ownWanted()));
                     }
                     break;
                 }
                 case EVENTS: {
                     int id = b.getInt();
                     long mask = (b.getInt() & 0xffffffffL) | ((long) b.getInt() << 32);
+                    long touch = 1L << Native.TOUCH;
+                    if ((events.get(id) & touch) != (mask & touch)) touchListeners += (mask & touch) != 0 ? 1 : -1;
                     events.put(id, mask);
                     View v = views.get(id);
                     if (v instanceof Box) {
@@ -191,7 +216,9 @@ final class Mounter {
                     if (v instanceof ImageBox && presses && ((ImageBox) v).press == null) {
                         ((ImageBox) v).press = new Pressable(v, this, id);
                     }
-                    if (v instanceof TextBox || v instanceof ImageBox) v.setClickable(presses);
+                    if (v instanceof TextBox || v instanceof ImageBox) {
+                        v.setClickable(presses || (v instanceof TextBox && ((TextBox) v).hasLinks()));
+                    }
                     break;
                 }
                 case IMAGE: {
@@ -203,7 +230,17 @@ final class Mounter {
                     View v = views.get(b.getInt());
                     boolean horizontal = b.getInt() != 0, indicator = b.getInt() != 0;
                     int dismiss = b.getInt();
-                    if (v instanceof ScrollBox) ((ScrollBox) v).configure(horizontal, indicator, dismiss);
+                    boolean mirrored = b.getInt() != 0;
+                    if (v instanceof ScrollBox) {
+                        ((ScrollBox) v).configure(horizontal, indicator, dismiss);
+                        setMirrored((ScrollBox) v, mirrored);
+                    }
+                    break;
+                }
+                case LAYOUT_DIRECTION: {
+                    rtl = b.getInt() != 0;
+                    host.setLayoutDirection(rtl ? View.LAYOUT_DIRECTION_RTL : View.LAYOUT_DIRECTION_LTR);
+                    for (int i = 0; i < modals.size(); i++) modals.valueAt(i).mirror(rtl);
                     break;
                 }
                 case SCROLL_BEHAVIOR: {
@@ -406,6 +443,14 @@ final class Mounter {
         }
         group.addView(child, index);
         Box.place(child);
+        // Cells of a mirrored list flip back.
+        int mirror = parent instanceof ScrollBox && mirrors.get(parentId) == 1 ? 2 : 0;
+        if (mirrors.get(childId) != mirror) {
+            if (mirror == 0) mirrors.delete(childId);
+            else mirrors.put(childId, mirror);
+            Dynamic d = statics.get(childId);
+            applyDynamic(child, d != null ? d : new Dynamic());
+        }
         if (parent instanceof ScrollBox && ((ScrollBox) parent).hasSticky()) ((ScrollBox) parent).frontSticky();
     }
 
@@ -495,6 +540,7 @@ final class Mounter {
         if (modal != null) {
             modal.dismiss();
             modals.remove(id);
+            touchTrackers.remove(modal.touches());
         }
         View v = views.get(id);
         if (v instanceof StackBox) stacks.remove(v);
@@ -510,6 +556,9 @@ final class Mounter {
         headerItems.remove(id);
         headerSizes.remove(id);
         statics.remove(id);
+        feedback.remove(id);
+        mirrors.delete(id);
+        if ((events.get(id) & (1L << Native.TOUCH)) != 0) touchListeners--;
         events.delete(id);
         slops.remove(id);
         a11y.remove(id);
@@ -607,6 +656,12 @@ final class Mounter {
         d.perspective = b.getFloat();
         boolean hasTint = b.getInt() != 0;
         int tint = b.getInt();
+        float elevation = b.getFloat();
+        boolean originXFraction = b.getInt() == 1;
+        float originX = b.getFloat();
+        boolean originYFraction = b.getInt() == 1;
+        float originY = b.getFloat();
+        boolean backfaceHidden = b.getInt() != 0;
         d.opacity = opacity;
         d.background = background;
         if (v == null) return;
@@ -624,6 +679,21 @@ final class Mounter {
             decor.shadowDx = sdx * density;
             decor.shadowDy = sdy * density;
             decor.shadowRadius = Math.max(0.01f, sRadius * density);
+            decor.originX = originXFraction ? originX : originX * density;
+            decor.originXFraction = originXFraction;
+            decor.originY = originYFraction ? originY : originY * density;
+            decor.originYFraction = originYFraction;
+            decor.backfaceHidden = backfaceHidden;
+            decor.applyPivot(v);
+        }
+        // Material shadow: needs an outline (the decor's shape).
+        v.setElevation(elevation * density);
+        if (elevation > 0 && decor != null && !(v instanceof Box || v instanceof TextBox || v instanceof InputBox)) {
+            decor.clip(v, false);
+        }
+        if (elevation > 0 && android.os.Build.VERSION.SDK_INT >= 28 && (shadowColor >>> 24) != 0) {
+            v.setOutlineAmbientShadowColor(shadowColor);
+            v.setOutlineSpotShadowColor(shadowColor);
         }
         if (v instanceof Box) {
             ((Box) v).clip = overflow;
@@ -638,16 +708,53 @@ final class Mounter {
         v.invalidate();
     }
 
+    /**
+     * Horizontal lists laid out right to left are mirrored as a whole (1)
+     * and their cells mirrored back (2): the list's offsets stay left to
+     * right. View transforms compose with the flip.
+     */
+    private final android.util.SparseIntArray mirrors = new android.util.SparseIntArray();
+
+    private void setMirrored(ScrollBox list, boolean mirrored) {
+        int id = list.id;
+        if ((mirrors.get(id) == 1) == mirrored) return;
+        if (mirrored) mirrors.put(id, 1);
+        else mirrors.delete(id);
+        Dynamic d = statics.get(id);
+        applyDynamic(list, d != null ? d : new Dynamic());
+        ViewGroup content = list.content;
+        for (int i = 0; i < content.getChildCount(); i++) {
+            View cell = content.getChildAt(i);
+            if (!(cell instanceof Node)) continue;
+            int cellId = ((Node) cell).nodeId();
+            if (mirrored) mirrors.put(cellId, 2);
+            else mirrors.delete(cellId);
+            Dynamic c = statics.get(cellId);
+            applyDynamic(cell, c != null ? c : new Dynamic());
+        }
+    }
+
+    /** Sign of x-axis transforms of {@code v}: -1 for mirrored cells. */
+    private int mirror(View v) {
+        return v instanceof Node ? mirrors.get(((Node) v).nodeId()) : 0;
+    }
+
     private void applyDynamic(View v, Dynamic d) {
+        int mirror = mirror(v);
+        // A cell flips back last: its x translation and rotations about the
+        // y and z axes turn around.
+        float back = mirror == 2 ? -1 : 1;
         v.setAlpha(d.opacity);
-        v.setTranslationX(d.tx * density);
+        v.setTranslationX(back * d.tx * density);
         v.setTranslationY(d.ty * density);
-        v.setScaleX(d.sx);
+        v.setScaleX(mirror != 0 ? -d.sx : d.sx);
         v.setScaleY(d.sy);
-        v.setRotation(d.rotate);
+        v.setRotation(back * d.rotate);
         v.setRotationX(d.rotateX);
-        v.setRotationY(d.rotateY);
+        v.setRotationY(back * d.rotateY);
         setPerspective(v, d.perspective);
+        Decor backface = decor(v);
+        if (backface != null) backface.applyBackface(v);
         Decor decor = decor(v);
         if (decor != null && decor.fill != d.background) {
             decor.fill = d.background;
@@ -660,6 +767,98 @@ final class Mounter {
         if (term == 0) term = 0.00078125f;
         float distance = -1 / term;
         v.setCameraDistance(density * density * distance * (float) Math.sqrt(5));
+    }
+
+    /** Press feedback of a view: `activeOpacity`, `delayLongPress`, `android_ripple`. */
+    static final class Feedback {
+        float activeOpacity = Float.NaN;
+        int longPressDelay = -1;
+        android.graphics.drawable.RippleDrawable ripple;
+        boolean rippleForeground;
+    }
+
+    private final android.util.SparseArray<Feedback> feedback = new android.util.SparseArray<>();
+
+    /** Milliseconds before a press on {@code id} becomes a long press. */
+    int longPressDelay(int id) {
+        Feedback f = feedback.get(id);
+        return f != null && f.longPressDelay >= 0 ? f.longPressDelay : ViewConfiguration.getLongPressTimeout();
+    }
+
+    /** Whether presses on {@code id} show feedback (so the view takes them). */
+    boolean hasPressFeedback(int id) {
+        Feedback f = feedback.get(id);
+        return f != null && (!Float.isNaN(f.activeOpacity) || f.ripple != null);
+    }
+
+    /** Shows (or ends) the press feedback of view {@code id}, pressed at ({@code x}, {@code y}). */
+    void pressFeedback(View v, int id, boolean pressed, float x, float y) {
+        Feedback f = feedback.get(id);
+        if (f == null) return;
+        if (!Float.isNaN(f.activeOpacity)) {
+            v.animate().alpha(pressed ? baseOpacity(id) * f.activeOpacity : baseOpacity(id)).setDuration(pressed ? 100 : 250).start();
+        }
+        if (f.ripple != null) {
+            if (pressed) f.ripple.setHotspot(x, y);
+            f.ripple.setState(pressed
+                    ? new int[] {android.R.attr.state_pressed, android.R.attr.state_enabled}
+                    : new int[] {android.R.attr.state_enabled});
+        }
+    }
+
+    /** `android_ripple`: flags 1 set, 2 borderless, 4 foreground. */
+    private void setRipple(View v, Feedback f, int flags, Integer color, float radius) {
+        Decor decor = v instanceof Box ? ((Box) v).decor : v instanceof TextBox ? ((TextBox) v).decor
+                : v instanceof ImageBox ? ((ImageBox) v).decor : null;
+        if (decor == null) return;
+        // Undo the previous ripple.
+        if (f.ripple != null) {
+            if (f.rippleForeground) v.setForeground(null);
+            else v.setBackground(decor);
+            f.ripple = null;
+        }
+        if ((flags & 1) == 0) return;
+        int c = color != null ? color : themeHighlight();
+        android.graphics.drawable.Drawable mask = (flags & 2) != 0 ? null : new android.graphics.drawable.Drawable() {
+            private final android.graphics.Path path = new android.graphics.Path();
+            private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+
+            @Override
+            public void draw(android.graphics.Canvas canvas) {
+                paint.setColor(0xffffffff);
+                canvas.drawPath(decor.shape(getBounds(), 0, path), paint);
+            }
+
+            @Override
+            public void setAlpha(int alpha) {}
+
+            @Override
+            public void setColorFilter(android.graphics.ColorFilter filter) {}
+
+            @SuppressWarnings("deprecation")
+            @Override
+            public int getOpacity() {
+                return android.graphics.PixelFormat.TRANSLUCENT;
+            }
+        };
+        android.graphics.drawable.RippleDrawable ripple = new android.graphics.drawable.RippleDrawable(
+                android.content.res.ColorStateList.valueOf(c), null, mask);
+        if (radius >= 0) ripple.setRadius(Math.round(radius * density));
+        f.ripple = ripple;
+        f.rippleForeground = (flags & 4) != 0;
+        if (f.rippleForeground) {
+            v.setForeground(ripple);
+        } else {
+            v.setBackground(new android.graphics.drawable.LayerDrawable(new android.graphics.drawable.Drawable[] {decor, ripple}));
+        }
+    }
+
+    private int themeHighlight() {
+        android.util.TypedValue value = new android.util.TypedValue();
+        if (context.getTheme().resolveAttribute(android.R.attr.colorControlHighlight, value, true)) {
+            return value.resourceId != 0 ? context.getColor(value.resourceId) : value.data;
+        }
+        return 0x1f000000;
     }
 
     /** The opacity a view returns to after a press (`activeOpacity`). */
@@ -705,13 +904,31 @@ final class Mounter {
             a.actionLabels[i] = string(objects, b.getInt());
         }
         a.testId = string(objects, b.getInt());
+        float longPressDelay = b.getFloat();
+        int ripple = b.getInt();
+        Integer rippleColor = null;
+        float rippleRadius = -1;
+        if ((ripple & 1) != 0) {
+            rippleColor = optColor(b);
+            rippleRadius = b.getFloat();
+        }
         if (v == null) return;
+        Feedback f = feedback.get(id);
+        if (f == null) feedback.put(id, f = new Feedback());
+        f.activeOpacity = activeOpacity;
+        f.longPressDelay = longPressDelay >= 0 ? Math.round(longPressDelay) : -1;
+        setRipple(v, f, ripple, rippleColor, rippleRadius);
+        // Feedback alone makes text and images take presses.
+        if (hasPressFeedback(id)) {
+            if (v instanceof TextBox && ((TextBox) v).press == null) ((TextBox) v).press = new Pressable(v, this, id);
+            if (v instanceof ImageBox && ((ImageBox) v).press == null) ((ImageBox) v).press = new Pressable(v, this, id);
+            if (v instanceof TextBox || v instanceof ImageBox) v.setClickable(true);
+        }
         if (slop[0] != 0 || slop[1] != 0 || slop[2] != 0 || slop[3] != 0) slops.put(id, slop);
         else slops.remove(id);
         if (v instanceof Box) {
             Box box = (Box) v;
             box.pointerEvents = pointerEvents;
-            box.activeOpacity = activeOpacity;
         }
         if (v instanceof TextBox) ((TextBox) v).a11y = a;
         a11y.put(id, a);
@@ -731,14 +948,20 @@ final class Mounter {
             float value = out[i + 2];
             switch ((int) out[i + 1]) {
                 case 0: v.setAlpha(Math.max(0, Math.min(1, value))); break;
-                case 1: v.setTranslationX(value * density); break;
+                case 1: v.setTranslationX((mirror(v) == 2 ? -1 : 1) * value * density); break;
                 case 2: v.setTranslationY(value * density); break;
-                case 3: v.setScaleX(value); v.setScaleY(value); break;
-                case 4: v.setScaleX(value); break;
+                case 3: v.setScaleX(mirror(v) != 0 ? -value : value); v.setScaleY(value); break;
+                case 4: v.setScaleX(mirror(v) != 0 ? -value : value); break;
                 case 5: v.setScaleY(value); break;
-                case 6: v.setRotation(value); break;
-                case 8: v.setRotationX(value); break;
-                case 9: v.setRotationY(value); break;
+                case 6: v.setRotation((mirror(v) == 2 ? -1 : 1) * value); break;
+                case 8:
+                case 9: {
+                    if ((int) out[i + 1] == 8) v.setRotationX(value);
+                    else v.setRotationY((mirror(v) == 2 ? -1 : 1) * value);
+                    Decor decor = decor(v);
+                    if (decor != null) decor.applyBackface(v);
+                    break;
+                }
                 case 10: setPerspective(v, value); break;
                 case 7: {
                     Decor decor = decor(v);
@@ -1009,7 +1232,11 @@ final class Mounter {
         boolean editable = b.getInt() != 0, autoFocus = b.getInt() != 0, hasSelection = b.getInt() != 0;
         int selection = b.getInt();
         boolean blurOnSubmit = b.getInt() != 0;
+        String autofill = optString(b, objects);
+        boolean inputRtl = b.getInt() != 0;
         if (!(v instanceof InputBox)) return;
+        ((InputBox) v).setAutofill(autofill);
+        ((InputBox) v).edit.setLayoutDirection(inputRtl ? View.LAYOUT_DIRECTION_RTL : View.LAYOUT_DIRECTION_LTR);
         String family = familyIndex >= 0 ? (String) objects[familyIndex] : null;
         ((InputBox) v).configure(size, weight, italic, color, family, spacing, align, placeholder,
                 hasPlaceholderColor, placeholderColor, secure, keyboard, returnKey, capitalize, autoCorrect,
@@ -1080,6 +1307,27 @@ final class Mounter {
             case 13: {
                 String text = (String) objects[b.getInt()];
                 SystemUi.toast(context, text, b.getInt() != 0);
+                break;
+            }
+            case 14: {
+                boolean block = b.getInt() != 0;
+                clearJsResponder();
+                if (block && v != null) {
+                    // Scroll views around the responder stop taking its touches.
+                    for (ViewParent p = v.getParent(); p != null; p = p.getParent()) {
+                        if (p instanceof ScrollBox) {
+                            ((ScrollBox) p).jsBlocked = true;
+                            blockedScrolls.add((ScrollBox) p);
+                        }
+                    }
+                    if (v.getParent() != null) v.getParent().requestDisallowInterceptTouchEvent(true);
+                }
+                break;
+            }
+            case 15: clearJsResponder(); break;
+            case 16: {
+                int start = b.getInt(), end = b.getInt();
+                if (v instanceof InputBox) ((InputBox) v).select(start, end);
                 break;
             }
             default: break;
@@ -1223,6 +1471,21 @@ final class Mounter {
 
     boolean hasPan(int id) {
         return Native.hasPan(handle(), id);
+    }
+
+    private void clearJsResponder() {
+        for (ScrollBox s : blockedScrolls) s.jsBlocked = false;
+        blockedScrolls.clear();
+    }
+
+    /** A native scroll view took the touches over. */
+    void cancelTouches() {
+        for (TouchTracker t : touchTrackers) t.cancelAll();
+    }
+
+    /** See {@link Native#touch}. */
+    void touches(int phase, int[] ids, int[] targets, int[] pathLengths, int[] paths, float[] coords, boolean[] changed, long time) {
+        Native.touch(handle(), phase, ids, targets, pathLengths, paths, coords, changed, time);
     }
 
     void event(int id, int kind) {

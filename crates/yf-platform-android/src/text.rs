@@ -80,16 +80,24 @@ impl TextEngine for AndroidTextEngine {
                 argb(s.color),
                 argb(s.decoration_color.unwrap_or(s.color)),
                 family,
+                s.font_variant.0 as i32,
             ]);
             floats.extend_from_slice(&[s.font_size, s.line_height, s.letter_spacing]);
         }
+        // Alignment, writing direction (0 from the content, 1 left to
+        // right, 2 right to left) << 4, layout right to left << 8.
         let align = match text.align {
             TextAlign::Auto => 0,
             TextAlign::Left => 1,
             TextAlign::Center => 2,
             TextAlign::Right => 3,
             TextAlign::Justify => 4,
-        };
+        } | match text.writing_direction {
+            None => 0,
+            Some(false) => 1,
+            Some(true) => 2,
+        } << 4
+            | (text.rtl as i32) << 8;
         let ellipsize = match text.ellipsize {
             EllipsizeMode::Tail => 0,
             EllipsizeMode::Head => 1,

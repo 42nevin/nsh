@@ -414,7 +414,7 @@ extern "system" fn Java_dev_yf_Native_environment(
 ) {
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
-    let mut v = [0f32; 7];
+    let mut v = [0f32; 8];
     if env.get_float_array_region(&values, 0, &mut v).is_err() {
         return;
     }
@@ -428,6 +428,7 @@ extern "system" fn Java_dev_yf_Native_environment(
     environment.keyboard_height = v[4];
     environment.keyboard_duration = v[5];
     environment.font_scale = v[6];
+    environment.rtl = v[7] != 0.0;
     environment.color_scheme = if dark != 0 {
         ColorScheme::Dark
     } else {
@@ -496,6 +497,90 @@ extern "system" fn Java_dev_yf_Native_event(
     };
     if let Some(control) = host.control() {
         control.dispatch_event(id as NodeId, kind, payload);
+    }
+}
+
+/// Touches for the JS responder system (see `Native.touch`).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+extern "system" fn Java_dev_yf_Native_touch(
+    env: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    phase: jint,
+    ids: jni::objects::JIntArray<'_>,
+    targets: jni::objects::JIntArray<'_>,
+    path_lengths: jni::objects::JIntArray<'_>,
+    paths: jni::objects::JIntArray<'_>,
+    coords: JFloatArray<'_>,
+    changed: jni::objects::JBooleanArray<'_>,
+    time: jlong,
+) {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    let ints = |a: &jni::objects::JIntArray<'_>| -> Vec<i32> {
+        let n = env.get_array_length(a).unwrap_or(0) as usize;
+        let mut v = vec![0; n];
+        if env.get_int_array_region(a, 0, &mut v).is_err() {
+            v.clear();
+        }
+        v
+    };
+    let (ids, targets, path_lengths, paths) = (
+        ints(&ids),
+        ints(&targets),
+        ints(&path_lengths),
+        ints(&paths),
+    );
+    let n = ids.len();
+    let mut c = vec![0.0; n * 4];
+    let mut flags = vec![0u8; n];
+    if targets.len() != n
+        || path_lengths.len() != n
+        || env.get_float_array_region(&coords, 0, &mut c).is_err()
+        || env
+            .get_boolean_array_region(&changed, 0, &mut flags)
+            .is_err()
+    {
+        return;
+    }
+    let mut at = 0;
+    let points = (0..n)
+        .map(|i| {
+            let len = path_lengths[i].max(0) as usize;
+            let path = paths
+                .get(at..at + len)
+                .map(|p| p.iter().map(|&id| id as NodeId).collect())
+                .unwrap_or_default();
+            at += len;
+            yf_core::TouchPoint {
+                id: ids[i] as u32,
+                target: targets[i] as NodeId,
+                path,
+                page_x: c[i * 4],
+                page_y: c[i * 4 + 1],
+                location_x: c[i * 4 + 2],
+                location_y: c[i * 4 + 3],
+                changed: flags[i] != 0,
+            }
+        })
+        .collect();
+    let phase = match phase {
+        0 => yf_core::TouchPhase::Start,
+        1 => yf_core::TouchPhase::Move,
+        2 => yf_core::TouchPhase::End,
+        _ => yf_core::TouchPhase::Cancel,
+    };
+    if let Some(control) = host.control() {
+        control.dispatch_event(
+            yf_core::ROOT_ID,
+            EventKind::Touch,
+            EventPayload::Touch(Box::new(yf_core::TouchEvent {
+                phase,
+                timestamp: time as f64,
+                points,
+            })),
+        );
     }
 }
 
@@ -571,6 +656,9 @@ extern "system" fn Java_dev_yf_Native_eventMap(
                 "isBuffering" => "isBuffering",
                 "id" => "id",
                 "index" => "index",
+                "start" => "start",
+                "end" => "end",
+                "key" => "key",
                 _ => continue,
             };
             if let Some(v) = read(&mut env, i) {

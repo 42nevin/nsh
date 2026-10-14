@@ -46,9 +46,13 @@ define_class!(
             }
             let Some(view) = recognizer.view() else { return };
             let id = view.tag() as NodeId;
+            let link = recognizer.link();
             // Press out first, then the press, as in React Native.
             if recognizer.release() {
-                self.with_mounter(move |m| m.pressed(id));
+                match link {
+                    Some(link) => self.link_event(&link, EventKind::Press),
+                    None => self.with_mounter(move |m| m.pressed(id)),
+                }
             }
         }
 
@@ -141,8 +145,14 @@ define_class!(
             self.with_mounter(move |m| m.input_focused(id, false));
         }
 
+        #[unsafe(method(textFieldDidChangeSelection:))]
+        fn text_field_did_change_selection(&self, field: &UITextField) {
+            self.selection_changed(field);
+        }
+
         #[unsafe(method(textFieldShouldReturn:))]
         fn text_field_should_return(&self, field: &UITextField) -> bool {
+            self.key_press(field.tag() as NodeId, "Enter".to_owned());
             let text = field.text().map(|t| t.to_string()).unwrap_or_default();
             let id = field.tag() as NodeId;
             self.with_mounter(move |m| m.input_submitted(id, text));
@@ -157,7 +167,11 @@ define_class!(
             replacement: &NSString,
         ) -> bool {
             let current = field.text().unwrap_or_default();
-            input::fits(&current, range, replacement, input::max_length(field))
+            let fits = input::fits(&current, range, replacement, input::max_length(field));
+            if fits && let Some(key) = input::key_of(range, replacement) {
+                self.key_press(field.tag() as NodeId, key);
+            }
+            fits
         }
     }
 
@@ -167,6 +181,11 @@ define_class!(
             let text = view.text().to_string();
             let id = view.tag() as NodeId;
             self.with_mounter(move |m| m.input_changed(id, text));
+        }
+
+        #[unsafe(method(textViewDidChangeSelection:))]
+        fn text_view_did_change_selection(&self, view: &UITextView) {
+            self.selection_changed(view);
         }
 
         #[unsafe(method(textViewDidBeginEditing:))]
@@ -188,7 +207,11 @@ define_class!(
             range: NSRange,
             replacement: &NSString,
         ) -> bool {
-            input::fits(&view.text(), range, replacement, input::max_length(view))
+            let fits = input::fits(&view.text(), range, replacement, input::max_length(view));
+            if fits && let Some(key) = input::key_of(range, replacement) {
+                self.key_press(view.tag() as NodeId, key);
+            }
+            fits
         }
     }
 
@@ -248,6 +271,8 @@ define_class!(
 
         #[unsafe(method(scrollViewWillBeginDragging:))]
         fn scroll_view_will_begin_dragging(&self, scroll: &UIScrollView) {
+            // The scroll view takes the touches from JS responders.
+            self.with_mounter(|m| m.cancel_touches());
             // Caught while gliding: the glide ended.
             if scroll.isDecelerating() {
                 self.scroll_event(scroll, EventKind::MomentumScrollEnd);
@@ -409,6 +434,64 @@ impl EventTarget {
     /// A press on view `id` was held long enough.
     pub(crate) fn long_press(&self, id: NodeId) {
         self.with_mounter(move |m| m.long_pressed(id));
+    }
+
+    /// The node under a touch on `view` and the nodes around it that listen
+    /// to touches; `None` when none does.
+    pub(crate) fn touch_target(
+        &self,
+        view: &UIView,
+        point: CGPoint,
+    ) -> Option<(NodeId, objc2::rc::Retained<UIView>, Vec<NodeId>)> {
+        match self.ivars().mounter.get(self.mtm()).try_borrow() {
+            Ok(m) => m.as_ref().and_then(|m| m.touch_target(view, point)),
+            Err(_) => None,
+        }
+    }
+
+    /// `onKeyPress` on input `id`.
+    pub(crate) fn key_press(&self, id: NodeId, key: String) {
+        self.with_mounter(move |m| {
+            m.input_event(
+                id,
+                EventKind::KeyPress,
+                EventPayload::Map(vec![("key", yf_core::PayloadValue::Str(key))]),
+            )
+        });
+    }
+
+    /// `onSelectionChange` of the input `view` belongs to.
+    fn selection_changed(&self, view: &UIView) {
+        let id = view.tag() as NodeId;
+        let Some((start, end)) = input::selection(view) else {
+            return;
+        };
+        self.with_mounter(move |m| {
+            m.input_event(
+                id,
+                EventKind::SelectionChange,
+                EventPayload::Map(vec![
+                    ("start", yf_core::PayloadValue::Number(start as f64)),
+                    ("end", yf_core::PayloadValue::Number(end as f64)),
+                ]),
+            )
+        });
+    }
+
+    /// A press event on a pressable text span.
+    pub(crate) fn link_event(&self, link: &yf_core::TextLink, kind: EventKind) {
+        if link.events.contains(kind) {
+            self.dispatch(link.node, kind, EventPayload::None);
+        }
+    }
+
+    /// Touches for the JS responder system.
+    pub(crate) fn touches(&self, event: Box<yf_core::TouchEvent>) {
+        self.dispatch(
+            yf_core::ROOT_ID,
+            EventKind::Touch,
+            EventPayload::Touch(event),
+        );
     }
 
     fn keyboard_tap(&self, view: &UIView) -> Option<KeyboardTaps> {

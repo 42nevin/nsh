@@ -21,7 +21,8 @@ use objc2_ui_kit::{
     UIViewAutoresizing,
 };
 use yf_core::{
-    AutoCapitalize, Color, InputConfig, KeyboardType, NodeId, Rect, ReturnKeyType, TextAlign,
+    AutoCapitalize, AutoFill, Color, InputConfig, KeyboardType, NodeId, Rect, ReturnKeyType,
+    TextAlign,
 };
 
 use crate::{target::EventTarget, text};
@@ -70,6 +71,18 @@ define_class!(
         fn placeholder_rect(&self, bounds: CGRect) -> CGRect {
             inset(bounds, self.ivars().insets.get())
         }
+
+        #[unsafe(method(deleteBackward))]
+        fn delete_backward(&self) {
+            let empty = self.text().is_none_or(|t| t.length() == 0);
+            // SAFETY: calling the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), deleteBackward] };
+            // Deleting in an empty field changes nothing, so no delegate
+            // call reports it.
+            if empty {
+                backspace_on_empty(self.as_ref());
+            }
+        }
     }
 );
 
@@ -79,7 +92,84 @@ define_class!(
     #[thread_kind = MainThreadOnly]
     #[ivars = InputIvars]
     pub(crate) struct Area;
+
+    impl Area {
+        #[unsafe(method(deleteBackward))]
+        fn delete_backward(&self) {
+            let empty = self.text().length() == 0;
+            // SAFETY: calling the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), deleteBackward] };
+            if empty {
+                backspace_on_empty(self.as_ref());
+            }
+        }
+    }
 );
+
+/// Reports `Backspace` for a delete in an empty input (to its delegate,
+/// the event target).
+fn backspace_on_empty(view: &UIView) {
+    // SAFETY: both input classes have a `delegate`, set to the target.
+    let delegate: Option<Retained<AnyObject>> = unsafe { msg_send![view, delegate] };
+    if let Some(target) = delegate
+        .as_deref()
+        .and_then(|d| d.downcast_ref::<EventTarget>())
+    {
+        target.key_press(view.tag() as NodeId, "Backspace".to_owned());
+    }
+}
+
+/// The selection of an input view, in UTF-16 units.
+pub(crate) fn selection(view: &UIView) -> Option<(u32, u32)> {
+    // SAFETY: UITextField and UITextView adopt UITextInput.
+    unsafe {
+        let range: Option<Retained<AnyObject>> = msg_send![view, selectedTextRange];
+        let range = range?;
+        let begin: Retained<AnyObject> = msg_send![view, beginningOfDocument];
+        let start: Retained<AnyObject> = msg_send![&range, start];
+        let end: Retained<AnyObject> = msg_send![&range, end];
+        let a: isize = msg_send![view, offsetFromPosition: &*begin, toPosition: &*start];
+        let b: isize = msg_send![view, offsetFromPosition: &*begin, toPosition: &*end];
+        Some((a.max(0) as u32, b.max(0) as u32))
+    }
+}
+
+/// Selects `start..end` (UTF-16 units, clamped to the text).
+fn set_selection(view: &UIView, start: u32, end: u32) {
+    // SAFETY: UITextField and UITextView adopt UITextInput.
+    unsafe {
+        let begin: Retained<AnyObject> = msg_send![view, beginningOfDocument];
+        let end_doc: Retained<AnyObject> = msg_send![view, endOfDocument];
+        let length: isize = msg_send![view, offsetFromPosition: &*begin, toPosition: &*end_doc];
+        let (a, b) = (
+            (start as isize).min(length),
+            (end.max(start) as isize).min(length),
+        );
+        let from: Option<Retained<AnyObject>> =
+            msg_send![view, positionFromPosition: &*begin, offset: a];
+        let to: Option<Retained<AnyObject>> =
+            msg_send![view, positionFromPosition: &*begin, offset: b];
+        let (Some(from), Some(to)) = (from, to) else {
+            return;
+        };
+        let range: Option<Retained<AnyObject>> =
+            msg_send![view, textRangeFromPosition: &*from, toPosition: &*to];
+        let _: () = msg_send![view, setSelectedTextRange: range.as_deref()];
+    }
+}
+
+/// The key a change of the text reports (`onKeyPress`): `Backspace` for a
+/// deletion, `Enter` for a line break, else the typed text.
+pub(crate) fn key_of(range: NSRange, replacement: &NSString) -> Option<String> {
+    let text = replacement.to_string();
+    if text.is_empty() {
+        (range.length > 0).then(|| "Backspace".to_owned())
+    } else if text == "\n" {
+        Some("Enter".to_owned())
+    } else {
+        Some(text)
+    }
+}
 
 impl Field {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
@@ -217,6 +307,11 @@ impl Input {
         self.container.addSubview(view);
     }
 
+    /// Selects `start..end` of the text.
+    pub(crate) fn select(&self, start: u32, end: u32) {
+        set_selection(self.editor_view(), start, end);
+    }
+
     /// Applies a configuration; switching `multiline` swaps the editor.
     pub(crate) fn configure(
         &mut self,
@@ -247,7 +342,9 @@ impl Input {
         let font = text::ui_font(&config.style);
         let color = ui_color(config.style.color);
         let align = match config.align {
-            TextAlign::Auto | TextAlign::Left | TextAlign::Justify => NSTextAlignment::Left,
+            // Natural follows the editor's (mirrored) direction.
+            TextAlign::Auto => NSTextAlignment::Natural,
+            TextAlign::Left | TextAlign::Justify => NSTextAlignment::Left,
             TextAlign::Center => NSTextAlignment::Center,
             TextAlign::Right => NSTextAlignment::Right,
         };
@@ -287,6 +384,7 @@ impl Input {
                 view.ivars().max_length.set(config.max_length);
             }
         }
+        crate::mount::mirror(self.editor_view(), config.rtl);
         let first = self.config.is_none();
         let auto_focus = config.auto_focus;
         self.config = Some(config);
@@ -408,13 +506,54 @@ fn traits(view: &AnyObject, config: &InputConfig) {
         UITextAutocorrectionType::No
     };
     // SAFETY: UITextField and UITextView adopt UITextInputTraits; each
-    // setter takes the NSInteger-backed enum (or BOOL) passed here.
+    // setter takes the NSInteger-backed enum (BOOL, or string) passed here.
     unsafe {
         send(view, sel!(setSecureTextEntry:), Bool::new(config.secure));
         send(view, sel!(setKeyboardType:), keyboard.0);
         send(view, sel!(setReturnKeyType:), return_key.0);
         send(view, sel!(setAutocapitalizationType:), capitalize.0);
         send(view, sel!(setAutocorrectionType:), correct.0);
+        let content_type =
+            content_type(config.auto_fill).map_or(std::ptr::null(), |t| t as *const NSString);
+        send(view, sel!(setTextContentType:), content_type);
+    }
+}
+
+/// The `textContentType` for `fill`.
+fn content_type(fill: AutoFill) -> Option<&'static NSString> {
+    use objc2_ui_kit::*;
+    // SAFETY: immutable UIKit constants.
+    unsafe {
+        Some(match fill {
+            // An empty type turns autofill off.
+            AutoFill::Default => return None,
+            AutoFill::Off => return Some(objc2_foundation::ns_string!("")),
+            AutoFill::Username => UITextContentTypeUsername,
+            AutoFill::Password => UITextContentTypePassword,
+            AutoFill::NewPassword => UITextContentTypeNewPassword,
+            AutoFill::OneTimeCode => UITextContentTypeOneTimeCode,
+            AutoFill::Email => UITextContentTypeEmailAddress,
+            AutoFill::Tel => UITextContentTypeTelephoneNumber,
+            AutoFill::Name => UITextContentTypeName,
+            AutoFill::GivenName => UITextContentTypeGivenName,
+            AutoFill::FamilyName => UITextContentTypeFamilyName,
+            AutoFill::MiddleName => UITextContentTypeMiddleName,
+            AutoFill::Nickname => UITextContentTypeNickname,
+            AutoFill::Organization => UITextContentTypeOrganizationName,
+            AutoFill::StreetAddress => UITextContentTypeFullStreetAddress,
+            AutoFill::AddressLine1 => UITextContentTypeStreetAddressLine1,
+            AutoFill::AddressLine2 => UITextContentTypeStreetAddressLine2,
+            AutoFill::City => UITextContentTypeAddressCity,
+            AutoFill::Region => UITextContentTypeAddressState,
+            AutoFill::PostalCode => UITextContentTypePostalCode,
+            AutoFill::Country => UITextContentTypeCountryName,
+            AutoFill::CreditCardNumber => UITextContentTypeCreditCardNumber,
+            AutoFill::CreditCardExpiration => UITextContentTypeCreditCardExpiration,
+            AutoFill::CreditCardSecurityCode => UITextContentTypeCreditCardSecurityCode,
+            AutoFill::CreditCardName => UITextContentTypeCreditCardName,
+            AutoFill::Url => UITextContentTypeURL,
+            AutoFill::Birthdate => UITextContentTypeBirthdate,
+        })
     }
 }
 

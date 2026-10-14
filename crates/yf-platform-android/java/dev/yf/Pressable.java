@@ -15,6 +15,11 @@ final class Pressable {
     private final View view;
     private final Mounter mounter;
     private final int id;
+    /** The node presses go to: the view, or the pressable text span the touch is on. */
+    private int node;
+    /** Its listeners, for spans (which have no view). */
+    private long nodeEvents;
+    private boolean span;
     private float downX, downY;
     private boolean tracking, pressedIn, longPressed;
     private final Runnable pressIn = this::pressIn;
@@ -26,13 +31,33 @@ final class Pressable {
         this.id = id;
     }
 
-    boolean wanted() {
+    /** The view itself takes presses. */
+    boolean ownWanted() {
         return mounter.wants(id, Native.PRESS) || mounter.wants(id, Native.LONG_PRESS)
-                || mounter.wants(id, Native.PRESS_IN) || mounter.wants(id, Native.PRESS_OUT);
+                || mounter.wants(id, Native.PRESS_IN) || mounter.wants(id, Native.PRESS_OUT)
+                || mounter.hasPressFeedback(id);
+    }
+
+    private boolean wants(int kind) {
+        return span ? (nodeEvents & (1L << kind)) != 0 : mounter.wants(id, kind);
+    }
+
+    private void event(int kind) {
+        if (wants(kind)) mounter.event(node, kind);
     }
 
     boolean onTouchEvent(MotionEvent e) {
-        if (!wanted()) return false;
+        if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            int link = view instanceof TextBox ? ((TextBox) view).linkAt(e.getX(), e.getY()) : -1;
+            span = link >= 0;
+            if (span) {
+                node = ((TextBox) view).linkNode(link);
+                nodeEvents = ((TextBox) view).linkEvents(link);
+            } else {
+                if (!ownWanted()) return false;
+                node = id;
+            }
+        }
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 downX = e.getX();
@@ -42,7 +67,7 @@ final class Pressable {
                 longPressed = false;
                 if (insideScrollView()) view.postDelayed(pressIn, ViewConfiguration.getTapTimeout());
                 else pressIn();
-                if (mounter.wants(id, Native.LONG_PRESS)) view.postDelayed(longPress, ViewConfiguration.getLongPressTimeout());
+                if (wants(Native.LONG_PRESS)) view.postDelayed(longPress, span ? ViewConfiguration.getLongPressTimeout() : mounter.longPressDelay(id));
                 return true;
             case MotionEvent.ACTION_MOVE: {
                 float slop = ViewConfiguration.get(view.getContext()).getScaledTouchSlop();
@@ -58,9 +83,9 @@ final class Pressable {
             case MotionEvent.ACTION_UP:
                 if (tracking) {
                     if (!pressedIn) pressIn();
-                    boolean press = !longPressed && mounter.wants(id, Native.PRESS);
+                    boolean press = !longPressed;
                     pressOut();
-                    if (press) mounter.event(id, Native.PRESS);
+                    if (press) event(Native.PRESS);
                 }
                 tracking = false;
                 return true;
@@ -80,7 +105,8 @@ final class Pressable {
     private void pressIn() {
         if (pressedIn || !tracking) return;
         pressedIn = true;
-        if (mounter.wants(id, Native.PRESS_IN)) mounter.event(id, Native.PRESS_IN);
+        event(Native.PRESS_IN);
+        if (!span) mounter.pressFeedback(view, id, true, downX, downY);
     }
 
     private void pressOut() {
@@ -88,14 +114,15 @@ final class Pressable {
         view.removeCallbacks(longPress);
         if (!pressedIn) return;
         pressedIn = false;
-        if (mounter.wants(id, Native.PRESS_OUT)) mounter.event(id, Native.PRESS_OUT);
+        event(Native.PRESS_OUT);
+        if (!span) mounter.pressFeedback(view, id, false, downX, downY);
     }
 
     private void longPress() {
         if (!tracking) return;
         if (!pressedIn) pressIn();
         longPressed = true;
-        mounter.event(id, Native.LONG_PRESS);
+        event(Native.LONG_PRESS);
     }
 
     private boolean insideScrollView() {

@@ -86,7 +86,7 @@ export function Form() {
         </view>
 
         <Section title="Account">
-          <Field ref={ref(0)} next={next(0)} label="Name" value={name()} onChangeText={setName} autoCapitalize="words" placeholder="Ada Lovelace" />
+          <Field ref={ref(0)} next={next(0)} label="Name" value={name()} onChangeText={setName} autoCapitalize="words" autoComplete="name" placeholder="Ada Lovelace" />
           <Field
             ref={ref(1)}
             next={next(1)}
@@ -96,10 +96,11 @@ export function Form() {
             keyboardType="email-address"
             autoCapitalize="none"
             autoCorrect={false}
+            autoComplete="email"
             placeholder="ada@example.com"
           />
-          <Field ref={ref(2)} next={next(2)} label="Password" secureTextEntry placeholder="At least 8 characters" />
-          <Field ref={ref(3)} next={next(3)} label="Phone" keyboardType="phone-pad" placeholder="+1 555 0100" />
+          <Field ref={ref(2)} next={next(2)} label="Password" secureTextEntry autoComplete="new-password" placeholder="At least 8 characters" />
+          <Field ref={ref(3)} next={next(3)} label="Phone" keyboardType="phone-pad" autoComplete="tel" placeholder="+1 555 0100" />
           <Field ref={ref(4)} next={next(4)} label="Website" keyboardType="url" autoCapitalize="none" autoCorrect={false} placeholder="https://" />
         </Section>
 
@@ -121,6 +122,10 @@ export function Form() {
           <Field ref={ref(9)} next={next(9)} label="City" placeholder="London" />
           <Field ref={ref(10)} next={next(10)} label="Postal code" autoCapitalize="characters" placeholder="SW1A 1AA" />
           <Field ref={ref(11)} next={next(11)} label="Country" placeholder="United Kingdom" />
+        </Section>
+
+        <Section title="Selection and keys">
+          <SelectionDemo />
         </Section>
 
         <Section title="Text">
@@ -247,5 +252,41 @@ function MessageBar() {
       </view>
     </KeyboardAvoidingView>
     </Screen>
+  );
+}
+
+/** `onSelectionChange`, `onKeyPress`, `selection` and `setSelection`. */
+function SelectionDemo() {
+  const [text, setText] = createSignal("Select part of this text");
+  const [range, setRange] = createSignal({ start: 0, end: 0 });
+  const [keys, setKeys] = createSignal<string[]>([]);
+  const [selection, setSelection] = createSignal<{ start: number; end?: number } | undefined>(undefined);
+  let input: YNode | undefined;
+  return (
+    <view style={{ gap: 8 }}>
+      <input
+        ref={(node) => (input = node)}
+        value={text()}
+        onChangeText={setText}
+        selection={selection()}
+        onSelectionChange={setRange}
+        onKeyPress={(e) => setKeys((k) => [...k, e.key].slice(-8))}
+        autoComplete="off"
+        style={field}
+      />
+      <text style={{ fontSize: 13, color: colors.muted }}>
+        {`Selection ${range().start}–${range().end}: "${text().slice(range().start, range().end)}"`}
+      </text>
+      <text style={{ fontSize: 13, color: colors.muted }}>{`Keys: ${keys().join(" ") || "–"}`}</text>
+      <view style={{ flexDirection: "row", gap: 8 }}>
+        <view style={{ flex: 1 }}>
+          <Button label="Select all" onPress={() => setSelection({ start: 0, end: text().length })} />
+        </view>
+        <view style={{ flex: 1 }}>
+          <Button label="Caret to start" color="#57606a" onPress={() => input?.setSelection(0)} />
+        </view>
+      </view>
+      <Field label="One-time code (autofill from messages)" keyboardType="number-pad" autoComplete="one-time-code" maxLength={6} />
+    </view>
   );
 }

@@ -34,7 +34,6 @@ class Box extends ViewGroup implements Node {
     /** 0 auto, 1 none, 2 box-none, 3 box-only. */
     int pointerEvents;
     /** Opacity factor while pressed, or NaN. */
-    float activeOpacity = Float.NaN;
     /** Pan axis lock: 0 free, 1 horizontal, 2 vertical. */
     int panAxis;
     boolean pinchable, rotatable;
@@ -122,6 +121,7 @@ class Box extends ViewGroup implements Node {
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
         invalidateOutline();
+        decor.applyPivot(this);
         if (content != null) content.layout(0, 0, w, h);
     }
 
@@ -233,6 +233,8 @@ class Box extends ViewGroup implements Node {
     // --- Gestures ----------------------------------------------------------
 
     private float downRawX, downRawY;
+    /** Where the press went down (for the ripple). */
+    private float pressX, pressY;
     private boolean panning, tracking, pressedIn, longPressed;
     private VelocityTracker velocity;
     private final Runnable longPress = this::onLongPress;
@@ -249,7 +251,7 @@ class Box extends ViewGroup implements Node {
 
     private boolean pressable() {
         return wants(Native.PRESS) || wants(Native.LONG_PRESS) || wants(Native.PRESS_IN)
-                || wants(Native.PRESS_OUT) || !Float.isNaN(activeOpacity);
+                || wants(Native.PRESS_OUT) || mounter.hasPressFeedback(id);
     }
 
     private boolean pannable() {
@@ -273,9 +275,7 @@ class Box extends ViewGroup implements Node {
         if (pressedIn || !tracking) return;
         pressedIn = true;
         if (wants(Native.PRESS_IN)) mounter.event(id, Native.PRESS_IN);
-        if (!Float.isNaN(activeOpacity)) {
-            animate().alpha(mounter.baseOpacity(id) * activeOpacity).setDuration(100).start();
-        }
+        mounter.pressFeedback(this, id, true, pressX, pressY);
     }
 
     private void pressOut() {
@@ -284,9 +284,7 @@ class Box extends ViewGroup implements Node {
         if (!pressedIn) return;
         pressedIn = false;
         if (wants(Native.PRESS_OUT)) mounter.event(id, Native.PRESS_OUT);
-        if (!Float.isNaN(activeOpacity)) {
-            animate().alpha(mounter.baseOpacity(id)).setDuration(250).start();
-        }
+        mounter.pressFeedback(this, id, false, pressX, pressY);
     }
 
     /** Whether a scroll view may still take this touch for a scroll. */
@@ -359,10 +357,12 @@ class Box extends ViewGroup implements Node {
                 if (velocity != null) velocity.recycle();
                 velocity = VelocityTracker.obtain();
                 track(e);
+                pressX = e.getX();
+                pressY = e.getY();
                 if (pressable) {
                     if (insideScrollView()) postDelayed(pressIn, ViewConfiguration.getTapTimeout());
                     else onPressIn();
-                    if (wants(Native.LONG_PRESS)) postDelayed(longPress, ViewConfiguration.getLongPressTimeout());
+                    if (wants(Native.LONG_PRESS)) postDelayed(longPress, mounter.longPressDelay(id));
                 }
                 return true;
             case MotionEvent.ACTION_POINTER_DOWN:

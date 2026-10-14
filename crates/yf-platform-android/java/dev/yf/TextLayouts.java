@@ -13,6 +13,9 @@ import android.text.style.AbsoluteSizeSpan;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.LineHeightSpan;
 import android.text.style.MetricAffectingSpan;
+import android.text.TextDirectionHeuristic;
+import android.text.TextDirectionHeuristics;
+import android.text.style.AlignmentSpan;
 import android.text.style.StrikethroughSpan;
 import android.text.style.UnderlineSpan;
 import java.io.File;
@@ -116,8 +119,9 @@ public final class TextLayouts {
         return Typeface.create(base, Math.max(1, Math.min(1000, weight)), italic);
     }
 
-    // Span ints: start, end, weight, flags, color, decoration color, family.
-    private static final int SPAN_INTS = 7;
+    // Span ints: start, end, weight, flags, color, decoration color, family,
+    // font variant bits.
+    private static final int SPAN_INTS = 8;
     private static final int ITALIC = 1;
     private static final int UNDERLINE = 2;
     private static final int STRIKE = 4;
@@ -136,8 +140,11 @@ public final class TextLayouts {
         private final StaticLayout[] layouts = new StaticLayout[4];
         private int next;
 
+        final TextDirectionHeuristic direction;
+
         Prepared(CharSequence text, TextPaint paint, Layout.Alignment alignment, boolean justify,
-                 int maxLines, TextUtils.TruncateAt ellipsize, float density) {
+                 int maxLines, TextUtils.TruncateAt ellipsize, float density, TextDirectionHeuristic direction) {
+            this.direction = direction;
             this.text = text;
             this.paint = paint;
             this.alignment = alignment;
@@ -172,6 +179,7 @@ public final class TextLayouts {
             // so the builder reuses its glyph measurements.
             StaticLayout.Builder b = StaticLayout.Builder.obtain(text, 0, text.length(), paint, widthPx)
                     .setAlignment(alignment)
+                    .setTextDirection(direction)
                     .setIncludePad(false)
                     .setLineSpacing(0f, 1f)
                     .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
@@ -217,16 +225,40 @@ public final class TextLayouts {
             int f = Spanned.SPAN_EXCLUSIVE_EXCLUSIVE;
             s.setSpan(new AbsoluteSizeSpan(Math.round(size)), start, end, f);
             s.setSpan(new ForegroundColorSpan(color), start, end, f);
-            s.setSpan(new FontSpan(typeface, spacing), start, end, f);
-            if ((flags & UNDERLINE) != 0) s.setSpan(new UnderlineSpan(), start, end, f);
-            if ((flags & STRIKE) != 0) s.setSpan(new StrikethroughSpan(), start, end, f);
+            s.setSpan(new FontSpan(typeface, spacing, features(ints[o + 7])), start, end, f);
             if (lineHeight > 0) s.setSpan(new ExactLineHeight(lineHeight), start, end, Spanned.SPAN_INCLUSIVE_INCLUSIVE);
+            // StaticLayout does not draw decorations of precomputed text:
+            // TextBox draws these.
+            if ((flags & (UNDERLINE | STRIKE)) != 0) {
+                s.setSpan(new Decoration((flags & UNDERLINE) != 0, (flags & STRIKE) != 0, ints[o + 5], size), start, end, f);
+            }
         }
-        Layout.Alignment alignment;
-        switch (align) {
-            case 2: alignment = Layout.Alignment.ALIGN_CENTER; break;
-            case 3: alignment = Layout.Alignment.ALIGN_OPPOSITE; break;
-            default: alignment = Layout.Alignment.ALIGN_NORMAL;
+        // `encode` packs the writing direction and the layout direction in.
+        int writing = (align >> 4) & 3;
+        boolean rtlLayout = (align & 0x100) != 0;
+        align &= 15;
+        TextDirectionHeuristic direction = writing == 1 ? TextDirectionHeuristics.LTR
+                : writing == 2 ? TextDirectionHeuristics.RTL
+                : rtlLayout ? TextDirectionHeuristics.FIRSTSTRONG_RTL : TextDirectionHeuristics.FIRSTSTRONG_LTR;
+        // `auto` is the right side right to left (as on iOS).
+        if (align == 0 && rtlLayout) align = 3;
+        Layout.Alignment alignment = align == 2 ? Layout.Alignment.ALIGN_CENTER : Layout.Alignment.ALIGN_NORMAL;
+        if (align == 1 || align == 3) {
+            // Left and right are absolute, while Android's alignments follow
+            // each paragraph's direction: align each paragraph by its own.
+            int start = 0;
+            while (start <= text.length()) {
+                int end = text.indexOf('\n', start);
+                if (end < 0) end = text.length();
+                boolean rtl = direction.isRtl(text, start, end - start);
+                boolean normal = (align == 1) != rtl;
+                int spanEnd = Math.min(end + 1, text.length());
+                if (spanEnd > start) {
+                    s.setSpan(new AlignmentSpan.Standard(normal ? Layout.Alignment.ALIGN_NORMAL : Layout.Alignment.ALIGN_OPPOSITE),
+                            start, spanEnd, Spanned.SPAN_PARAGRAPH);
+                }
+                start = end + 1;
+            }
         }
         TextUtils.TruncateAt truncate;
         switch (ellipsize) {
@@ -239,9 +271,10 @@ public final class TextLayouts {
         PrecomputedText.Params params = new PrecomputedText.Params.Builder(paint)
                 .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
                 .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+                .setTextDirection(direction)
                 .build();
         CharSequence measured = PrecomputedText.create(s, params);
-        return new Prepared(measured, paint, alignment, align == 4, maxLines, truncate, density);
+        return new Prepared(measured, paint, alignment, align == 4, maxLines, truncate, density, direction);
     }
 
     /** Size in dp, packed as two float bit patterns (width high). */
@@ -278,18 +311,48 @@ public final class TextLayouts {
     }
 
     /** Typeface and letter spacing of a run. */
+    /** Underline / strikethrough of a run (drawn by {@link TextBox}). */
+    static final class Decoration {
+        final boolean underline, strike;
+        final int color;
+        final float sizePx;
+
+        Decoration(boolean underline, boolean strike, int color, float sizePx) {
+            this.underline = underline;
+            this.strike = strike;
+            this.color = color;
+            this.sizePx = sizePx;
+        }
+    }
+
+    /** OpenType feature settings for `fontVariant` bits (`yf_core::FontVariant`), or null. */
+    static String features(int bits) {
+        if (bits == 0) return null;
+        StringBuilder b = new StringBuilder();
+        String[] tags = {"smcp", "onum", "lnum", "tnum", "pnum"};
+        for (int i = 0; i < tags.length; i++) {
+            if ((bits & (1 << i)) == 0) continue;
+            if (b.length() > 0) b.append(", ");
+            b.append('\'').append(tags[i]).append('\'');
+        }
+        return b.toString();
+    }
+
     private static final class FontSpan extends MetricAffectingSpan {
         private final Typeface typeface;
         private final float spacingPx;
+        private final String features;
 
-        FontSpan(Typeface typeface, float spacingPx) {
+        FontSpan(Typeface typeface, float spacingPx, String features) {
             this.typeface = typeface;
             this.spacingPx = spacingPx;
+            this.features = features;
         }
 
         private void apply(TextPaint paint) {
             paint.setTypeface(typeface);
             if (spacingPx != 0 && paint.getTextSize() > 0) paint.setLetterSpacing(spacingPx / paint.getTextSize());
+            if (features != null) paint.setFontFeatureSettings(features);
         }
 
         @Override

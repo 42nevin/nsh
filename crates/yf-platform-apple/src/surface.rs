@@ -207,6 +207,7 @@ impl RootView {
             },
             // The body text style is 17pt at the default size.
             font_scale: (body / 17.0) as f32,
+            rtl: preferred_language_rtl(),
         }
     }
 
@@ -482,4 +483,16 @@ impl Drop for Surface {
             unsafe { center.removeObserver(observer.as_ref()) };
         }
     }
+}
+
+/// Whether the user's first language is written right to left (as React
+/// Native decides; the app's own localizations do not matter).
+fn preferred_language_rtl() -> bool {
+    use objc2_foundation::{NSLocale, NSLocaleLanguageDirection};
+    NSLocale::preferredLanguages()
+        .firstObject()
+        .is_some_and(|language| {
+            NSLocale::characterDirectionForLanguage(&language)
+                == NSLocaleLanguageDirection::RightToLeft
+        })
 }

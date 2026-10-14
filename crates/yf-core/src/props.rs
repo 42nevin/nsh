@@ -270,6 +270,19 @@ pub enum AccessibilityProp {
     Actions(Vec<AccessibilityActionDef>),
 }
 
+/// Android's press ripple (`android_ripple`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Ripple {
+    /// Ripple color; the theme's when `None`.
+    pub color: Option<crate::style::Color>,
+    /// The ripple is not clipped to the view.
+    pub borderless: bool,
+    /// Radius in points; the platform's when `None`.
+    pub radius: Option<f32>,
+    /// Drawn over the view's content (else behind it).
+    pub foreground: bool,
+}
+
 /// Non-style properties of a view that only the platform needs.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ViewProps {
@@ -279,6 +292,11 @@ pub struct ViewProps {
     pub hit_slop: EdgeInsets,
     /// Opacity while pressed (native press feedback, no JS round trip).
     pub active_opacity: Option<f32>,
+    /// Milliseconds before a press becomes a long press (platform default
+    /// when `None`).
+    pub long_press_delay: Option<f32>,
+    /// Ripple while pressed (Android).
+    pub ripple: Option<Ripple>,
     /// Accessibility.
     pub accessibility: Accessibility,
     /// `testID`: an identifier for UI tests.

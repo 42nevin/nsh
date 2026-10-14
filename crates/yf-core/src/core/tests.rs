@@ -1733,3 +1733,182 @@ fn modals_lay_out_at_the_reported_size() {
     let batch = c.commit().unwrap();
     assert_eq!(frame_of(&batch, 3).map(|f| f.height), Some(400.0));
 }
+
+#[test]
+fn right_to_left_layouts() {
+    let mut c = core();
+    let n = |v: f32| StyleValue::Number(v);
+    let s = |v: &'static str| StyleValue::Str(v);
+    let mut ops = vec![
+        Op::Create {
+            id: 2,
+            tag: Tag::View,
+        },
+        Op::SetStyle {
+            id: 2,
+            style: style(&[
+                ("flexDirection", s("row")),
+                ("width", n(300.0)),
+                ("height", n(50.0)),
+            ]),
+        },
+    ];
+    // Two boxes in a row: the first with `marginStart`, the second with
+    // `marginLeft` (swapped right to left, as in React Native).
+    for (id, key) in [(3, "marginStart"), (4, "marginLeft")] {
+        ops.push(Op::Create { id, tag: Tag::View });
+        ops.push(Op::SetStyle {
+            id,
+            style: style(&[("width", n(50.0)), ("height", n(50.0)), (key, n(10.0))]),
+        });
+        ops.push(Op::Insert {
+            parent: 2,
+            child: id,
+            before: None,
+        });
+    }
+    ops.push(Op::Insert {
+        parent: ROOT_ID,
+        child: 2,
+        before: None,
+    });
+    apply(&mut c, ops);
+    let batch = c.commit().unwrap();
+    assert_eq!(frame_of(&batch, 3).map(|f| f.x), Some(10.0));
+    assert_eq!(frame_of(&batch, 4).map(|f| f.x), Some(70.0));
+
+    // The surface turns right to left: the row runs from the right.
+    apply(
+        &mut c,
+        vec![Op::SetProp {
+            id: ROOT_ID,
+            prop: Prop::LayoutDirection(true),
+        }],
+    );
+    let batch = c.commit().unwrap();
+    assert!(
+        batch
+            .items
+            .iter()
+            .any(|i| matches!(i, MountItem::LayoutDirection { rtl: true }))
+    );
+    assert_eq!(frame_of(&batch, 3).map(|f| f.x), Some(300.0 - 10.0 - 50.0));
+    assert_eq!(
+        frame_of(&batch, 4).map(|f| f.x),
+        Some(300.0 - 60.0 - 10.0 - 50.0)
+    );
+
+    // A subtree built detached and inserted takes the direction too; an
+    // explicit `direction` overrides it.
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 5,
+                tag: Tag::View,
+            },
+            Op::SetStyle {
+                id: 5,
+                style: style(&[
+                    ("flexDirection", s("row")),
+                    ("direction", s("ltr")),
+                    ("height", n(20.0)),
+                ]),
+            },
+            Op::Create {
+                id: 6,
+                tag: Tag::View,
+            },
+            Op::SetStyle {
+                id: 6,
+                style: style(&[
+                    ("width", n(20.0)),
+                    ("start", n(5.0)),
+                    ("position", s("absolute")),
+                ]),
+            },
+            Op::Insert {
+                parent: 5,
+                child: 6,
+                before: None,
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 5,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    assert_eq!(frame_of(&batch, 6).map(|f| f.x), Some(5.0));
+
+    // Back to left to right.
+    apply(
+        &mut c,
+        vec![Op::SetProp {
+            id: ROOT_ID,
+            prop: Prop::LayoutDirection(false),
+        }],
+    );
+    let batch = c.commit().unwrap();
+    assert_eq!(frame_of(&batch, 3).map(|f| f.x), Some(10.0));
+    assert_eq!(frame_of(&batch, 4).map(|f| f.x), Some(70.0));
+}
+
+#[test]
+fn right_to_left_horizontal_scrolls() {
+    let mut c = core();
+    let n = |v: f32| StyleValue::Number(v);
+    let mut ops = vec![
+        Op::SetProp {
+            id: ROOT_ID,
+            prop: Prop::LayoutDirection(true),
+        },
+        Op::Create {
+            id: 2,
+            tag: Tag::Scroll,
+        },
+        Op::SetProp {
+            id: 2,
+            prop: Prop::Horizontal(true),
+        },
+        Op::SetStyle {
+            id: 2,
+            style: style(&[
+                ("width", n(150.0)),
+                ("height", n(50.0)),
+                ("paddingStart", n(10.0)),
+            ]),
+        },
+    ];
+    for id in [3, 4] {
+        ops.push(Op::Create { id, tag: Tag::View });
+        ops.push(Op::SetStyle {
+            id,
+            style: style(&[("width", n(100.0)), ("height", n(50.0))]),
+        });
+        ops.push(Op::Insert {
+            parent: 2,
+            child: id,
+            before: None,
+        });
+    }
+    ops.push(Op::Insert {
+        parent: ROOT_ID,
+        child: 2,
+        before: None,
+    });
+    apply(&mut c, ops);
+    let batch = c.commit().unwrap();
+    // Content: 10 (start padding) + 200; the first child at the right end.
+    assert_eq!(frame_of(&batch, 3).map(|f| f.x), Some(210.0 - 10.0 - 100.0));
+    assert_eq!(frame_of(&batch, 4).map(|f| f.x), Some(0.0));
+    // It starts scrolled to its right end.
+    assert!(batch.items.iter().any(|i| matches!(
+        i,
+        MountItem::Command {
+            id: 2,
+            command: Command::ScrollTo { x, .. }
+        } if *x == 60.0
+    )));
+}

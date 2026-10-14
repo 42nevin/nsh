@@ -157,6 +157,158 @@ events! {
     MomentumScrollBegin = "onMomentumScrollBegin": "A scroll view started gliding after a fling (payload: [`EventPayload::Scroll`]).",
     MomentumScrollEnd = "onMomentumScrollEnd": "A scroll view stopped gliding (payload: [`EventPayload::Scroll`]).",
     Dialog = "onDialog": "An alert or action sheet closed (root only; payload: `id`, `index`, -1 when dismissed).",
+    Touch = "onTouch": "Touches on the view or inside it, for the JS touch and responder handlers (payload: [`EventPayload::Touch`]).",
+    SelectionChange = "onSelectionChange": "The selection (or caret) of an input moved (payload: `start`, `end` in UTF-16 units).",
+    KeyPress = "onKeyPress": "A key was pressed in an input (payload: `key`: the character, `Backspace` or `Enter`).",
+}
+
+/// What an input holds, for the system's autofill and suggestions
+/// (`autoComplete`, `textContentType`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutoFill {
+    /// The platform decides.
+    #[default]
+    Default,
+    /// No autofill.
+    Off,
+    /// Account name.
+    Username,
+    /// Existing password.
+    Password,
+    /// A password being chosen.
+    NewPassword,
+    /// A code from a text message or e-mail.
+    OneTimeCode,
+    /// E-mail address.
+    Email,
+    /// Phone number.
+    Tel,
+    /// Full name.
+    Name,
+    /// First name.
+    GivenName,
+    /// Last name.
+    FamilyName,
+    /// Middle name.
+    MiddleName,
+    /// Nickname.
+    Nickname,
+    /// Company.
+    Organization,
+    /// Street address, all lines.
+    StreetAddress,
+    /// First address line.
+    AddressLine1,
+    /// Second address line.
+    AddressLine2,
+    /// City.
+    City,
+    /// State or region.
+    Region,
+    /// Postal code.
+    PostalCode,
+    /// Country.
+    Country,
+    /// Credit card number.
+    CreditCardNumber,
+    /// Credit card expiry date.
+    CreditCardExpiration,
+    /// Credit card security code.
+    CreditCardSecurityCode,
+    /// Name on the credit card.
+    CreditCardName,
+    /// Web address.
+    Url,
+    /// Birth date.
+    Birthdate,
+}
+
+impl AutoFill {
+    /// Parses React Native's `autoComplete` values and iOS's
+    /// `textContentType` names.
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "off" | "none" => Self::Off,
+            "username" | "username-new" => Self::Username,
+            "password" | "current-password" => Self::Password,
+            "new-password" | "newPassword" | "password-new" => Self::NewPassword,
+            "one-time-code" | "oneTimeCode" | "sms-otp" => Self::OneTimeCode,
+            "email" | "emailAddress" => Self::Email,
+            "tel" | "telephoneNumber" | "tel-national" | "tel-device" | "tel-country-code" => {
+                Self::Tel
+            }
+            "name" | "name-full" => Self::Name,
+            "given-name" | "givenName" | "name-given" => Self::GivenName,
+            "family-name" | "familyName" | "name-family" => Self::FamilyName,
+            "additional-name" | "middleName" | "name-middle" => Self::MiddleName,
+            "nickname" => Self::Nickname,
+            "organization" | "organizationName" => Self::Organization,
+            "street-address" | "fullStreetAddress" | "postal-address" => Self::StreetAddress,
+            "address-line1" | "streetAddressLine1" => Self::AddressLine1,
+            "address-line2" | "streetAddressLine2" => Self::AddressLine2,
+            "address-level2" | "addressCity" | "postal-address-locality" => Self::City,
+            "address-level1" | "addressState" | "postal-address-region" => Self::Region,
+            "postal-code" | "postalCode" => Self::PostalCode,
+            "country" | "countryName" | "postal-address-country" => Self::Country,
+            "cc-number" | "creditCardNumber" => Self::CreditCardNumber,
+            "cc-exp" | "creditCardExpiration" | "cc-exp-month" | "cc-exp-year" => {
+                Self::CreditCardExpiration
+            }
+            "cc-csc" | "creditCardSecurityCode" => Self::CreditCardSecurityCode,
+            "cc-name" | "creditCardName" => Self::CreditCardName,
+            "url" | "URL" => Self::Url,
+            "birthdate-full" | "birthdate" | "birthdate-day" | "birthdate-month"
+            | "birthdate-year" => Self::Birthdate,
+            _ => return None,
+        })
+    }
+}
+
+/// The phase of a [`TouchEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TouchPhase {
+    /// Fingers went down (the changed points).
+    Start,
+    /// Fingers moved.
+    Move,
+    /// Fingers lifted (the changed points).
+    End,
+    /// The system or a native gesture took the touches over.
+    Cancel,
+}
+
+/// One finger of a [`TouchEvent`], in points.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TouchPoint {
+    /// Identifies the finger while it is down.
+    pub id: u32,
+    /// The view under the finger when it went down.
+    pub target: NodeId,
+    /// The views around `target` (it included) that listen to touches,
+    /// innermost first.
+    pub path: Vec<NodeId>,
+    /// Position in the surface.
+    pub page_x: f32,
+    /// Position in the surface.
+    pub page_y: f32,
+    /// Position in `target`.
+    pub location_x: f32,
+    /// Position in `target`.
+    pub location_y: f32,
+    /// This finger is one the event is about (it went down, moved or
+    /// lifted).
+    pub changed: bool,
+}
+
+/// Touches for the JS responder system.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TouchEvent {
+    /// What happened.
+    pub phase: TouchPhase,
+    /// Milliseconds since an arbitrary origin.
+    pub timestamp: f64,
+    /// The fingers down during the event (with those that lifted).
+    pub points: Vec<TouchPoint>,
 }
 
 /// A set of [`EventKind`]s.
@@ -265,6 +417,22 @@ pub enum EventPayload {
         /// typing.
         count: u32,
     },
+    /// Touches (`onTouch`).
+    Touch(Box<TouchEvent>),
+}
+
+impl TouchEvent {
+    /// Folds a later move into this pending one: the later positions,
+    /// changed if either moved them.
+    pub fn merge_move(&mut self, later: TouchEvent) {
+        let mut later = later;
+        for p in &mut later.points {
+            if let Some(old) = self.points.iter().find(|o| o.id == p.id) {
+                p.changed |= old.changed;
+            }
+        }
+        *self = later;
+    }
 }
 
 /// How an image fits its box.
@@ -583,6 +751,21 @@ pub enum Command {
     /// Show an alert or action sheet (on the root); the answer comes back
     /// as [`EventKind::Dialog`].
     Dialog(Box<Dialog>),
+    /// A JS responder took the touches on this view: `block` keeps native
+    /// scroll views around it from taking them over.
+    SetJsResponder {
+        /// Block native scrolling.
+        block: bool,
+    },
+    /// The JS responder let go (on the root).
+    ClearJsResponder,
+    /// Select a range of an input (UTF-16 units; equal for a caret).
+    SetSelection {
+        /// Start.
+        start: u32,
+        /// End.
+        end: u32,
+    },
     /// Show a short message (Android toast; on the root).
     Toast {
         /// The message.
@@ -733,6 +916,10 @@ pub enum Prop {
     AutoFocus(bool),
     /// `<input selectionColor>` (caret and selection).
     SelectionColor(Option<Color>),
+    /// `<input autoComplete>` / `textContentType`.
+    AutoFill(AutoFill),
+    /// `<input selection>`: start and end (UTF-16 units).
+    Selection(u32, u32),
     /// `<scroll keyboardDismissMode>` / `<List keyboardDismissMode>`.
     KeyboardDismissMode(KeyboardDismissMode),
     /// `pointerEvents`.
@@ -741,6 +928,13 @@ pub enum Prop {
     HitSlop(EdgeInsets),
     /// `activeOpacity`: native press feedback.
     ActiveOpacity(Option<f32>),
+    /// The surface lays out right to left (on the root, from
+    /// `I18nManager`).
+    LayoutDirection(bool),
+    /// `delayLongPress`: milliseconds before a press becomes a long press.
+    LongPressDelay(Option<f32>),
+    /// `android_ripple`: Android's press ripple.
+    Ripple(Option<crate::props::Ripple>),
     /// An accessibility property.
     Accessibility(AccessibilityProp),
     /// `testID`.

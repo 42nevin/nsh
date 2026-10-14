@@ -471,6 +471,10 @@ pub struct InputConfig {
     pub auto_focus: bool,
     /// Caret and selection color.
     pub selection_color: Option<Color>,
+    /// What the input holds, for autofill.
+    pub auto_fill: crate::ops::AutoFill,
+    /// The text runs right to left.
+    pub rtl: bool,
 }
 
 impl Default for InputConfig {
@@ -491,6 +495,8 @@ impl Default for InputConfig {
             blur_on_submit: true,
             auto_focus: false,
             selection_color: None,
+            auto_fill: crate::ops::AutoFill::Default,
+            rtl: false,
         }
     }
 }
@@ -582,6 +588,10 @@ pub enum MountItem {
         scroll_value: Option<yf_anim::NodeId>,
         /// When dragging dismisses the keyboard.
         keyboard_dismiss: KeyboardDismissMode,
+        /// A horizontal list laid out right to left: the platform mirrors
+        /// the scroll view and each of its cells (so the list's offsets
+        /// stay left to right).
+        mirrored: bool,
     },
     /// Set the scrollable content size.
     ScrollContent {
@@ -599,6 +609,12 @@ pub enum MountItem {
         dx: f32,
         /// Vertical shift.
         dy: f32,
+    },
+    /// The surface lays out right to left (or no longer): native controls
+    /// mirror.
+    LayoutDirection {
+        /// Right to left.
+        rtl: bool,
     },
     /// The sticky cells of a list (replaces the previous set): each one
     /// is translated along the main axis by `clamp(offset - start, 0,

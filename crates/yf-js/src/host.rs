@@ -8,7 +8,7 @@ use rquickjs::{
     Array, CatchResultExt, Context, Ctx, Function, Module, Persistent, Runtime, Value,
     function::Opt,
 };
-use yf_core::{EventKind, EventPayload, NodeId, Op, PayloadValue};
+use yf_core::{EventKind, EventPayload, NodeId, Op, PayloadValue, TouchPhase};
 
 use crate::{
     console,
@@ -363,6 +363,7 @@ fn environment_object<'js>(ctx: &Ctx<'js>, env: &Environment) -> rquickjs::Resul
         },
     )?;
     obj.set("fontScale", env.font_scale)?;
+    obj.set("rtl", env.rtl)?;
     Ok(obj.into_value())
 }
 
@@ -409,6 +410,37 @@ fn payload_object<'js>(ctx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resu
         }
         EventPayload::Error { message } => obj.set("message", message.as_str())?,
         EventPayload::Text { text, .. } => obj.set("text", text.as_str())?,
+        EventPayload::Touch(touch) => {
+            obj.set(
+                "phase",
+                match touch.phase {
+                    TouchPhase::Start => "start",
+                    TouchPhase::Move => "move",
+                    TouchPhase::End => "end",
+                    TouchPhase::Cancel => "cancel",
+                },
+            )?;
+            obj.set("timestamp", touch.timestamp)?;
+            let points = rquickjs::Array::new(ctx.clone())?;
+            for (i, p) in touch.points.iter().enumerate() {
+                let o = rquickjs::Object::new(ctx.clone())?;
+                o.set("identifier", p.id)?;
+                o.set("target", p.target)?;
+                let path = rquickjs::Array::new(ctx.clone())?;
+                for (j, id) in p.path.iter().enumerate() {
+                    path.set(j, *id)?;
+                }
+                o.set("path", path)?;
+                o.set("pageX", p.page_x)?;
+                o.set("pageY", p.page_y)?;
+                o.set("locationX", p.location_x)?;
+                o.set("locationY", p.location_y)?;
+                o.set("changed", p.changed)?;
+                o.set("timestamp", touch.timestamp)?;
+                points.set(i, o)?;
+            }
+            obj.set("points", points)?;
+        }
     }
     Ok(obj.into_value())
 }

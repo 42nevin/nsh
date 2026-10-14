@@ -31,6 +31,7 @@ mod system;
 mod target;
 mod text;
 mod text_view;
+mod touch;
 mod video;
 mod view;
 mod web;

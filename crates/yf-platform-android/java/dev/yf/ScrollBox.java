@@ -41,6 +41,8 @@ final class ScrollBox extends FrameLayout implements Node {
 
     // `ScrollBehavior`; offsets and lengths in dp.
     private boolean paging, enabled = true, bounces = true, oneStep;
+    /** A JS responder inside keeps the touches (`onResponderGrant` returned true). */
+    boolean jsBlocked;
     private float snapInterval, deceleration;
     private float[] snapOffsets = new float[0];
     private int snapAlignment; // 0 start, 1 center, 2 end
@@ -114,6 +116,8 @@ final class ScrollBox extends FrameLayout implements Node {
             if (stickyCells.length > 0) pinSticky();
             if (touching && !dragging && !swallowing) {
                 dragging = true;
+                // The scroll view takes the touches from JS responders.
+                mounter.cancelTouches();
                 // Caught while gliding: the glide ended.
                 if (momentum) emit(Native.MOMENTUM_SCROLL_END);
                 momentum = false;
@@ -302,13 +306,13 @@ final class ScrollBox extends FrameLayout implements Node {
 
         @Override
         public boolean onInterceptTouchEvent(MotionEvent e) {
-            return enabled && super.onInterceptTouchEvent(e);
+            return enabled && !jsBlocked && super.onInterceptTouchEvent(e);
         }
 
         @SuppressLint("ClickableViewAccessibility")
         @Override
         public boolean onTouchEvent(MotionEvent e) {
-            if (!enabled) return false;
+            if (!enabled || jsBlocked) return false;
             boolean up = beforeTouch(e);
             boolean handled = super.onTouchEvent(e);
             if (up) released();
@@ -328,13 +332,13 @@ final class ScrollBox extends FrameLayout implements Node {
 
         @Override
         public boolean onInterceptTouchEvent(MotionEvent e) {
-            return enabled && super.onInterceptTouchEvent(e);
+            return enabled && !jsBlocked && super.onInterceptTouchEvent(e);
         }
 
         @SuppressLint("ClickableViewAccessibility")
         @Override
         public boolean onTouchEvent(MotionEvent e) {
-            if (!enabled) return false;
+            if (!enabled || jsBlocked) return false;
             boolean up = beforeTouch(e);
             boolean handled = super.onTouchEvent(e);
             if (up) released();

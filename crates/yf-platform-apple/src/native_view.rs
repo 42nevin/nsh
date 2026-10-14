@@ -126,6 +126,11 @@ define_class!(
 );
 
 impl YFView {
+    /// `pointerEvents`.
+    pub(crate) fn pointer_events(&self) -> PointerEvents {
+        self.ivars().props.borrow().pointer_events
+    }
+
     fn hit(&self, point: CGPoint, event: Option<&UIEvent>) -> Option<Retained<UIView>> {
         let mode = self.ivars().props.borrow().pointer_events;
         // SAFETY: calling the superclass implementation.

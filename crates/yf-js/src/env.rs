@@ -39,6 +39,8 @@ pub struct Environment {
     pub color_scheme: ColorScheme,
     /// Preferred text size relative to the default (1.0).
     pub font_scale: f32,
+    /// The user's language is written right to left.
+    pub rtl: bool,
 }
 
 impl Default for Environment {
@@ -50,6 +52,7 @@ impl Default for Environment {
             keyboard_duration: 0.25,
             color_scheme: ColorScheme::Light,
             font_scale: 1.0,
+            rtl: false,
         }
     }
 }

@@ -9,11 +9,12 @@
 
 use jni::objects::GlobalRef;
 use yf_core::{
-    AccessibilityRole, AutoCapitalize, BorderStyle, Checked, Color, Command, DialogButtonStyle,
-    InputConfig, KeyboardDismissMode, KeyboardTaps, KeyboardType, LayoutCurve, LayoutProperty,
-    LayoutTransition, LiveRegion, ModalAnimation, ModalPresentation, MountBatch, MountItem,
-    NativeProps, PointerEvents, ResizeMode, ReturnKeyType, ScreenAnimation, ScreenConfig,
-    SnapAlignment, StatusBarStyle, TextAlign, ViewKind, ViewProps, ViewStyle, WebSource,
+    AccessibilityRole, AutoCapitalize, AutoFill, BorderStyle, Checked, Color, Command,
+    DialogButtonStyle, InputConfig, KeyboardDismissMode, KeyboardTaps, KeyboardType, LayoutCurve,
+    LayoutProperty, LayoutTransition, LiveRegion, ModalAnimation, ModalPresentation, MountBatch,
+    MountItem, NativeProps, OriginLen, PointerEvents, ResizeMode, ReturnKeyType, ScreenAnimation,
+    ScreenConfig, SnapAlignment, StatusBarStyle, TextAlign, ViewKind, ViewProps, ViewStyle,
+    WebSource,
 };
 
 use crate::{
@@ -47,6 +48,7 @@ const MODAL_CONFIG: i32 = 22;
 const NATIVE_PROPS: i32 = 23;
 const STICKY_CELLS: i32 = 24;
 const SCROLL_BEHAVIOR: i32 = 25;
+const LAYOUT_DIRECTION: i32 = 26;
 
 /// An entry of the object table.
 pub(crate) enum Obj {
@@ -159,7 +161,7 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                 id,
                 layout,
                 content,
-                ..
+                text,
             } => {
                 let Some(AndroidLayout(layout)) = layout.downcast::<AndroidLayout>() else {
                     continue;
@@ -170,6 +172,15 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                 e.objects.push(Obj::Layout(layout.clone()));
                 for v in [content.x, content.y, content.width, content.height] {
                     e.float(v);
+                }
+                // Pressable spans: start, end, node, events (low, high).
+                e.int(text.links.len() as i32);
+                for l in &text.links {
+                    e.int(l.start as i32);
+                    e.int(l.end as i32);
+                    e.int(l.node as i32);
+                    e.int(l.events.bits() as u32 as i32);
+                    e.int((l.events.bits() >> 32) as u32 as i32);
                 }
             }
             MountItem::Events { id, events } => {
@@ -204,6 +215,7 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                 shows_indicator,
                 scroll_value,
                 keyboard_dismiss,
+                mirrored,
             } => {
                 e.int(SCROLL_CONFIG);
                 e.int(id as i32);
@@ -214,12 +226,14 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     KeyboardDismissMode::OnDrag => 1,
                     KeyboardDismissMode::Interactive => 2,
                 });
+                e.bool(mirrored);
                 e.anim.push(MountItem::ScrollConfig {
                     id,
                     horizontal,
                     shows_indicator,
                     scroll_value,
                     keyboard_dismiss,
+                    mirrored,
                 });
             }
             MountItem::ScrollContent { id, size } => {
@@ -237,6 +251,10 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     e.float(c.start);
                     e.float(c.end);
                 }
+            }
+            MountItem::LayoutDirection { rtl } => {
+                e.int(LAYOUT_DIRECTION);
+                e.bool(rtl);
             }
             MountItem::ScrollBehavior { id, behavior } => {
                 let b = &*behavior;
@@ -418,6 +436,16 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                         e.string(text);
                         e.bool(long);
                     }
+                    Command::SetJsResponder { block } => {
+                        e.int(14);
+                        e.bool(block);
+                    }
+                    Command::ClearJsResponder => e.int(15),
+                    Command::SetSelection { start, end } => {
+                        e.int(16);
+                        e.int(start as i32);
+                        e.int(end as i32);
+                    }
                     // Turned into a mount item / `ScrollTo` by the core.
                     Command::LayoutAnimation(_)
                     | Command::ScrollToIndex { .. }
@@ -472,6 +500,21 @@ fn view_style(e: &mut Encoded, s: &ViewStyle) {
     }
     e.bool(s.tint_color.is_some());
     e.int(s.tint_color.map_or(0, argb));
+    e.float(s.elevation);
+    // Transform origin: kind (0 points, 1 fraction) and value per axis.
+    for v in [s.transform_origin.x, s.transform_origin.y] {
+        match v {
+            OriginLen::Px(p) => {
+                e.int(0);
+                e.float(p);
+            }
+            OriginLen::Fraction(f) => {
+                e.int(1);
+                e.float(f);
+            }
+        }
+    }
+    e.bool(s.backface_hidden);
 }
 
 fn opt_color(e: &mut Encoded, c: Option<Color>) {
@@ -633,6 +676,15 @@ fn view_props(e: &mut Encoded, p: &ViewProps) {
         e.opt_string(action.label.as_deref());
     }
     e.opt_string(p.test_id.as_deref());
+    e.float(p.long_press_delay.unwrap_or(-1.0));
+    match p.ripple {
+        Some(r) => {
+            e.int(1 | (r.borderless as i32) << 1 | (r.foreground as i32) << 2);
+            opt_color(e, r.color);
+            e.float(r.radius.unwrap_or(-1.0));
+        }
+        None => e.int(0),
+    }
 }
 
 /// Index of `role` in `A11y.java`'s class name table.
@@ -743,4 +795,35 @@ fn input(e: &mut Encoded, c: &InputConfig) {
     e.bool(c.selection_color.is_some());
     e.int(c.selection_color.map_or(0, argb));
     e.bool(c.blur_on_submit);
+    // Android autofill hints ("" for none).
+    e.opt_string(match c.auto_fill {
+        AutoFill::Default => None,
+        AutoFill::Off => Some(""),
+        AutoFill::Username => Some("username"),
+        AutoFill::Password => Some("password"),
+        AutoFill::NewPassword => Some("newPassword"),
+        AutoFill::OneTimeCode => Some("smsOTPCode"),
+        AutoFill::Email => Some("emailAddress"),
+        AutoFill::Tel => Some("phone"),
+        AutoFill::Name => Some("personName"),
+        AutoFill::GivenName => Some("personGivenName"),
+        AutoFill::FamilyName => Some("personFamilyName"),
+        AutoFill::MiddleName => Some("personMiddleName"),
+        AutoFill::Nickname => Some("nickname"),
+        AutoFill::Organization => Some("organization"),
+        AutoFill::StreetAddress => Some("postalAddress"),
+        AutoFill::AddressLine1 => Some("streetAddress"),
+        AutoFill::AddressLine2 => Some("extendedAddress"),
+        AutoFill::City => Some("addressLocality"),
+        AutoFill::Region => Some("addressRegion"),
+        AutoFill::PostalCode => Some("postalCode"),
+        AutoFill::Country => Some("addressCountry"),
+        AutoFill::CreditCardNumber => Some("creditCardNumber"),
+        AutoFill::CreditCardExpiration => Some("creditCardExpirationDate"),
+        AutoFill::CreditCardSecurityCode => Some("creditCardSecurityCode"),
+        AutoFill::CreditCardName => Some("creditCardHolderName"),
+        AutoFill::Url => Some("url"),
+        AutoFill::Birthdate => Some("birthDateFull"),
+    });
+    e.bool(c.rtl);
 }

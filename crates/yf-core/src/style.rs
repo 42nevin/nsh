@@ -433,6 +433,175 @@ pub struct ViewStyle {
     pub transform: Transform,
     /// `tintColor`: recolors an image's opaque pixels.
     pub tint_color: Option<Color>,
+    /// `elevation`: Android's material shadow (points).
+    pub elevation: f32,
+    /// `transformOrigin`: the point transforms act around.
+    pub transform_origin: TransformOrigin,
+    /// `backfaceVisibility: "hidden"`: invisible when turned away.
+    pub backface_hidden: bool,
+}
+
+/// A coordinate of [`TransformOrigin`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OriginLen {
+    /// Points from the left / top edge.
+    Px(f32),
+    /// A fraction of the width / height.
+    Fraction(f32),
+}
+
+impl OriginLen {
+    /// The coordinate in a box `length` points long.
+    pub fn resolve(self, length: f32) -> f32 {
+        match self {
+            OriginLen::Px(v) => v,
+            OriginLen::Fraction(f) => f * length,
+        }
+    }
+}
+
+/// `transformOrigin`: the point transforms rotate and scale around.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TransformOrigin {
+    /// Horizontal position.
+    pub x: OriginLen,
+    /// Vertical position.
+    pub y: OriginLen,
+    /// Depth in points.
+    pub z: f32,
+}
+
+impl Default for TransformOrigin {
+    fn default() -> Self {
+        Self::CENTER
+    }
+}
+
+impl TransformOrigin {
+    /// The center (the default).
+    pub const CENTER: Self = Self {
+        x: OriginLen::Fraction(0.5),
+        y: OriginLen::Fraction(0.5),
+        z: 0.0,
+    };
+
+    /// Offset of the origin from the center of a `width` × `height` box.
+    pub fn offset(&self, width: f32, height: f32) -> (f32, f32, f32) {
+        (
+            self.x.resolve(width) - width / 2.0,
+            self.y.resolve(height) - height / 2.0,
+            self.z,
+        )
+    }
+
+    /// Parses CSS's syntax: one to three of keywords (`left`, `center`,
+    /// `right`, `top`, `bottom`), percentages and lengths (`10px` or a
+    /// bare number), the third being a depth.
+    pub fn parse(s: &str) -> Option<Self> {
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.is_empty() || parts.len() > 3 {
+            return None;
+        }
+        let len = |p: &str| -> Option<OriginLen> {
+            if let Some(pct) = p.strip_suffix('%') {
+                return pct
+                    .trim()
+                    .parse::<f32>()
+                    .ok()
+                    .map(|v| OriginLen::Fraction(v / 100.0));
+            }
+            p.strip_suffix("px")
+                .unwrap_or(p)
+                .parse::<f32>()
+                .ok()
+                .map(OriginLen::Px)
+        };
+        let mut x = None;
+        let mut y = None;
+        let mut free = Vec::new();
+        for &p in parts.iter().take(2) {
+            match p {
+                "left" => x = Some(OriginLen::Fraction(0.0)),
+                "right" => x = Some(OriginLen::Fraction(1.0)),
+                "top" => y = Some(OriginLen::Fraction(0.0)),
+                "bottom" => y = Some(OriginLen::Fraction(1.0)),
+                "center" => free.push(OriginLen::Fraction(0.5)),
+                p => free.push(len(p)?),
+            }
+        }
+        // Unnamed values fill x, then y.
+        for v in free {
+            if x.is_none() {
+                x = Some(v);
+            } else if y.is_none() {
+                y = Some(v);
+            } else {
+                return None;
+            }
+        }
+        let z = match parts.get(2) {
+            Some(p) => p.strip_suffix("px").unwrap_or(p).parse::<f32>().ok()?,
+            None => 0.0,
+        };
+        Some(Self {
+            x: x.unwrap_or(OriginLen::Fraction(0.5)),
+            y: y.unwrap_or(OriginLen::Fraction(0.5)),
+            z,
+        })
+    }
+}
+
+/// `fontVariant`: OpenType features, as bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct FontVariant(pub u8);
+
+impl FontVariant {
+    /// `small-caps`.
+    pub const SMALL_CAPS: u8 = 1;
+    /// `oldstyle-nums`.
+    pub const OLDSTYLE_NUMS: u8 = 2;
+    /// `lining-nums`.
+    pub const LINING_NUMS: u8 = 4;
+    /// `tabular-nums`.
+    pub const TABULAR_NUMS: u8 = 8;
+    /// `proportional-nums`.
+    pub const PROPORTIONAL_NUMS: u8 = 16;
+
+    /// Parses space-separated variant names.
+    pub fn parse(s: &str) -> Option<Self> {
+        let mut bits = 0;
+        for word in s.split_whitespace() {
+            bits |= match word {
+                "small-caps" => Self::SMALL_CAPS,
+                "oldstyle-nums" => Self::OLDSTYLE_NUMS,
+                "lining-nums" => Self::LINING_NUMS,
+                "tabular-nums" => Self::TABULAR_NUMS,
+                "proportional-nums" => Self::PROPORTIONAL_NUMS,
+                "normal" => 0,
+                _ => return None,
+            };
+        }
+        Some(Self(bits))
+    }
+
+    /// Whether `bit` is set.
+    pub fn has(self, bit: u8) -> bool {
+        self.0 & bit != 0
+    }
+
+    /// The OpenType feature tags.
+    pub fn tags(self) -> impl Iterator<Item = &'static str> {
+        [
+            (Self::SMALL_CAPS, "smcp"),
+            (Self::OLDSTYLE_NUMS, "onum"),
+            (Self::LINING_NUMS, "lnum"),
+            (Self::TABULAR_NUMS, "tnum"),
+            (Self::PROPORTIONAL_NUMS, "pnum"),
+        ]
+        .into_iter()
+        .filter(move |&(bit, _)| self.has(bit))
+        .map(|(_, tag)| tag)
+    }
 }
 
 impl ViewStyle {
@@ -463,6 +632,9 @@ impl Default for ViewStyle {
             shadow: Shadow::DEFAULT,
             transform: Transform::IDENTITY,
             tint_color: None,
+            elevation: 0.0,
+            transform_origin: TransformOrigin::CENTER,
+            backface_hidden: false,
         }
     }
 }
@@ -512,6 +684,11 @@ pub struct TextStyle {
     pub shadow_offset: Option<(f32, f32)>,
     /// `textShadowRadius`.
     pub shadow_radius: Option<f32>,
+    /// `fontVariant`.
+    pub font_variant: Option<FontVariant>,
+    /// `writingDirection`: right to left (`Some(true)`), left to right, or
+    /// the layout's direction (`None`, `auto`).
+    pub writing_direction: Option<bool>,
 }
 
 impl TextStyle {
@@ -552,6 +729,111 @@ pub struct Style {
     pub animated: Vec<(yf_anim::AnimProp, yf_anim::NodeId)>,
     /// `zIndex`: stacking order among siblings (higher on top).
     pub z_index: i32,
+    /// `direction`: right to left (`Some(true)`), left to right, or
+    /// inherited (`None`).
+    pub direction: Option<bool>,
+    /// Start / end properties, placed by the resolved direction.
+    pub logical: Logical,
+}
+
+/// Properties named by start and end (`marginStart`, `borderTopEndRadius`
+/// ...): left and right in left-to-right layouts, the other way around in
+/// right-to-left ones.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Logical {
+    /// `marginStart`, `marginEnd`.
+    pub margin: [Option<LengthPercentageAuto>; 2],
+    /// `paddingStart`, `paddingEnd`.
+    pub padding: [Option<LengthPercentage>; 2],
+    /// `start`, `end`.
+    pub inset: [Option<LengthPercentageAuto>; 2],
+    /// `borderStartWidth`, `borderEndWidth`.
+    pub border_width: [Option<f32>; 2],
+    /// `borderStartColor`, `borderEndColor`.
+    pub border_color: [Option<Color>; 2],
+    /// `borderTopStartRadius`, `borderTopEndRadius`,
+    /// `borderBottomEndRadius`, `borderBottomStartRadius`.
+    pub radius: [Option<f32>; 4],
+}
+
+impl Logical {
+    /// Whether no start / end property is set.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn set_side<T>(rect: &mut taffy::Rect<T>, left: bool, value: T) {
+    if left {
+        rect.left = value;
+    } else {
+        rect.right = value;
+    }
+}
+
+/// Swaps the left and right properties: in right-to-left layouts they
+/// mean start and end, as in React Native. An involution.
+pub(crate) fn swap_sides(layout: &mut taffy::Style, view: &mut ViewStyle) {
+    fn swap<T>(r: &mut taffy::Rect<T>) {
+        std::mem::swap(&mut r.left, &mut r.right);
+    }
+    swap(&mut layout.margin);
+    swap(&mut layout.padding);
+    swap(&mut layout.inset);
+    swap(&mut layout.border);
+    view.borders.widths.swap(1, 3);
+    view.borders.colors.swap(1, 3);
+    // top left, top right, bottom right, bottom left
+    view.corner_radius.swap(0, 1);
+    view.corner_radius.swap(2, 3);
+}
+
+/// Lays a node out in direction `rtl`: swaps its left and right
+/// properties when right to left, then places the start / end ones.
+pub(crate) fn apply_direction(
+    layout: &mut taffy::Style,
+    view: &mut ViewStyle,
+    logical: &Logical,
+    rtl: bool,
+) {
+    layout.direction = if rtl {
+        taffy::Direction::Rtl
+    } else {
+        taffy::Direction::Ltr
+    };
+    if rtl {
+        swap_sides(layout, view);
+    }
+    if logical.is_empty() {
+        return;
+    }
+    // Start is the left side left to right.
+    for (i, left) in [!rtl, rtl].into_iter().enumerate() {
+        if let Some(v) = logical.margin[i] {
+            set_side(&mut layout.margin, left, v);
+        }
+        if let Some(v) = logical.padding[i] {
+            set_side(&mut layout.padding, left, v);
+        }
+        if let Some(v) = logical.inset[i] {
+            set_side(&mut layout.inset, left, v);
+        }
+        let side = if left { 3 } else { 1 };
+        if let Some(w) = logical.border_width[i] {
+            set_side(&mut layout.border, left, LengthPercentage::length(w));
+            view.borders.widths[side] = w;
+        }
+        if let Some(c) = logical.border_color[i] {
+            view.borders.colors[side] = c;
+        }
+    }
+    // Corners: top start, top end, bottom end, bottom start.
+    let corners = if rtl { [1, 0, 3, 2] } else { [0, 1, 2, 3] };
+    for (i, &corner) in corners.iter().enumerate() {
+        if let Some(r) = logical.radius[i] {
+            view.corner_radius[corner] = Some(r);
+        }
+    }
 }
 
 impl Default for Style {
@@ -571,6 +853,8 @@ impl Default for Style {
             text: TextStyle::default(),
             animated: Vec::new(),
             z_index: 0,
+            direction: None,
+            logical: Logical::default(),
         }
     }
 }
@@ -645,6 +929,20 @@ fn lp_or_zero(v: StyleValue<'_>) -> Result<LengthPercentage, StyleError> {
     match v {
         StyleValue::Null => Ok(LengthPercentage::length(0.0)),
         v => Len::parse(v)?.lp(),
+    }
+}
+
+fn opt_lpa(v: StyleValue<'_>) -> Result<Option<LengthPercentageAuto>, StyleError> {
+    match v {
+        StyleValue::Null => Ok(None),
+        v => Ok(Some(Len::parse(v)?.lpa())),
+    }
+}
+
+fn opt_lp(v: StyleValue<'_>) -> Result<Option<LengthPercentage>, StyleError> {
+    match v {
+        StyleValue::Null => Ok(None),
+        v => Ok(Some(Len::parse(v)?.lp()?)),
     }
 }
 
@@ -916,6 +1214,32 @@ impl Style {
             "borderBottomWidth" => self.set_border_width(&[2], value)?,
             "borderLeftWidth" => self.set_border_width(&[3], value)?,
             "zIndex" => self.z_index = number(value, 0.0)? as i32,
+            "direction" => {
+                self.direction = match keyword(value)? {
+                    None | Some("inherit") => None,
+                    Some("ltr") => Some(false),
+                    Some("rtl") => Some(true),
+                    Some(_) => return Err(StyleError::InvalidValue),
+                }
+            }
+            "marginStart" => self.logical.margin[0] = opt_lpa(value)?,
+            "marginEnd" => self.logical.margin[1] = opt_lpa(value)?,
+            "paddingStart" => self.logical.padding[0] = opt_lp(value)?,
+            "paddingEnd" => self.logical.padding[1] = opt_lp(value)?,
+            "start" => self.logical.inset[0] = opt_lpa(value)?,
+            "end" => self.logical.inset[1] = opt_lpa(value)?,
+            "borderStartWidth" => {
+                self.logical.border_width[0] = opt_number(value)?.map(|w| w.max(0.0))
+            }
+            "borderEndWidth" => {
+                self.logical.border_width[1] = opt_number(value)?.map(|w| w.max(0.0))
+            }
+            "borderStartColor" => self.logical.border_color[0] = color(value)?,
+            "borderEndColor" => self.logical.border_color[1] = color(value)?,
+            "borderTopStartRadius" => self.logical.radius[0] = opt_number(value)?,
+            "borderTopEndRadius" => self.logical.radius[1] = opt_number(value)?,
+            "borderBottomEndRadius" => self.logical.radius[2] = opt_number(value)?,
+            "borderBottomStartRadius" => self.logical.radius[3] = opt_number(value)?,
 
             // View
             "backgroundColor" => {
@@ -949,6 +1273,20 @@ impl Style {
                 }
             }
             "tintColor" => self.view.tint_color = color(value)?,
+            "elevation" => self.view.elevation = number(value, 0.0)?.max(0.0),
+            "backfaceVisibility" => {
+                self.view.backface_hidden = match keyword(value)? {
+                    None | Some("visible") => false,
+                    Some("hidden") => true,
+                    Some(_) => return Err(StyleError::InvalidValue),
+                }
+            }
+            "transformOrigin" => {
+                self.view.transform_origin = match keyword(value)? {
+                    None => TransformOrigin::CENTER,
+                    Some(s) => TransformOrigin::parse(s).ok_or(StyleError::InvalidValue)?,
+                }
+            }
             "opacity" => self.view.opacity = number(value, 1.0)?.clamp(0.0, 1.0),
             "overflow" => {
                 self.view.overflow_hidden = match keyword(value)? {
@@ -993,6 +1331,20 @@ impl Style {
                 }
             }
             "textDecorationColor" => self.text.decoration_color = color(value)?,
+            "writingDirection" => {
+                self.text.writing_direction = match keyword(value)? {
+                    None | Some("auto") => None,
+                    Some("ltr") => Some(false),
+                    Some("rtl") => Some(true),
+                    Some(_) => return Err(StyleError::InvalidValue),
+                }
+            }
+            "fontVariant" => {
+                self.text.font_variant = match keyword(value)? {
+                    None => None,
+                    Some(s) => Some(FontVariant::parse(s).ok_or(StyleError::InvalidValue)?),
+                }
+            }
             "textShadowColor" => self.text.shadow_color = color(value)?,
             "textShadowRadius" => self.text.shadow_radius = opt_number(value)?,
             "textTransform" => {
@@ -1046,6 +1398,28 @@ mod tests {
         assert_eq!(s.layout.flex_shrink, 0.0);
         assert_eq!(s.layout.position, Position::Relative);
         assert_eq!(s.layout.align_content, AlignContent::FLEX_START);
+    }
+
+    #[test]
+    fn transform_origins() {
+        let p = |s| TransformOrigin::parse(s).unwrap();
+        assert_eq!(p("top left").x, OriginLen::Fraction(0.0));
+        assert_eq!(p("top left").y, OriginLen::Fraction(0.0));
+        assert_eq!(p("bottom").y, OriginLen::Fraction(1.0));
+        assert_eq!(p("bottom").x, OriginLen::Fraction(0.5));
+        assert_eq!(p("10px 25%").x, OriginLen::Px(10.0));
+        assert_eq!(p("10px 25%").y, OriginLen::Fraction(0.25));
+        assert_eq!(p("right 5 3").z, 3.0);
+        assert_eq!(p("center top").y, OriginLen::Fraction(0.0));
+        assert_eq!(p("0 0").offset(100.0, 50.0), (-50.0, -25.0, 0.0));
+        assert!(TransformOrigin::parse("sideways").is_none());
+    }
+
+    #[test]
+    fn font_variants() {
+        let v = FontVariant::parse("small-caps tabular-nums").unwrap();
+        assert_eq!(v.tags().collect::<Vec<_>>(), ["smcp", "tnum"]);
+        assert!(FontVariant::parse("wide").is_none());
     }
 
     #[test]

@@ -42,6 +42,12 @@ final class ImageBox extends View implements Node {
         return id;
     }
 
+    @Override
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        decor.applyPivot(this);
+    }
+
     /** Press handling, once the view has press listeners. */
     Pressable press;
 

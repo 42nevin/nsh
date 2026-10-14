@@ -36,6 +36,16 @@ final class ModalHost {
         root = new Box(context, mounter, id);
         container = new Container(context);
         container.addView(root);
+        mirror(mounter.rtl);
+    }
+
+    /** Lays the modal's widgets out right to left (or not). */
+    void mirror(boolean rtl) {
+        container.setLayoutDirection(rtl ? View.LAYOUT_DIRECTION_RTL : View.LAYOUT_DIRECTION_LTR);
+    }
+
+    TouchTracker touches() {
+        return container.touches;
     }
 
     boolean shown() {
@@ -131,8 +141,18 @@ final class ModalHost {
     private final class Container extends ViewGroup {
         private int[] reported = {0, 0, 0, 0, 0, 0};
 
+        private final TouchTracker touches;
+
         Container(Context context) {
             super(context);
+            touches = new TouchTracker(mounter, this);
+            mounter.touchTrackers.add(touches);
+        }
+
+        @Override
+        public boolean dispatchTouchEvent(android.view.MotionEvent e) {
+            boolean tracking = touches.onTouch(e);
+            return super.dispatchTouchEvent(e) || tracking;
         }
 
         @Override

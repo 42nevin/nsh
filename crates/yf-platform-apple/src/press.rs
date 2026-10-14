@@ -20,14 +20,14 @@ use objc2_ui_kit::{
     UIControl, UIEvent, UIGestureRecognizer, UIGestureRecognizerState, UIScrollView, UITouch,
     UIView,
 };
-use yf_core::NodeId;
+use yf_core::{EventKind, NodeId, TextLink};
 
-use crate::target::EventTarget;
+use crate::{target::EventTarget, text_view::TextView};
 
 /// Delay before `onPressIn` inside scroll views, so starting a scroll does
 /// not flash pressed states.
 const SCROLL_PRESS_DELAY: f64 = 0.13;
-/// How long a press must be held to become a long press.
+/// How long a press must be held to become a long press (by default).
 const LONG_PRESS: f64 = 0.5;
 /// How far outside the view the finger may wander before the press ends.
 const RETENTION: f64 = 20.0;
@@ -43,6 +43,13 @@ pub(crate) struct PressIvars {
     generation: Cell<u64>,
     /// Report long presses.
     long_press: Cell<bool>,
+    /// Seconds before a press becomes a long press.
+    long_press_delay: Cell<f64>,
+    /// The view itself takes presses (not only its text's pressable spans).
+    own: Cell<bool>,
+    /// The pressable text span the current touch is on: its presses go
+    /// there.
+    link: Cell<Option<TextLink>>,
 }
 
 define_class!(
@@ -64,6 +71,17 @@ define_class!(
                 return self.set_state(UIGestureRecognizerState::Failed);
             }
             let ivars = self.ivars();
+            let link = view
+                .downcast_ref::<TextView>()
+                .and_then(|t| t.link_at(touch.locationInView(Some(&view))));
+            ivars.link.set(link);
+            if link.is_none() && !ivars.own.get() {
+                return self.set_state(UIGestureRecognizerState::Failed);
+            }
+            let long_press = match link {
+                Some(l) => l.events.contains(EventKind::LongPress),
+                None => ivars.long_press.get(),
+            };
             ivars.start.set(touch.locationInView(Some(&view)));
             ivars.pressed.set(false);
             ivars.long_pressed.set(false);
@@ -75,8 +93,8 @@ define_class!(
             } else {
                 self.after(delay, generation, |r| r.press_in());
             }
-            if ivars.long_press.get() {
-                self.after(LONG_PRESS, generation, |r| {
+            if long_press {
+                self.after(ivars.long_press_delay.get(), generation, |r| {
                     if !r.ivars().pressed.get() {
                         r.press_in();
                     }
@@ -123,6 +141,7 @@ define_class!(
             if ivars.pressed.replace(false) {
                 self.report(Report::PressOut);
             }
+            ivars.link.set(None);
         }
 
         #[unsafe(method(canBePreventedByGestureRecognizer:))]
@@ -154,6 +173,9 @@ impl PressRecognizer {
             long_pressed: Cell::new(false),
             generation: Cell::new(0),
             long_press: Cell::new(false),
+            long_press_delay: Cell::new(LONG_PRESS),
+            own: Cell::new(false),
+            link: Cell::new(None),
         });
         // SAFETY: the designated initializer; `handlePress:` is implemented by
         // the target, which outlives the recognizer.
@@ -168,6 +190,23 @@ impl PressRecognizer {
     /// Whether long presses are reported.
     pub(crate) fn set_long_press(&self, on: bool) {
         self.ivars().long_press.set(on);
+    }
+
+    /// `delayLongPress` in milliseconds (the default when `None`).
+    pub(crate) fn set_long_press_delay(&self, ms: Option<f32>) {
+        self.ivars()
+            .long_press_delay
+            .set(ms.map_or(LONG_PRESS, |ms| ms as f64 / 1000.0));
+    }
+
+    /// Whether the view itself takes presses.
+    pub(crate) fn set_own(&self, on: bool) {
+        self.ivars().own.set(on);
+    }
+
+    /// The pressable text span the current press is on.
+    pub(crate) fn link(&self) -> Option<TextLink> {
+        self.ivars().link.get()
     }
 
     /// The touch ended on the view: reports the press out, and returns
@@ -191,9 +230,17 @@ impl PressRecognizer {
     }
 
     fn report(&self, report: Report) {
+        let target = &self.ivars().target;
+        if let Some(link) = self.ivars().link.get() {
+            let kind = match report {
+                Report::PressIn => EventKind::PressIn,
+                Report::PressOut => EventKind::PressOut,
+                Report::LongPress => EventKind::LongPress,
+            };
+            return target.link_event(&link, kind);
+        }
         let Some(view) = self.view() else { return };
         let id = view.tag() as NodeId;
-        let target = &self.ivars().target;
         match report {
             Report::PressIn => target.press_changed(id, true),
             Report::PressOut => target.press_changed(id, false),

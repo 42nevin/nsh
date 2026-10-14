@@ -10,7 +10,10 @@ import android.text.InputType;
 import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.View;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputConnectionWrapper;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -24,6 +27,8 @@ final class InputBox extends FrameLayout implements Node {
     final EditText edit;
     /** Edits reported to the engine. */
     int count;
+    /** The text as last reported or set. */
+    private String known = "";
     private boolean multiline;
     /** Return unfocuses a single-line input. */
     private boolean blurOnSubmit = true;
@@ -43,6 +48,30 @@ final class InputBox extends FrameLayout implements Node {
                 if (code == android.view.KeyEvent.KEYCODE_ENTER && !multiline) return true;
                 return super.onKeyUp(code, event);
             }
+
+            @Override
+            public boolean onKeyDown(int code, android.view.KeyEvent event) {
+                // Hardware keys, and keys the keyboard sends as key events.
+                if (code == android.view.KeyEvent.KEYCODE_DEL) key("Backspace");
+                else if (code == android.view.KeyEvent.KEYCODE_ENTER) key("Enter");
+                else if (event.getUnicodeChar() != 0) key(String.valueOf((char) event.getUnicodeChar()));
+                return super.onKeyDown(code, event);
+            }
+
+            @Override
+            public InputConnection onCreateInputConnection(EditorInfo info) {
+                InputConnection connection = super.onCreateInputConnection(info);
+                return connection == null ? null : new KeyConnection(connection);
+            }
+
+            @Override
+            protected void onSelectionChanged(int start, int end) {
+                super.onSelectionChanged(start, end);
+                if (mounter != null && mounter.wants(InputBox.this.id, Native.SELECTION_CHANGE)) {
+                    mounter.eventMap(InputBox.this.id, Native.SELECTION_CHANGE, new String[] {"start", "end"},
+                            new Object[] {(double) start, (double) end});
+                }
+            }
         };
         edit.setBackground(new ColorDrawable(0));
         edit.setPadding(0, 0, 0, 0);
@@ -57,12 +86,19 @@ final class InputBox extends FrameLayout implements Node {
             @Override
             public void afterTextChanged(Editable s) {
                 if (applying) return;
+                // Reconfiguring (filters, input type) sets the same text
+                // again: only real edits count.
+                String text = s.toString();
+                if (text.equals(known)) return;
+                known = text;
                 InputBox.this.count++;
                 mounter.event(id, Native.CHANGE_TEXT, s.toString(), InputBox.this.count, 0, 0);
             }
         });
         edit.setOnEditorActionListener((v, action, event) -> {
             if (multiline && event != null) return false;
+            // The keyboard's action key (a hardware Enter reported its key).
+            if (event == null) key("Enter");
             // A hardware Enter reports its down and its up: act once. (The up
             // would otherwise reach the next field, focused meanwhile.)
             if (event != null && event.getAction() != android.view.KeyEvent.ACTION_DOWN) return true;
@@ -150,10 +186,83 @@ final class InputBox extends FrameLayout implements Node {
         if (first && autoFocus) post(this::focus);
     }
 
+    /** `onKeyPress`. */
+    private void key(String key) {
+        if (mounter.wants(id, Native.KEY_PRESS)) {
+            mounter.eventMap(id, Native.KEY_PRESS, new String[] {"key"}, new Object[] {key});
+        }
+    }
+
+    /**
+     * Reports the keys of soft keyboards, which edit through the input
+     * connection rather than with key events.
+     */
+    private final class KeyConnection extends InputConnectionWrapper {
+        /** The text being composed (a word the keyboard may still change). */
+        private CharSequence composing;
+
+        KeyConnection(InputConnection target) {
+            super(target, true);
+        }
+
+        @Override
+        public boolean setComposingText(CharSequence text, int position) {
+            int before = composing == null ? 0 : composing.length();
+            if (text.length() > before) key(text.subSequence(text.length() - 1, text.length()).toString());
+            else if (text.length() < before) key("Backspace");
+            composing = text;
+            return super.setComposingText(text, position);
+        }
+
+        @Override
+        public boolean finishComposingText() {
+            composing = null;
+            return super.finishComposingText();
+        }
+
+        @Override
+        public boolean commitText(CharSequence text, int position) {
+            String added = text.toString();
+            // Committing the word being composed adds only what is new.
+            if (composing != null && added.startsWith(composing.toString())) added = added.substring(composing.length());
+            composing = null;
+            if (added.equals("\n")) key("Enter");
+            else if (!added.isEmpty()) key(added);
+            return super.commitText(text, position);
+        }
+
+        @Override
+        public boolean deleteSurroundingText(int before, int after) {
+            if (before > 0 || after > 0) key("Backspace");
+            return super.deleteSurroundingText(before, after);
+        }
+    }
+
+    /** Selects {@code start..end} (clamped to the text). */
+    void select(int start, int end) {
+        int length = edit.length();
+        edit.setSelection(Math.min(start, length), Math.min(Math.max(start, end), length));
+    }
+
+    /** Autofill: a hint ("" for none, null for the default). */
+    void setAutofill(String hint) {
+        if (Build.VERSION.SDK_INT < 26) return;
+        if (hint == null) {
+            edit.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_AUTO);
+            edit.setAutofillHints((String[]) null);
+        } else if (hint.isEmpty()) {
+            edit.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
+        } else {
+            edit.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_YES);
+            edit.setAutofillHints(hint);
+        }
+    }
+
     /** Sets the text from JS unless the user typed since JS saw `count`. */
     void setValue(String text, int count) {
         if (count != this.count || text.contentEquals(edit.getText())) return;
         applying = true;
+        known = text;
         int selection = edit.getSelectionEnd();
         edit.setText(text);
         edit.setSelection(Math.min(Math.max(selection, 0), text.length()));

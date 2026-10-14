@@ -103,9 +103,9 @@ The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distributi
 | `<view>` | `YFView` (UIView) | `onPress` / `onLongPress` / `onPressIn` / `onPressOut`, `activeOpacity`, `pan={{x, y}}` + `onPanStart` / `onPanEnd`, `pinch` / `rotation` |
 | `<text>` | `TextView` (CTFrame) | nested `<text>` is a span; `numberOfLines`, `ellipsizeMode`, `allowFontScaling`, `maxFontSizeMultiplier` |
 | `<image src>` | UIView + image CALayer | `src` is a URL or `import img from "./a.png"` (an asset descriptor with its size); `resizeMode`; `onLoad` / `onError`; `tintColor` |
-| `<scroll>` | UIScrollView | `horizontal`, `refreshing` + `onRefresh`, `scrollValue`, `onScrollEnd`, `keyboardDismissMode` |
+| `<scroll>` | UIScrollView | `horizontal`, `refreshing` + `onRefresh`, `scrollValue`, `onScrollEnd`, `keyboardDismissMode`, see **Scrolling** below |
 | `List`, `SectionList` (runtime) | UIScrollView + recycled cells | see **List** below |
-| `<input>` | UITextField / UITextView in a container | `value` / `defaultValue` / `onChangeText` / `onSubmitEditing` / `onFocus` / `onBlur`, `placeholder`, `secureTextEntry`, `keyboardType`, `returnKeyType`, `autoCapitalize`, `autoCorrect`, `multiline`, `maxLength`, `editable`, `autoFocus`, `selectionColor`, `blurOnSubmit` |
+| `<input>` | UITextField / UITextView in a container | `value` / `defaultValue` / `onChangeText` / `onSubmitEditing` / `onFocus` / `onBlur`, `placeholder`, `secureTextEntry`, `keyboardType`, `returnKeyType`, `autoCapitalize`, `autoCorrect`, `multiline`, `maxLength`, `editable`, `autoFocus`, `selectionColor`, `blurOnSubmit`, `selection` + `onSelectionChange` (UTF-16 `start` / `end`), `onKeyPress` (`key`: the text, `Backspace`, `Enter`), `autoComplete` / `textContentType` (autofill); ref `setSelection(start, end)` |
 | `Stack` / `Screen` (runtime) | UINavigationController | `createNavigator(route)`: `push` / `pop` / `popToTop` / `replace` / `reset`; screens keep their state while stacked; native header (`title`, `headerLeft` / `headerRight` / `headerTitle` elements, `headerLargeTitle`, `headerTransparent`, colors, `headerBackTitle`), swipe back |
 | `Modal` (runtime) | presented UIViewController | `visible`, `animationType`, `presentationStyle` (`pageSheet` / `formSheet` on iOS), `transparent`, `onRequestClose` (controlled), `onShow`, `onDismiss` |
 | `Switch`, `Slider`, `ActivityIndicator` | UISwitch, UISlider, UIActivityIndicatorView | controlled `value` + `onValueChange` (a switch JS did not flip goes back), `onSlidingComplete`, colors |
@@ -123,8 +123,19 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
 - **Imperative calls**: nodes have `focus()`, `blur()` and `scrollTo({ x, y, animated })` (use `ref`); lists also
   `scrollToIndex({ index, viewPosition, viewOffset, animated })`, `scrollToEnd()`, `scrollToOffset()`; `Keyboard.dismiss()`.
   Commands run after the commit's other mount items; list scrolls are resolved by the core with the current item sizes.
-- **Touch** (React Native semantics): `pointerEvents`, `hitSlop`, `activeOpacity`; press-in waits ~130ms inside scroll views;
-  only the innermost pressable view responds. `Pressable` passes `{ pressed }` to `style` / `children`.
+- **Touch** (React Native semantics): `pointerEvents`, `hitSlop`, `activeOpacity`, `delayLongPress`, `android_ripple`
+  (`{ color, borderless, radius, foreground }`, Android only); press-in waits ~130ms inside scroll views; only the innermost
+  pressable view responds. `Pressable` passes `{ pressed }` to `style` / `children`. Nested `<text>` spans with press handlers
+  are links: the core lists them in `AttributedText::links` (UTF-16 ranges) and the block's press recognizer routes a press to
+  the span under the finger (CoreText `CTLineGetStringIndexForPosition` / `Layout.getOffsetForHorizontal`).
+- **Raw touches and the responder system**: `onTouchStart/Move/End/Cancel` (+ `Capture`), `onStartShouldSetResponder`,
+  `onMoveShouldSetResponder` (+ `Capture`), `onResponderGrant/Reject/Start/Move/End/Release/Terminate/TerminationRequest`, and
+  `PanResponder.create` on top. A node with any of them listens to `onTouch` natively; one tracker per root view (surface,
+  modals: `touch.rs`, `TouchTracker.java`) observes without recognizing and reports touches whose target or an ancestor
+  listens, with the path of listening nodes (`EventPayload::Touch`, sent to the root; moves are merged per engine turn). The
+  negotiation runs in JS as in React Native. A grant returning true (PanResponder's default) sends `setJsResponder`: scroll
+  views around stop taking the touches (UIKit: their pan recognizer is disabled; Android: `ScrollBox.jsBlocked`); a native
+  scroll view that starts dragging first cancels the JS touches.
 - **Accessibility**: `accessible`, `accessibilityLabel` / `Hint` / `Role` (`role`) / `State` / `Value` / `Actions` +
   `onAccessibilityAction`, `accessibilityElementsHidden`, `importantForAccessibility`, `accessibilityLiveRegion`, `testID`
   (Android: resource id). Views without a label read their texts.
@@ -133,6 +144,27 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
 - **Frames**: `requestAnimationFrame` / `cancelAnimationFrame` follow the display (CADisplayLink / Choreographer).
 - **Back button** (Android): `BackHandler.addEventListener("hardwareBackPress", ...)`, after modals and stacks; the app exits
   when nothing handles it.
+- **Scrolling**: `pagingEnabled`, `snapToInterval` / `snapToOffsets` / `snapToAlignment`, `disableIntervalMomentum`,
+  `decelerationRate`, `scrollEnabled`, `bounces`, `contentInset`, `contentOffset`, `keyboardShouldPersistTaps`
+  (`never` / `handled` / `always`), `onScroll` (+ `scrollEventThrottle`; at most once per engine turn), `onScrollBeginDrag` /
+  `EndDrag`, `onMomentumScrollBegin` / `End` (a glide caught by a new drag ends with `onMomentumScrollEnd`). Snapping is decided
+  by `ScrollBehavior::snap_target` (core) on iOS and its Java port on Android, from the release offset, the projected glide and
+  the velocity. Lists keep the visible rows in place when items are inserted above them (`splice`).
+- **System UI**: `StatusBar` (component and static methods; the last mounted wins, prop by prop), `Alert.alert`,
+  `ActionSheetIOS.showActionSheetWithOptions` (a list dialog on Android), `ToastAndroid`. Answers come back as the root's
+  `onDialog` event. Embedding apps forward their controller's status bar to `yf_status_bar_style()` / `_hidden()` / `_animation()`.
+- **Right to left**: `I18nManager` (`isRTL`, reactive; `allowRTL`, `forceRTL`, applied at once) sets the root's direction;
+  `direction` (`inherit` / `ltr` / `rtl`) overrides it per view. The core resolves each node's direction (inherited, also for
+  subtrees built detached), sets taffy's `direction` (rows run from the right) and, right to left, swaps the left and right
+  properties (margins, paddings, insets, borders, corners — React Native's default `doLeftAndRightSwapInRTL`) and places the
+  start / end ones (`marginStart`, `start`, `borderTopEndRadius`, ...). A direction change swaps the current taffy style in place
+  (an involution), so authored styles need not be kept. Text: `auto` alignment is the right side right to left, left / right
+  swap, `writingDirection` sets the base direction (else the content's). Native widgets mirror (`MountItem::LayoutDirection`:
+  `semanticContentAttribute`, `View.setLayoutDirection`; Android apps need `android:supportsRtl`). Horizontal scroll views
+  are laid out left to right and their children mirrored in the content by the core (a right-to-left row would overflow to
+  negative offsets), starting at the right end and keeping their distance from it; horizontal lists are flipped natively
+  (`ScrollConfig::mirrored`: the scroll view and each cell get scaleX −1, composed with their transforms), so the list's
+  offset logic stays left to right.
 - **Environment** (reactive accessors from `"yf"`): `windowSize()`, `safeArea()`, `keyboard()` (`{ height, duration }`: how
   far the keyboard reaches into the surface, the bottom safe area under it included, on every platform),
   `colorScheme()`, `fontScale()`. `KeyboardAvoidingView` pads its bottom by `keyboard().height`, animated with the keyboard,
@@ -145,8 +177,12 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
   `borderStyle` (`solid` / `dashed` / `dotted`), `borderRadius` + the four `borderTopLeftRadius`-style corners, `overflow`, `opacity`,
   `transform` (translate / scale / rotate / rotateX / rotateY / skew / perspective, applied right to left like CSS; Android has no
   skew), `zIndex` (stable order of the native views), `shadowColor` / `shadowOffset` / `shadowOpacity` / `shadowRadius` (RN
-  defaults: offset `(0, -3)`, radius 3, opacity 0), `tintColor` (images). `style` may be an array of styles merged left to right
-  (falsy entries skipped), decoded in Rust. Text adds `textShadowColor` / `textShadowOffset` / `textShadowRadius`.
+  defaults: offset `(0, -3)`, radius 3, opacity 0), `tintColor` (images), `elevation` (Android's material shadow, with
+  `shadowColor` from API 28), `transformOrigin` (keywords / percentages / lengths; iOS conjugates the matrix around it,
+  Android sets the pivot), `backfaceVisibility` (iOS `doubleSided`; Android hides the view while its rotations turn it away). `style` may be an array of styles merged left to right
+  (falsy entries skipped), decoded in Rust. Text adds `textShadowColor` / `textShadowOffset` / `textShadowRadius`,
+  `fontVariant` (OpenType `smcp` / `onum` / `lnum` / `tnum` / `pnum`: CoreText feature settings, `Paint.setFontFeatureSettings`)
+  and `writingDirection`.
   On Apple everything is drawn by Core Animation (`decor.rs`), escalating only as needed: rounded corners sharing one radius (possibly only some
   corners) → the layer's own `cornerRadius` + `maskedCorners`; different radii → `CAShapeLayer` fill / stroke / mask; clipping + shadow → the
   children move into a content view (clipping a layer clips its shadow too). With a background the shadow gets a `shadowPath` (no offscreen
@@ -176,9 +212,9 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
   requests for the same key are coalesced and downloads nobody waits for are cancelled (Android: HttpURLConnection / APK assets →
   `BitmapFactory` power-of-two sampling → `LruCache`, same coalescing). During development `asset:/path` goes through the dev
   server's `/assets/`; `yf build` copies assets to `out/assets/`, `yf package` puts them in the app.
-- **Android differences**: shadows need a background (no content shadows, e.g. text with a transparent background); decoration
-  colors are ignored (lines use the text color); odd corner radii clip by path before API 33; pull to refresh is our own
-  (stretch overscroll stays native).
+- **Android differences**: shadows need a background (no content shadows, e.g. text with a transparent background); odd corner
+  radii clip by path before API 33; pull to refresh is our own (stretch overscroll stays native); `contentInset` is padding and
+  `decelerationRate` only shapes snapping glides.
 
 ## Packaging and embedding
 
@@ -341,8 +377,16 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
 - **Android, JNI**: cache classes and method ids in `JNI_OnLoad`; wrap every call from the (permanently attached) engine thread in
   a local frame (`java::with_env`), or local references pile up.
 - **Android, text**: `StaticLayout` ignores `maxLines` without an ellipsis (clip mode counts lines itself and the view clips);
-  build layouts from `PrecomputedText` with the same break strategy / hyphenation as its params, or it measures again.
-- **Android, inputs**: a hardware Enter reports its down and its up — act on the down only and consume the up, or the up advances
+  build layouts from `PrecomputedText` with the same break strategy / hyphenation / text direction as its params, or it
+  measures again. A layout of precomputed text does not draw `UnderlineSpan` / `StrikethroughSpan` (even ones set after
+  `create`): runs carry a `TextLayouts.Decoration` marker and `TextBox` draws the lines. `Layout.Alignment` is relative to each
+  paragraph's direction: absolute left / right alignment sets an `AlignmentSpan` per paragraph from its resolved direction.
+- **Android, JNI event maps intern their keys from a fixed list** (`Java_dev_yf_Native_eventMap`): a new payload key must be
+  added there or it is dropped silently.
+- **Android, inputs**: `EditText` reconfiguration (input type, filters, single line) sets the same text again and fires
+  `afterTextChanged`: only text that differs from the last known one counts as an edit, or JS values are rejected as stale.
+  Soft keyboards edit through the input connection (`KeyConnection`: composing text, commits, deletes), hardware keys arrive
+  as key events; both feed `onKeyPress`. A hardware Enter reports its down and its up — act on the down only and consume the up, or the up advances
   focus again in the next field; blur by focusing the (focusable, highlight-free) `YfView`, as `clearFocus()` hands focus to the
   first focusable view; set the typeface after the input type (password types reset it to monospace).
 - **Android, keyboard avoidance**: the keyboard's height becomes bottom padding of the scroll around the focused input, and
@@ -350,6 +394,8 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
   whether a rectangle is visible. `YfView` is a scroll container (`setScrollContainer(true)`) so that windows without a soft
   input mode resize instead of panning: the system picks the mode at the first layout, before the app's content is mounted,
   and a mode set from code afterwards is overridden. Windows that ask for `adjustPan` are left to the system.
+- **Android, nested scrolling**: scroll views enable nested scrolling, or an outer vertical ScrollView intercepts every vertical
+  drag meant for an inner one.
 - **Android, safe area**: `YfView` reports only the parts of the system bars / keyboard that overlap it (like UIKit's
   `safeAreaInsets`), so embedded views below a toolbar get no top inset. Overlays use the same overlap (`topInset()`).
 - **Android, dev assets come over plain HTTP**, which apps block by default (API 28+): the dev host APK and `yf-dev.aar` set
@@ -379,6 +425,10 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
 - **UINavigationController breaks transitions started during another one**: stack changes that arrive while
   `transitionCoordinator()` is set wait for `didShow` and are applied on the next main-queue turn (the coordinator outlives
   the callback); only screens the controller actually had count as popped by the user.
+- **`UIAlertController` asserts when its presentation controller's delegate is set**; a popover action sheet (iPad, Mac) hides
+  its cancel action and runs it on a tap outside, so sheets without one get a hidden cancel answering "dismissed".
+- **Catalyst: a mouse drag does not scroll a UIScrollView** (Mac behavior); test scrolling with trackpad-style scroll wheel
+  events (with phases), which also produce drag and momentum callbacks. Mouse drags do reach views as touches.
 - **Catalyst's Mac idiom presents page / form sheets as macOS sheets** at a default size wider than a 390pt window: they get
   the window's size as `preferredContentSize`. Standalone apps have a white root view (UIKit windows are black).
 - **Development hosts never restore windows**: `yf run` launches the Catalyst host with `-ApplePersistenceIgnoreState YES`;
@@ -386,7 +436,8 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
 - **Android widgets**: a null tint list clears the theme's drawable tint (keep the default until a color is set: `Controls.Tint`);
   `MediaPlayer.setPlaybackParams` starts playback (set the rate only while playing) and a paused player draws nothing until
   it seeks; `WebView` JavaScript bridge calls arrive on a binder thread (post to the UI thread).
-- **Not supported / not verifiable here**: Android has no skew transforms (as in React Native); the iOS simulator cannot
+- **Not supported / not verifiable here**: `I18nManager.swapLeftAndRightInRTL(false)` (left / right always swap right to left);
+  after switching direction at runtime UIKit keeps an existing back button's chevron; Android has no skew transforms (as in React Native); the iOS simulator cannot
   inject edge swipes (interactive back is untested there); Android's stylus handwriting mode (on by default on recent
   emulators) intercepts taps on inputs — turn it off with `adb shell settings put secure stylus_handwriting_enabled 0`.
 

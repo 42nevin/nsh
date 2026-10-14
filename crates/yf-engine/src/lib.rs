@@ -375,6 +375,7 @@ fn run<M: TextEngine, S: MountSink>(
         committed_since_gc: false,
         hot: Vec::new(),
         scroll_events: FxHashMap::default(),
+        touch_move: None,
         net: Net {
             network: config.network.clone(),
             tx,
@@ -439,6 +440,7 @@ fn run<M: TextEngine, S: MountSink>(
                 }
             }
         }
+        state.dispatch_touch_move(&host);
         state.dispatch_scroll_events(&host);
         for update in std::mem::take(&mut state.hot) {
             if let Some(map) = update.source_map {
@@ -500,6 +502,8 @@ struct State<M: TextEngine> {
     /// `onScroll` events: the latest offset per scroll view, sent once per
     /// frame at most (and not more often than the view's throttle).
     scroll_events: FxHashMap<NodeId, ScrollEvent>,
+    /// Touch moves not delivered yet: those queued in one frame become one.
+    touch_move: Option<(NodeId, Box<yf_core::TouchEvent>)>,
 }
 
 /// Requests between JS and the platform's network stack.
@@ -540,6 +544,13 @@ impl Net {
 }
 
 impl<M: TextEngine> State<M> {
+    /// Sends the pending touch move.
+    fn dispatch_touch_move(&mut self, host: &Host) {
+        if let Some((id, touch)) = self.touch_move.take() {
+            host.dispatch_event(id, EventKind::Touch, &EventPayload::Touch(touch));
+        }
+    }
+
     /// When a throttled `onScroll` is due.
     fn next_scroll_event(&self) -> Option<Instant> {
         self.scroll_events
@@ -695,6 +706,19 @@ fn handle<M: TextEngine>(host: &Host, state: &mut State<M>, message: Message) ->
                     }
                     _ => {}
                 }
+            }
+            if let EventPayload::Touch(touch) = payload {
+                if touch.phase == yf_core::TouchPhase::Move {
+                    match &mut state.touch_move {
+                        Some((_, pending)) => pending.merge_move(*touch),
+                        None => state.touch_move = Some((id, touch)),
+                    }
+                    return true;
+                }
+                // Moves before a start, end or cancel go first.
+                state.dispatch_touch_move(host);
+                host.dispatch_event(id, event, &EventPayload::Touch(touch));
+                return true;
             }
             host.dispatch_event(id, event, &payload)
         }

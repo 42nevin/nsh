@@ -50,6 +50,9 @@ final class Native {
     static final int MOMENTUM_SCROLL_BEGIN = 38;
     static final int MOMENTUM_SCROLL_END = 39;
     static final int DIALOG = 40;
+    static final int TOUCH = 41;
+    static final int SELECTION_CHANGE = 42;
+    static final int KEY_PRESS = 43;
 
     static native long create(YfView view, float density, boolean trace);
 
@@ -64,7 +67,7 @@ final class Native {
 
     /**
      * values: safe area top, right, bottom, left, keyboard height, keyboard
-     * animation duration (s), font scale.
+     * animation duration (s), font scale, 1 if the language is right to left.
      */
     static native void environment(long handle, float[] values, boolean dark);
 
@@ -87,6 +90,15 @@ final class Native {
      * else null.
      */
     static native float[] scroll(long handle, int id, float x, float y, int applied);
+
+    /**
+     * Touches for the JS responder system. phase: 0 start, 1 move, 2 end,
+     * 3 cancel. Per finger: id, target node, path length (in {@code paths},
+     * innermost first), pageX, pageY, locationX, locationY (in
+     * {@code coords}, dp) and whether it changed. {@code time}: ms.
+     */
+    static native void touch(long handle, int phase, int[] ids, int[] targets, int[] pathLengths, int[] paths,
+            float[] coords, boolean[] changed, long time);
 
     static native boolean hasPan(long handle, int id);
 

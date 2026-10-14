@@ -141,6 +141,61 @@ enum Refresh {
     },
 }
 
+/// Lays UIKit's own content of `view` (controls, navigation bars, text
+/// fields) out right to left, or left to right.
+pub(crate) fn mirror(view: &UIView, rtl: bool) {
+    view.setSemanticContentAttribute(if rtl {
+        objc2_ui_kit::UISemanticContentAttribute::ForceRightToLeft
+    } else {
+        objc2_ui_kit::UISemanticContentAttribute::Unspecified
+    });
+}
+
+fn mirror_native(native: &Native, rtl: bool) {
+    mirror(native.view(), rtl);
+    // The navigation controller (its back gesture and transitions) and bar.
+    if let Native::Stack(stack) = native {
+        if let Some(view) = stack.nav.view() {
+            mirror(&view, rtl);
+        }
+        mirror(&stack.nav.navigationBar(), rtl);
+    }
+}
+
+/// The innermost visible subview of `view` at `point` (in `view`),
+/// interaction enabled or not, honoring `pointerEvents`.
+fn innermost(view: &UIView, point: CGPoint) -> Retained<UIView> {
+    let box_only = view
+        .downcast_ref::<YFView>()
+        .is_some_and(|v| v.pointer_events() == yf_core::PointerEvents::BoxOnly);
+    if !box_only {
+        let subviews = view.subviews().to_vec();
+        for sub in subviews.iter().rev() {
+            if sub.isHidden() || sub.alpha() <= 0.01 {
+                continue;
+            }
+            if let Some(yf) = sub.downcast_ref::<YFView>()
+                && matches!(
+                    yf.pointer_events(),
+                    yf_core::PointerEvents::None | yf_core::PointerEvents::BoxNone
+                )
+            {
+                continue;
+            }
+            let p = view.convertPoint_toView(point, Some(sub));
+            let b = sub.bounds();
+            if p.x >= b.origin.x
+                && p.y >= b.origin.y
+                && p.x < b.origin.x + b.size.width
+                && p.y < b.origin.y + b.size.height
+            {
+                return innermost(sub, p);
+            }
+        }
+    }
+    view.retain()
+}
+
 fn ui_insets(i: yf_core::EdgeInsets) -> objc2_ui_kit::UIEdgeInsets {
     objc2_ui_kit::UIEdgeInsets {
         top: i.top as CGFloat,
@@ -185,6 +240,12 @@ struct Slot {
     gesture_start: [f32; 4],
     /// `activeOpacity`: opacity while pressed.
     active_opacity: Option<f32>,
+    /// `delayLongPress` (milliseconds).
+    long_press_delay: Option<f32>,
+    /// A horizontal list laid out right to left: mirrored as a whole.
+    mirrored: bool,
+    /// A cell of such a list: mirrored back.
+    in_mirrored: bool,
     pressed: bool,
     scroll_value: Option<yf_anim::NodeId>,
     /// How a scroll view scrolls (scroll views only).
@@ -211,6 +272,9 @@ impl Slot {
             values: GestureValues::default(),
             gesture_start: [0.0; 4],
             active_opacity: None,
+            long_press_delay: None,
+            mirrored: false,
+            in_mirrored: false,
             pressed: false,
             scroll_value: None,
             behavior: None,
@@ -265,6 +329,14 @@ pub(crate) struct Mounter {
     dirty_modals: Vec<NodeId>,
     /// Where `asset:/` URIs of videos resolve.
     asset_base: Option<AssetBase>,
+    /// Report touches to JS: on the root and on each modal's root.
+    touch_trackers: Vec<(NodeId, Retained<crate::touch::TouchTracker>)>,
+    /// Views listening to touches (the trackers run while there are any).
+    touch_listeners: usize,
+    /// Scroll views a JS responder keeps from scrolling.
+    blocked_scrolls: Vec<Retained<UIScrollView>>,
+    /// The surface lays out right to left: native controls mirror.
+    rtl: bool,
     /// Sticky cells of lists, by list.
     sticky: rustc_hash::FxHashMap<NodeId, Vec<StickyCell>>,
     mtm: MainThreadMarker,
@@ -309,6 +381,10 @@ impl Mounter {
             dirty_modals: Vec::new(),
             asset_base: asset_base.clone(),
             sticky: Default::default(),
+            touch_trackers: Vec::new(),
+            touch_listeners: 0,
+            blocked_scrolls: Vec::new(),
+            rtl: false,
             mtm,
         }
     }
@@ -401,12 +477,19 @@ impl Mounter {
                     }
                 };
                 native.view().setTag(id as isize);
+                if self.rtl {
+                    mirror_native(&native, true);
+                }
                 let idx = id as usize;
                 if idx >= self.views.len() {
                     self.views
                         .resize_with((idx + 1).next_power_of_two(), || None);
                 }
+                let modal = matches!(native, Native::Modal(_));
                 self.views[idx] = Some(Slot::new(native));
+                if modal && self.touch_listeners > 0 {
+                    self.add_touch_tracker(id);
+                }
                 if self.layout_animation.is_some() {
                     self.created.push(id);
                 }
@@ -433,6 +516,8 @@ impl Mounter {
                         None => p.addSubview(c),
                     }
                 }
+                let mirrored = self.slot(parent).is_some_and(|p| p.mirrored);
+                self.set_in_mirrored(child, mirrored);
                 if self.sticky.contains_key(&parent) {
                     // New cells must not cover the pinned ones.
                     self.front_sticky(parent);
@@ -457,6 +542,10 @@ impl Mounter {
                 self.sticky.remove(&id);
                 self.target.scroll_deleted(id);
                 if let Some(s) = self.views.get_mut(id as usize).and_then(Option::take) {
+                    if s.events.contains(EventKind::Touch) {
+                        self.touch_listener_changed(false);
+                    }
+                    self.touch_trackers.retain(|(root, _)| *root != id);
                     s.native.view().removeFromSuperview();
                     if let Some(key) = &s.image_key {
                         self.images.cancel(id, key);
@@ -502,9 +591,22 @@ impl Mounter {
                         self.decorate(id);
                     }
                 }
+                // The origin of the transform depends on the size.
+                if let Some(s) = self.slot(id)
+                    && s.style.transform_origin != yf_core::TransformOrigin::CENTER
+                {
+                    s.native
+                        .view()
+                        .layer()
+                        .setTransform(dynamic_transform(s, &self.animator));
+                }
             }
             MountItem::ViewStyle { id, style } => {
                 if let Some(s) = self.slot_mut(id) {
+                    s.native
+                        .view()
+                        .layer()
+                        .setDoubleSided(!style.backface_hidden);
                     s.style = *style;
                     self.decorate(id);
                     if let Some(s) = self.slot(id) {
@@ -520,13 +622,26 @@ impl Mounter {
             } => {
                 if let Some(Slot {
                     native: Native::Text(view),
+                    events,
                     ..
                 }) = self.slot(id)
                 {
+                    let links = !text.links.is_empty() || view.has_links();
+                    let events = *events;
                     view.set_layout(text, layout, content);
+                    // Pressable spans need the block's press recognizer.
+                    if links {
+                        self.set_events(id, events);
+                    }
                 }
             }
             MountItem::Events { id, events } => self.set_events(id, events),
+            MountItem::LayoutDirection { rtl } => {
+                self.rtl = rtl;
+                for s in self.views.iter().flatten() {
+                    mirror_native(&s.native, rtl);
+                }
+            }
             MountItem::Image {
                 id,
                 source,
@@ -538,7 +653,26 @@ impl Mounter {
                 shows_indicator,
                 scroll_value,
                 keyboard_dismiss,
+                mirrored,
             } => {
+                if let Some(s) = self.slot_mut(id)
+                    && s.mirrored != mirrored
+                {
+                    s.mirrored = mirrored;
+                    let cells: Vec<NodeId> = s
+                        .native
+                        .view()
+                        .subviews()
+                        .iter()
+                        .map(|v| v.tag() as NodeId)
+                        .collect();
+                    if let Some(s) = self.slot(id) {
+                        apply_dynamic(s, &self.animator);
+                    }
+                    for cell in cells {
+                        self.set_in_mirrored(cell, mirrored);
+                    }
+                }
                 if let Some(s) = self.slot_mut(id)
                     && let Native::Scroll(scroll) = &s.native
                 {
@@ -759,9 +893,21 @@ impl Mounter {
             (Command::Dialog(dialog), native) if id == yf_core::ROOT_ID => {
                 crate::system::show_dialog(&dialog, native.view(), &self.control);
             }
+            (Command::SetJsResponder { block }, _) => self.set_js_responder(id, block),
+            (Command::SetSelection { start, end }, Native::Input(input)) => {
+                input.select(start, end)
+            }
+            (Command::ClearJsResponder, _) => self.clear_js_responder(),
             // Toasts are Android only.
             (Command::Toast { .. }, _) => {}
             (command, _) => log::warn!("{command:?} does not apply to view {id}"),
+        }
+    }
+
+    /// An input event, if the input listens to it.
+    pub(crate) fn input_event(&self, id: NodeId, kind: EventKind, payload: EventPayload) {
+        if self.slot(id).is_some_and(|s| s.events.contains(kind)) {
+            self.control.dispatch_event(id, kind, payload);
         }
     }
 
@@ -941,6 +1087,131 @@ impl Mounter {
                 .as_ref()
                 .map_or_else(Default::default, |b| b.keyboard_taps),
         )
+    }
+
+    /// Counts views listening to touches; the trackers run while any does.
+    fn touch_listener_changed(&mut self, listening: bool) {
+        if listening {
+            self.touch_listeners += 1;
+        } else {
+            self.touch_listeners = self.touch_listeners.saturating_sub(1);
+        }
+        let on = self.touch_listeners > 0;
+        if on && self.touch_trackers.is_empty() {
+            self.add_touch_tracker(yf_core::ROOT_ID);
+            let modals: Vec<NodeId> = self
+                .views
+                .iter()
+                .flatten()
+                .filter(|s| matches!(s.native, Native::Modal(_)))
+                .map(|s| s.native.view().tag() as NodeId)
+                .collect();
+            for modal in modals {
+                self.add_touch_tracker(modal);
+            }
+        }
+        for (_, tracker) in &self.touch_trackers {
+            tracker.setEnabled(on);
+        }
+    }
+
+    /// Tracks touches on the root view `root` (the surface or a modal).
+    fn add_touch_tracker(&mut self, root: NodeId) {
+        if self.touch_trackers.iter().any(|(id, _)| *id == root) {
+            return;
+        }
+        let Some(view) = self.slot(root).map(|s| s.native.view().retain()) else {
+            return;
+        };
+        let tracker = crate::touch::TouchTracker::new(self.mtm, &self.target);
+        tracker.setEnabled(self.touch_listeners > 0);
+        view.addGestureRecognizer(&tracker);
+        self.touch_trackers.push((root, tracker));
+    }
+
+    /// The node under a touch at `point` of `view` (the view UIKit hit,
+    /// which skips views without interaction such as text) and the nodes
+    /// around it listening to touches, innermost first.
+    pub(crate) fn touch_target(
+        &self,
+        view: &UIView,
+        point: CGPoint,
+    ) -> Option<(NodeId, Retained<UIView>, Vec<NodeId>)> {
+        let mut target = None;
+        let mut path = Vec::new();
+        // The innermost view there, as React Native targets it.
+        let mut current = Some(innermost(view, point));
+        while let Some(v) = current {
+            let id = v.tag() as NodeId;
+            let slot = self
+                .slot(id)
+                .filter(|s| std::ptr::eq::<UIView>(s.native.view(), &*v));
+            current = match slot {
+                Some(s) => {
+                    if target.is_none() {
+                        target = Some((id, v.retain()));
+                    }
+                    if s.events.contains(EventKind::Touch) {
+                        path.push(id);
+                    }
+                    // Screens, header items and modals are not subviews of
+                    // their parent node's view.
+                    match self.hosts.get(&id).and_then(|&p| self.slot(p)) {
+                        Some(host) => Some(host.native.view().retain()),
+                        None => v.superview(),
+                    }
+                }
+                None => v.superview(),
+            };
+        }
+        let (id, view) = target?;
+        (!path.is_empty()).then_some((id, view, path))
+    }
+
+    /// Marks `id` as a cell of a mirrored list (or not), flipping it back.
+    fn set_in_mirrored(&mut self, id: NodeId, mirrored: bool) {
+        if let Some(c) = self.slot_mut(id)
+            && c.in_mirrored != mirrored
+        {
+            c.in_mirrored = mirrored;
+            if let Some(c) = self.slot(id) {
+                apply_dynamic(c, &self.animator);
+            }
+        }
+    }
+
+    /// A native scroll view took the touches over.
+    pub(crate) fn cancel_touches(&self) {
+        for (_, tracker) in &self.touch_trackers {
+            tracker.cancel_all();
+        }
+    }
+
+    /// A JS responder took the touches on `id`: with `block`, the scroll
+    /// views around it stop scrolling until it lets go.
+    fn set_js_responder(&mut self, id: NodeId, block: bool) {
+        self.clear_js_responder();
+        if !block {
+            return;
+        }
+        let Some(s) = self.slot(id) else { return };
+        let mut current = s.native.view().superview();
+        while let Some(v) = current {
+            if let Some(scroll) = v.downcast_ref::<UIScrollView>() {
+                let pan = scroll.panGestureRecognizer();
+                if pan.isEnabled() {
+                    pan.setEnabled(false);
+                    self.blocked_scrolls.push(scroll.retain());
+                }
+            }
+            current = v.superview();
+        }
+    }
+
+    fn clear_js_responder(&mut self) {
+        for scroll in self.blocked_scrolls.drain(..) {
+            scroll.panGestureRecognizer().setEnabled(true);
+        }
     }
 
     pub(crate) fn dismiss_keyboard(&self) {
@@ -1141,6 +1412,19 @@ impl Mounter {
     }
 
     fn set_events(&mut self, id: NodeId, events: EventMask) {
+        let listened = self
+            .slot(id)
+            .is_some_and(|s| s.events.contains(EventKind::Touch));
+        self.set_view_events(id, events);
+        let listens = self
+            .slot(id)
+            .is_some_and(|s| s.events.contains(EventKind::Touch));
+        if listened != listens {
+            self.touch_listener_changed(listens);
+        }
+    }
+
+    fn set_view_events(&mut self, id: NodeId, events: EventMask) {
         let target = self.target.clone();
         let control = self.control.clone();
         let (mtm, mac_idiom) = (self.mtm, self.mac_idiom);
@@ -1150,12 +1434,17 @@ impl Mounter {
         slot.events = events;
         let v = slot.values;
         let any = |kinds: &[EventKind]| kinds.iter().any(|&k| events.contains(k));
-        let wants_press = any(&[
+        let own_press = any(&[
             EventKind::Press,
             EventKind::LongPress,
             EventKind::PressIn,
             EventKind::PressOut,
         ]) || slot.active_opacity.is_some();
+        let (links, links_long_press) = match &slot.native {
+            Native::Text(t) => (t.has_links(), t.links_long_press()),
+            _ => (false, false),
+        };
+        let wants_press = own_press || links;
         let wants_pan = v.pan_x.is_some()
             || v.pan_y.is_some()
             || any(&[EventKind::PanStart, EventKind::PanEnd]);
@@ -1200,9 +1489,12 @@ impl Mounter {
             });
         }
         if let Some(press) = &g.press {
-            press.set_long_press(events.contains(EventKind::LongPress));
+            press.set_long_press(events.contains(EventKind::LongPress) || links_long_press);
+            press.set_own(own_press);
+            press.set_long_press_delay(slot.long_press_delay);
         }
-        if wants_press || wants_pan || wants_pinch || wants_rotation {
+        let wants_touch = events.contains(EventKind::Touch);
+        if wants_press || wants_pan || wants_pinch || wants_rotation || wants_touch {
             view.setUserInteractionEnabled(true);
         }
         if let Some(yf) = slot.native.yf() {
@@ -1584,6 +1876,10 @@ impl Mounter {
         let (control, mtm) = (self.control.clone(), self.mtm);
         let Some(s) = self.slot_mut(id) else { return };
         let active = props.active_opacity;
+        s.long_press_delay = props.long_press_delay;
+        if let Some(press) = &s.gestures.press {
+            press.set_long_press_delay(props.long_press_delay);
+        }
         match s.native.yf() {
             Some(view) => view.set_props(props, &control),
             None => {
@@ -2070,7 +2366,28 @@ fn dynamic_transform(slot: &Slot, animator: &Animator) -> CATransform3D {
             *o = Some(animator.eval(node).number());
         }
     }
-    let m = slot.style.transform.matrix(|i| overrides[i]).0;
+    let mut m = slot.style.transform.matrix(|i| overrides[i]).0;
+    // Mirrored lists flip first; their cells flip back last (row vectors).
+    let mut flip = translation(0.0, 0.0, 0.0);
+    flip[0] = -1.0;
+    if slot.mirrored {
+        m = mat_mul(&flip, &m);
+    }
+    if slot.in_mirrored {
+        m = mat_mul(&m, &flip);
+    }
+    let origin = slot.style.transform_origin;
+    if origin != yf_core::TransformOrigin::CENTER {
+        // Around the origin rather than the layer's center (its anchor):
+        // to the origin, transform, and back (row vectors).
+        let size = slot.native.view().bounds().size;
+        let (dx, dy, dz) = origin.offset(size.width as f32, size.height as f32);
+        let (dx, dy, dz) = (dx as CGFloat, dy as CGFloat, dz as CGFloat);
+        m = mat_mul(
+            &mat_mul(&translation(-dx, -dy, -dz), &m),
+            &translation(dx, dy, dz),
+        );
+    }
     CATransform3D {
         m11: m[0],
         m12: m[1],
@@ -2089,6 +2406,27 @@ fn dynamic_transform(slot: &Slot, animator: &Animator) -> CATransform3D {
         m43: m[14],
         m44: m[15],
     }
+}
+
+/// A translation matrix (row vectors, as Core Animation).
+fn translation(x: CGFloat, y: CGFloat, z: CGFloat) -> [CGFloat; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        x, y, z, 1.0,
+    ]
+}
+
+/// `a × b` of row-major 4×4 matrices.
+fn mat_mul(a: &[CGFloat; 16], b: &[CGFloat; 16]) -> [CGFloat; 16] {
+    let mut out = [0.0; 16];
+    for r in 0..4 {
+        for c in 0..4 {
+            out[r * 4 + c] = (0..4).map(|k| a[r * 4 + k] * b[k * 4 + c]).sum();
+        }
+    }
+    out
 }
 
 /// `t` scaled by `f` around the layer's center.
