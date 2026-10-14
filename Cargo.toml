@@ -1,0 +1,73 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/yf-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unreachable_pub = "deny"
+private_interfaces = "deny"
+
+[workspace.dependencies]
+yf-anim = { path = "crates/yf-anim" }
+yf-core = { path = "crates/yf-core" }
+yf-js = { path = "crates/yf-js" }
+yf-engine = { path = "crates/yf-engine" }
+yf-bundler = { path = "crates/yf-bundler" }
+yf-platform-apple = { path = "crates/yf-platform-apple" }
+yf-dev = { path = "crates/yf-dev" }
+
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4.6", features = ["derive"] }
+crossbeam-channel = "0.5"
+notify = "8.2"
+log = "0.4"
+libc = "0.2"
+imagesize = "0.15"
+oxc_sourcemap = "9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+rustc-hash = "2.1"
+slab = "0.4"
+taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "block_layout", "content_size"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "fs"] }
+
+# `full` is avoided on purpose: it enables `dyn-load` (dlopen2), which does not build for iOS / Catalyst.
+rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "bindgen"] }
+
+rolldown = "=1.2.13"
+rolldown_common = "=1.2.13"
+oxc = { version = "=0.153.0", features = ["transformer", "codegen", "semantic"] }
+# Solid universal-mode JSX compiler (Oxc port). Pinned to a commit: the published tag predates the `compile` API.
+dom-expressions-compiler = { git = "https://github.com/yumemi-thomas/solid-1x-compiler", rev = "e03fc5d9494ac83c718cee701dbac104dbeee540", default-features = false }
+
+objc2 = "0.6.5"
+objc2-foundation = "0.3.2"
+objc2-ui-kit = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+objc2-core-text = "0.3.2"
+objc2-image-io = "0.3.2"
+block2 = "0.6.2"
+objc2-quartz-core = "0.3.2"
+dispatch2 = "0.3.1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+# Keep the interpreter and layout fast even in debug builds; they dominate runtime cost.
+[profile.dev.package.rquickjs-sys]
+opt-level = 3
+[profile.dev.package.taffy]
+opt-level = 3

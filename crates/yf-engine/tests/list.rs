@@ -1,0 +1,123 @@
+//! The runtime's `List` with the engine: rows render, scrolling rebinds
+//! recycled cells and `onEndReached` reaches JS.
+
+use std::{sync::mpsc, time::Duration};
+
+use yf_core::{ApproxTextEngine, MountBatch, MountItem, Size, ViewKind};
+use yf_engine::{Bundle, Engine, EngineConfig, MountSink};
+
+struct Sink(mpsc::Sender<MountBatch>);
+
+impl MountSink for Sink {
+    fn submit(&self, batch: MountBatch) {
+        let _ = self.0.send(batch);
+    }
+}
+
+const APP: &str = r#"
+import { createSignal } from "solid-js";
+import { List, render, root } from "yf";
+const [rows, setRows] = createSignal(Array.from({ length: 100 }, (_, i) => i));
+function App() {
+  return (
+    <List each={rows()} estimatedItemSize={50} style={{ flex: 1 }}
+          onEndReached={() => { console.log("end"); setRows([...rows(), ...Array.from({ length: 100 }, (_, i) => rows().length + i)]); }}>
+      {(row) => <view style={{ height: 50 }}><text>{`row ${row()}`}</text></view>}
+    </List>
+  );
+}
+render(() => <App />, root);
+"#;
+
+fn texts(batch: &MountBatch) -> Vec<String> {
+    batch
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            MountItem::Text { text, .. } => Some(text.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn cells_created(batch: &MountBatch) -> usize {
+    // Each cell is a View whose child is the row View: count rows via text views.
+    batch
+        .items
+        .iter()
+        .filter(|i| {
+            matches!(
+                i,
+                MountItem::Create {
+                    kind: ViewKind::Text,
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+#[test]
+fn list_scrolls_with_recycled_cells() {
+    let dir = std::env::temp_dir().join(format!("yf-list-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("App.tsx");
+    std::fs::write(&entry, APP).unwrap();
+    let bundle = yf_bundler::bundle(&yf_bundler::BundleOptions {
+        entry,
+        minify: false,
+    })
+    .unwrap();
+    let bytecode = yf_js::compile_bytecode(&bundle.code, false).unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let config = EngineConfig {
+        bundle: Bundle::bytecode(bytecode),
+        viewport: Size::new(320.0, 500.0),
+        trace: false,
+    };
+    let engine = Engine::start(config, || ApproxTextEngine, Sink(tx)).unwrap();
+    let first = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    // 500 pt viewport + 500 pt overscan at 50 pt per row = 21 rows.
+    let first_texts = texts(&first);
+    assert_eq!(first_texts.len(), 21, "{first_texts:?}");
+    assert_eq!(first_texts[0], "row 0");
+    let list = first
+        .items
+        .iter()
+        .find_map(|i| match i {
+            MountItem::Create {
+                id,
+                kind: ViewKind::Scroll,
+            } => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+
+    // Scroll to row 40: rows 30..=60 are needed; cells are recycled, so the
+    // update re-renders text in existing views instead of creating them.
+    engine.control().scroll(list, 0.0, 2000.0);
+    let batch = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let shown = texts(&batch);
+    assert!(shown.contains(&"row 40".to_owned()), "{shown:?}");
+    assert!(
+        cells_created(&batch) <= 10,
+        "created {} text views",
+        cells_created(&batch)
+    );
+
+    // Near the end: `onEndReached` appends rows; the content grows.
+    engine.control().scroll(list, 0.0, 4600.0);
+    let mut grew = false;
+    while let Ok(batch) = rx.recv_timeout(Duration::from_secs(2)) {
+        grew |= batch
+            .items
+            .iter()
+            .any(|i| matches!(i, MountItem::ScrollContent { size, .. } if size.height >= 10_000.0));
+        if grew {
+            break;
+        }
+    }
+    assert!(grew, "onEndReached did not extend the list");
+    let _ = std::fs::remove_dir_all(&dir);
+}

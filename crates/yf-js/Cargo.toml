@@ -1,0 +1,18 @@
+[package]
+name = "yf-js"
+description = "QuickJS host: runtime setup, host APIs, op decoding and bytecode."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+log.workspace = true
+yf-core.workspace = true
+yf-anim.workspace = true
+rquickjs.workspace = true
+rustc-hash.workspace = true
+thiserror.workspace = true
