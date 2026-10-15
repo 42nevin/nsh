@@ -21,8 +21,8 @@ crates/
                        `include/nsh.h`) under the `NativeShell` Swift module (`swift/NativeShell.swift`) iOS apps embed nsh with
   nsh-platform-android/ Android backend: `libnsh.so` (JNI glue, StaticLayout text engine, batch encoding, UI-thread animator) + the Java
                        runtime in `java/com/longbridge/nsh` (NshView, Mounter, views, images, networking); feature `dev` as above
-  nsh-host/            Development host app (Catalyst / iOS simulator); connects to a dev server or runs a local bundle
-  nsh-app/             Release runner: the executable of iOS apps built by `nsh package`
+  nsh-ios-host/        Development host app (Catalyst / iOS simulator); connects to a dev server or runs a local bundle
+  nsh-ios-app/         Release runner: the executable of iOS apps built by `nsh package`
   nsh-cli/             The `nsh` command line: init / build / trace / dev / run / package; keygen / certify / publish / verify / revoke
   xtask/               Maintainer tasks: `cargo xtask android` (Android runtime), `cargo xtask dist` (the distribution)
 js/runtime/*.ts       The JS runtime, one file per module apps import (see **JS modules**): `index.ts` is `nsh`, `list.ts` is
@@ -35,7 +35,7 @@ js/vendor/solid-js/   Embedded solid-js (version in VERSION) and its type declar
 examples/             Example apps (gallery: a demo index, one module per demo; counter) and embedding samples (embed-ios, embed-android)
 ```
 
-Dependency direction: `nsh-core` ← `nsh-js` ← `nsh-engine` (also ← `nsh-package`) ← `nsh-platform-*` ← `nsh-host` / `nsh-app`; `nsh-cli` depends on `nsh-bundler`, `nsh-js` and `nsh-engine`. `nsh-core` must not depend on any platform or JS crate.
+Dependency direction: `nsh-core` ← `nsh-js` ← `nsh-engine` (also ← `nsh-package`) ← `nsh-platform-*` ← `nsh-ios-host` / `nsh-ios-app`; `nsh-cli` depends on `nsh-bundler`, `nsh-js` and `nsh-engine`. `nsh-core` must not depend on any platform or JS crate.
 
 ## Data flow and threads
 
@@ -73,13 +73,13 @@ Input                        native gestures -> EngineControl::dispatch_event ->
 ```sh
 cargo build -p nsh-cli                                                             # build the nsh CLI
 ./target/debug/nsh init my-app                                                     # new app: App.tsx, nsh.json, tsconfig.json, .nsh/types
-cargo build -p nsh-host --target aarch64-apple-ios-macabi                          # build the Catalyst development host (needed by nsh run)
-cargo build -p nsh-host --target aarch64-apple-ios-sim                             # the iOS simulator host (`nsh run --target ios`)
-cargo build -p nsh-app --target aarch64-apple-ios-sim                              # the release runner (`nsh package --target ios-simulator`)
+cargo build -p nsh-ios-host --target aarch64-apple-ios-macabi                          # build the Catalyst development host (needed by nsh run)
+cargo build -p nsh-ios-host --target aarch64-apple-ios-sim                             # the iOS simulator host (`nsh run --target ios`)
+cargo build -p nsh-ios-app --target aarch64-apple-ios-sim                              # the release runner (`nsh package --target ios-simulator`)
 ./target/debug/nsh trace examples/counter/App.tsx                                  # headless run: prints mount items and the time of every commit
 ./target/release/nsh trace examples/gallery/Bench.tsx --scroll 3000 --taps 0       # headless scrolling (10pt per frame): per-frame list cost
 ./target/debug/nsh run examples/counter/App.tsx --trace                            # dev server + Catalyst host (390×844), hot reload on save
-./target/debug/nsh run examples/gallery/App.tsx --target ios                       # in an iOS simulator (boots one; needs the nsh-host sim build)
+./target/debug/nsh run examples/gallery/App.tsx --target ios                       # in an iOS simulator (boots one; needs the nsh-ios-host sim build)
 ./target/debug/nsh run examples/gallery/App.tsx --target android                   # on an emulator / device (needs `cargo xtask android --dev`)
 ./target/debug/nsh package examples/gallery/App.tsx --target ios-simulator --run   # installable app (.app / .ipa / .apk)
 cargo xtask android [--release] [--dev]                                            # Android runtime into target/android/<profile>[-dev]
@@ -97,7 +97,7 @@ cargo test --release -p nsh-engine --test list_bench -- --ignored --nocapture   
 cargo test --release -p nsh-core bench_ -- --ignored --nocapture                # row / cell relayout benchmarks
 cargo +nightly fmt --all                                                        # .rustfmt.toml uses nightly options
 cargo clippy --workspace --all-targets
-cargo clippy -p nsh-platform-ios -p nsh-host -p nsh-app --target aarch64-apple-ios-macabi --features nsh-platform-ios/embed,nsh-platform-ios/dev
+cargo clippy -p nsh-platform-ios -p nsh-ios-host -p nsh-ios-app --target aarch64-apple-ios-macabi --features nsh-platform-ios/embed,nsh-platform-ios/dev
 cargo xtask ios-embed                                                           # NativeShell(Dev).xcframework into dist/nsh/embed/ios
 ```
 
@@ -437,7 +437,7 @@ For code an app downloads (first-party updates, third-party mini apps): `nsh_pac
 
 - **Bytecode is trusted input.** QuickJS does not validate bytecode; loading crafted bytecode corrupts memory. So
   `Bundle::bytecode` / `Bundle::read_trusted` are `unsafe` and only called for: the app's own signed resources
-  (`nsh-app`, `AppActivity`, `NshView.loadAssetBundle`, `NshAppView.loadBundle` for a path inside the main bundle —
+  (`nsh-ios-app`, `AppActivity`, `NshView.loadAssetBundle`, `NshAppView.loadBundle` for a path inside the main bundle —
   `nsh_platform_ios::in_app_bundle`), bytecode compiled in-process, the dev server the developer connected to (its
   handshake negotiates the version), and verified packages (`Bundle::from_package`). `Bundle::read` and
   `NshView.loadBundleFile` refuse `.qbc` files; downloaded code is either JS source or a signed package.
@@ -463,7 +463,7 @@ For code an app downloads (first-party updates, third-party mini apps): `nsh_pac
   `NshTrust(stateDirectory:)` / `addRoot` / `updateRevocations` / `openPackage(at:) async throws -> NshPackage` (its
   `info`: id, name, version, build) and `NshAppView.run(_:)`, or `loadPackage(at:trust:) async throws`; Android
   `NshTrust(stateDir)` / `addRoot` / `updateRevocations` / `openPackage(file) throws NshPackage.RefusedException`
-  (any thread) and `NshView.runPackage(pkg)`. A refused package throws; the running app stays. To try a package on a simulator / emulator: `nsh-host --package <file> --root <root.pub>`, or
+  (any thread) and `NshView.runPackage(pkg)`. A refused package throws; the running app stays. To try a package on a simulator / emulator: `nsh-ios-host --package <file> --root <root.pub>`, or
   `DevActivity` with the `package` (path on the device) and `root` (base64) extras; their trust state persists in
   the temporary / cache directory, so older builds are refused there too.
 - Not done yet: delivering packages (an update server, OTA); the app decides where packages come from.
@@ -634,7 +634,7 @@ For code an app downloads (first-party updates, third-party mini apps): `nsh_pac
 - **objc2 crates are used with `default-features = false`** and an explicit feature list in the root `Cargo.toml` (one feature per
   header): the defaults link CloudKit, CoreData, CoreImage, CoreLocation, Metal, ... into every app (each one costs dyld time at
   launch). When a method is missing after using a new API, enable the header feature named in its `#[cfg(feature = ...)]`; check
-  `otool -L` on a release `nsh-app` afterwards (only UIKit, Foundation, CoreFoundation, CoreGraphics, CoreText, QuartzCore, ImageIO).
+  `otool -L` on a release `nsh-ios-app` afterwards (only UIKit, Foundation, CoreFoundation, CoreGraphics, CoreText, QuartzCore, ImageIO).
 - **iOS simulator: launch apps only after `simctl bootstatus -b`**; apps launched while the simulator boots are sent to the
   background when SpringBoard comes up.
 - **IPAs are zipped with `ditto -c -k --norsrc --keepParent`**: `--sequesterRsrc` adds `__MACOSX/` resource forks.

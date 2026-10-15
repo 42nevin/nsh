@@ -35,8 +35,8 @@ Build the CLI and the development host of the target you want once (and again af
 
 ```sh
 cargo build -p nsh-cli
-cargo build -p nsh-host --target aarch64-apple-ios-macabi   # for the Mac Catalyst window
-cargo build -p nsh-host --target aarch64-apple-ios-sim      # for --target ios
+cargo build -p nsh-ios-host --target aarch64-apple-ios-macabi   # for the Mac Catalyst window
+cargo build -p nsh-ios-host --target aarch64-apple-ios-sim      # for --target ios
 cargo xtask android --dev                                   # for --target android
 ```
 

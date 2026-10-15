@@ -14,7 +14,7 @@ workspace = true
 dev = ["dep:nsh-dev"]
 # The C ABI the NativeShell Swift module is built on (`embed`), exported for
 # the static library `cargo xtask dist` builds with `cargo rustc --crate-type
-# staticlib`. Off for nsh-host / nsh-app, so they export nothing.
+# staticlib`. Off for nsh-ios-host / nsh-ios-app, so they export nothing.
 embed = []
 
 [dependencies]

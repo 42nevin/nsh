@@ -4,10 +4,10 @@
 //! Distribution layout (`cargo xtask dist`), next to `bin/nsh`:
 //!
 //! ```text
-//! runtime/ios/iphoneos/nsh-app          release runner (device)
-//! runtime/ios/iphonesimulator/nsh-app   release runner (simulator)
-//! runtime/ios/iphonesimulator/nsh-host  development host (simulator)
-//! runtime/ios/maccatalyst/nsh-host      development host (Mac Catalyst)
+//! runtime/ios/iphoneos/nsh-ios-app           release runner (device)
+//! runtime/ios/iphonesimulator/nsh-ios-app    release runner (simulator)
+//! runtime/ios/iphonesimulator/nsh-ios-host   development host (simulator)
+//! runtime/ios/maccatalyst/nsh-ios-host       development host (Mac Catalyst)
 //! runtime/android/release/             classes.dex + lib/<abi>/libnsh.so
 //! runtime/android/dev/                 the same with development support
 //! ```
@@ -90,7 +90,7 @@ fn android_existing(dir: PathBuf, dev: bool) -> anyhow::Result<PathBuf> {
     )
 }
 
-/// Path of runtime file `name` (`nsh-app`, `nsh-host`) for `platform`.
+/// Path of runtime file `name` (`nsh-ios-app`, `nsh-ios-host`) for `platform`.
 pub(crate) fn file(platform: Platform, name: &str) -> anyhow::Result<PathBuf> {
     if let Some(root) = env::var_os("NSH_RUNTIME") {
         return existing(

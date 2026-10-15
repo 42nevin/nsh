@@ -2,9 +2,9 @@
 //!
 //! ```text
 //! dist/nsh/bin/nsh                                             the CLI
-//! dist/nsh/runtime/ios/iphoneos/nsh-app                        packaged app runner
-//! dist/nsh/runtime/ios/iphonesimulator/{nsh-app,nsh-host}
-//! dist/nsh/runtime/ios/maccatalyst/nsh-host                    development host
+//! dist/nsh/runtime/ios/iphoneos/nsh-ios-app                    packaged app runner
+//! dist/nsh/runtime/ios/iphonesimulator/{nsh-ios-app,nsh-ios-host}
+//! dist/nsh/runtime/ios/maccatalyst/nsh-ios-host                development host
 //! dist/nsh/runtime/android/{release,dev}/                      classes.dex, lib/<abi>/libnsh.so
 //! dist/nsh/embed/ios/{NativeShell,NativeShellDev}.xcframework  embedding in iOS apps
 //! dist/nsh/embed/android/{nsh,nsh-dev}.aar                     embedding in Android apps
@@ -38,17 +38,17 @@ pub(crate) fn dist() -> anyhow::Result<()> {
 
     // iOS runtimes: release runners, development hosts.
     for (triple, dir) in [(IOS, "iphoneos"), (IOS_SIM, "iphonesimulator")] {
-        cargo(&["build", "--release", "-p", "nsh-app", "--target", triple])?;
+        cargo(&["build", "--release", "-p", "nsh-ios-app", "--target", triple])?;
         copy(
-            &release.join(triple).join("release/nsh-app"),
-            &out.join("runtime/ios").join(dir).join("nsh-app"),
+            &release.join(triple).join("release/nsh-ios-app"),
+            &out.join("runtime/ios").join(dir).join("nsh-ios-app"),
         )?;
     }
     for (triple, dir) in [(IOS_SIM, "iphonesimulator"), (CATALYST, "maccatalyst")] {
-        cargo(&["build", "--release", "-p", "nsh-host", "--target", triple])?;
+        cargo(&["build", "--release", "-p", "nsh-ios-host", "--target", triple])?;
         copy(
-            &release.join(triple).join("release/nsh-host"),
-            &out.join("runtime/ios").join(dir).join("nsh-host"),
+            &release.join(triple).join("release/nsh-ios-host"),
+            &out.join("runtime/ios").join(dir).join("nsh-ios-host"),
         )?;
     }
 

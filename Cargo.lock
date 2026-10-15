@@ -1803,14 +1803,6 @@ name = "nsh-anim"
 version = "0.1.0"
 
 [[package]]
-name = "nsh-app"
-version = "0.1.0"
-dependencies = [
- "log",
- "nsh-platform-ios",
-]
-
-[[package]]
 name = "nsh-bundler"
 version = "0.1.0"
 dependencies = [
@@ -1897,7 +1889,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "nsh-host"
+name = "nsh-ios-app"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "nsh-platform-ios",
+]
+
+[[package]]
+name = "nsh-ios-host"
 version = "0.1.0"
 dependencies = [
  "log",

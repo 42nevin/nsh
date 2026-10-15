@@ -116,7 +116,7 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
             return package_android(&options, config, &name, &id, &entry, &built);
         }
     };
-    let runner = runtime::file(platform, "nsh-app")?;
+    let runner = runtime::file(platform, "nsh-ios-app")?;
 
     fs::create_dir_all(options.out)?;
     let app = options.out.join(format!("{name}.app"));

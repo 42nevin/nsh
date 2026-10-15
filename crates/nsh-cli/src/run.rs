@@ -53,7 +53,7 @@ pub(crate) fn run(
         let result = run_android(&session, &work, trace);
         return result;
     }
-    let host = crate::runtime::file(target.platform(), "nsh-host")?;
+    let host = crate::runtime::file(target.platform(), "nsh-ios-host")?;
     let mut args = vec!["--dev-server".to_owned(), session.local_url()];
     if trace {
         args.push("--trace".to_owned());
@@ -61,7 +61,7 @@ pub(crate) fn run(
     match target {
         Target::Catalyst => {
             let app = package_catalyst(&work, &host)?;
-            let exe = app.join("Contents/MacOS/nsh-host");
+            let exe = app.join("Contents/MacOS/nsh-ios-host");
             let mut child = Command::new(&exe)
                 .args(&args)
                 // A host that crashed must not ask to reopen its windows
@@ -184,7 +184,7 @@ fn package_catalyst(work: &Path, host: &Path) -> anyhow::Result<PathBuf> {
     let macos = contents.join("MacOS");
     fs::create_dir_all(&macos)?;
     fs::write(contents.join("Info.plist"), info_plist(Target::Catalyst))?;
-    install_binary(host, &macos.join("nsh-host"))?;
+    install_binary(host, &macos.join("nsh-ios-host"))?;
     Ok(app)
 }
 
@@ -194,7 +194,7 @@ fn package_ios(work: &Path, host: &Path) -> anyhow::Result<PathBuf> {
     let app = work.join("ios").join(format!("{APP_NAME}.app"));
     fs::create_dir_all(&app)?;
     fs::write(app.join("Info.plist"), info_plist(Target::Ios))?;
-    if install_binary(host, &app.join("nsh-host"))? || !app.join("_CodeSignature").exists() {
+    if install_binary(host, &app.join("nsh-ios-host"))? || !app.join("_CodeSignature").exists() {
         let status = Command::new("codesign")
             .args(["--force", "--sign", "-", "--timestamp=none"])
             .arg(&app)
@@ -326,7 +326,7 @@ fn info_plist(target: Target) -> String {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleExecutable</key><string>nsh-host</string>
+    <key>CFBundleExecutable</key><string>nsh-ios-host</string>
     <key>CFBundleIdentifier</key><string>{BUNDLE_ID}</string>
     <key>CFBundleName</key><string>{APP_NAME}</string>
     <key>CFBundlePackageType</key><string>APPL</string>

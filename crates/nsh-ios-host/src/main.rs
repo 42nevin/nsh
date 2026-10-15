@@ -1,10 +1,10 @@
 //! Development host: a prebuilt app that runs any nsh app.
 //!
-//! - `nsh-host --dev-server ws://127.0.0.1:8790/ws [--trace]` loads bundles
+//! - `nsh-ios-host --dev-server ws://127.0.0.1:8790/ws [--trace]` loads bundles
 //!   pushed by `nsh dev` / `nsh run` and reloads on every rebuild.
-//! - `nsh-host --bundle <path> [--trace]` runs a built bundle (`.qbc` is
+//! - `nsh-ios-host --bundle <path> [--trace]` runs a built bundle (`.qbc` is
 //!   QuickJS bytecode, anything else JS source).
-//! - `nsh-host --package <app.nshpkg> --root <root.pub>... [--trace]` verifies
+//! - `nsh-ios-host --package <app.nshpkg> --root <root.pub>... [--trace]` verifies
 //!   a signed package (`nsh publish`) against the given roots and runs it, as
 //!   an embedding app would (its trust state lives in the temporary
 //!   directory).
@@ -80,7 +80,7 @@ fn load_package(
 ) -> Result<(nsh_platform_ios::Bundle, std::path::PathBuf), String> {
     use nsh_engine::package::{PublicKey, TrustStore};
 
-    let state = std::env::temp_dir().join("nsh-host-trust");
+    let state = std::env::temp_dir().join("nsh-ios-host-trust");
     let mut trust = TrustStore::open(&state).map_err(|e| e.to_string())?;
     for root in roots {
         let key = std::fs::read_to_string(root).map_err(|e| format!("{}: {e}", root.display()))?;
@@ -93,6 +93,6 @@ fn load_package(
 
 #[cfg(not(target_os = "ios"))]
 fn main() {
-    eprintln!("nsh-host runs on UIKit targets; build it with --target aarch64-apple-ios-macabi");
+    eprintln!("nsh-ios-host runs on UIKit targets; build it with --target aarch64-apple-ios-macabi");
     std::process::exit(1);
 }

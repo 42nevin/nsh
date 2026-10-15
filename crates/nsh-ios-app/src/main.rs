@@ -45,6 +45,6 @@ fn main() {
 
 #[cfg(not(target_os = "ios"))]
 fn main() {
-    eprintln!("nsh-app is the executable of packaged iOS apps; build it for an iOS target");
+    eprintln!("nsh-ios-app is the executable of packaged iOS apps; build it for an iOS target");
     std::process::exit(1);
 }
