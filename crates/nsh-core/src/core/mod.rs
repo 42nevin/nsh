@@ -488,6 +488,22 @@ pub enum ApplyError {
     BadAnchor(NodeId),
     /// The insert would create a cycle.
     Cycle(NodeId),
+    /// Creating the node would exceed the node quota ([`Core::set_max_nodes`]).
+    TooManyNodes(usize),
+    /// A new id far beyond the ids in use (ids index a table, so they must
+    /// stay dense).
+    IdOutOfRange(NodeId),
+}
+
+impl ApplyError {
+    /// The app went over a quota or sent what no runtime sends: it should
+    /// be stopped rather than continue.
+    pub fn is_fatal(&self) -> bool {
+        matches!(
+            self,
+            ApplyError::TooManyNodes(_) | ApplyError::IdOutOfRange(_)
+        )
+    }
 }
 
 /// The shadow tree of one surface.
@@ -539,6 +555,8 @@ pub struct Core<M: TextEngine> {
     tailwind: Tailwind,
     /// What class variants read from the environment.
     class_env: ClassEnvironment,
+    /// [`Core::set_max_nodes`].
+    max_nodes: usize,
 }
 
 impl<M: TextEngine> Core<M> {
@@ -562,6 +580,7 @@ impl<M: TextEngine> Core<M> {
             measure_cache: MeasureCache::default(),
             pending_text: Vec::new(),
             attachment_blocks: Vec::new(),
+            max_nodes: usize::MAX,
             lists: Vec::new(),
             roots: Vec::new(),
             accessories: Default::default(),
@@ -644,6 +663,12 @@ impl<M: TextEngine> Core<M> {
     /// Number of live nodes, including the root.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// Caps the number of nodes (each may hold a native view, whose memory
+    /// no JS heap limit covers): creating more is a fatal [`ApplyError`].
+    pub fn set_max_nodes(&mut self, max: usize) {
+        self.max_nodes = max.max(1);
     }
 
     /// Changes the size of the root view.
@@ -939,6 +964,12 @@ impl<M: TextEngine> Core<M> {
 
     fn alloc(&mut self, id: NodeId, kind: Kind) -> Result<Key, ApplyError> {
         let idx = id as usize;
+        if self.nodes.len() >= self.max_nodes {
+            return Err(ApplyError::TooManyNodes(self.max_nodes));
+        }
+        if idx > self.slots.len().saturating_add(self.max_nodes) {
+            return Err(ApplyError::IdOutOfRange(id));
+        }
         if idx >= self.slots.len() {
             self.slots.resize((idx + 1).next_power_of_two(), 0);
         } else if self.slots[idx] != 0 {

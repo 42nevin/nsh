@@ -14,7 +14,7 @@ use std::{
 
 use dispatch2::{DispatchQueue, MainThreadBound};
 use nsh_dev::{DevClient, DevEvent, protocol::BundleFormat};
-use nsh_engine::{BYTECODE_VERSION, Bundle};
+use nsh_engine::{BYTECODE_VERSION, Bundle, Policy};
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained, sel,
 };
@@ -207,9 +207,11 @@ fn handle(view: &Rc<Inner>, ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
             source_map,
         } => {
             let mut bundle = match format {
-                BundleFormat::Bytecode => Bundle::bytecode(bytes),
+                BundleFormat::Bytecode => {
+                    Bundle::bytecode(bytes).with_policy(Policy::development())
+                }
                 BundleFormat::Source => match String::from_utf8(bytes) {
-                    Ok(code) => Bundle::source(code),
+                    Ok(code) => Bundle::source(code).with_policy(Policy::development()),
                     Err(_) => {
                         return show_error(
                             ui,

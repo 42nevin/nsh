@@ -16,6 +16,7 @@ use crate::{
     error::JsError,
     net::{HttpResponse, NetworkQueue, RequestId},
     protocol::{self, Warnings},
+    sandbox::{self, Budget, Limits, Phase},
     timers::Timers,
     web,
 };
@@ -39,6 +40,18 @@ pub(crate) struct Shared {
     /// Measures one line of text for `measureText` (the engine's text
     /// engine).
     measurer: RefCell<Option<TextMeasurer>>,
+    /// The VM's limits.
+    pub(crate) limits: Limits,
+    /// Why the VM was stopped (out of memory, over a quota): no JS runs
+    /// after that.
+    pub(crate) fatal: RefCell<Option<String>>,
+}
+
+impl Shared {
+    /// Stops the VM for `reason` (the first reason wins).
+    pub(crate) fn stop(&self, reason: String) {
+        self.fatal.borrow_mut().get_or_insert(reason);
+    }
 }
 
 /// Measures the width of one line of `text` in `font`, in points.
@@ -51,31 +64,116 @@ pub struct Host {
     rt: Runtime,
     shared: Rc<Shared>,
     on_error: Option<ErrorHandler>,
+    budget: Budget,
+}
+
+/// How a VM is set up.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HostOptions {
+    /// Resource limits.
+    pub limits: Limits,
+    /// Removes `eval` and the function constructors and freezes the shared
+    /// prototypes (see `sandbox`). Off for development bundles.
+    pub harden: bool,
 }
 
 impl Host {
-    /// Creates a runtime and installs `console`, timers and the op bridge.
+    /// Creates a runtime with the default limits, not hardened, and installs
+    /// `console`, timers and the op bridge.
     pub fn new() -> Result<Host, JsError> {
+        Self::with_options(HostOptions::default())
+    }
+
+    /// Creates a runtime set up by `options` and installs `console`, timers
+    /// and the op bridge.
+    pub fn with_options(options: HostOptions) -> Result<Host, JsError> {
+        let limits = options.limits;
         let rt = Runtime::new()?;
         // The engine thread is spawned with a larger stack; keep a margin.
-        rt.set_max_stack_size(4 * 1024 * 1024);
+        rt.set_max_stack_size(limits.stack_bytes);
+        if limits.memory_bytes > 0 {
+            rt.set_memory_limit(limits.memory_bytes);
+        }
+        let budget = Budget::new(limits);
+        rt.set_interrupt_handler(Some(budget.interrupt_handler(None)));
         let ctx = Context::full(&rt)?;
-        let shared = Rc::new(Shared::default());
-        ctx.with(|ctx| install(&ctx, &shared).map_err(|e| JsError::from_engine(&ctx, e)))?;
+        let shared = Rc::new(Shared {
+            limits,
+            ..Shared::default()
+        });
+        ctx.with(|ctx| {
+            install(&ctx, &shared)?;
+            if options.harden {
+                sandbox::harden(&ctx)?;
+            }
+            Ok(())
+        })
+        .map_err(|e| ctx.with(|ctx| JsError::from_engine(&ctx, e)))?;
         Ok(Host {
             ctx,
             rt,
             shared,
             on_error: None,
+            budget,
         })
     }
 
     /// Aborts running JS (with an uncatchable exception) once `stop` is
     /// set: an engine shutting down never waits for a long-running script.
     pub fn set_stop_flag(&self, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-        self.rt.set_interrupt_handler(Some(Box::new(move || {
-            stop.load(std::sync::atomic::Ordering::Relaxed)
-        })));
+        self.rt
+            .set_interrupt_handler(Some(self.budget.interrupt_handler(Some(stop))));
+    }
+
+    /// Why the VM was stopped, if it was: it ran out of memory, or the app
+    /// went over a quota. No JS runs after that; the views stay as they are.
+    pub fn fatal(&self) -> Option<String> {
+        self.shared.fatal.borrow().clone()
+    }
+
+    /// Stops the VM (e.g. the core refused an op over a quota).
+    pub fn stop(&self, reason: String) {
+        self.shared.stop(reason);
+    }
+
+    /// The VM's limits.
+    pub fn limits(&self) -> &Limits {
+        self.budget.limits()
+    }
+
+    /// Runs `f` (a call into JS) within the budget of `phase`; `None` once
+    /// the VM was stopped.
+    fn guarded<R>(&self, phase: Phase, f: impl FnOnce() -> R) -> Option<R> {
+        if self.shared.fatal.borrow().is_some() {
+            return None;
+        }
+        let started = self.budget.begin(phase);
+        let result = f();
+        self.budget.end(started);
+        Some(result)
+    }
+
+    /// What an error from a call means: an overrun budget or exhausted
+    /// memory get a message saying so (exhausted memory also stops the VM).
+    fn classify(&self, mut err: JsError) -> JsError {
+        if let Some(trip) = self.budget.take_trip() {
+            err.message = format!("{trip}\n{}", err.message);
+        } else if err.message.contains("out of memory") {
+            let reason = format!(
+                "the script ran out of memory (limit {} MB) and was stopped",
+                self.budget.limits().memory_bytes >> 20
+            );
+            self.shared.stop(reason.clone());
+            err.message = format!("{reason}\n{}", err.message);
+        }
+        err
+    }
+
+    /// The error for a call refused because the VM was stopped.
+    fn stopped(&self) -> JsError {
+        JsError {
+            message: self.fatal().unwrap_or_default(),
+        }
     }
 
     /// Sets what canvas `measureText` measures with.
@@ -91,21 +189,31 @@ impl Host {
 
     /// Evaluates a bundle given as source.
     pub fn eval_source(&self, source: &str) -> Result<(), JsError> {
-        self.ctx.with(|ctx| -> Result<(), JsError> {
-            let module = Module::declare(ctx.clone(), crate::BUNDLE_NAME, source)
-                .catch(&ctx)
-                .map_err(JsError::caught)?;
-            let (_, promise) = module.eval().catch(&ctx).map_err(JsError::caught)?;
-            promise.finish::<()>().catch(&ctx).map_err(JsError::caught)
-        })?;
-        self.run_jobs();
-        Ok(())
+        self.guarded(Phase::Load, || {
+            self.ctx
+                .with(|ctx| -> Result<(), JsError> {
+                    let module = Module::declare(ctx.clone(), crate::BUNDLE_NAME, source)
+                        .catch(&ctx)
+                        .map_err(JsError::caught)?;
+                    let (_, promise) = module.eval().catch(&ctx).map_err(JsError::caught)?;
+                    promise.finish::<()>().catch(&ctx).map_err(JsError::caught)
+                })
+                .map_err(|e| self.classify(e))?;
+            self.run_jobs();
+            Ok(())
+        })
+        .unwrap_or_else(|| Err(self.stopped()))
     }
 
     /// Evaluates a classic script named `name` (for stack traces) and
     /// returns whether its completion value is `true`: development updates
     /// report whether they could be applied.
     pub fn eval_script(&self, name: &str, source: &str) -> Result<bool, JsError> {
+        self.guarded(Phase::Load, || self.eval_script_unguarded(name, source))
+            .unwrap_or_else(|| Err(self.stopped()))
+    }
+
+    fn eval_script_unguarded(&self, name: &str, source: &str) -> Result<bool, JsError> {
         let applied = self.ctx.with(|ctx| -> Result<bool, JsError> {
             let mut options = rquickjs::context::EvalOptions::default();
             options.global = true;
@@ -116,82 +224,94 @@ impl Host {
                 .catch(&ctx)
                 .map_err(JsError::caught)?;
             Ok(value.as_bool() == Some(true))
-        })?;
+        });
+        let applied = applied.map_err(|e| self.classify(e))?;
         self.run_jobs();
         Ok(applied)
     }
 
     /// Evaluates a bundle compiled with [`crate::compile_bytecode`].
     pub fn eval_bytecode(&self, bytecode: &[u8]) -> Result<(), JsError> {
-        self.ctx.with(|ctx| -> Result<(), JsError> {
-            // SAFETY: bytecode comes from `compile_bytecode` with the same
-            // QuickJS build; QuickJS does not validate arbitrary input.
-            let module = unsafe { Module::load(ctx.clone(), bytecode) }
-                .catch(&ctx)
-                .map_err(JsError::caught)?;
-            let (_, promise) = module.eval().catch(&ctx).map_err(JsError::caught)?;
-            promise.finish::<()>().catch(&ctx).map_err(JsError::caught)
-        })?;
-        self.run_jobs();
-        Ok(())
+        self.guarded(Phase::Load, || {
+            self.ctx
+                .with(|ctx| -> Result<(), JsError> {
+                    // SAFETY: bytecode comes from `compile_bytecode` with the same
+                    // QuickJS build; QuickJS does not validate arbitrary input.
+                    let module = unsafe { Module::load(ctx.clone(), bytecode) }
+                        .catch(&ctx)
+                        .map_err(JsError::caught)?;
+                    let (_, promise) = module.eval().catch(&ctx).map_err(JsError::caught)?;
+                    promise.finish::<()>().catch(&ctx).map_err(JsError::caught)
+                })
+                .map_err(|e| self.classify(e))?;
+            self.run_jobs();
+            Ok(())
+        })
+        .unwrap_or_else(|| Err(self.stopped()))
     }
 
     /// Delivers a native event (and its data) to the node's JS handler.
     pub fn dispatch_event(&self, id: NodeId, event: EventKind, payload: &EventPayload) {
-        self.ctx.with(|ctx| {
-            let payload = match (event, payload) {
-                // `onChangeText` receives the text itself, as in React Native.
-                (EventKind::ChangeText, EventPayload::Text { text, .. }) => {
-                    rquickjs::String::from_str(ctx.clone(), text).map(|s| s.into_value())
-                }
-                (_, EventPayload::Value(value)) => payload_value(&ctx, value),
-                _ => payload_object(&ctx, payload),
-            };
-            let result = payload.and_then(|payload| {
-                ctx.globals()
-                    .get::<_, Function>("__nsh_dispatch")?
-                    .call::<_, ()>((id, event.prop_name(), payload))
+        self.guarded(Phase::Call, || {
+            self.ctx.with(|ctx| {
+                let payload = match (event, payload) {
+                    // `onChangeText` receives the text itself, as in React Native.
+                    (EventKind::ChangeText, EventPayload::Text { text, .. }) => {
+                        rquickjs::String::from_str(ctx.clone(), text).map(|s| s.into_value())
+                    }
+                    (_, EventPayload::Value(value)) => payload_value(&ctx, value),
+                    _ => payload_object(&ctx, payload),
+                };
+                let result = payload.and_then(|payload| {
+                    ctx.globals()
+                        .get::<_, Function>("__nsh_dispatch")?
+                        .call::<_, ()>((id, event.prop_name(), payload))
+                });
+                self.report(&ctx, result);
             });
-            self.report(&ctx, result);
+            self.run_jobs();
         });
-        self.run_jobs();
     }
 
     /// Asks the runtime's `List` to render items into cells:
     /// `(slot, item index)` pairs.
     pub fn bind_list(&self, list: NodeId, binds: &[(u32, u32)]) {
-        self.ctx.with(|ctx| {
-            let result = (|| {
-                let flat = rquickjs::Array::new(ctx.clone())?;
-                for (i, &(slot, index)) in binds.iter().enumerate() {
-                    flat.set(i * 2, slot)?;
-                    flat.set(i * 2 + 1, index)?;
-                }
-                ctx.globals()
-                    .get::<_, Function>("__nsh_list")?
-                    .call::<_, ()>((list, flat))
-            })();
-            self.report(&ctx, result);
+        self.guarded(Phase::Call, || {
+            self.ctx.with(|ctx| {
+                let result = (|| {
+                    let flat = rquickjs::Array::new(ctx.clone())?;
+                    for (i, &(slot, index)) in binds.iter().enumerate() {
+                        flat.set(i * 2, slot)?;
+                        flat.set(i * 2 + 1, index)?;
+                    }
+                    ctx.globals()
+                        .get::<_, Function>("__nsh_list")?
+                        .call::<_, ()>((list, flat))
+                })();
+                self.report(&ctx, result);
+            });
+            self.run_jobs();
         });
-        self.run_jobs();
     }
 
     /// Resolves the promises of finished (or interrupted) native animations.
     pub fn animations_finished(&self, finished: &[nsh_anim::Finished]) {
-        if finished.is_empty() {
-            return;
-        }
-        self.ctx.with(|ctx| {
-            let result = (|| {
-                let callback = ctx.globals().get::<_, Function>("__nsh_anim_end")?;
-                for f in finished {
-                    callback.call::<_, ()>((f.animation, f.finished))?;
-                }
-                Ok(())
-            })();
-            self.report(&ctx, result);
+        self.guarded(Phase::Call, || {
+            if finished.is_empty() {
+                return;
+            }
+            self.ctx.with(|ctx| {
+                let result = (|| {
+                    let callback = ctx.globals().get::<_, Function>("__nsh_anim_end")?;
+                    for f in finished {
+                        callback.call::<_, ()>((f.animation, f.finished))?;
+                    }
+                    Ok(())
+                })();
+                self.report(&ctx, result);
+            });
+            self.run_jobs();
         });
-        self.run_jobs();
     }
 
     /// Moves the ops committed by JS since the last call into `out`.
@@ -216,24 +336,32 @@ impl Host {
             let Some(callback) = self.shared.timers.borrow_mut().pop_due(now) else {
                 break;
             };
-            self.ctx.with(|ctx| {
-                let result = callback.restore(&ctx).and_then(|f| f.call::<_, ()>(()));
-                self.report(&ctx, result);
+            // Each callback, with the microtasks it queues, has a budget of its own.
+            let ran = self.guarded(Phase::Call, || {
+                self.ctx.with(|ctx| {
+                    let result = callback.restore(&ctx).and_then(|f| f.call::<_, ()>(()));
+                    self.report(&ctx, result);
+                });
+                self.run_jobs();
             });
-            self.run_jobs();
+            if ran.is_none() {
+                break;
+            }
         }
     }
 
     /// Runs pending promise jobs and microtasks until the queue is empty.
     pub fn run_jobs(&self) {
-        while self.rt.is_job_pending() {
-            if let Err(err) = self.rt.execute_pending_job() {
-                let err = err.0.with(|ctx| JsError {
-                    message: describe(ctx.catch()),
-                });
-                self.uncaught(&err);
+        self.guarded(Phase::Call, || {
+            while self.rt.is_job_pending() {
+                if let Err(err) = self.rt.execute_pending_job() {
+                    let err = err.0.with(|ctx| JsError {
+                        message: describe(ctx.catch()),
+                    });
+                    self.uncaught(&err);
+                }
             }
-        }
+        });
     }
 
     /// Moves the network requests and cancellations made since the last
@@ -248,19 +376,21 @@ impl Host {
     /// evaluating the bundle (the runtime reads the initial value), then on
     /// every change.
     pub fn set_environment(&self, env: &Environment) {
-        self.ctx.with(|ctx| {
-            let result = (|| {
-                let value = environment_object(&ctx, env)?;
-                let globals = ctx.globals();
-                globals.set("__nsh_env_value", value.clone())?;
-                if let Ok(update) = globals.get::<_, Function>("__nsh_env") {
-                    update.call::<_, ()>((value,))?;
-                }
-                Ok(())
-            })();
-            self.report(&ctx, result);
+        self.guarded(Phase::Call, || {
+            self.ctx.with(|ctx| {
+                let result = (|| {
+                    let value = environment_object(&ctx, env)?;
+                    let globals = ctx.globals();
+                    globals.set("__nsh_env_value", value.clone())?;
+                    if let Ok(update) = globals.get::<_, Function>("__nsh_env") {
+                        update.call::<_, ()>((value,))?;
+                    }
+                    Ok(())
+                })();
+                self.report(&ctx, result);
+            });
+            self.run_jobs();
         });
-        self.run_jobs();
     }
 
     /// True if JS asked for a display frame (`requestAnimationFrame`).
@@ -272,22 +402,24 @@ impl Host {
     /// current `performance.now()`. Callbacks requested meanwhile wait for
     /// the next frame.
     pub fn run_frame(&self) {
-        let callbacks = std::mem::take(&mut *self.shared.frames.borrow_mut());
-        if callbacks.is_empty() {
-            return;
-        }
-        self.ctx.with(|ctx| {
-            let now = (|| -> rquickjs::Result<f64> {
-                let performance: rquickjs::Object = ctx.globals().get("performance")?;
-                performance.get::<_, Function>("now")?.call(())
-            })()
-            .unwrap_or(0.0);
-            for (_, callback) in callbacks {
-                let result = callback.restore(&ctx).and_then(|f| f.call::<_, ()>((now,)));
-                self.report(&ctx, result);
+        self.guarded(Phase::Call, || {
+            let callbacks = std::mem::take(&mut *self.shared.frames.borrow_mut());
+            if callbacks.is_empty() {
+                return;
             }
+            self.ctx.with(|ctx| {
+                let now = (|| -> rquickjs::Result<f64> {
+                    let performance: rquickjs::Object = ctx.globals().get("performance")?;
+                    performance.get::<_, Function>("now")?.call(())
+                })()
+                .unwrap_or(0.0);
+                for (_, callback) in callbacks {
+                    let result = callback.restore(&ctx).and_then(|f| f.call::<_, ()>((now,)));
+                    self.report(&ctx, result);
+                }
+            });
+            self.run_jobs();
         });
-        self.run_jobs();
     }
 
     /// Moves the font assets (`asset:/…` URIs) imported since the last call
@@ -298,18 +430,22 @@ impl Host {
 
     /// Settles the `fetch` promise of request `id`.
     pub fn finish_fetch(&self, id: RequestId, result: Result<HttpResponse, String>) {
-        self.ctx.with(|ctx| {
-            let result = web::finish_fetch(&ctx, id, result);
-            self.report(&ctx, result);
+        self.guarded(Phase::Call, || {
+            self.ctx.with(|ctx| {
+                let result = web::finish_fetch(&ctx, id, result);
+                self.report(&ctx, result);
+            });
+            self.run_jobs();
         });
-        self.run_jobs();
     }
 
     /// Runs the cycle collector. Call when idle so released nodes are
     /// reported promptly.
     pub fn collect_garbage(&self) {
-        self.rt.run_gc();
-        self.run_jobs();
+        self.guarded(Phase::Call, || {
+            self.rt.run_gc();
+            self.run_jobs();
+        });
     }
 }
 
@@ -321,8 +457,9 @@ impl Host {
     }
 
     fn uncaught(&self, err: &JsError) {
+        let err = self.classify(err.clone());
         match &self.on_error {
-            Some(handler) => handler(err),
+            Some(handler) => handler(&err),
             None => log::error!(target: "js", "uncaught exception: {err}"),
         }
     }
@@ -533,8 +670,18 @@ fn install(ctx: &Ctx<'_>, shared: &Rc<Shared>) -> rquickjs::Result<()> {
     globals.set(
         "__nsh_commit",
         Function::new(ctx.clone(), move |buf: Array<'_>| -> rquickjs::Result<()> {
+            // Decoding allocates in Rust, outside the heap limit.
+            if buf.len() > s.limits.max_op_values {
+                let reason = format!(
+                    "the app committed {} values at once (limit {}) and was stopped",
+                    buf.len(),
+                    s.limits.max_op_values
+                );
+                s.stop(reason.clone());
+                return Err(rquickjs::Exception::throw_range(buf.ctx(), &reason));
+            }
             let mut ops = s.ops.borrow_mut();
-            protocol::decode(buf.ctx(), &buf, &mut ops, &mut s.warnings.borrow_mut())
+            protocol::decode(buf.ctx(), &buf, &mut ops, &mut s.warnings.borrow_mut(), &s)
         })?,
     )?;
 
@@ -749,5 +896,118 @@ mod tests {
             matches!(&ops[0], Op::CreateText { text, .. } if text == "micro,a,b"),
             "{ops:?}"
         );
+    }
+
+    fn sandboxed(limits: Limits) -> Host {
+        Host::with_options(HostOptions {
+            limits,
+            harden: true,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn calls_over_budget_are_interrupted_and_the_vm_goes_on() {
+        let mut host = sandboxed(Limits {
+            call_budget: Duration::from_millis(50),
+            ..Limits::default()
+        });
+        let errors = Rc::new(RefCell::new(Vec::new()));
+        let seen = errors.clone();
+        host.set_error_handler(Box::new(move |e| seen.borrow_mut().push(e.message.clone())));
+        host.eval_source(
+            r#"
+            globalThis.__nsh_dispatch = (id) => {
+                // try/catch cannot swallow the interrupt.
+                try { if (id === 1) for (;;) {} } catch (e) {}
+                __nsh_commit([0, id + 10, "view"]);
+            };
+            "#,
+        )
+        .unwrap();
+        let start = Instant::now();
+        host.dispatch_event(1, EventKind::Press, &EventPayload::None);
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let errors = errors.borrow().clone();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("budget of 50 ms"), "{}", errors[0]);
+        assert!(ops(&host).is_empty());
+        // The next call runs normally.
+        host.dispatch_event(2, EventKind::Press, &EventPayload::None);
+        assert_eq!(ops(&host).len(), 1);
+        assert!(host.fatal().is_none());
+    }
+
+    #[test]
+    fn running_out_of_memory_stops_the_vm() {
+        let host = sandboxed(Limits {
+            memory_bytes: 16 << 20,
+            ..Limits::default()
+        });
+        let err = host
+            .eval_source("const keep = []; for (;;) keep.push(new Array(100000).fill(1));")
+            .unwrap_err();
+        assert!(
+            err.message.contains("ran out of memory (limit 16 MB)"),
+            "{}",
+            err.message
+        );
+        assert!(host.fatal().is_some());
+        // Nothing runs any more.
+        assert!(host.eval_source("__nsh_commit([0, 2, 'view']);").is_err());
+        assert!(ops(&host).is_empty());
+    }
+
+    #[test]
+    fn huge_op_buffers_stop_the_vm() {
+        let host = sandboxed(Limits {
+            max_op_values: 1000,
+            ..Limits::default()
+        });
+        assert!(
+            host.eval_source("__nsh_commit(new Array(2000).fill(0));")
+                .is_err()
+        );
+        assert!(host.fatal().unwrap().contains("limit 1000"));
+    }
+
+    #[test]
+    fn hardened_vms_run_no_code_from_strings() {
+        let host = sandboxed(Limits::default());
+        host.eval_source(
+            r#"
+            const results = [];
+            const attempt = (f) => { try { f(); results.push("ran"); } catch (e) { results.push(e.constructor.name); } };
+            attempt(() => eval("1"));
+            attempt(() => new Function("return 1")());
+            attempt(() => (function () {}).constructor("return 1")());
+            attempt(() => (async function () {}).constructor("return 1"));
+            attempt(() => (function* () {}).constructor("yield 1"));
+            attempt(() => { "use strict"; Array.prototype.map = null; });
+            attempt(() => { "use strict"; Object.prototype.polluted = 1; });
+            // Ordinary code is unaffected.
+            class MyError extends Error { constructor() { super("x"); this.name = "MyError"; } }
+            attempt(() => { const e = new MyError(); if (e.name !== "MyError") throw new Error(); });
+            attempt(() => [1, 2].map((x) => x * 2));
+            __nsh_commit([1, 1, results.join(",")]);
+            "#,
+        )
+        .unwrap();
+        let ops = ops(&host);
+        let Op::CreateText { text, .. } = &ops[0] else {
+            panic!("{ops:?}")
+        };
+        assert_eq!(
+            text,
+            "ReferenceError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,ran,ran"
+        );
+    }
+
+    #[test]
+    fn development_vms_keep_eval() {
+        let host = Host::new().unwrap();
+        host.eval_source(r#"__nsh_commit([1, 1, String(eval("1 + 1"))]);"#)
+            .unwrap();
+        assert!(matches!(&ops(&host)[0], Op::CreateText { text, .. } if text == "2"));
     }
 }

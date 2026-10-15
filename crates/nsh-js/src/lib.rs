@@ -17,6 +17,7 @@ mod error;
 mod host;
 mod net;
 mod protocol;
+mod sandbox;
 mod timers;
 mod web;
 
@@ -24,6 +25,7 @@ pub use crate::{
     bytecode::{BUNDLE_NAME, BYTECODE_VERSION, compile_bytecode},
     env::{ColorScheme, Environment, Idiom, Insets},
     error::JsError,
-    host::{ErrorHandler, Host, TextMeasurer},
+    host::{ErrorHandler, Host, HostOptions, TextMeasurer},
     net::{HttpRequest, HttpResponse, NetworkQueue, RequestId},
+    sandbox::Limits,
 };

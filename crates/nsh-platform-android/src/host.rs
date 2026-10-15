@@ -75,6 +75,7 @@ impl Host {
             environment: *self.environment.lock().expect("environment"),
             // Android's toolbar is 56dp; it has no large titles.
             header_heights: (56.0, 56.0),
+            limits: nsh_engine::Limits::default(),
         };
         let density = self.density;
         let sink = Sink(self.clone());

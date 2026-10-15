@@ -141,6 +141,7 @@ pub(crate) fn decode<'js>(
     buf: &Array<'js>,
     out: &mut Vec<Op>,
     warnings: &mut Warnings,
+    shared: &crate::host::Shared,
 ) -> rquickjs::Result<()> {
     let len = buf.len();
     let mut r = Reader { ctx, buf, pos: 0 };
@@ -192,6 +193,15 @@ pub(crate) fn decode<'js>(
                 let id = r.id()?;
                 let list = r.value()?;
                 let drawing = match list.as_array() {
+                    Some(list) if list.len() > shared.limits.max_canvas_ops => {
+                        let reason = format!(
+                            "a canvas drawing recorded {} values (limit {}) and the app was stopped",
+                            list.len(),
+                            shared.limits.max_canvas_ops
+                        );
+                        shared.stop(reason.clone());
+                        return Err(rquickjs::Exception::throw_range(ctx, &reason));
+                    }
                     Some(list) => crate::canvas::decode(ctx, list, 0, list.len())?,
                     None => Default::default(),
                 };

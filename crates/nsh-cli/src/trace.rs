@@ -68,6 +68,7 @@ pub(crate) fn trace(
         ))),
         environment: Default::default(),
         header_heights: (44.0, 96.0),
+        limits: nsh_engine::Limits::default(),
     };
     let control = Arc::new(OnceLock::new());
     let sink = ChannelSink {

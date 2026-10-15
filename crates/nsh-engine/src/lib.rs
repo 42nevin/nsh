@@ -19,13 +19,13 @@ use std::{
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use nsh_core::{
-    Core, EdgeInsets, EventKind, EventPayload, ListBind, MountBatch, NodeId, Op, PayloadValue,
-    Size, TextEngine,
+    ApplyError, Core, EdgeInsets, EventKind, EventPayload, ListBind, MountBatch, NodeId, Op,
+    PayloadValue, Size, TextEngine,
 };
 pub use nsh_js::{
-    BYTECODE_VERSION, ColorScheme, Environment, HttpRequest, HttpResponse, Idiom, Insets,
+    BYTECODE_VERSION, ColorScheme, Environment, HttpRequest, HttpResponse, Idiom, Insets, Limits,
 };
-use nsh_js::{Host, JsError, NetworkQueue, RequestId};
+use nsh_js::{Host, HostOptions, JsError, NetworkQueue, RequestId};
 use rustc_hash::FxHashMap;
 
 use crate::symbolicate::Symbolicator;
@@ -47,6 +47,30 @@ pub struct Bundle {
     pub code: BundleCode,
     /// Source map (JSON) used to show app source locations in stack traces.
     pub source_map: Option<Arc<str>>,
+    /// What the code may do.
+    pub policy: Policy,
+}
+
+/// What a bundle's code may do.
+#[derive(Debug, Clone)]
+pub struct Policy {
+    /// Run without `eval`, the function constructors and writable shared
+    /// prototypes (see `nsh_js::HostOptions::harden`). On by default; off for
+    /// development bundles.
+    pub harden: bool,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self { harden: true }
+    }
+}
+
+impl Policy {
+    /// Development bundles: `eval` and friends stay (debugging).
+    pub fn development() -> Self {
+        Self { harden: false }
+    }
 }
 
 /// The code of a bundle.
@@ -64,6 +88,7 @@ impl Bundle {
         Self {
             code: BundleCode::Bytecode(bytes),
             source_map: None,
+            policy: Policy::default(),
         }
     }
 
@@ -72,12 +97,19 @@ impl Bundle {
         Self {
             code: BundleCode::Source(code),
             source_map: None,
+            policy: Policy::default(),
         }
     }
 
     /// Attaches a source map.
     pub fn with_source_map(mut self, map: impl Into<Arc<str>>) -> Self {
         self.source_map = Some(map.into());
+        self
+    }
+
+    /// Replaces the policy.
+    pub fn with_policy(mut self, policy: Policy) -> Self {
+        self.policy = policy;
         self
     }
 
@@ -159,6 +191,8 @@ pub struct EngineConfig {
     /// Height of the platform's screen header bar, normal and with a large
     /// title (status bar excluded).
     pub header_heights: (f32, f32),
+    /// The VM's resource limits.
+    pub limits: Limits,
 }
 
 impl std::fmt::Debug for EngineConfig {
@@ -171,6 +205,7 @@ impl std::fmt::Debug for EngineConfig {
             .field("assets", &self.assets.is_some())
             .field("environment", &self.environment)
             .field("header_heights", &self.header_heights)
+            .field("limits", &self.limits)
             .finish()
     }
 }
@@ -348,7 +383,11 @@ fn run<M: TextEngine + 'static, S: MountSink>(
 ) {
     raise_thread_priority();
     let sink = Rc::new(sink);
-    let mut host = match Host::new() {
+    let options = HostOptions {
+        limits: config.limits,
+        harden: config.bundle.policy.harden,
+    };
+    let mut host = match Host::with_options(options) {
         Ok(host) => {
             host.set_stop_flag(stop);
             host
@@ -381,6 +420,7 @@ fn run<M: TextEngine + 'static, S: MountSink>(
         nsh_core::canvas::measure_line(&*measurer, font, text)
     }));
     let mut core = Core::new(text_engine, config.viewport);
+    core.set_max_nodes(config.limits.max_nodes);
     core.set_font_scale(config.environment.font_scale);
     core.set_class_environment(class_environment(&config.environment));
     core.set_header_heights(config.header_heights.0, config.header_heights.1);
@@ -417,6 +457,15 @@ fn run<M: TextEngine + 'static, S: MountSink>(
         report("bundle failed", &err.message);
     }
     let eval_us = start.elapsed().as_micros();
+    // A VM stopped for good (out of memory, over a quota) is reported once;
+    // its views stay as they were and no JS runs any more.
+    let mut stopped = false;
+    let mut check_stopped = |host: &Host| {
+        if !stopped && let Some(reason) = host.fatal() {
+            stopped = true;
+            report("stopped", &reason);
+        }
+    };
     state.load_fonts(&host, config.assets.as_deref(), &report);
     if let Some(batch) = state.commit(&host) {
         if state.trace {
@@ -430,6 +479,7 @@ fn run<M: TextEngine + 'static, S: MountSink>(
     }
     state.net.pump(&host);
     state.request_frame(&host, &*sink);
+    check_stopped(&host);
 
     loop {
         // Wake for the next timer, or for an idle collection if one is due.
@@ -482,6 +532,7 @@ fn run<M: TextEngine + 'static, S: MountSink>(
         }
         state.net.pump(&host);
         state.request_frame(&host, &*sink);
+        check_stopped(&host);
         if state.committed_since_gc && rx.is_empty() && last_gc.elapsed() >= IDLE_GC_INTERVAL {
             // Idle: collect cycles so released nodes free their views.
             host.collect_garbage();
@@ -664,9 +715,22 @@ impl<M: TextEngine> State<M> {
             js += js_start.elapsed();
             host.take_ops(&mut self.ops);
             op_count += self.ops.len();
+            // A stop drops the rest of the ops (`drain` clears them).
             for op in self.ops.drain(..) {
-                if let Err(err) = self.core.apply(op) {
-                    log::error!("invalid op: {err:?}");
+                match self.core.apply(op) {
+                    Ok(()) => {}
+                    Err(err) if err.is_fatal() => {
+                        host.stop(match err {
+                            ApplyError::TooManyNodes(max) => {
+                                format!("the app created more than {max} nodes and was stopped")
+                            }
+                            other => {
+                                format!("the app sent an invalid op ({other:?}) and was stopped")
+                            }
+                        });
+                        break;
+                    }
+                    Err(err) => log::error!("invalid op: {err:?}"),
                 }
             }
             if let Some(batch) = self.core.commit() {

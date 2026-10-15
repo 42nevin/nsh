@@ -98,6 +98,7 @@ fn fetch_round_trips_through_the_platform_network() {
         assets: None,
         environment: Default::default(),
         header_heights: (44.0, 96.0),
+        limits: nsh_engine::Limits::default(),
     };
     let _engine = Engine::start(config, || ApproxTextEngine, Sink(tx)).unwrap();
     assert_eq!(

@@ -2683,3 +2683,30 @@ fn views_inside_text_are_attachments() {
     assert_eq!(text.text, "abcd\u{FFFC}");
     assert_eq!(frame_of(&batch, 8).map(|f| f.x), Some(5.0 + 32.0));
 }
+
+#[test]
+fn node_quota_and_dense_ids() {
+    let mut c = core();
+    c.set_max_nodes(3);
+    // The root is one node.
+    for id in 2..4 {
+        c.apply(Op::Create { id, tag: Tag::View }).unwrap();
+    }
+    assert!(matches!(
+        c.apply(Op::Create {
+            id: 4,
+            tag: Tag::View
+        }),
+        Err(ApplyError::TooManyNodes(3))
+    ));
+    let mut c = core();
+    c.set_max_nodes(1000);
+    // An id that would make the id table enormous.
+    let err = c
+        .apply(Op::Create {
+            id: 4_000_000_000,
+            tag: Tag::View,
+        })
+        .unwrap_err();
+    assert!(matches!(err, ApplyError::IdOutOfRange(_)) && err.is_fatal());
+}

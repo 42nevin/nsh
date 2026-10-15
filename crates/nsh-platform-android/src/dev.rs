@@ -7,7 +7,7 @@ use std::sync::{
 };
 
 use nsh_dev::{DevClient, DevEvent, protocol::BundleFormat};
-use nsh_engine::{BYTECODE_VERSION, Bundle};
+use nsh_engine::{BYTECODE_VERSION, Bundle, Policy};
 
 use crate::host::Host;
 
@@ -114,9 +114,11 @@ fn handle(host: &Arc<Host>, state: &Mutex<DevState>, event: DevEvent) {
             source_map,
         } => {
             let mut bundle = match format {
-                BundleFormat::Bytecode => Bundle::bytecode(bytes),
+                BundleFormat::Bytecode => {
+                    Bundle::bytecode(bytes).with_policy(Policy::development())
+                }
                 BundleFormat::Source => match String::from_utf8(bytes) {
-                    Ok(code) => Bundle::source(code),
+                    Ok(code) => Bundle::source(code).with_policy(Policy::development()),
                     Err(_) => {
                         return host.dev_error(Some((
                             "Invalid bundle",

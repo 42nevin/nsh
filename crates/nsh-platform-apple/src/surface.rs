@@ -377,6 +377,7 @@ impl RootView {
             ))),
             environment: self.environment(),
             header_heights: header_heights(mtm),
+            limits: nsh_engine::Limits::default(),
         };
         let sink = MainThreadSink {
             mounter: mounter.clone(),
