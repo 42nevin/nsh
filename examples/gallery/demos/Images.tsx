@@ -1,6 +1,8 @@
-import { createSignal, For } from "solid-js";
+import { createSignal, For, Index } from "solid-js";
+import bounce from "../bounce.gif";
 import logo from "../logo@2x.png";
-import { colors, Section } from "../ui";
+import spinner from "../spinner.webp";
+import { Button, colors, Section } from "../ui";
 
 const wide = "https://picsum.photos/seed/yf-wide/480/240";
 
@@ -8,7 +10,53 @@ function Caption(props: { children: string }) {
   return <text style={{ fontSize: 12, color: colors.muted, textAlign: "center" }}>{props.children}</text>;
 }
 
+/** Network images behind a placeholder, fading in; "Reload" asks for
+ * images that are not cached yet. */
+function Placeholders() {
+  const [seed, setSeed] = createSignal(1);
+  const fades = [0, 300, 1000];
+  return (
+    <view style={{ gap: 10 }}>
+      <view style={{ flexDirection: "row", justifyContent: "space-between" }}>
+        <Index each={fades}>
+          {(fade) => (
+            <view style={{ gap: 4, alignItems: "center" }}>
+              <image
+                src={`https://picsum.photos/seed/yf-fade-${seed()}-${fade()}/300/300`}
+                defaultSource={logo}
+                fadeDuration={fade()}
+                resizeMode="cover"
+                style={{ width: 100, height: 100, borderRadius: 12, backgroundColor: "#eaeef2" }}
+              />
+              <Caption>{`fade ${fade()}ms`}</Caption>
+            </view>
+          )}
+        </Index>
+      </view>
+      <Button label="Reload" onPress={() => setSeed(seed() + 1)} />
+    </view>
+  );
+}
+
+function Blur() {
+  const radii = [0, 2, 6, 16];
+  return (
+    <view style={{ flexDirection: "row", justifyContent: "space-between" }}>
+      <Index each={radii}>
+        {(radius) => (
+          <view style={{ gap: 4, alignItems: "center" }}>
+            <image src={wide} blurRadius={radius()} style={{ width: 76, height: 76, borderRadius: 8 }} />
+            <Caption>{`blur ${radius()}`}</Caption>
+          </view>
+        )}
+      </Index>
+    </view>
+  );
+}
+
 export function Images() {
+  const [events, setEvents] = createSignal<string[]>([]);
+  const log = (line: string) => setEvents([...events(), line]);
   const [loaded, setLoaded] = createSignal("loading…");
   const [failed, setFailed] = createSignal("loading…");
   return (
@@ -49,12 +97,39 @@ export function Images() {
             </For>
           </view>
         </Section>
+        <Section title="Animated GIF and WebP">
+          <view style={{ flexDirection: "row", gap: 24, justifyContent: "center" }}>
+            <view style={{ gap: 4, alignItems: "center" }}>
+              <image src={bounce} />
+              <Caption>bounce.gif</Caption>
+            </view>
+            <view style={{ gap: 4, alignItems: "center" }}>
+              <image src={spinner} />
+              <Caption>spinner.webp</Caption>
+            </view>
+            <view style={{ gap: 4, alignItems: "center" }}>
+              <image src={bounce} style={{ width: 48, height: 48, borderRadius: 24 }} />
+              <Caption>scaled, round</Caption>
+            </view>
+          </view>
+        </Section>
+        <Section title="Placeholder (defaultSource) and fade in">
+          <Placeholders />
+        </Section>
+        <Section title="Blur radius">
+          <Blur />
+        </Section>
         <Section title="Events">
           <view style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
             <image
               src="https://picsum.photos/seed/yf-load/300/200"
-              onLoad={(e) => setLoaded(`onLoad: ${e.width}×${e.height}`)}
+              onLoadStart={() => log("onLoadStart")}
+              onLoad={(e) => {
+                log("onLoad");
+                setLoaded(`onLoad: ${e.width}×${e.height}`);
+              }}
               onError={(e) => setLoaded(`onError: ${e.message}`)}
+              onLoadEnd={() => log("onLoadEnd")}
               style={{ width: 90, height: 60, borderRadius: 8, backgroundColor: "#eaeef2" }}
             />
             <text style={{ flex: 1 }}>{loaded()}</text>
@@ -67,6 +142,7 @@ export function Images() {
             />
             <text numberOfLines={3} style={{ flex: 1 }}>{failed()}</text>
           </view>
+          <Caption>{events().join(" → ") || "no load events yet"}</Caption>
         </Section>
       </view>
     </scroll>

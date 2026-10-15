@@ -94,7 +94,16 @@ final class Decor extends Drawable {
             canvas.drawPath(shape(b, 0, path), paint);
             paint.clearShadowLayer();
         }
+        if (!bordersAbove) drawBorders(canvas);
+    }
+
+    /** The view draws the borders itself, above its content (images, like
+     * Core Animation's layer border). */
+    boolean bordersAbove;
+
+    void drawBorders(Canvas canvas) {
         if (!hasBorder()) return;
+        Rect b = getBounds();
         if (uniformBorder()) {
             float w = borderWidths[0];
             paint.setStyle(Paint.Style.STROKE);

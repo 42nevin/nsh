@@ -1,7 +1,7 @@
 //! Animation drivers. All are closed-form functions of elapsed time, so the
 //! result does not depend on frame rate or dropped frames.
 
-use crate::ops::{AnimId, Driver, Easing};
+use crate::ops::{AnimId, Curve, Driver, EaseMode, Easing};
 
 /// Spring rest thresholds (value units and units per second).
 const REST_DISPLACEMENT: f32 = 0.001;
@@ -21,6 +21,13 @@ pub(crate) struct Running {
 }
 
 impl Running {
+    /// Started at `start` (seconds) rather than on the first step: steps of
+    /// a composite animation follow each other without a frame's gap.
+    pub(crate) fn starting_at(mut self, start: f64) -> Self {
+        self.start = Some(start);
+        self
+    }
+
     pub(crate) fn new(id: AnimId, driver: Driver, from: f32, velocity: f32) -> Self {
         let velocity = match driver {
             Driver::Spring {
@@ -37,6 +44,22 @@ impl Running {
             from,
             velocity,
             start: None,
+        }
+    }
+
+    /// When an animation that ended at the frame `now` really ended: timings
+    /// end on time; springs and decays when the frame noticed.
+    pub(crate) fn end_time(&self, now: f64) -> f64 {
+        match (self.driver, self.start) {
+            (
+                Driver::Timing {
+                    duration_ms,
+                    delay_ms,
+                    ..
+                },
+                Some(start),
+            ) => (start + (delay_ms.max(0.0) + duration_ms.max(0.0)) as f64 / 1000.0).min(now),
+            _ => now,
         }
     }
 
@@ -131,13 +154,51 @@ fn spring(x0: f32, v0: f32, k: f32, c: f32, m: f32, t: f32) -> (f32, f32) {
     (x as f32, v as f32)
 }
 
-fn ease(easing: Easing, p: f32) -> f32 {
+pub(crate) fn ease(easing: Easing, p: f32) -> f32 {
     match easing {
         Easing::Linear => p,
         Easing::EaseIn => cubic_bezier(0.42, 0.0, 1.0, 1.0, p),
         Easing::EaseOut => cubic_bezier(0.0, 0.0, 0.58, 1.0, p),
         Easing::EaseInOut => cubic_bezier(0.42, 0.0, 0.58, 1.0, p),
         Easing::Bezier(x1, y1, x2, y2) => cubic_bezier(x1, y1, x2, y2, p),
+        Easing::Curve(curve, mode) => match mode {
+            EaseMode::In => curve_in(curve, p),
+            EaseMode::Out => 1.0 - curve_in(curve, 1.0 - p),
+            EaseMode::InOut if p < 0.5 => curve_in(curve, p * 2.0) / 2.0,
+            EaseMode::InOut => 1.0 - curve_in(curve, (1.0 - p) * 2.0) / 2.0,
+        },
+    }
+}
+
+/// React Native's `Easing` functions (their own, "in", form).
+fn curve_in(curve: Curve, t: f32) -> f32 {
+    use std::f32::consts::PI;
+    match curve {
+        Curve::Quad => t * t,
+        Curve::Cubic => t * t * t,
+        Curve::Poly(n) => t.powf(n),
+        Curve::Sin => 1.0 - (t * PI / 2.0).cos(),
+        Curve::Circle => 1.0 - (1.0 - t * t).max(0.0).sqrt(),
+        Curve::Exp => 2f32.powf(10.0 * (t - 1.0)),
+        Curve::Elastic(bounciness) => {
+            let p = bounciness * PI;
+            1.0 - (t * PI / 2.0).cos().powi(3) * (t * p).cos()
+        }
+        Curve::Back(s) => t * t * ((s + 1.0) * t - s),
+        Curve::Bounce => {
+            if t < 1.0 / 2.75 {
+                7.5625 * t * t
+            } else if t < 2.0 / 2.75 {
+                let t = t - 1.5 / 2.75;
+                7.5625 * t * t + 0.75
+            } else if t < 2.5 / 2.75 {
+                let t = t - 2.25 / 2.75;
+                7.5625 * t * t + 0.9375
+            } else {
+                let t = t - 2.625 / 2.75;
+                7.5625 * t * t + 0.984375
+            }
+        }
     }
 }
 

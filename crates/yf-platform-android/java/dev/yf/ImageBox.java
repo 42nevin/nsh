@@ -12,6 +12,8 @@ import android.graphics.PorterDuff;
 import android.graphics.PorterDuffColorFilter;
 import android.graphics.Rect;
 import android.graphics.Shader;
+import android.graphics.drawable.Animatable;
+import android.graphics.drawable.Drawable;
 import android.view.View;
 
 /** An image drawn inside the view's rounded shape (always clipped). */
@@ -24,16 +26,17 @@ final class ImageBox extends View implements Node {
     /** Size the pending load decodes at. */
     int requestedPx;
     final Images.Callback callback;
-    private Bitmap bitmap;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private final Matrix matrix = new Matrix();
     private final Path path = new Path();
     private final android.graphics.RectF dest = new android.graphics.RectF();
 
-    ImageBox(Context context, int id, Images.Callback callback) {
+    ImageBox(Context context, int id, Images.Callback callback, Images.Callback placeholderCallback) {
         super(context);
         this.id = id;
         this.callback = callback;
+        this.placeholderCallback = placeholderCallback;
+        decor.bordersAbove = true;
         setBackground(decor);
     }
 
@@ -64,22 +67,103 @@ final class ImageBox extends View implements Node {
         return true;
     }
 
+    /** `defaultSource`, `blurRadius` (px), `fadeDuration` (ms, -1: the default). */
+    String placeholderUri;
+    int blurPx;
+    int fadeMs = -1;
+    /** Size the pending placeholder load decodes at. */
+    int placeholderPx;
+    /** The image (not its placeholder) is shown. */
+    boolean imageShown;
+    final Images.Callback placeholderCallback;
+
+    private int tint;
+    /** What is shown: a Bitmap or an animated Drawable. */
+    private Object content;
+    /** What it fades in over (a placeholder). */
+    private Object previous;
+    private final Paint previousPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private long fadeStart;
+    private int fading;
+
     /** `tintColor`: draws the image's opaque pixels in one color (0: none). */
     void setTint(int color) {
-        paint.setColorFilter((color >>> 24) == 0 ? null : new PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN));
+        tint = color;
+        PorterDuffColorFilter filter = (color >>> 24) == 0 ? null : new PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN);
+        paint.setColorFilter(filter);
+        previousPaint.setColorFilter(filter);
+        if (content instanceof Drawable) ((Drawable) content).setColorFilter(filter);
         invalidate();
     }
 
-    void setBitmap(Bitmap bitmap) {
-        this.bitmap = bitmap;
-        paint.setShader(bitmap == null ? null : new BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP));
+    /** Shows {@code image} (a Bitmap or an animated Drawable), fading in over {@code fadeMs}. */
+    void setImage(Object image, int fadeMs) {
+        if (content instanceof Drawable && content != image) {
+            Drawable old = (Drawable) content;
+            if (old instanceof Animatable) ((Animatable) old).stop();
+            old.setCallback(null);
+        }
+        previous = fadeMs > 0 && content instanceof Bitmap ? content : null;
+        previousPaint.setShader(previous == null ? null : shader((Bitmap) previous));
+        content = image;
+        paint.setShader(image instanceof Bitmap ? shader((Bitmap) image) : null);
+        if (image instanceof Drawable) {
+            Drawable d = (Drawable) image;
+            d.setCallback(this);
+            d.setColorFilter(paint.getColorFilter());
+            if (d instanceof Animatable) ((Animatable) d).start();
+        }
+        fading = image == null ? 0 : fadeMs;
+        fadeStart = android.os.SystemClock.uptimeMillis();
         invalidate();
+    }
+
+    private static BitmapShader shader(Bitmap bitmap) {
+        return new BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+    }
+
+    @Override
+    protected boolean verifyDrawable(Drawable who) {
+        return who == content || super.verifyDrawable(who);
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+        if (content instanceof Animatable) ((Animatable) content).stop();
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        if (content instanceof Animatable) ((Animatable) content).start();
     }
 
     @Override
     protected void onDraw(Canvas canvas) {
-        if (bitmap == null || getWidth() == 0 || getHeight() == 0) return;
-        float w = getWidth(), h = getHeight(), bw = bitmap.getWidth(), bh = bitmap.getHeight();
+        if (getWidth() == 0 || getHeight() == 0) return;
+        float alpha = 1;
+        if (fading > 0) {
+            alpha = Math.min(1, (android.os.SystemClock.uptimeMillis() - fadeStart) / (float) fading);
+            if (alpha < 1) postInvalidateOnAnimation();
+            else previous = null;
+        }
+        if (previous != null) draw(canvas, previous, previousPaint, 255);
+        if (content != null) draw(canvas, content, paint, Math.round(alpha * 255));
+        decor.drawBorders(canvas);
+    }
+
+    /** Draws {@code image} placed by the resize mode, inside the view's shape. */
+    private void draw(Canvas canvas, Object image, Paint paint, int alpha) {
+        float w = getWidth(), h = getHeight();
+        float bw, bh;
+        if (image instanceof Bitmap) {
+            bw = ((Bitmap) image).getWidth();
+            bh = ((Bitmap) image).getHeight();
+        } else {
+            bw = Math.max(1, ((Drawable) image).getIntrinsicWidth());
+            bh = Math.max(1, ((Drawable) image).getIntrinsicHeight());
+        }
         matrix.reset();
         switch (resizeMode) {
             case 2:
@@ -94,14 +178,24 @@ final class ImageBox extends View implements Node {
                 matrix.postTranslate((w - bw * scale) / 2, (h - bh * scale) / 2);
             }
         }
-        paint.getShader().setLocalMatrix(matrix);
-        // Only where the image is: the shader clamps (repeats edge pixels)
-        // outside it.
+        // Only where the image is (a shader clamps: repeats edge pixels).
         dest.set(0, 0, bw, bh);
         matrix.mapRect(dest);
         canvas.save();
         canvas.clipRect(dest);
-        canvas.drawPath(decor.shape(new Rect(0, 0, getWidth(), getHeight()), 0, path), paint);
+        Path shape = decor.shape(new Rect(0, 0, getWidth(), getHeight()), 0, path);
+        if (image instanceof Bitmap) {
+            paint.getShader().setLocalMatrix(matrix);
+            paint.setAlpha(alpha);
+            canvas.drawPath(shape, paint);
+        } else {
+            Drawable d = (Drawable) image;
+            canvas.clipPath(shape);
+            canvas.concat(matrix);
+            d.setBounds(0, 0, (int) bw, (int) bh);
+            d.setAlpha(alpha);
+            d.draw(canvas);
+        }
         canvas.restore();
     }
 }

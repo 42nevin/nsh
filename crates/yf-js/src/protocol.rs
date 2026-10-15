@@ -7,16 +7,18 @@
 
 use rquickjs::{Array, Ctx, Exception, Object, Type, Value};
 use rustc_hash::FxHashSet;
-use yf_anim::{AnimOp, AnimProp, Driver, Easing, Extrapolate, MathOp, Operand, Output};
+use yf_anim::{
+    AnimOp, AnimProp, Curve, Driver, EaseMode, Easing, Extrapolate, MathOp, Operand, Output,
+};
 use yf_core::{
     AccessibilityActionDef, AccessibilityProp, AccessibilityRole, AccessibilityState,
     AccessibilityValue, AutoCapitalize, AutoFill, CellSlot, Checked, Color, Command, Dialog,
-    DialogButton, DialogButtonStyle, EdgeInsets, EllipsizeMode, EventKind, HeaderSlot, ImageSource,
-    KeyboardDismissMode, KeyboardTaps, KeyboardType, LayoutAnimation, LayoutCurve, LayoutProperty,
-    LayoutTransition, ListContentStyle, LiveRegion, ModalAnimation, ModalPresentation, ModalProp,
-    NativeProp, NodeId, Op, PointerEvents, Prop, ResizeMode, ReturnKeyType, ScreenAnimation,
-    ScreenProp, ScrollProp, SnapAlignment, StatusBarConfig, StatusBarStyle, Style, StyleError,
-    StyleValue, Tag, TransformKind, Viewability, WebSource,
+    DialogButton, DialogButtonStyle, EdgeInsets, EllipsizeMode, EventKind, HeaderSlot, ImageProp,
+    ImageSource, KeyboardDismissMode, KeyboardTaps, KeyboardType, LayoutAnimation, LayoutCurve,
+    LayoutProperty, LayoutTransition, ListContentStyle, LiveRegion, ModalAnimation,
+    ModalPresentation, ModalProp, NativeProp, NodeId, Op, PointerEvents, Prop, ResizeMode,
+    ReturnKeyType, ScreenAnimation, ScreenProp, ScrollProp, SnapAlignment, StatusBarConfig,
+    StatusBarStyle, Style, StyleError, StyleValue, Tag, TransformKind, Viewability, WebSource,
 };
 
 // Must match the constants in `js/runtime/index.ts`.
@@ -38,6 +40,11 @@ const ANIM_SET: i32 = 3;
 const ANIM_START: i32 = 4;
 const ANIM_STOP: i32 = 5;
 const ANIM_RELEASE: i32 = 6;
+const ANIM_DIFF_CLAMP: i32 = 7;
+const ANIM_START_COMPOSITE: i32 = 8;
+const ANIM_STOP_ANIMATION: i32 = 9;
+const ANIM_RESET_COMPOSITE: i32 = 10;
+const ANIM_RELEASE_COMPOSITE: i32 = 11;
 
 /// Reports each distinct problem once, so a bad style in a list does not
 /// flood the log.
@@ -508,6 +515,11 @@ fn decode_prop<'js>(
             return Ok(Some(Op::SetStyle { id, style }));
         }
         "src" => Prop::Source(decode_source(&value)?),
+        "defaultSource" => Prop::Image(ImageProp::DefaultSource(decode_source(&value)?)),
+        "blurRadius" => Prop::Image(ImageProp::BlurRadius(number(&value).unwrap_or(0.0))),
+        "fadeDuration" => Prop::Image(ImageProp::FadeDuration(
+            number(&value).map(|ms| ms.max(0.0)),
+        )),
         "resizeMode" => Prop::ResizeMode(
             match value
                 .as_string()
@@ -1185,24 +1197,49 @@ fn decode_anim(r: &mut Reader<'_, '_>) -> rquickjs::Result<AnimOp> {
             let input_range = r.numbers()?;
             let outputs = r.value()?;
             let output = decode_output(r, &outputs)?;
-            let extrapolate = match r.string()?.as_str() {
+            let extrapolate = |name: String| match name.as_str() {
                 "extend" => Extrapolate::Extend,
                 "identity" => Extrapolate::Identity,
                 _ => Extrapolate::Clamp,
             };
+            let extrapolate_left = extrapolate(r.string()?);
+            let extrapolate_right = extrapolate(r.string()?);
+            let easing = r.value()?;
             AnimOp::CreateInterpolate {
                 node,
                 input,
                 input_range,
                 output,
-                extrapolate,
+                extrapolate_left,
+                extrapolate_right,
+                easing: decode_easing(&easing, Easing::Linear)?,
             }
         }
+        ANIM_DIFF_CLAMP => AnimOp::CreateDiffClamp {
+            node,
+            input: r.int()? as yf_anim::NodeId,
+            min: r.number()?,
+            max: r.number()?,
+        },
+        ANIM_START_COMPOSITE => {
+            // `node` carries the animation id here.
+            let key = r.int()? as u32;
+            let spec = r.value()?;
+            AnimOp::StartComposite {
+                animation: node,
+                key,
+                spec: decode_composite(r, &spec, 0)?,
+            }
+        }
+        ANIM_STOP_ANIMATION => AnimOp::StopAnimation { animation: node },
+        ANIM_RESET_COMPOSITE => AnimOp::ResetComposite { key: node },
+        ANIM_RELEASE_COMPOSITE => AnimOp::ReleaseComposite { key: node },
         ANIM_MATH => {
             let op = match r.string()?.as_str() {
                 "add" => MathOp::Add,
                 "sub" => MathOp::Sub,
                 "mul" => MathOp::Mul,
+                "mod" => MathOp::Mod,
                 _ => MathOp::Div,
             };
             let a = r.operand()?;
@@ -1245,6 +1282,26 @@ fn decode_output(r: &Reader<'_, '_>, outputs: &Value<'_>) -> rquickjs::Result<Ou
         .get::<Value>(0)
         .map(|v| v.is_string())
         .unwrap_or(false);
+    let angles = first_is_string
+        && items
+            .get::<String>(0)
+            .is_ok_and(|s| s.ends_with("deg") || s.ends_with("rad"));
+    if angles {
+        // `"45deg"` / `"0.5rad"`: rotations, in degrees.
+        let mut degrees = Vec::with_capacity(items.len());
+        for item in items.iter::<String>() {
+            let item = item?;
+            let value = match (item.strip_suffix("deg"), item.strip_suffix("rad")) {
+                (Some(d), _) => d.trim().parse::<f32>().ok(),
+                (_, Some(r)) => r.trim().parse::<f32>().ok().map(f32::to_degrees),
+                _ => None,
+            };
+            degrees.push(value.ok_or_else(|| {
+                Exception::throw_type(r.ctx, &format!("interpolate: invalid angle {item:?}"))
+            })?);
+        }
+        return Ok(Output::Numbers(degrees));
+    }
     if first_is_string {
         let mut colors = Vec::with_capacity(items.len());
         for item in items.iter::<String>() {
@@ -1277,19 +1334,7 @@ fn decode_driver(r: &Reader<'_, '_>, config: &Value<'_>) -> rquickjs::Result<Dri
         "timing" => Driver::Timing {
             to: num("to")?.unwrap_or(0.0),
             duration_ms: num("duration")?.unwrap_or(300.0),
-            easing: match c.get::<_, Value>("easing")? {
-                v if v.is_array() => {
-                    let a = v.as_array().expect("array");
-                    let p = |i| a.get::<f64>(i).map(|v| v as f32).unwrap_or(0.0);
-                    Easing::Bezier(p(0), p(1), p(2), p(3))
-                }
-                v => match v.as_string().map(|s| s.to_string()).transpose()?.as_deref() {
-                    Some("linear") => Easing::Linear,
-                    Some("easeIn") => Easing::EaseIn,
-                    Some("easeOut") => Easing::EaseOut,
-                    _ => Easing::EaseInOut,
-                },
-            },
+            easing: decode_easing(&c.get::<_, Value>("easing")?, Easing::EaseInOut)?,
             delay_ms: num("delay")?.unwrap_or(0.0),
         },
         "spring" => Driver::Spring {
@@ -1309,5 +1354,95 @@ fn decode_driver(r: &Reader<'_, '_>, config: &Value<'_>) -> rquickjs::Result<Dri
                 &format!("unknown animation type `{other}`"),
             ));
         }
+    })
+}
+
+/// An easing: a name (`linear`, `easeIn`, ...), a Bézier `[x1, y1, x2, y2]`
+/// or a curve `{ curve, param?, mode }` (the runtime's `Easing`).
+fn decode_easing(value: &Value<'_>, default: Easing) -> rquickjs::Result<Easing> {
+    if let Some(a) = value.as_array() {
+        let p = |i| a.get::<f64>(i).map(|v| v as f32).unwrap_or(0.0);
+        return Ok(Easing::Bezier(p(0), p(1), p(2), p(3)));
+    }
+    if let Some(o) = value.as_object() {
+        let curve = o.get::<_, Option<String>>("curve")?.unwrap_or_default();
+        let param = o.get::<_, Option<f64>>("param")?.map(|v| v as f32);
+        let curve = match curve.as_str() {
+            "quad" => Curve::Quad,
+            "cubic" => Curve::Cubic,
+            "poly" => Curve::Poly(param.unwrap_or(2.0)),
+            "sin" => Curve::Sin,
+            "circle" => Curve::Circle,
+            "exp" => Curve::Exp,
+            "elastic" => Curve::Elastic(param.unwrap_or(1.0)),
+            "back" => Curve::Back(param.unwrap_or(1.70158)),
+            "bounce" => Curve::Bounce,
+            _ => return Ok(default),
+        };
+        let mode = match o.get::<_, Option<String>>("mode")?.as_deref() {
+            Some("out") => EaseMode::Out,
+            Some("inOut") => EaseMode::InOut,
+            _ => EaseMode::In,
+        };
+        return Ok(Easing::Curve(curve, mode));
+    }
+    Ok(
+        match value
+            .as_string()
+            .map(|s| s.to_string())
+            .transpose()?
+            .as_deref()
+        {
+            Some("linear") => Easing::Linear,
+            Some("easeIn") => Easing::EaseIn,
+            Some("easeOut") => Easing::EaseOut,
+            Some("easeInOut") => Easing::EaseInOut,
+            // CSS / React Native `ease`.
+            Some("ease") => Easing::Bezier(0.25, 0.1, 0.25, 1.0),
+            _ => default,
+        },
+    )
+}
+
+/// A composite animation: `{ type, ... }` with `node` on the runs.
+fn decode_composite(
+    r: &Reader<'_, '_>,
+    spec: &Value<'_>,
+    depth: u32,
+) -> rquickjs::Result<yf_anim::Composite> {
+    use yf_anim::Composite;
+    let Some(o) = spec.as_object().filter(|_| depth < 64) else {
+        return Err(Exception::throw_type(r.ctx, "animation: invalid composite"));
+    };
+    let children = |key: &str| -> rquickjs::Result<Vec<Composite>> {
+        let list: rquickjs::Array = o.get(key)?;
+        list.iter::<Value>()
+            .map(|c| decode_composite(r, &c?, depth + 1))
+            .collect()
+    };
+    let kind: String = o.get("type")?;
+    Ok(match kind.as_str() {
+        "sequence" => Composite::Sequence(children("children")?),
+        "parallel" => Composite::Parallel {
+            children: children("children")?,
+            stop_together: o.get::<_, Option<bool>>("stopTogether")?.unwrap_or(true),
+        },
+        "delay" => Composite::Delay(o.get::<_, Option<f64>>("ms")?.unwrap_or(0.0) as f32),
+        "loop" => Composite::Loop {
+            child: Box::new(decode_composite(
+                r,
+                &o.get::<_, Value>("child")?,
+                depth + 1,
+            )?),
+            iterations: o
+                .get::<_, Option<f64>>("iterations")?
+                .filter(|n| *n >= 0.0)
+                .map(|n| n as u32),
+            reset: o.get::<_, Option<bool>>("reset")?.unwrap_or(true),
+        },
+        _ => Composite::Run {
+            node: o.get::<_, f64>("node")? as yf_anim::NodeId,
+            driver: decode_driver(r, spec)?,
+        },
     })
 }

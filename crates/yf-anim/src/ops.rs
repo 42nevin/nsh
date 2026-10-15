@@ -41,6 +41,43 @@ pub enum Easing {
     EaseInOut,
     /// A cubic Bézier `(x1, y1, x2, y2)`, like CSS `cubic-bezier()`.
     Bezier(f32, f32, f32, f32),
+    /// One of React Native's `Easing` functions with its `in` / `out` /
+    /// `inOut` form.
+    Curve(Curve, EaseMode),
+}
+
+/// A shape of React Native's `Easing` module (its "in" form).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Curve {
+    /// `t²`.
+    Quad,
+    /// `t³`.
+    Cubic,
+    /// `tⁿ`.
+    Poly(f32),
+    /// Sinusoidal.
+    Sin,
+    /// Circular.
+    Circle,
+    /// Exponential.
+    Exp,
+    /// Springy overshoot; the bounciness (1 by default).
+    Elastic(f32),
+    /// Pulls back before going; the overshoot (1.70158 by default).
+    Back(f32),
+    /// Bounces at the end.
+    Bounce,
+}
+
+/// How a [`Curve`] is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EaseMode {
+    /// As is.
+    In,
+    /// Mirrored: fast start, slow end.
+    Out,
+    /// `In` for the first half, `Out` for the second.
+    InOut,
 }
 
 /// How an animation moves a value.
@@ -102,6 +139,9 @@ pub enum Extrapolate {
 /// Binary operation of a math node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MathOp {
+    /// `a` modulo `b`, always non-negative for positive `b` (0 when `b`
+    /// is 0).
+    Mod,
     /// `a + b`.
     Add,
     /// `a - b`.
@@ -141,8 +181,25 @@ pub enum AnimOp {
         input_range: Vec<f32>,
         /// Outputs, same length as `input_range`.
         output: Output,
-        /// Behaviour outside the input range.
-        extrapolate: Extrapolate,
+        /// Behaviour below the input range.
+        extrapolate_left: Extrapolate,
+        /// Behaviour above the input range.
+        extrapolate_right: Extrapolate,
+        /// Curve within each segment.
+        easing: Easing,
+    },
+    /// Follows the changes of `input` but stays within `min..=max`
+    /// (React Native's `diffClamp`: a header that hides as content scrolls
+    /// up and shows as it scrolls down).
+    CreateDiffClamp {
+        /// New node.
+        node: NodeId,
+        /// Source node.
+        input: NodeId,
+        /// Lower bound.
+        min: f32,
+        /// Upper bound.
+        max: f32,
     },
     /// Combines two operands.
     CreateMath {
@@ -171,14 +228,93 @@ pub enum AnimOp {
         /// How to move.
         driver: Driver,
     },
+    /// Starts a composite animation (sequences, parallel groups, delays,
+    /// loops) run natively, step after step.
+    StartComposite {
+        /// Reported back when the whole animation ends.
+        animation: AnimId,
+        /// The composite (one JS object, run any number of times): the
+        /// values it animates are recorded as they are now, for `Reset`.
+        key: u32,
+        /// What to run.
+        spec: Composite,
+    },
+    /// Stops the composite `key` and puts its values back where they were
+    /// when it last started.
+    ResetComposite {
+        /// The composite.
+        key: u32,
+    },
+    /// Forgets the composite `key` (collected in JS).
+    ReleaseComposite {
+        /// The composite.
+        key: u32,
+    },
     /// Stops the animation of a value where it is.
     Stop {
         /// Value node.
         node: NodeId,
+    },
+    /// Stops a composite animation (its running steps stay where they are).
+    StopAnimation {
+        /// The animation.
+        animation: AnimId,
     },
     /// Frees a node.
     Release {
         /// Node.
         node: NodeId,
     },
+}
+
+/// A composite animation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Composite {
+    /// Moves a value.
+    Run {
+        /// Value node.
+        node: NodeId,
+        /// How.
+        driver: Driver,
+    },
+    /// One after the other; stops at the first that does not finish.
+    Sequence(Vec<Composite>),
+    /// All at once.
+    Parallel {
+        /// The animations.
+        children: Vec<Composite>,
+        /// One stopping stops the others (React Native's default).
+        stop_together: bool,
+    },
+    /// Waits, in milliseconds.
+    Delay(f32),
+    /// Repeats.
+    Loop {
+        /// The animation.
+        child: Box<Composite>,
+        /// Number of runs; `None` loops forever.
+        iterations: Option<u32>,
+        /// Values go back to where they were before each run.
+        reset: bool,
+    },
+}
+
+impl Composite {
+    /// The value nodes it animates.
+    pub fn nodes(&self, out: &mut Vec<NodeId>) {
+        match self {
+            Composite::Run { node, .. } => {
+                if !out.contains(node) {
+                    out.push(*node);
+                }
+            }
+            Composite::Sequence(children) | Composite::Parallel { children, .. } => {
+                for c in children {
+                    c.nodes(out);
+                }
+            }
+            Composite::Delay(_) => {}
+            Composite::Loop { child, .. } => child.nodes(out),
+        }
+    }
 }

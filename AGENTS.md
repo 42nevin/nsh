@@ -102,7 +102,7 @@ The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distributi
 |---|---|---|
 | `<view>` | `YFView` (UIView) | `onPress` / `onLongPress` / `onPressIn` / `onPressOut`, `activeOpacity`, `pan={{x, y}}` + `onPanStart` / `onPanEnd`, `pinch` / `rotation` |
 | `<text>` | `TextView` (CTFrame) | nested `<text>` is a span; `numberOfLines`, `ellipsizeMode`, `allowFontScaling`, `maxFontSizeMultiplier` |
-| `<image src>` | UIView + image CALayer | `src` is a URL or `import img from "./a.png"` (an asset descriptor with its size); `resizeMode`; `onLoad` / `onError`; `tintColor` |
+| `<image src>` | UIView + image CALayer | `src` is a URL or `import img from "./a.png"` (an asset descriptor with its size); `resizeMode`; `defaultSource` (placeholder), `blurRadius`, `fadeDuration`; `onLoadStart` / `onLoad` (the source's pixel size) / `onError` / `onLoadEnd`; `tintColor`; animated GIF / WebP / APNG |
 | `<scroll>` | UIScrollView | `horizontal`, `refreshing` + `onRefresh`, `scrollValue`, `onScrollEnd`, `keyboardDismissMode`, see **Scrolling** below |
 | `List`, `SectionList` (runtime) | UIScrollView + recycled cells | see **List** below |
 | `<input>` | UITextField / UITextView in a container | `value` / `defaultValue` / `onChangeText` / `onSubmitEditing` / `onFocus` / `onBlur`, `placeholder`, `secureTextEntry`, `keyboardType`, `returnKeyType`, `autoCapitalize`, `autoCorrect`, `multiline`, `maxLength`, `editable`, `autoFocus`, `selectionColor`, `blurOnSubmit`, `selection` + `onSelectionChange` (UTF-16 `start` / `end`), `onKeyPress` (`key`: the text, `Backspace`, `Enter`), `autoComplete` / `textContentType` (autofill); ref `setSelection(start, end)` |
@@ -203,7 +203,15 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
   "bind → JS → layout" rounds per frame, merged into one batch. Row-local state travels with recycled cells: keep it outside, keyed by id.
   Unbound cells keep their last content, so the core moves them out of sight; the header, footer and empty placeholder are cells with
   a role (`slot="header"`, ...) that are never recycled.
-- **Animation**: `createNativeValue()` → `timing` / `spring` / `decay` (return a Promise), `interpolate` (numbers or colors), `add/sub/mul/div`.
+- **Animation**: `createNativeValue()` → `timing` / `spring` / `decay` (return a Promise), `interpolate` (numbers, colors or
+  `"deg"` / `"rad"` angles; `extrapolate` / `extrapolateLeft` / `extrapolateRight`: `clamp` (default) / `extend` / `identity`;
+  `easing`), `add/sub/mul/div/mod`, `diffClamp(min, max)`. `Easing` (React Native's: `linear`, `ease`, `quad`, `cubic`, `poly`,
+  `sin`, `circle`, `exp`, `elastic`, `back`, `bounce`, `bezier`, `in` / `out` / `inOut`) is data decoded in Rust
+  (`yf_anim::Easing::Curve`), never a JS function. `Animated.timing` / `spring` / `decay` / `sequence` / `parallel` / `stagger` /
+  `delay` / `loop` build a `Composite` tree that runs entirely natively (`AnimOp::StartComposite`): each step starts at the exact end
+  time of the previous one (no frame gaps), `stop()` / `reset()` (back to the values at start) / `start(cb)` report `finished` once
+  for the whole tree; leaf animations get internal ids (`LEAF_IDS`) that never reach JS. Composites are released by
+  FinalizationRegistry (`ReleaseComposite`).
   Bindable: `opacity`, `backgroundColor`, and the translate / scale / rotate parts of `transform`. Driven on the main thread by `CADisplayLink`,
   paused while nothing animates. `scrollValue` writes the scroll offset into a native value in the same frame; `pan` lets drags drive native values
   directly, and JS receives the velocity when the drag ends. Native values referenced by a view's style are kept on the view node (`YNode.anims`)
@@ -211,7 +219,15 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
 - **Images**: background NSURLSession / file read → ImageIO downsampling decode at the view's pixel size → `NSCache` (purged under memory pressure);
   requests for the same key are coalesced and downloads nobody waits for are cancelled (Android: HttpURLConnection / APK assets →
   `BitmapFactory` power-of-two sampling → `LruCache`, same coalescing). During development `asset:/path` goes through the dev
-  server's `/assets/`; `yf build` copies assets to `out/assets/`, `yf package` puts them in the app.
+  server's `/assets/`; `yf build` copies assets to `out/assets/`, `yf package` puts them in the app. Cache keys include the decode
+  size and the blur radius. `blurRadius` is a stack blur on the decoding thread (`blur.rs`, `Blur.java`: the same algorithm, in
+  pixels). `defaultSource` loads after the image request and shows until the image arrives; the image then fades in over
+  `fadeDuration` (iOS: `CATransition`; Android: alpha over the placeholder; default 0 on iOS and 300ms on Android, as in React
+  Native). Animated images: iOS decodes up to 600 frames into an animated `UIImage` (frames repeated by their delays' common
+  divisor) played by a discrete `CAKeyframeAnimation` on `contents` (a tinted animated image shows its first frame); Android
+  (API 28+) uses `ImageDecoder` → `AnimatedImageDrawable`, not cached (each view plays its own copy; no blur). `onLoad` reports the
+  source's size in pixels on both platforms, whatever size the view decodes at. Android `ImageBox` draws its borders above the
+  image (as Core Animation's layer border).
 - **Android differences**: shadows need a background (no content shadows, e.g. text with a transparent background); odd corner
   radii clip by path before API 33; pull to refresh is our own (stretch overscroll stays native); `contentInset` is padding and
   `decelerationRate` only shapes snapping glides.
@@ -331,7 +347,10 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
 - **List cells are independent Taffy roots** (not children of the list's Taffy node; their width follows the list's cross axis): scrolling only
   relays out dirty cells and only emits frames for relaid cell subtrees; when the main tree is clean, `compute_layout` and the frame walk of the
   main tree are skipped (Taffy runs a full rounding pass even over a clean root).
-- **Taffy defaults are CSS semantics**; `Style::default()` switches to RN semantics: column, flexShrink 0, alignContent flex-start, position relative.
+- **Taffy defaults are CSS semantics**; `Style::default()` switches to RN semantics: column, flexShrink 0, alignContent flex-start, position relative,
+  and min sizes 0 (an unset or `auto` `minWidth` / `minHeight` is 0). Taffy's `auto` minimum is CSS's automatic minimum size (the
+  min-content size); text has no cheap min-content and reports its natural width, so `flex: 1` text in a row could not shrink and
+  overflowed instead of wrapping. Yoga has no automatic minimum.
 - **The bundler platform must not be Node.** solid-js's `node` export condition points to the non-reactive SSR build.
 - **`dom-expressions-compiler` is pinned to a commit on main.** Published tags predate the `compile` API we use. The project is young: run the
   full test suite before upgrading.
@@ -436,6 +455,9 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
 - **Android widgets**: a null tint list clears the theme's drawable tint (keep the default until a color is set: `Controls.Tint`);
   `MediaPlayer.setPlaybackParams` starts playback (set the rate only while playing) and a paused player draws nothing until
   it seeks; `WebView` JavaScript bridge calls arrive on a binder thread (post to the UI thread).
+- **Synthetic clicks on the Simulator / Catalyst windows go to whatever macOS window is on top at that point**: floating windows
+  of other apps (e.g. a Slack huddle bar at window level 1001) silently swallow clicks over a band of the app. When a tap does
+  nothing, list the windows at the point (`CGWindowListCopyWindowInfo`) before suspecting hit testing.
 - **Not supported / not verifiable here**: `I18nManager.swapLeftAndRightInRTL(false)` (left / right always swap right to left);
   after switching direction at runtime UIKit keeps an existing back button's chevron; Android has no skew transforms (as in React Native); the iOS simulator cannot
   inject edge swipes (interactive back is untested there); Android's stylus handwriting mode (on by default on recent

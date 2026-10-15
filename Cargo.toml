@@ -171,7 +171,9 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 ] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
   "std",
+  "CGBitmapContext",
   "CGColor",
+  "CGColorSpace",
   "CGContext",
   "CGImage",
   "CGPath",
@@ -194,6 +196,7 @@ objc2-core-text = { version = "0.3.2", default-features = false, features = [
 objc2-image-io = { version = "0.3.2", default-features = false, features = [
   "std",
   "objc2-core-graphics",
+  "CGImageProperties",
   "CGImageSource",
 ] }
 block2 = "0.6.2"

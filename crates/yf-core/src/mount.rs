@@ -501,6 +501,18 @@ impl Default for InputConfig {
     }
 }
 
+/// How an image is shown, besides its source.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ImageOptions {
+    /// `defaultSource`: shown until the image loads (and if it fails).
+    pub placeholder: Option<ImageSource>,
+    /// `blurRadius` in points (0: sharp).
+    pub blur_radius: f32,
+    /// `fadeDuration` in milliseconds; the platform's default when `None`
+    /// (React Native: 300 on Android, none on iOS).
+    pub fade_ms: Option<f32>,
+}
+
 /// One instruction for the platform backend.
 ///
 /// Items must be applied in order: [`MountItem::Insert`] refers to views
@@ -575,6 +587,8 @@ pub enum MountItem {
         source: Option<ImageSource>,
         /// Fit mode.
         resize_mode: ResizeMode,
+        /// How it is shown: placeholder, blur, fade.
+        options: ImageOptions,
     },
     /// Configure a scroll view.
     ScrollConfig {

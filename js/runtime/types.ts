@@ -389,8 +389,18 @@ export interface ImageProps extends CommonProps {
   /** A URL, `asset:/path`, or an imported asset. */
   src?: string | ImageAsset | { uri: string };
   resizeMode?: "cover" | "contain" | "stretch" | "center";
+  /** Shown until `src` has loaded (best a local asset). */
+  defaultSource?: string | ImageAsset | { uri: string };
+  /** Blurs the image by this radius in points (decoded once, off the main thread). */
+  blurRadius?: number;
+  /** How long a loaded image fades in, in milliseconds (default 0 on iOS, 300 on Android, like React Native). */
+  fadeDuration?: number;
+  onLoadStart?: () => void;
+  /** The source image's size in pixels (not the decoded, downsampled one). */
   onLoad?: (e: { width: number; height: number }) => void;
   onError?: (e: { message: string }) => void;
+  /** After `onLoad` or `onError`. */
+  onLoadEnd?: () => void;
 }
 
 /** Where a scroll view is: the payload of `onScroll`. */

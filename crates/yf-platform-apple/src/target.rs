@@ -3,10 +3,9 @@
 //! calls and display link ticks. Views are identified by their `tag` (the node id).
 
 use dispatch2::DispatchQueue;
-use objc2::runtime::ProtocolObject;
 use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
-    rc::Retained,
+    rc::Retained, runtime::ProtocolObject,
 };
 use objc2_core_foundation::CGPoint;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSRange, NSString};

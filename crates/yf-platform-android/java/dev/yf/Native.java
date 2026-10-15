@@ -53,6 +53,7 @@ final class Native {
     static final int TOUCH = 41;
     static final int SELECTION_CHANGE = 42;
     static final int KEY_PRESS = 43;
+    static final int LOAD_END = 44;
 
     static native long create(YfView view, float density, boolean trace);
 

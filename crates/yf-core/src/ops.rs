@@ -143,7 +143,7 @@ events! {
     RequestClose = "onRequestClose": "The user asked to close a modal (back button, swipe down).",
     Show = "onShow": "A modal finished appearing.",
     Insets = "onInsets": "The insets of a screen or modal changed (payload: `top`, `right`, `bottom`, `left`).",
-    LoadStart = "onLoadStart": "A web view or video started loading.",
+    LoadStart = "onLoadStart": "A web view, video or image started loading.",
     Message = "onMessage": "A web page posted a message (payload: `data`).",
     NavigationStateChange = "onNavigationStateChange": "A web view navigated (payload: `url`, `title`, `loading`, `canGoBack`, `canGoForward`).",
     Progress = "onProgress": "Video playback progressed (payload: `currentTime`, `duration`).",
@@ -160,6 +160,7 @@ events! {
     Touch = "onTouch": "Touches on the view or inside it, for the JS touch and responder handlers (payload: [`EventPayload::Touch`]).",
     SelectionChange = "onSelectionChange": "The selection (or caret) of an input moved (payload: `start`, `end` in UTF-16 units).",
     KeyPress = "onKeyPress": "A key was pressed in an input (payload: `key`: the character, `Backspace` or `Enter`).",
+    LoadEnd = "onLoadEnd": "An image finished loading, or failed.",
 }
 
 /// What an input holds, for the system's autofill and suggestions
@@ -396,7 +397,7 @@ pub enum EventPayload {
         /// Vertical content offset.
         y: f32,
     },
-    /// A loaded image's natural size in points.
+    /// A loaded image's source size in pixels (before downsampling).
     Image {
         /// Width.
         width: f32,
@@ -544,6 +545,17 @@ pub enum KeyboardTaps {
     Always,
     /// Taps that nothing handles dismiss the keyboard.
     Handled,
+}
+
+/// How an `<image>` is shown, besides its source.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImageProp {
+    /// `defaultSource`: a placeholder until the image loads.
+    DefaultSource(Option<ImageSource>),
+    /// `blurRadius` in points.
+    BlurRadius(f32),
+    /// `fadeDuration` in milliseconds (`None`: the platform's default).
+    FadeDuration(Option<f32>),
 }
 
 /// A behavior property of a scroll view or list.
@@ -931,6 +943,8 @@ pub enum Prop {
     /// The surface lays out right to left (on the root, from
     /// `I18nManager`).
     LayoutDirection(bool),
+    /// An image option.
+    Image(ImageProp),
     /// `delayLongPress`: milliseconds before a press becomes a long press.
     LongPressDelay(Option<f32>),
     /// `android_ripple`: Android's press ripple.

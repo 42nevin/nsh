@@ -174,6 +174,80 @@ fn text_update_emits_only_text_and_frames() {
 }
 
 #[test]
+fn flex_text_in_a_row_shrinks_and_wraps() {
+    // Yoga has no automatic minimum size: `flex: 1` text takes the space
+    // left in the row and wraps, however long its natural width.
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::SetStyle {
+                id: 2,
+                style: style(&[("flexDirection", StyleValue::Str("row"))]),
+            },
+            Op::Create {
+                id: 3,
+                tag: Tag::View,
+            },
+            Op::SetStyle {
+                id: 3,
+                style: style(&[
+                    ("width", StyleValue::Number(120.0)),
+                    ("height", StyleValue::Number(10.0)),
+                ]),
+            },
+            Op::Create {
+                id: 4,
+                tag: Tag::Text,
+            },
+            Op::SetStyle {
+                id: 4,
+                style: style(&[("flex", StyleValue::Number(1.0))]),
+            },
+            Op::CreateText {
+                id: 5,
+                text: "x".repeat(50),
+            },
+            Op::Insert {
+                parent: 4,
+                child: 5,
+                before: None,
+            },
+            Op::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            Op::Insert {
+                parent: 2,
+                child: 4,
+                before: None,
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    // 400pt of text in 200pt: two lines.
+    assert_eq!(
+        frame_of(&batch, 4),
+        Some(Rect {
+            x: 120.0,
+            y: 0.0,
+            width: 200.0,
+            height: 32.0
+        })
+    );
+}
+
+#[test]
 fn nested_spans_merge_with_styles() {
     let mut c = core();
     apply(

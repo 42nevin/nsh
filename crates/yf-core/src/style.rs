@@ -845,6 +845,11 @@ impl Default for Style {
             flex_direction: FlexDirection::Column,
             flex_shrink: 0.0,
             align_content: AlignContent::FLEX_START,
+            // Yoga has no automatic minimum size (see `min_len`).
+            min_size: taffy::Size {
+                width: LengthPercentageAuto::length(0.0),
+                height: LengthPercentageAuto::length(0.0),
+            },
             ..taffy::Style::DEFAULT
         };
         Self {
@@ -944,6 +949,16 @@ fn opt_lp(v: StyleValue<'_>) -> Result<Option<LengthPercentage>, StyleError> {
         StyleValue::Null => Ok(None),
         v => Ok(Some(Len::parse(v)?.lp()?)),
     }
+}
+
+/// A minimum size: unset is 0, as in Yoga. Taffy's `auto` would be CSS's
+/// automatic minimum (the min-content size), which keeps flex items from
+/// shrinking below their content (`flex: 1` text in a row would overflow).
+fn min_len(v: StyleValue<'_>) -> Result<LengthPercentageAuto, StyleError> {
+    Ok(match Len::parse(v)? {
+        Len::Auto => LengthPercentageAuto::length(0.0),
+        len => len.lpa(),
+    })
 }
 
 fn lpa_or_zero(v: StyleValue<'_>) -> Result<LengthPercentageAuto, StyleError> {
@@ -1148,8 +1163,8 @@ impl Style {
             "alignContent" => l.align_content = align_content(value, AlignContent::FLEX_START)?,
             "width" => l.size.width = Len::parse(value)?.dim(),
             "height" => l.size.height = Len::parse(value)?.dim(),
-            "minWidth" => l.min_size.width = Len::parse(value)?.lpa(),
-            "minHeight" => l.min_size.height = Len::parse(value)?.lpa(),
+            "minWidth" => l.min_size.width = min_len(value)?,
+            "minHeight" => l.min_size.height = min_len(value)?,
             "maxWidth" => l.max_size.width = Len::parse(value)?.lpa(),
             "maxHeight" => l.max_size.height = Len::parse(value)?.lpa(),
             "aspectRatio" => l.aspect_ratio = opt_number(value)?,
@@ -1398,6 +1413,7 @@ mod tests {
         assert_eq!(s.layout.flex_shrink, 0.0);
         assert_eq!(s.layout.position, Position::Relative);
         assert_eq!(s.layout.align_content, AlignContent::FLEX_START);
+        assert_eq!(s.layout.min_size.width, LengthPercentageAuto::length(0.0));
     }
 
     #[test]

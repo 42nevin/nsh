@@ -16,7 +16,7 @@ use crate::{
         ScreenConfig, ScrollBehavior, SliderProps, StickyCell, SwitchProps, VideoProps, ViewKind,
     },
     ops::{
-        CellSlot, Command, EventKind, EventMask, EventPayload, HeaderSlot, ImageSource,
+        CellSlot, Command, EventKind, EventMask, EventPayload, HeaderSlot, ImageProp, ImageSource,
         KeyboardDismissMode, ModalProp, NativeProp, NodeId, Op, PayloadValue, Prop, ROOT_ID,
         ResizeMode, ScreenProp, ScrollProp, Tag,
     },
@@ -252,6 +252,7 @@ struct InputState {
 struct ImageState {
     source: Option<ImageSource>,
     resize_mode: ResizeMode,
+    options: crate::mount::ImageOptions,
 }
 
 struct Node {
@@ -1229,6 +1230,16 @@ impl<M: TextEngine> Core<M> {
                     }
                 }
             }
+            Prop::Image(option) => {
+                if let Some(image) = node.image.as_mut() {
+                    match option {
+                        ImageProp::DefaultSource(source) => image.options.placeholder = source,
+                        ImageProp::BlurRadius(r) => image.options.blur_radius = r.max(0.0),
+                        ImageProp::FadeDuration(ms) => image.options.fade_ms = ms,
+                    }
+                    flags |= dirty::IMAGE;
+                }
+            }
             Prop::ResizeMode(mode) => {
                 if let Some(image) = node.image.as_mut() {
                     image.resize_mode = mode;
@@ -2083,6 +2094,7 @@ impl<M: TextEngine> Core<M> {
                     id,
                     source: image.source.clone(),
                     resize_mode: image.resize_mode,
+                    options: image.options.clone(),
                 });
             }
             if let Some(scroll) = &node.scroll {

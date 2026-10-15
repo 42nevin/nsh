@@ -5,7 +5,6 @@ import android.animation.AnimatorListenerAdapter;
 import android.animation.TimeInterpolator;
 import android.animation.ValueAnimator;
 import android.content.Context;
-import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.text.Layout;
 import android.util.SparseArray;
@@ -223,7 +222,9 @@ final class Mounter {
                 }
                 case IMAGE: {
                     int id = b.getInt(), uri = b.getInt(), mode = b.getInt();
-                    image(id, uri >= 0 ? (String) objects[uri] : null, mode);
+                    String placeholder = optString(b, objects);
+                    float blur = b.getFloat(), fade = b.getFloat();
+                    image(id, uri >= 0 ? (String) objects[uri] : null, mode, placeholder, px(blur), fade < 0 ? -1 : Math.round(fade));
                     break;
                 }
                 case SCROLL_CONFIG: {
@@ -381,7 +382,8 @@ final class Mounter {
             case 1: v = new TextBox(context, id); break;
             case 2: {
                 ImageBox[] self = new ImageBox[1];
-                self[0] = new ImageBox(context, id, (bitmap, error) -> imageDone(self[0], bitmap, error));
+                self[0] = new ImageBox(context, id, (image, error) -> imageDone(self[0], image, error),
+                        (image, error) -> placeholderDone(self[0], image));
                 v = self[0];
                 break;
             }
@@ -1159,56 +1161,91 @@ final class Mounter {
 
     // --- Images ------------------------------------------------------------
 
-    private void image(int id, String uri, int mode) {
+    private void image(int id, String uri, int mode, String placeholder, int blurPx, int fadeMs) {
         View v = views.get(id);
         if (!(v instanceof ImageBox)) return;
         ImageBox image = (ImageBox) v;
         image.resizeMode = mode;
-        if (uri == null ? image.uri == null : uri.equals(image.uri)) {
+        image.fadeMs = fadeMs;
+        boolean same = (uri == null ? image.uri == null : uri.equals(image.uri))
+                && (placeholder == null ? image.placeholderUri == null : placeholder.equals(image.placeholderUri))
+                && blurPx == image.blurPx;
+        if (same) {
             image.invalidate();
             return;
         }
         cancelImage(image);
-        image.setBitmap(null);
+        image.setImage(null, 0);
+        image.imageShown = false;
         image.uri = uri;
+        image.placeholderUri = placeholder;
+        image.blurPx = blurPx;
         loadImage(image);
     }
 
     private void loadImage(ImageBox image) {
-        if (image.uri == null || image.requestedPx > 0) return;
+        if (image.requestedPx > 0 || image.placeholderPx > 0) return;
         Box.Frame f = Box.frame(image);
         int maxPx = Math.max(f.right - f.left, f.bottom - f.top);
         if (maxPx <= 0) return;
-        image.requestedPx = maxPx;
-        Bitmap cached = images.request(image.uri, maxPx, image.callback);
-        if (cached != null) {
-            image.requestedPx = 0;
-            image.setBitmap(cached);
-            loaded(image, cached);
+        if (image.uri != null && !image.imageShown) {
+            image.requestedPx = maxPx;
+            Images.Image cached = images.request(image.uri, maxPx, image.blurPx, image.callback);
+            if (cached != null) {
+                image.requestedPx = 0;
+                image.setImage(cached.content, 0);
+                image.imageShown = true;
+                loaded(image, cached);
+            } else if (wants(image.id, Native.LOAD_START)) {
+                event(image.id, Native.LOAD_START);
+            }
+        }
+        // The placeholder, until the image shows.
+        if (image.placeholderUri != null && !image.imageShown) {
+            image.placeholderPx = maxPx;
+            Images.Image cached = images.request(image.placeholderUri, maxPx, 0, image.placeholderCallback);
+            if (cached != null) {
+                image.placeholderPx = 0;
+                image.setImage(cached.content, 0);
+            }
         }
     }
 
     private void cancelImage(ImageBox image) {
-        if (image.uri != null && image.requestedPx > 0) images.cancel(image.uri, image.requestedPx, image.callback);
+        if (image.uri != null && image.requestedPx > 0) images.cancel(image.uri, image.requestedPx, image.blurPx, image.callback);
+        if (image.placeholderUri != null && image.placeholderPx > 0) {
+            images.cancel(image.placeholderUri, image.placeholderPx, 0, image.placeholderCallback);
+        }
         image.requestedPx = 0;
+        image.placeholderPx = 0;
     }
 
-    private void imageDone(ImageBox image, Bitmap bitmap, String error) {
+    private void imageDone(ImageBox image, Images.Image result, String error) {
         image.requestedPx = 0;
         int id = image.id;
         if (views.get(id) != image) return;
-        if (bitmap != null) {
-            image.setBitmap(bitmap);
-            loaded(image, bitmap);
-        } else if (wants(id, Native.ERROR)) {
-            event(id, Native.ERROR, error, 0, 0, 0);
+        if (result != null) {
+            // React Native fades in images on Android (300 ms by default).
+            image.setImage(result.content, image.fadeMs < 0 ? 300 : image.fadeMs);
+            image.imageShown = true;
+            loaded(image, result);
+        } else {
+            // The placeholder (if any) stays.
+            if (wants(id, Native.ERROR)) event(id, Native.ERROR, error, 0, 0, 0);
+            if (wants(id, Native.LOAD_END)) event(id, Native.LOAD_END);
         }
     }
 
-    private void loaded(ImageBox image, Bitmap bitmap) {
-        if (wants(image.id, Native.LOAD)) {
-            event(image.id, Native.LOAD, null, 0, bitmap.getWidth() / density, bitmap.getHeight() / density);
-        }
+    private void placeholderDone(ImageBox image, Images.Image result) {
+        image.placeholderPx = 0;
+        if (views.get(image.id) != image || image.imageShown || result == null) return;
+        image.setImage(result.content, 0);
+    }
+
+    /** `onLoad` reports the source's size in pixels, as on iOS. */
+    private void loaded(ImageBox image, Images.Image result) {
+        if (wants(image.id, Native.LOAD)) event(image.id, Native.LOAD, null, 0, result.width, result.height);
+        if (wants(image.id, Native.LOAD_END)) event(image.id, Native.LOAD_END);
     }
 
     // --- Inputs and commands -------------------------------------------------

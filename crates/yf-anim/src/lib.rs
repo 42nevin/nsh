@@ -13,5 +13,8 @@ mod ops;
 
 pub use crate::{
     graph::{AnimValue, Finished, Graph},
-    ops::{AnimId, AnimOp, AnimProp, Driver, Easing, Extrapolate, MathOp, NodeId, Operand, Output},
+    ops::{
+        AnimId, AnimOp, AnimProp, Composite, Curve, Driver, EaseMode, Easing, Extrapolate, MathOp,
+        NodeId, Operand, Output,
+    },
 };

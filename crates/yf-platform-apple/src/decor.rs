@@ -12,8 +12,9 @@ use objc2_core_foundation::{CFRetained, CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage, CGMutablePath};
 use objc2_foundation::{NSArray, NSNumber};
 use objc2_quartz_core::{
-    CACornerMask, CALayer, CAShapeLayer, CATransaction, kCAFillRuleEvenOdd, kCAGravityCenter,
-    kCAGravityResize, kCAGravityResizeAspect, kCAGravityResizeAspectFill, kCALineCapRound,
+    CACornerMask, CALayer, CAMediaTiming, CAShapeLayer, CATransaction, kCAFillRuleEvenOdd,
+    kCAGravityCenter, kCAGravityResize, kCAGravityResizeAspect, kCAGravityResizeAspectFill,
+    kCALineCapRound,
 };
 use objc2_ui_kit::{UIColor, UIImage, UIView};
 use yf_core::{BorderStyle, Borders, Color, CornerRadii, ResizeMode, ViewStyle};
@@ -87,10 +88,50 @@ impl Decor {
     }
 
     /// Shows `image` (or nothing) in an image view.
-    pub(crate) fn set_image(&mut self, image: Option<&UIImage>) {
+    /// Shows `image` (fading in over `fade` seconds); an animated image
+    /// plays its frames, forever.
+    pub(crate) fn set_image(&mut self, image: Option<&UIImage>, fade: f64) {
         // SAFETY: plain getters on a valid image.
         self.contents = image.and_then(|i| unsafe { i.CGImage().map(|cg| (cg, i.scale())) });
-        quiet(|| self.show_contents());
+        let Some(layer) = self.image.clone() else {
+            return;
+        };
+        let key = objc2_foundation::ns_string!("frames");
+        layer.removeAnimationForKey(key);
+        if fade > 0.0 {
+            // A crossfade from what was shown (nothing or a placeholder).
+            let transition = objc2_quartz_core::CATransition::animation();
+            transition.setDuration(fade);
+            // SAFETY: an immutable Core Animation constant.
+            transition.setType(unsafe { objc2_quartz_core::kCATransitionFade });
+            layer.addAnimation_forKey(&transition, Some(objc2_foundation::ns_string!("fade")));
+            self.show_contents();
+        } else {
+            quiet(|| self.show_contents());
+        }
+        // SAFETY: plain getters on a valid image.
+        let frames = image.and_then(|i| unsafe { i.images().map(|f| (f, i.duration())) });
+        if let Some((frames, duration)) = frames.filter(|(f, _)| f.count() > 1)
+            && self.tint.is_none()
+        {
+            let values: Vec<Retained<AnyObject>> = frames
+                .iter()
+                // SAFETY: plain getters; CGImages are valid `contents` values.
+                .filter_map(|f| unsafe { f.CGImage() })
+                .map(|cg| unsafe { Retained::cast_unchecked::<AnyObject>(cg) })
+                .collect();
+            let animation = objc2_quartz_core::CAKeyframeAnimation::animationWithKeyPath(Some(
+                objc2_foundation::ns_string!("contents"),
+            ));
+            // SAFETY: an array of CGImages, valid `contents` values.
+            unsafe { animation.setValues(Some(&NSArray::from_retained_slice(&values))) };
+            // SAFETY: an immutable Core Animation constant.
+            animation.setCalculationMode(unsafe { objc2_quartz_core::kCAAnimationDiscrete });
+            animation.setDuration(duration);
+            animation.setRepeatCount(f32::INFINITY);
+            animation.setRemovedOnCompletion(false);
+            layer.addAnimation_forKey(&animation, Some(key));
+        }
     }
 
     /// Puts the image into the image layer, or into the tint mask.

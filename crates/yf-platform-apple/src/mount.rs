@@ -11,7 +11,7 @@ use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_quartz_core::CATransform3D;
 use objc2_ui_kit::{
     UIActivityIndicatorView, UIActivityIndicatorViewStyle, UIControlEvents, UIDevice,
-    UIGestureRecognizer, UIGestureRecognizerState, UIImage, UIPanGestureRecognizer,
+    UIGestureRecognizer, UIGestureRecognizerState, UIPanGestureRecognizer,
     UIPinchGestureRecognizer, UIRefreshControl, UIRotationGestureRecognizer, UIScrollView,
     UIScrollViewContentInsetAdjustmentBehavior, UIScrollViewKeyboardDismissMode,
     UIUserInterfaceIdiom, UIView, UIViewAnimationOptions,
@@ -255,6 +255,12 @@ struct Slot {
     image: Option<ImageSource>,
     /// The load in flight for this view.
     image_key: Option<String>,
+    /// Placeholder, blur and fade of the image.
+    image_options: yf_core::ImageOptions,
+    /// The placeholder's load in flight.
+    placeholder_key: Option<String>,
+    /// The image (not its placeholder) is shown.
+    image_shown: bool,
 }
 
 impl Slot {
@@ -281,6 +287,9 @@ impl Slot {
             horizontal: false,
             image: None,
             image_key: None,
+            image_options: yf_core::ImageOptions::default(),
+            placeholder_key: None,
+            image_shown: false,
         }
     }
 }
@@ -547,7 +556,7 @@ impl Mounter {
                     }
                     self.touch_trackers.retain(|(root, _)| *root != id);
                     s.native.view().removeFromSuperview();
-                    if let Some(key) = &s.image_key {
+                    for key in [&s.image_key, &s.placeholder_key].into_iter().flatten() {
                         self.images.cancel(id, key);
                     }
                     self.animated.retain(|&v| v != id);
@@ -646,7 +655,8 @@ impl Mounter {
                 id,
                 source,
                 resize_mode,
-            } => self.set_image(id, source, resize_mode),
+                options,
+            } => self.set_image(id, source, resize_mode, options),
             MountItem::ScrollConfig {
                 id,
                 horizontal,
@@ -1305,20 +1315,32 @@ impl Mounter {
             .apply(s.native.view(), kind, &s.style, background, animated, mtm);
     }
 
-    fn set_image(&mut self, id: NodeId, source: Option<ImageSource>, resize_mode: ResizeMode) {
+    fn set_image(
+        &mut self,
+        id: NodeId,
+        source: Option<ImageSource>,
+        resize_mode: ResizeMode,
+        options: yf_core::ImageOptions,
+    ) {
         let Some(s) = self.slot_mut(id) else { return };
         if !matches!(s.native, Native::Image(_)) {
             return;
         }
         s.decor.set_resize_mode(resize_mode);
-        if s.image.as_ref().map(|src| &src.uri) == source.as_ref().map(|src| &src.uri) {
+        let same_source =
+            s.image.as_ref().map(|src| &src.uri) == source.as_ref().map(|src| &src.uri);
+        let same_look = s.image_options.placeholder == options.placeholder
+            && s.image_options.blur_radius == options.blur_radius;
+        s.image_options = options;
+        if same_source && same_look {
             return;
         }
-        s.decor.set_image(None);
-        let old_key = s.image_key.take();
+        s.decor.set_image(None, 0.0);
+        s.image_shown = false;
+        let old = [s.image_key.take(), s.placeholder_key.take()];
         s.image = source;
-        let wants = s.image.is_some();
-        if let Some(key) = old_key {
+        let wants = s.image.is_some() || s.image_options.placeholder.is_some();
+        for key in old.into_iter().flatten() {
             self.images.cancel(id, &key);
         }
         if wants {
@@ -1334,12 +1356,16 @@ impl Mounter {
             .map_or(2.0, |s| s.native.view().contentScaleFactor());
         for id in std::mem::take(&mut self.pending_images) {
             let Some(s) = self.slot(id) else { continue };
-            let (Some(source), Native::Image(view)) = (&s.image, &s.native) else {
+            let Native::Image(view) = &s.native else {
                 continue;
             };
             let size = view.bounds().size;
             let max_pixels = (size.width.max(size.height) * scale).ceil() as u32;
-            let uri = source.uri.clone();
+            let (source, placeholder, blur) = (
+                s.image.as_ref().map(|s| s.uri.clone()),
+                s.image_options.placeholder.as_ref().map(|s| s.uri.clone()),
+                s.image_options.blur_radius,
+            );
             let shared = self.shared.clone();
             let done = move |key: String, result: Result<DecodedImage, String>| {
                 let mtm = MainThreadMarker::new().expect("main queue");
@@ -1347,16 +1373,45 @@ impl Mounter {
                     m.image_loaded(&key, result);
                 }
             };
-            match self.images.request(id, &uri, max_pixels, scale, done) {
-                Request::Ready(image) => {
-                    if let Some(s) = self.slot_mut(id) {
-                        s.decor.set_image(Some(&image));
+            if let Some(uri) = source {
+                match self
+                    .images
+                    .request(id, &uri, max_pixels, scale, blur, done.clone())
+                {
+                    Request::Ready(decoded) => {
+                        if let Some(s) = self.slot_mut(id) {
+                            s.decor.set_image(Some(&decoded.image), 0.0);
+                            s.image_shown = true;
+                        }
+                        self.image_event(id, Ok(&decoded));
                     }
-                    self.image_event(id, Ok(&image));
+                    Request::Pending => {
+                        if let Some(s) = self.slot_mut(id) {
+                            s.image_key = Some(ImageLoader::key(&uri, max_pixels, blur));
+                            if s.events.contains(EventKind::LoadStart) {
+                                self.control.dispatch_event(
+                                    id,
+                                    EventKind::LoadStart,
+                                    EventPayload::None,
+                                );
+                            }
+                        }
+                    }
                 }
-                Request::Pending => {
-                    if let Some(s) = self.slot_mut(id) {
-                        s.image_key = Some(ImageLoader::key(&uri, max_pixels));
+            }
+            // The placeholder, until the image shows.
+            let shown = self.slot(id).is_some_and(|s| s.image_shown);
+            if let Some(uri) = placeholder.filter(|_| !shown) {
+                match self.images.request(id, &uri, max_pixels, scale, 0.0, done) {
+                    Request::Ready(decoded) => {
+                        if let Some(s) = self.slot_mut(id) {
+                            s.decor.set_image(Some(&decoded.image), 0.0);
+                        }
+                    }
+                    Request::Pending => {
+                        if let Some(s) = self.slot_mut(id) {
+                            s.placeholder_key = Some(ImageLoader::key(&uri, max_pixels, 0.0));
+                        }
                     }
                 }
             }
@@ -1366,35 +1421,45 @@ impl Mounter {
     pub(crate) fn image_loaded(&mut self, key: &str, result: Result<DecodedImage, String>) {
         for id in self.images.finish(key, &result) {
             let Some(s) = self.slot_mut(id) else { continue };
+            if s.placeholder_key.as_deref() == Some(key) {
+                s.placeholder_key = None;
+                if let (Ok(decoded), false) = (&result, s.image_shown) {
+                    s.decor.set_image(Some(&decoded.image), 0.0);
+                }
+                continue;
+            }
             if s.image_key.as_deref() != Some(key) {
                 continue;
             }
             s.image_key = None;
             match &result {
-                Ok(DecodedImage(image)) => {
-                    s.decor.set_image(Some(image));
-                    self.image_event(id, Ok(image));
+                Ok(decoded) => {
+                    // React Native fades images in on Android only.
+                    let fade = s.image_options.fade_ms.unwrap_or(0.0) as f64 / 1000.0;
+                    s.decor.set_image(Some(&decoded.image), fade);
+                    s.image_shown = true;
+                    self.image_event(id, Ok(decoded));
                 }
                 Err(message) => {
                     log::warn!("image failed: {message}");
+                    // The placeholder (if any) stays.
                     self.image_event(id, Err(message));
                 }
             }
         }
     }
 
-    fn image_event(&self, id: NodeId, result: Result<&UIImage, &String>) {
+    /// `onLoad` reports the source's size in pixels (as Android).
+    fn image_event(&self, id: NodeId, result: Result<&DecodedImage, &String>) {
         let Some(s) = self.slot(id) else { return };
         match result {
-            Ok(image) if s.events.contains(EventKind::Load) => {
-                // SAFETY: plain getter on a valid image.
-                let size = unsafe { image.size() };
+            Ok(decoded) if s.events.contains(EventKind::Load) => {
                 self.control.dispatch_event(
                     id,
                     EventKind::Load,
                     EventPayload::Image {
-                        width: size.width as f32,
-                        height: size.height as f32,
+                        width: decoded.width as f32,
+                        height: decoded.height as f32,
                     },
                 );
             }
@@ -1408,6 +1473,10 @@ impl Mounter {
                 );
             }
             _ => {}
+        }
+        if s.events.contains(EventKind::LoadEnd) {
+            self.control
+                .dispatch_event(id, EventKind::LoadEnd, EventPayload::None);
         }
     }
 

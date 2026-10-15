@@ -1,5 +1,6 @@
 import { For } from "solid-js";
 import { render, root, Screen, Stack } from "yf";
+import { Animations } from "./demos/Animations";
 import { Controls } from "./demos/Controls";
 import { Form } from "./demos/Form";
 import { Gestures } from "./demos/Gestures";
@@ -25,7 +26,8 @@ const demos: DemoEntry[] = [
   { name: "Controls", detail: "Switch, slider, spinner, layout animation, sheet", screen: Controls },
   { name: "Gestures", detail: "Pinch, rotate, press states, hit slop, pointer events", screen: Gestures },
   { name: "Physics", detail: "Drags and springs on the UI thread", screen: Physics },
-  { name: "Images", detail: "Resize modes, tint, load and error events", screen: Images },
+  { name: "Animations", detail: "Easing, sequence / parallel / stagger / loop, springs, interpolation, diffClamp", screen: Animations },
+  { name: "Images", detail: "Resize modes, tint, GIF / WebP, placeholders, blur, fade, events", screen: Images },
   { name: "Styles", detail: "Corners, borders, shadows, clipping, 3D transforms", screen: Styles },
   { name: "Text", detail: "Fonts, spans, decorations, truncation, shadows", screen: TextDemo },
   { name: "Web and video", detail: "WKWebView / WebView, AVPlayer / MediaPlayer", screen: Media },

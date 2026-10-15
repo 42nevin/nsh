@@ -195,6 +195,7 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                 id,
                 source,
                 resize_mode,
+                options,
             } => {
                 e.int(IMAGE);
                 e.int(id as i32);
@@ -208,6 +209,9 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     ResizeMode::Stretch => 2,
                     ResizeMode::Center => 3,
                 });
+                e.opt_string(options.placeholder.as_ref().map(|p| &*p.uri));
+                e.float(options.blur_radius);
+                e.float(options.fade_ms.unwrap_or(-1.0));
             }
             MountItem::ScrollConfig {
                 id,
