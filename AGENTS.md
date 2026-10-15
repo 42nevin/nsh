@@ -117,7 +117,7 @@ host it is an empty crate, so always run clippy on platform code with the Cataly
 - **Two JS layers.** `nsh` / `nsh/<module>` (`js/runtime`) are the primitives and the environment every UI set builds
   on; `nsh/ui/<set>` is a whole UI for one form factor (`nsh/ui/mobile`; a desktop set will be separate, never an
   abstraction over both). Shared vs one form factor decides the layer, not JS vs native. Platform-only APIs go to
-  `nsh/ios` / `nsh/android`, platform-only props into `ios={…}` / `android={…}` / `desktop={…}`. `nsh` has no
+  `nsh/ios` / `nsh/android`, platform-only props into `ios={{…}}` / `android={{…}}` / `desktop={{…}}`. `nsh` has no
   catch-all re-exports; moved APIs get no compatibility re-exports.
 - **Primitives only.** The runtime adds capabilities, not widgets: components are drawn with the primitives in a UI
   set (`js/ui/mobile/components`) and look the same on iOS and Android; no platform-styled widgets. React Native is a
