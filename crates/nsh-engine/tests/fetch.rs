@@ -91,7 +91,8 @@ fn fetch_round_trips_through_the_platform_network() {
     let cancelled = network.cancelled.clone();
     let (tx, rx) = mpsc::channel();
     let config = EngineConfig {
-        bundle: Bundle::bytecode(nsh_js::compile_bytecode(&bundle.code, false).unwrap()),
+        // SAFETY: compiled just now by this runtime.
+        bundle: unsafe { Bundle::bytecode(nsh_js::compile_bytecode(&bundle.code, false).unwrap()) },
         viewport: Size::new(320.0, 480.0),
         trace: false,
         network: Some(network),
@@ -179,7 +180,8 @@ fn fetch_stays_within_the_capabilities() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = mpsc::channel();
     let config = EngineConfig {
-        bundle: Bundle::bytecode(nsh_js::compile_bytecode(&bundle.code, false).unwrap())
+        // SAFETY: compiled just now by this runtime.
+        bundle: unsafe { Bundle::bytecode(nsh_js::compile_bytecode(&bundle.code, false).unwrap()) }
             .with_capabilities_json(Some(r#"{ "network": { "hosts": ["api.example.com"] } }"#))
             .unwrap(),
         viewport: Size::new(320.0, 480.0),

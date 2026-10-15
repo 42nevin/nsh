@@ -39,6 +39,18 @@ pub struct AppOptions {
     pub asset_base: Option<AssetBase>,
 }
 
+/// Whether `path` is inside the app's own bundle (which the system verifies
+/// and keeps read-only): the only place bytecode files load from.
+pub fn in_app_bundle(path: &std::path::Path) -> bool {
+    let bundle = objc2_foundation::NSBundle::mainBundle()
+        .bundlePath()
+        .to_string();
+    match (std::fs::canonicalize(path), std::fs::canonicalize(bundle)) {
+        (Ok(path), Ok(bundle)) => path.starts_with(bundle),
+        _ => false,
+    }
+}
+
 /// Launch parameters, handed from [`run_app`] to the scene delegate that
 /// UIKit instantiates by class.
 static LAUNCH: Mutex<Option<(AppSource, AppOptions)>> = Mutex::new(None);

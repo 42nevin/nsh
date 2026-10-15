@@ -26,7 +26,8 @@ fn main() {
         .ok()
         .and_then(|exe| exe.parent().map(|d| d.join("nsh")))
         .unwrap_or_default();
-    let bundle = match Bundle::read(&dir.join("bundle.qbc")) {
+    // SAFETY: the bytecode is a resource of this (signed) app.
+    let bundle = match unsafe { Bundle::read_trusted(&dir.join("bundle.qbc")) } {
         Ok(bundle) => bundle,
         Err(err) => {
             log::error!("cannot read the app bundle in {}: {err}", dir.display());

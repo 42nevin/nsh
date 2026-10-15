@@ -115,8 +115,10 @@ fn handle(host: &Arc<Host>, state: &Mutex<DevState>, event: DevEvent) {
             capabilities,
         } => {
             let mut bundle = match format {
+                // SAFETY: compiled for this runtime's bytecode version (the
+                // handshake) by the dev server the developer connected to.
                 BundleFormat::Bytecode => {
-                    Bundle::bytecode(bytes).with_policy(Policy::development())
+                    unsafe { Bundle::bytecode(bytes) }.with_policy(Policy::development())
                 }
                 BundleFormat::Source => match String::from_utf8(bytes) {
                     Ok(code) => Bundle::source(code).with_policy(Policy::development()),

@@ -38,6 +38,12 @@ pub(crate) struct AppConfig {
     pub(crate) build: Option<u32>,
     /// App icon: a square PNG, ideally 1024×1024, relative to `nsh.json`.
     pub(crate) icon: Option<PathBuf>,
+    /// Read and checked by the bundler.
+    #[serde(default, rename = "tailwind")]
+    _tailwind: Option<serde::de::IgnoredAny>,
+    /// Read and checked by the bundler.
+    #[serde(default, rename = "capabilities")]
+    _capabilities: Option<serde::de::IgnoredAny>,
 }
 
 /// Options of `nsh package`.
@@ -69,9 +75,9 @@ pub(crate) fn read_config(entry: &Path) -> anyhow::Result<AppConfig> {
     Ok(config)
 }
 
-pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
-    let entry = options.entry.canonicalize()?;
-    let config = &options.config;
+/// The app's display name and id: from the config, else the entry's
+/// directory name and `com.example.<name>`.
+pub(crate) fn name_and_id(entry: &Path, config: &AppConfig) -> (String, String) {
     let name = config.name.clone().unwrap_or_else(|| {
         entry
             .parent()
@@ -87,6 +93,13 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
             .to_lowercase();
         format!("com.example.{slug}")
     });
+    (name, id)
+}
+
+pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
+    let entry = options.entry.canonicalize()?;
+    let config = &options.config;
+    let (name, id) = name_and_id(&entry, config);
     let executable: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     let executable = if executable.is_empty() {
         "App".to_owned()

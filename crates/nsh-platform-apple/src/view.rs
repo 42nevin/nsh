@@ -70,6 +70,32 @@ impl AppView {
         Inner::load(&self.inner, bundle);
     }
 
+    /// Verifies the signed package `bytes` (`.nshpkg`, written by
+    /// `nsh publish`) with `trust` and runs it, its assets extracted under
+    /// `assets_root`; accepting it refuses older builds of its app from now
+    /// on. A refused package is reported to the error handler and returned;
+    /// the running app stays.
+    pub fn load_package(
+        &self,
+        trust: &mut nsh_engine::package::TrustStore,
+        bytes: &[u8],
+        assets_root: &std::path::Path,
+    ) -> Result<(), String> {
+        match nsh_engine::load_package(trust, bytes, assets_root) {
+            Ok((bundle, assets)) => {
+                self.set_asset_base(Some(crate::AssetBase::Directory(assets)));
+                self.load(bundle);
+                Ok(())
+            }
+            Err(err) => {
+                let message = format!("refused package: {err}");
+                log::error!("{message}");
+                self.inner.report_error(&message);
+                Err(message)
+            }
+        }
+    }
+
     /// Sets where `asset:/…` files (images, fonts) are read from. A change
     /// applies from the next [`AppView::load`].
     pub fn set_asset_base(&self, base: Option<crate::AssetBase>) {

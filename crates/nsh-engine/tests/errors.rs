@@ -44,7 +44,9 @@ fn uncaught_errors_point_at_app_sources() {
     })
     .unwrap();
     let bytecode = nsh_js::compile_bytecode(&bundle.code, false).unwrap();
-    let bundle = Bundle::bytecode(bytecode).with_source_map(bundle.source_map.expect("source map"));
+    // SAFETY: compiled just now by this runtime.
+    let bundle = unsafe { Bundle::bytecode(bytecode) }
+        .with_source_map(bundle.source_map.expect("source map"));
 
     let (tx, rx) = mpsc::channel();
     let sink = Sink {

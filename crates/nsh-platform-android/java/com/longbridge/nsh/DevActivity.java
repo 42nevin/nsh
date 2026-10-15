@@ -6,10 +6,14 @@ import android.os.Bundle;
 
 /**
  * The development host: runs the app served by `nsh dev` (`nsh run --target
- * android` passes the server URL as the `url` extra).
+ * android` passes the server URL as the `url` extra). With a `package` extra
+ * (a `.nshpkg` path on the device) and `root` (a root public key, base64;
+ * comma-separated for several) it verifies and runs that signed package as an
+ * embedding app would; its trust state lives in the cache directory.
  */
 public final class DevActivity extends Activity {
     private NshView view;
+    private NshTrust trust;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -17,6 +21,16 @@ public final class DevActivity extends Activity {
         edgeToEdge(this);
         view = new NshView(this, getIntent().getBooleanExtra("trace", false));
         setContentView(view);
+        String pkg = getIntent().getStringExtra("package");
+        if (pkg != null) {
+            trust = new NshTrust(new java.io.File(getCacheDir(), "nsh-trust"));
+            String roots = getIntent().getStringExtra("root");
+            if (roots != null) {
+                for (String root : roots.split(",")) trust.addRoot(root);
+            }
+            view.loadPackage(trust, new java.io.File(pkg));
+            return;
+        }
         String url = getIntent().getStringExtra("url");
         view.connectDevServer(url != null ? url : "ws://127.0.0.1:8790/ws");
     }
@@ -31,6 +45,7 @@ public final class DevActivity extends Activity {
     @Override
     protected void onDestroy() {
         view.destroy();
+        if (trust != null) trust.close();
         super.onDestroy();
     }
 

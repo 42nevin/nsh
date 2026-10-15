@@ -9,6 +9,7 @@ mod net;
 mod package;
 mod run;
 mod runtime;
+mod sign;
 mod trace;
 
 use std::path::PathBuf;
@@ -106,6 +107,91 @@ enum Command {
         #[arg(long)]
         device: Option<String>,
     },
+    /// Create a signing key: `<name>.secret` (keep it offline for a root)
+    /// and `<name>.pub` (what apps trust, for a root).
+    Keygen {
+        /// Path and name of the key files, e.g. `keys/root`.
+        name: PathBuf,
+    },
+    /// Certify a release key with a root key, for some app ids and a time
+    /// window; packages carry the certificate.
+    Certify {
+        /// The root's secret key (`.secret`).
+        #[arg(long)]
+        root: PathBuf,
+        /// The release key's public key (`.pub`).
+        #[arg(long)]
+        key: PathBuf,
+        /// App ids it may sign for: `*`, `com.example.*` or an id (repeatable).
+        #[arg(long = "apps", required = true)]
+        apps: Vec<String>,
+        /// How long it may sign, from now.
+        #[arg(long, default_value_t = 365)]
+        days: u64,
+        /// The certificate to write.
+        #[arg(short, long)]
+        out: PathBuf,
+    },
+    /// Build an app in release mode and sign it into a package (`.nshpkg`)
+    /// for apps that embed nsh to verify and run. Metadata comes from
+    /// `nsh.json` next to the entry, overridden by the flags below.
+    Publish {
+        /// Entry module, e.g. `App.tsx`.
+        entry: PathBuf,
+        /// The release key's secret key (`.secret`).
+        #[arg(long)]
+        key: PathBuf,
+        /// Its certificate (`nsh certify`).
+        #[arg(long)]
+        cert: PathBuf,
+        /// The package to write (default: `out/<id>-<build>.nshpkg`).
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// App id, e.g. `com.example.app`.
+        #[arg(long)]
+        id: Option<String>,
+        /// Version, e.g. `1.2.0`.
+        #[arg(long = "app-version")]
+        version: Option<String>,
+        /// Build number: must grow with every release.
+        #[arg(long)]
+        build: Option<u32>,
+    },
+    /// Verify a package as an app trusting the given roots would (without
+    /// roots: only its signature).
+    Verify {
+        /// The package (`.nshpkg`).
+        package: PathBuf,
+        /// A trusted root's public key (`.pub`; repeatable).
+        #[arg(long)]
+        root: Vec<PathBuf>,
+        /// A revocation list to apply.
+        #[arg(long)]
+        revocations: Option<PathBuf>,
+    },
+    /// Sign a revocation list: release keys and packages that must not load
+    /// any more.
+    Revoke {
+        /// The root's secret key (`.secret`).
+        #[arg(long)]
+        root: PathBuf,
+        /// Keep the entries of this list (the last one published).
+        #[arg(long)]
+        extend: Option<PathBuf>,
+        /// The list's number: higher than any published before (default
+        /// with `--extend`: that list's plus one).
+        #[arg(long)]
+        sequence: Option<u64>,
+        /// A release key id to revoke (repeatable).
+        #[arg(long = "key")]
+        keys: Vec<String>,
+        /// A package SHA-256 to revoke (repeatable; `nsh verify` prints it).
+        #[arg(long = "package")]
+        packages: Vec<String>,
+        /// The list to write.
+        #[arg(short, long)]
+        out: PathBuf,
+    },
 }
 
 /// Arguments of `nsh package`.
@@ -162,7 +248,13 @@ fn main() -> anyhow::Result<()> {
             init::write_types_for(entry)
         }
         Command::Package(args) => init::write_types_for(&args.entry),
-        Command::Init { .. } | Command::Trace { .. } => {}
+        Command::Publish { entry, .. } => init::write_types_for(entry),
+        Command::Init { .. }
+        | Command::Trace { .. }
+        | Command::Keygen { .. }
+        | Command::Certify { .. }
+        | Command::Verify { .. }
+        | Command::Revoke { .. } => {}
     }
     match command {
         Command::Init { dir, name } => init::init(&dir, name),
@@ -236,5 +328,47 @@ fn main() -> anyhow::Result<()> {
             target,
             device,
         } => run::run(&entry, port, release, trace, target, device.as_deref()),
+        Command::Keygen { name } => sign::keygen(&name),
+        Command::Certify {
+            root,
+            key,
+            apps,
+            days,
+            out,
+        } => sign::certify_key(&root, &key, &apps, days, &out),
+        Command::Publish {
+            entry,
+            key,
+            cert,
+            out,
+            id,
+            version,
+            build,
+        } => {
+            let mut config = package::read_config(&entry)?;
+            config.id = id.or(config.id);
+            config.version = version.or(config.version);
+            config.build = build.or(config.build);
+            sign::publish(sign::PublishOptions {
+                entry: &entry,
+                key: &key,
+                cert: &cert,
+                out,
+                config,
+            })
+        }
+        Command::Verify {
+            package,
+            root,
+            revocations,
+        } => sign::verify(&package, &root, revocations.as_deref()),
+        Command::Revoke {
+            root,
+            extend,
+            sequence,
+            keys,
+            packages,
+            out,
+        } => sign::revoke_list(&root, extend.as_deref(), sequence, &keys, &packages, &out),
     }
 }

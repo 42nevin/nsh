@@ -74,6 +74,18 @@ final class Native {
 
     static native boolean connectDevServer(long handle, String url);
 
+    /** A trust store kept in {@code dir}; 0 if its state cannot be read. */
+    static native long trustCreate(String dir);
+
+    static native boolean trustAddRoot(long trust, String publicKey);
+
+    static native boolean trustUpdateRevocations(long trust, String json);
+
+    static native void trustDestroy(long trust);
+
+    /** Verifies and runs a signed package; false if refused (reported to the view). */
+    static native boolean loadPackage(long handle, long trust, byte[] bytes);
+
     /** Root size in dp. */
     static native void resize(long handle, float width, float height);
 

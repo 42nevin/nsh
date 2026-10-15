@@ -1,0 +1,261 @@
+//! Signed packages: `nsh keygen`, `nsh certify`, `nsh publish`,
+//! `nsh verify` and `nsh revoke` (see `nsh_package` for the trust model).
+
+use std::{
+    fs,
+    io::Write as _,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context as _, bail};
+use nsh_package::{
+    App, Certificate, Contents, PublicKey, Revocations, SecretKey, TrustStore, build, certify,
+    revoke, verify_signature,
+};
+
+fn read_secret(path: &Path) -> anyhow::Result<SecretKey> {
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    SecretKey::from_base64(&text).with_context(|| format!("{}", path.display()))
+}
+
+fn read_public(path: &Path) -> anyhow::Result<PublicKey> {
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    PublicKey::from_base64(&text).with_context(|| format!("{}", path.display()))
+}
+
+fn write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(path, bytes).with_context(|| format!("write {}", path.display()))
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// `nsh keygen <name>`: `<name>.secret` (readable by the owner only) and
+/// `<name>.pub`. Never overwrites a key.
+pub(crate) fn keygen(name: &Path) -> anyhow::Result<()> {
+    let secret_path = name.with_extension("secret");
+    let public_path = name.with_extension("pub");
+    for path in [&secret_path, &public_path] {
+        if path.exists() {
+            bail!("{} exists; keys are never overwritten", path.display());
+        }
+    }
+    if let Some(dir) = name.parent().filter(|d| !d.as_os_str().is_empty()) {
+        fs::create_dir_all(dir)?;
+    }
+    let key = SecretKey::generate()?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options
+        .open(&secret_path)
+        .with_context(|| format!("create {}", secret_path.display()))?;
+    writeln!(file, "{}", key.to_base64())?;
+    write(
+        &public_path,
+        format!("{}\n", key.public().to_base64()).as_bytes(),
+    )?;
+    println!(
+        "key {}: {} (keep it secret), {}",
+        key.public().id(),
+        secret_path.display(),
+        public_path.display()
+    );
+    Ok(())
+}
+
+/// `nsh certify`: the root certifies a release key for app ids, for `days`
+/// from now.
+pub(crate) fn certify_key(
+    root: &Path,
+    key: &Path,
+    apps: &[String],
+    days: u64,
+    out: &Path,
+) -> anyhow::Result<()> {
+    if apps.is_empty() {
+        bail!("name the app ids the key may sign for (--apps com.example.*)");
+    }
+    let root = read_secret(root)?;
+    let key = read_public(key)?;
+    let from = now();
+    let cert = certify(&root, &key, apps, from, from + days * 86_400);
+    write(out, cert.to_json().as_bytes())?;
+    println!(
+        "{}: key {} certified by root {} for {} until {} days from now",
+        out.display(),
+        key.id(),
+        root.public().id(),
+        apps.join(", "),
+        days
+    );
+    Ok(())
+}
+
+/// Options of `nsh publish`.
+pub(crate) struct PublishOptions<'a> {
+    pub(crate) entry: &'a Path,
+    pub(crate) key: &'a Path,
+    pub(crate) cert: &'a Path,
+    pub(crate) out: Option<PathBuf>,
+    pub(crate) config: crate::package::AppConfig,
+}
+
+/// `nsh publish`: a release build of the app, signed into a `.nshpkg`.
+pub(crate) fn publish(options: PublishOptions<'_>) -> anyhow::Result<()> {
+    let entry = options.entry.canonicalize()?;
+    let config = &options.config;
+    let (name, id) = crate::package::name_and_id(&entry, config);
+    let Some(build_number) = config.build else {
+        bail!(
+            "a package needs a build number (nsh.json `build` or --build): older builds are refused once a newer one was installed"
+        );
+    };
+    let key = read_secret(options.key)?;
+    let cert_path = options.cert;
+    let cert = Certificate::from_json(
+        &fs::read_to_string(cert_path).with_context(|| format!("read {}", cert_path.display()))?,
+    )?;
+
+    let built =
+        crate::build::compile(&entry, true).map_err(|e| anyhow::anyhow!("{}", e.colored))?;
+    let root = entry.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut assets = Vec::with_capacity(built.assets.len());
+    for asset in &built.assets {
+        let bytes =
+            fs::read(root.join(asset)).with_context(|| format!("read {}", asset.display()))?;
+        // `asset:/img/a.png`: always `/`-separated.
+        let path = asset
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        assets.push((path, bytes));
+    }
+    let contents = Contents {
+        app: App {
+            id: id.clone(),
+            name,
+            version: config.version.clone().unwrap_or_else(|| "1.0.0".to_owned()),
+            build: build_number.into(),
+        },
+        capabilities: built.capabilities.as_ref().map(|c| c.to_json()),
+        source: built.code,
+        bytecode: Some((built.bytecode, nsh_js::BYTECODE_VERSION.to_owned())),
+        source_map: built.source_map,
+        assets,
+        min_runtime: None,
+    };
+    let bytes = build(&contents, &key, &cert)?;
+    let out = options
+        .out
+        .unwrap_or_else(|| PathBuf::from("out").join(format!("{id}-{build_number}.nshpkg")));
+    write(&out, &bytes)?;
+    println!(
+        "{}: {} {} (build {}), {} assets, {} KB, signed by {}",
+        out.display(),
+        id,
+        contents.app.version,
+        build_number,
+        contents.assets.len(),
+        bytes.len().div_ceil(1024),
+        key.public().id()
+    );
+    Ok(())
+}
+
+/// `nsh verify`: checks a package as an app trusting `roots` (and knowing
+/// `revocations`) would; without roots, only its signature.
+pub(crate) fn verify(
+    package: &Path,
+    roots: &[PathBuf],
+    revocations: Option<&Path>,
+) -> anyhow::Result<()> {
+    let bytes = fs::read(package).with_context(|| format!("read {}", package.display()))?;
+    if roots.is_empty() {
+        let header = verify_signature(&bytes)?;
+        let app = header.app();
+        println!(
+            "signature valid: {} {} (build {}); the certificate was not checked (pass --root)",
+            app.id, app.version, app.build
+        );
+        return Ok(());
+    }
+    let mut store = TrustStore::new();
+    for root in roots {
+        store.add_root(read_public(root)?);
+    }
+    if let Some(path) = revocations {
+        let list = Revocations::from_json(
+            &fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?,
+        )?;
+        store.update_revocations(list)?;
+    }
+    let verified = store.verify(&bytes, nsh_js::BYTECODE_VERSION)?;
+    println!(
+        "valid: {} {} (build {}), release key {}, sha256 {}, {} assets, bytecode {}",
+        verified.app.id,
+        verified.app.version,
+        verified.app.build,
+        verified.key_id,
+        verified.sha256,
+        verified.assets.len(),
+        if verified.bytecode().is_some() {
+            "for this runtime"
+        } else {
+            "for another runtime (the source runs)"
+        }
+    );
+    Ok(())
+}
+
+/// `nsh revoke`: a revocation list signed by the root. With `extend`, it
+/// keeps that list's entries and its sequence number goes up by one unless
+/// given.
+pub(crate) fn revoke_list(
+    root: &Path,
+    extend: Option<&Path>,
+    sequence: Option<u64>,
+    keys: &[String],
+    packages: &[String],
+    out: &Path,
+) -> anyhow::Result<()> {
+    let root = read_secret(root)?;
+    let (mut all_keys, mut all_packages, previous) = match extend {
+        Some(path) => {
+            let list = Revocations::from_json(
+                &fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?,
+            )?;
+            let (sequence, keys, packages) = list.contents()?;
+            (keys, packages, Some(sequence))
+        }
+        None => (Vec::new(), Vec::new(), None),
+    };
+    let sequence = match (sequence, previous) {
+        (Some(s), Some(p)) if s <= p => bail!("--sequence {s} must exceed the extended list's {p}"),
+        (Some(s), _) => s,
+        (None, Some(p)) => p + 1,
+        (None, None) => bail!(
+            "give --sequence (higher than any list published before) or --extend the last list"
+        ),
+    };
+    all_keys.extend(keys.iter().cloned());
+    all_packages.extend(packages.iter().cloned());
+    let list = revoke(&root, sequence, &all_keys, &all_packages);
+    write(out, list.to_json().as_bytes())?;
+    let (_, keys, packages) = list.contents()?;
+    println!(
+        "{}: list {sequence}, {} release keys and {} packages revoked",
+        out.display(),
+        keys.len(),
+        packages.len()
+    );
+    Ok(())
+}

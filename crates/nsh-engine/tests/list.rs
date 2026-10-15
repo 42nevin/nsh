@@ -73,7 +73,8 @@ fn list_scrolls_with_recycled_cells() {
 
     let (tx, rx) = mpsc::channel();
     let config = EngineConfig {
-        bundle: Bundle::bytecode(bytecode),
+        // SAFETY: compiled just now by this runtime.
+        bundle: unsafe { Bundle::bytecode(bytecode) },
         viewport: Size::new(320.0, 500.0),
         trace: false,
         network: None,

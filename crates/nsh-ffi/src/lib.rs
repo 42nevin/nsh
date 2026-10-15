@@ -10,10 +10,13 @@
 
 use std::{
     ffi::{CStr, c_char, c_void},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
-use nsh_engine::Bundle;
+use nsh_engine::{
+    Bundle,
+    package::{PublicKey, Revocations, TrustStore},
+};
 use nsh_platform_apple::{AppView, AssetBase, SurfaceOptions};
 use objc2::MainThreadMarker;
 use objc2_core_foundation::CGRect;
@@ -78,9 +81,12 @@ pub unsafe extern "C" fn nsh_app_view(app: *mut NshApp) -> *mut UIView {
     std::ptr::from_ref(app.view.view()).cast_mut()
 }
 
-/// Runs a bundle written by `nsh build` (`bundle.qbc`, or `bundle.js`):
-/// assets are read from the `assets` directory next to it. Replaces the
-/// running app. Returns false (and logs why) if the file cannot be read.
+/// Runs a bundle written by `nsh build`: assets are read from the `assets`
+/// directory next to it. Replaces the running app. Bytecode (`bundle.qbc`)
+/// only loads from inside the app's own bundle; elsewhere (downloads,
+/// documents) only JS source (`bundle.js`) does — signed bytecode comes in
+/// packages ([`nsh_app_load_package`]). Returns false (and logs why) if the
+/// file cannot be read or is refused.
 ///
 /// # Safety
 ///
@@ -95,7 +101,13 @@ pub unsafe extern "C" fn nsh_app_load_bundle(app: *mut NshApp, path: *const c_ch
         return false;
     };
     let path = Path::new(path);
-    match Bundle::read(path) {
+    let read = if nsh_platform_apple::in_app_bundle(path) {
+        // SAFETY: a resource of the (system-verified, read-only) app bundle.
+        unsafe { Bundle::read_trusted(path) }
+    } else {
+        Bundle::read(path)
+    };
+    match read {
         Ok(bundle) => {
             app.view.set_asset_base(
                 path.parent()
@@ -109,6 +121,157 @@ pub unsafe extern "C" fn nsh_app_load_bundle(app: *mut NshApp, path: *const c_ch
             false
         }
     }
+}
+
+/// The keys, revocations and accepted builds that signed packages are
+/// verified against (opaque to C).
+pub struct NshTrust {
+    store: TrustStore,
+    /// Where packages' assets are extracted.
+    packages: PathBuf,
+}
+
+/// Creates a trust store kept in `state_dir` (created if needed): the
+/// newest revocation list and the highest build accepted per app persist
+/// there, and packages' assets are extracted under it. Trusts no key until
+/// [`nsh_trust_add_root`]. Returns `NULL` (and logs why) if its state cannot
+/// be read. Free with [`nsh_trust_destroy`].
+///
+/// # Safety
+///
+/// `state_dir` must be a NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_trust_create(state_dir: *const c_char) -> *mut NshTrust {
+    // SAFETY: guaranteed by the caller.
+    let Ok(dir) = unsafe { CStr::from_ptr(state_dir) }.to_str() else {
+        log::error!("trust state directory is not UTF-8");
+        return std::ptr::null_mut();
+    };
+    let dir = PathBuf::from(dir);
+    match TrustStore::open(&dir) {
+        Ok(store) => Box::into_raw(Box::new(NshTrust {
+            store,
+            packages: dir.join("packages"),
+        })),
+        Err(err) => {
+            log::error!("cannot open the trust store in {}: {err}", dir.display());
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Trusts a root public key (base64, as `nsh keygen` writes it in
+/// `<name>.pub`): packages whose release key it certified load. Returns
+/// false for an invalid key.
+///
+/// # Safety
+///
+/// `trust` must come from [`nsh_trust_create`]; `public_key` must be a
+/// NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_trust_add_root(
+    trust: *mut NshTrust,
+    public_key: *const c_char,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    let (trust, key) = unsafe { (&mut *trust, CStr::from_ptr(public_key)) };
+    match key
+        .to_str()
+        .map_err(|e| e.to_string())
+        .and_then(|k| PublicKey::from_base64(k).map_err(|e| e.to_string()))
+    {
+        Ok(key) => {
+            trust.store.add_root(key);
+            true
+        }
+        Err(err) => {
+            log::error!("invalid root key: {err}");
+            false
+        }
+    }
+}
+
+/// Applies a revocation list (the JSON `nsh revoke` writes) signed by a
+/// trusted root and newer than the one the store has. Returns false (and
+/// logs why) if it is invalid, untrusted or not newer.
+///
+/// # Safety
+///
+/// `trust` must come from [`nsh_trust_create`]; `json` must be a
+/// NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_trust_update_revocations(
+    trust: *mut NshTrust,
+    json: *const c_char,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    let (trust, json) = unsafe { (&mut *trust, CStr::from_ptr(json)) };
+    let result = json
+        .to_str()
+        .map_err(|e| e.to_string())
+        .and_then(|json| Revocations::from_json(json).map_err(|e| e.to_string()))
+        .and_then(|list| {
+            trust
+                .store
+                .update_revocations(list)
+                .map_err(|e| e.to_string())
+        });
+    match result {
+        Ok(_) => true,
+        Err(err) => {
+            log::error!("revocation list refused: {err}");
+            false
+        }
+    }
+}
+
+/// Frees `trust`.
+///
+/// # Safety
+///
+/// `trust` must come from [`nsh_trust_create`] and not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_trust_destroy(trust: *mut NshTrust) {
+    if !trust.is_null() {
+        // SAFETY: guaranteed by the caller.
+        drop(unsafe { Box::from_raw(trust) });
+    }
+}
+
+/// Verifies the signed package at `path` (`.nshpkg`, written by
+/// `nsh publish`) with `trust` and runs it, replacing the running app: its
+/// release key must be certified by a trusted root for the app's id, not
+/// revoked, and its build not older than one accepted before. Its bytecode
+/// is used when it was compiled for this runtime. Returns false if it is
+/// refused (the reason goes to the log and the error handler; the running
+/// app stays).
+///
+/// # Safety
+///
+/// `app` must come from [`nsh_app_create`], `trust` from
+/// [`nsh_trust_create`]; `path` must be a NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_app_load_package(
+    app: *mut NshApp,
+    trust: *mut NshTrust,
+    path: *const c_char,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    let (app, trust, path) = unsafe { (&*app, &mut *trust, CStr::from_ptr(path)) };
+    let Ok(path) = path.to_str() else {
+        log::error!("package path is not UTF-8");
+        return false;
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::error!("cannot read package {path}: {err}");
+            return false;
+        }
+    };
+    app.view
+        .load_package(&mut trust.store, &bytes, &trust.packages)
+        .is_ok()
 }
 
 /// What the apps `app` loads are granted at most: JSON in the form of

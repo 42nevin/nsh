@@ -11,6 +11,7 @@ crates/
   nsh-anim/            Native animation graph (pure Rust): value / interpolate / math nodes, timing / spring / decay drivers
   nsh-js/              QuickJS host: console / timers / op bridge, op buffer decoding, bytecode compilation and loading
   nsh-engine/          Engine thread: drives nsh-js + nsh-core and hands one MountBatch per frame to the platform
+  nsh-package/         Signed packages (`.nshpkg`): Ed25519 keys, release-key certificates, revocation lists, the trust store
   nsh-bundler/         Bundler: rolldown + Oxc (TS stripping) + Solid universal JSX compiler + embedded JS packages + source maps;
                        the `nsh:tailwind-theme` module (nsh.json `tailwind`) and the unknown-class check (`classes.rs`);
                        development bundles with hot module replacement (`hot.rs`); the TypeScript declarations of `.nsh/types` (`types.rs`)
@@ -22,7 +23,7 @@ crates/
   nsh-host/            Development host app (Catalyst / iOS simulator); connects to a dev server or runs a local bundle
   nsh-app/             Release runner: the executable of iOS apps built by `nsh package`
   nsh-ffi/             C ABI (`include/nsh.h`, `libnsh.a`) for embedding nsh in existing iOS apps; shipped as an XCFramework
-  nsh-cli/             The `nsh` command line: init / build / trace / dev / run / package
+  nsh-cli/             The `nsh` command line: init / build / trace / dev / run / package; keygen / certify / publish / verify / revoke
   xtask/               Maintainer tasks: `cargo xtask android` (Android runtime), `cargo xtask dist` (the distribution)
 js/runtime/*.ts       The JS runtime, one file per module apps import (see **JS modules**): `index.ts` is `nsh`, `list.ts` is
                       `nsh/list`, ...; `_core.ts` is internal (the Solid universal renderer, the op buffer, the environment,
@@ -34,7 +35,7 @@ js/vendor/solid-js/   Embedded solid-js (version in VERSION) and its type declar
 examples/             Example apps (gallery: a demo index, one module per demo; counter) and embedding samples (embed-ios, embed-android)
 ```
 
-Dependency direction: `nsh-core` ← `nsh-js` ← `nsh-engine` ← `nsh-platform-*` ← `nsh-host` / `nsh-app` / `nsh-ffi`; `nsh-cli` depends on `nsh-bundler`, `nsh-js` and `nsh-engine`. `nsh-core` must not depend on any platform or JS crate.
+Dependency direction: `nsh-core` ← `nsh-js` ← `nsh-engine` (also ← `nsh-package`) ← `nsh-platform-*` ← `nsh-host` / `nsh-app` / `nsh-ffi`; `nsh-cli` depends on `nsh-bundler`, `nsh-js` and `nsh-engine`. `nsh-core` must not depend on any platform or JS crate.
 
 ## Data flow and threads
 
@@ -85,6 +86,11 @@ cargo xtask android [--release] [--dev]                                         
 cargo xtask dist                                                                   # the distribution in dist/nsh
 ./target/debug/nsh dev examples/counter/App.tsx                                    # dev server only (for simulators / devices); prints local and LAN URLs
 ./target/debug/nsh build examples/counter/App.tsx --release                        # writes bundle.js / bundle.qbc
+./target/debug/nsh keygen keys/root && ./target/debug/nsh keygen keys/release      # signing keys (.secret / .pub)
+./target/debug/nsh certify --root keys/root.secret --key keys/release.pub --apps 'com.example.*' -o keys/release.cert
+./target/debug/nsh publish examples/counter/App.tsx --key keys/release.secret --cert keys/release.cert --build 2
+./target/debug/nsh verify out/com.example.counter-2.nshpkg --root keys/root.pub     # as a device would check it
+./target/debug/nsh revoke --root keys/root.secret --sequence 1 --package <sha256> -o revocations.json
 
 cargo test --workspace
 cargo test --release -p nsh-engine --test list_bench -- --ignored --nocapture   # gallery scroll benchmark (JS + core)
@@ -411,6 +417,42 @@ trusted as the app's own code: every limit and check is enforced in Rust, never 
   `asset:` URIs are always allowed. Host checks take the host after the last `@` (`https://ok.com@evil.io` is evil.io).
 - **Embedding limits**: `nsh_app_set_limits` / `NshView.setLimits` (heap MB, stack KB, load / call budgets ms, node
   quota; 0 keeps a default), from the next load.
+
+## Signed packages
+
+For code an app downloads (first-party updates, third-party mini apps): `nsh_package` and `nsh publish`.
+
+- **Bytecode is trusted input.** QuickJS does not validate bytecode; loading crafted bytecode corrupts memory. So
+  `Bundle::bytecode` / `Bundle::read_trusted` are `unsafe` and only called for: the app's own signed resources
+  (`nsh-app`, `AppActivity`, `NshView.loadAssetBundle`, `nsh_app_load_bundle` for a path inside the main bundle —
+  `nsh_platform_apple::in_app_bundle`), bytecode compiled in-process, the dev server the developer connected to (its
+  handshake negotiates the version), and verified packages (`Bundle::from_package`). `Bundle::read` and
+  `NshView.loadBundleFile` refuse `.qbc` files; downloaded code is either JS source or a signed package.
+- **Keys, two levels**: a root key (offline; apps trust its public key, several may be trusted) certifies release keys
+  (`nsh certify`: app id patterns `*` / `com.example.*` / an id, and a validity window). Packages are signed by a
+  release key and carry its certificate, so release keys rotate without app updates. Key ids are derived (first 8
+  bytes of the SHA-256 of the public key). Every signature is over `context \0 sha256(message)` with a context per kind
+  (package, certificate, revocation list), so one can never pass for another.
+- **Package** (`.nshpkg`, format in `nsh-package/src/lib.rs`): a JSON header (app id / name / version / build,
+  declared capabilities, bytecode version, minimum runtime, signing time, the certificate, a file table with SHA-256s)
+  then the files (source, bytecode, source map, assets), then the release key's signature over everything before it.
+  The source is always included; the bytecode is only used when its version is the runtime's `BYTECODE_VERSION`.
+  `nsh publish` refuses to sign what a device would refuse (the certificate must cover the app and the time).
+- **Verification** (`TrustStore::verify`): the certificate's root signature, the release key not revoked, the package
+  signature, the app id and the signing time against the certificate, the minimum runtime, the file table tiling the
+  data exactly, each file's hash, the package hash not revoked, and the build not older than the highest accepted for
+  that app (`accept` records it; rollback protection). Revocation lists (`nsh revoke`, signed by a root) only replace
+  an older list (sequence numbers), so an old list cannot be replayed. The state (newest list, accepted builds)
+  persists in the store's directory (`nsh-trust.json`, written atomically).
+- `nsh_engine::load_package` verifies, extracts the assets once per package to `<root>/<app id>/<sha256>/assets`,
+  accepts the build and returns the bundle (with the package's declared capabilities) and the asset directory.
+- **Embedding**: iOS `nsh_trust_create(state_dir)` / `nsh_trust_add_root` / `nsh_trust_update_revocations` /
+  `nsh_app_load_package(app, trust, path)` (`AppView::load_package`); Android `NshTrust(stateDir)` / `addRoot` /
+  `updateRevocations` / `NshView.loadPackage(trust, file)`. A refused package goes to the error handler and the
+  running app stays. To try a package on a simulator / emulator: `nsh-host --package <file> --root <root.pub>`, or
+  `DevActivity` with the `package` (path on the device) and `root` (base64) extras; their trust state persists in
+  the temporary / cache directory, so older builds are refused there too.
+- Not done yet: delivering packages (an update server, OTA); the app decides where packages come from.
 
 ## Packaging and embedding
 

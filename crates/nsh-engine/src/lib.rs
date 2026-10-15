@@ -28,6 +28,8 @@ pub use nsh_js::{
     BYTECODE_VERSION, ColorScheme, Environment, HttpRequest, HttpResponse, Idiom, Insets, Limits,
 };
 use nsh_js::{Host, HostOptions, JsError, NetworkQueue, RequestId};
+/// Signed packages, release-key certificates, revocations and trust stores.
+pub use nsh_package as package;
 use rustc_hash::FxHashMap;
 
 use crate::symbolicate::Symbolicator;
@@ -109,7 +111,15 @@ pub enum BundleCode {
 
 impl Bundle {
     /// A bytecode bundle.
-    pub fn bytecode(bytes: Vec<u8>) -> Self {
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must be bytecode from `nsh_js::compile_bytecode` for this
+    /// runtime's `BYTECODE_VERSION`, from a trusted source: QuickJS does not
+    /// validate bytecode, and loading crafted bytecode corrupts memory. Trusted
+    /// are the app's own signed resources, a development server the developer
+    /// pointed the host at, and verified packages ([`Bundle::from_package`]).
+    pub unsafe fn bytecode(bytes: Vec<u8>) -> Self {
         Self {
             code: BundleCode::Bytecode(bytes),
             source_map: None,
@@ -138,13 +148,32 @@ impl Bundle {
         self
     }
 
-    /// Reads a bundle written by `nsh build`: `bundle.qbc` (bytecode) or any
-    /// other file as JS source, plus `bundle.js.map` and the app's
-    /// `capabilities.json` next to it if present.
+    /// Reads a JS source bundle written by `nsh build` (`bundle.js`), plus
+    /// `bundle.js.map` and the app's `capabilities.json` next to it if
+    /// present. Bytecode (`bundle.qbc`) is refused: files can be replaced, and
+    /// only [`Bundle::read_trusted`] (the app's own resources) or a verified
+    /// package may load bytecode.
     pub fn read(path: &std::path::Path) -> io::Result<Bundle> {
+        if path.extension().is_some_and(|e| e == "qbc") {
+            return Err(io::Error::other(
+                "bytecode only loads from the app's own resources or a signed package (.nshpkg); load bundle.js",
+            ));
+        }
+        // SAFETY: not bytecode.
+        unsafe { Self::read_trusted(path) }
+    }
+
+    /// Like [`Bundle::read`], also reading `bundle.qbc` as bytecode.
+    ///
+    /// # Safety
+    ///
+    /// A `.qbc` file must be trusted as [`Bundle::bytecode`] requires (e.g.
+    /// inside the app's own signed bundle).
+    pub unsafe fn read_trusted(path: &std::path::Path) -> io::Result<Bundle> {
         let bytes = std::fs::read(path)?;
         let bundle = if path.extension().is_some_and(|e| e == "qbc") {
-            Bundle::bytecode(bytes)
+            // SAFETY: guaranteed by the caller.
+            unsafe { Bundle::bytecode(bytes) }
         } else {
             Bundle::source(String::from_utf8(bytes).map_err(io::Error::other)?)
         };
@@ -157,6 +186,62 @@ impl Bundle {
         }
         Ok(bundle)
     }
+}
+
+impl Bundle {
+    /// The bundle of a verified package: its bytecode when it was compiled
+    /// for this runtime (else its source), its source map and its declared
+    /// capabilities.
+    pub fn from_package(package: &nsh_package::VerifiedPackage) -> Result<Bundle, String> {
+        let bundle = match package.bytecode() {
+            // SAFETY: verified: signed by a certified release key, hashed,
+            // and compiled for this runtime.
+            Some(bytecode) => unsafe { Bundle::bytecode(bytecode.to_vec()) },
+            None => Bundle::source(package.source.clone()),
+        };
+        let mut bundle = match &package.source_map {
+            Some(map) => bundle.with_source_map(map.clone()),
+            None => bundle,
+        };
+        bundle.policy.declared = package
+            .capabilities
+            .as_ref()
+            .map(Capabilities::from_json)
+            .transpose()?;
+        Ok(bundle)
+    }
+}
+
+/// Verifies the package `bytes` with `trust`, writes its assets under
+/// `assets_root` (`<root>/<app id>/<package hash>/`, once per package) and
+/// records its build (older builds of the app are refused from now on).
+/// Returns the bundle and its asset directory.
+pub fn load_package(
+    trust: &mut nsh_package::TrustStore,
+    bytes: &[u8],
+    assets_root: &std::path::Path,
+) -> Result<(Bundle, std::path::PathBuf), String> {
+    let package = trust
+        .verify(bytes, BYTECODE_VERSION)
+        .map_err(|e| e.to_string())?;
+    let bundle = Bundle::from_package(&package)?;
+    let dir = assets_root.join(&package.app.id).join(&package.sha256);
+    let done = dir.join(".complete");
+    if !done.exists() {
+        let assets = dir.join("assets");
+        for (path, data) in &package.assets {
+            // Paths were checked (relative, no `..`) when the package was read.
+            let dest = assets.join(path);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&dest, data).map_err(|e| format!("{}: {e}", dest.display()))?;
+        }
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::write(&done, b"").map_err(|e| e.to_string())?;
+    }
+    trust.accept(&package).map_err(|e| e.to_string())?;
+    Ok((bundle, dir.join("assets")))
 }
 
 /// Parses capabilities in their JSON form (`capabilities.json`, the dev

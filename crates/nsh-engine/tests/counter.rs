@@ -25,7 +25,8 @@ fn start() -> (Engine, Receiver<MountBatch>) {
     let bytecode = nsh_js::compile_bytecode(&bundle.code, false).unwrap();
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
-        bundle: Bundle::bytecode(bytecode),
+        // SAFETY: compiled just now by this runtime.
+        bundle: unsafe { Bundle::bytecode(bytecode) },
         viewport: Size::new(390.0, 844.0),
         trace: false,
         network: None,

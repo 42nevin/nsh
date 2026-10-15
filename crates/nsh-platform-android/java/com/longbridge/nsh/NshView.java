@@ -29,7 +29,8 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * A view running a nsh app. Add it anywhere in a view hierarchy, then load
- * a bundle ({@link #loadBundleFile}, {@link #loadAssetBundle}) or, in
+ * a bundle ({@link #loadBundleFile}, {@link #loadAssetBundle}), a signed
+ * package ({@link #loadPackage}) or, in
  * development builds, connect to a `nsh dev` server. Call {@link #destroy}
  * when done.
  */
@@ -112,8 +113,17 @@ public class NshView extends FrameLayout {
         Native.setLimits(handle, memoryMb, stackKb, loadMs, callMs, maxNodes);
     }
 
-    /** Runs a bundle written by `nsh build` (`bundle.qbc` or `bundle.js`); assets come from `assets/` next to it. */
+    /**
+     * Runs a JS bundle written by `nsh build` (`bundle.js`); assets come from
+     * `assets/` next to it. Bytecode only loads from the APK's own assets
+     * ({@link #loadAssetBundle}) or a signed package ({@link #loadPackage}):
+     * files can be replaced, and QuickJS does not validate bytecode.
+     */
     public boolean loadBundleFile(File file) {
+        if (file.getName().endsWith(".qbc")) {
+            reportError("bytecode only loads from the APK's assets or a signed package (.nshpkg); load bundle.js");
+            return false;
+        }
         try {
             byte[] code = Net.readAll(new FileInputStream(file));
             String map = null;
@@ -125,7 +135,7 @@ public class NshView extends FrameLayout {
             assetHttp = null;
             assetApk = null;
             assetDir = new File(file.getParentFile(), "assets");
-            Native.load(handle, code, file.getName().endsWith(".qbc"), map, capabilities);
+            Native.load(handle, code, false, map, capabilities);
             return true;
         } catch (Exception e) {
             reportError("cannot read bundle " + file + ": " + e);
@@ -153,6 +163,32 @@ public class NshView extends FrameLayout {
             reportError("cannot read the app bundle: " + e);
             return false;
         }
+    }
+
+    /**
+     * Verifies the signed package {@code file} (`.nshpkg`, written by
+     * `nsh publish`) with {@code trust} and runs it: its release key must be
+     * certified by a trusted root for the app's id, not revoked, and its
+     * build not older than one accepted before (accepting it refuses older
+     * builds from now on). Returns false if it is refused: the reason goes to
+     * the error listener and the running app stays.
+     */
+    public boolean loadPackage(NshTrust trust, File file) {
+        byte[] bytes;
+        try {
+            bytes = Net.readAll(new FileInputStream(file));
+        } catch (Exception e) {
+            reportError("cannot read package " + file + ": " + e);
+            return false;
+        }
+        return Native.loadPackage(handle, trust.handle(), bytes);
+    }
+
+    /** Called by {@code Native.loadPackage} before the package starts. */
+    void usePackageAssets(String dir) {
+        assetHttp = null;
+        assetApk = null;
+        assetDir = new File(dir);
     }
 
     /** Development: loads from a `nsh dev` server and reloads on every change. */

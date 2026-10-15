@@ -43,7 +43,7 @@ mod zoom;
 pub use nsh_engine::Bundle;
 
 pub use crate::{
-    app::{AppOptions, AppSource, run_app},
+    app::{AppOptions, AppSource, in_app_bundle, run_app},
     image::AssetBase,
     surface::{Surface, SurfaceOptions},
     system::{preferred_status_bar_style, prefers_status_bar_hidden, status_bar_animation},

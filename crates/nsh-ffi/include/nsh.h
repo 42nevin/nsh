@@ -28,10 +28,45 @@ NshApp *nsh_app_create(CGRect frame, bool trace);
 /// The view to add to your hierarchy. Owned by `app`.
 UIView *nsh_app_view(NshApp *app);
 
-/// Runs a bundle written by `nsh build` (`bundle.qbc`, or `bundle.js`);
-/// assets are read from the `assets` directory next to it. Replaces the
-/// running app. Returns false (and logs why) if the file cannot be read.
+/// Runs a bundle written by `nsh build`; assets are read from the `assets`
+/// directory next to it. Replaces the running app. Bytecode (`bundle.qbc`)
+/// only loads from inside the app's own bundle; elsewhere only JS source
+/// (`bundle.js`) does: signed bytecode comes in packages
+/// (`nsh_app_load_package`). Returns false (and logs why) if the file cannot
+/// be read or is refused.
 bool nsh_app_load_bundle(NshApp *app, const char *path);
+
+/// The keys, revocations and accepted builds that signed packages are
+/// verified against.
+typedef struct NshTrust NshTrust;
+
+/// Creates a trust store kept in `state_dir` (e.g. Application Support;
+/// created if needed): the newest revocation list and the highest build
+/// accepted per app persist there, and packages' assets are extracted under
+/// it. Trusts no key until `nsh_trust_add_root`. Returns NULL (and logs why)
+/// if its state cannot be read. Free with `nsh_trust_destroy`.
+NshTrust *_Nullable nsh_trust_create(const char *state_dir);
+
+/// Trusts a root public key (base64, as `nsh keygen` writes it in
+/// `<name>.pub`): packages whose release key it certified load. Returns
+/// false for an invalid key.
+bool nsh_trust_add_root(NshTrust *trust, const char *public_key);
+
+/// Applies a revocation list (the JSON `nsh revoke` writes) signed by a
+/// trusted root and newer than the one the store has. Returns false (and
+/// logs why) if it is invalid, untrusted or not newer.
+bool nsh_trust_update_revocations(NshTrust *trust, const char *json);
+
+/// Frees `trust`.
+void nsh_trust_destroy(NshTrust *_Nullable trust);
+
+/// Verifies the signed package at `path` (`.nshpkg`, written by
+/// `nsh publish`) with `trust` and runs it, replacing the running app: its
+/// release key must be certified by a trusted root for the app's id, not
+/// revoked, and its build not older than one accepted before (accepting it
+/// refuses older builds from now on). Returns false if it is refused (the
+/// reason goes to the log and the error handler; the running app stays).
+bool nsh_app_load_package(NshApp *app, NshTrust *trust, const char *path);
 
 /// What the apps `app` loads are granted at most: JSON in the form of
 /// `nsh.json`'s `capabilities` (`NULL`: what each app declares), e.g.

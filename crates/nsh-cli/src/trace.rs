@@ -53,12 +53,14 @@ pub(crate) fn trace(
         bundle.code.len()
     );
     let bytecode = nsh_js::compile_bytecode(&bundle.code, false)?;
+    // SAFETY: compiled just now by this runtime.
+    let bytecode = unsafe { Bundle::bytecode(bytecode) };
 
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
         bundle: match bundle.source_map {
-            Some(map) => Bundle::bytecode(bytecode).with_source_map(map),
-            None => Bundle::bytecode(bytecode),
+            Some(map) => bytecode.with_source_map(map),
+            None => bytecode,
         },
         viewport: Size::new(width, height),
         trace: true,

@@ -1,0 +1,243 @@
+//! Packages through the trust model: certificates, signatures, hashes,
+//! revocation, rollback and persistence.
+
+use nsh_package::{App, Contents, Error, PublicKey, SecretKey, TrustStore, build, certify, revoke};
+
+const BYTECODE: &str = "bc-1";
+
+fn contents(id: &str, build: u64) -> Contents {
+    Contents {
+        app: App {
+            id: id.into(),
+            name: "Demo".into(),
+            version: "1.0.0".into(),
+            build,
+        },
+        capabilities: Some(serde_json::json!({ "network": { "hosts": ["api.example.com"] } })),
+        source: "console.log('hi')".into(),
+        bytecode: Some((vec![1, 2, 3], BYTECODE.into())),
+        source_map: Some("{}".into()),
+        assets: vec![("img/logo.png".into(), vec![9; 100])],
+        min_runtime: None,
+    }
+}
+
+struct Keys {
+    root: SecretKey,
+    release: SecretKey,
+    cert: nsh_package::Certificate,
+}
+
+fn keys(apps: &[&str]) -> Keys {
+    let root = SecretKey::generate().unwrap();
+    let release = SecretKey::generate().unwrap();
+    let apps: Vec<String> = apps.iter().map(|s| s.to_string()).collect();
+    let cert = certify(&root, &release.public(), &apps, 0, u64::MAX);
+    Keys {
+        root,
+        release,
+        cert,
+    }
+}
+
+fn store(roots: &[PublicKey]) -> TrustStore {
+    let mut store = TrustStore::new();
+    for r in roots {
+        store.add_root(*r);
+    }
+    store
+}
+
+#[test]
+fn a_package_verifies_against_its_root() {
+    let k = keys(&["com.longbridge.*"]);
+    let bytes = build(&contents("com.longbridge.demo", 3), &k.release, &k.cert).unwrap();
+    let store = store(&[k.root.public()]);
+    let package = store.verify(&bytes, BYTECODE).unwrap();
+    assert_eq!(package.app.id, "com.longbridge.demo");
+    assert_eq!(package.source, "console.log('hi')");
+    assert_eq!(package.bytecode(), Some(&[1u8, 2, 3][..]));
+    assert_eq!(package.assets, [("img/logo.png".to_owned(), vec![9; 100])]);
+    assert_eq!(package.key_id, k.release.public().id());
+    assert!(package.capabilities.is_some());
+    // Bytecode for another runtime is dropped; the source still runs.
+    let other = store.verify(&bytes, "bc-2").unwrap();
+    assert!(other.bytecode().is_none());
+}
+
+#[test]
+fn every_byte_is_covered() {
+    let k = keys(&["*"]);
+    let bytes = build(&contents("a.b", 1), &k.release, &k.cert).unwrap();
+    let store = store(&[k.root.public()]);
+    // Flipping any byte (header, files, signature) is refused.
+    for i in (0..bytes.len()).step_by(37) {
+        let mut tampered = bytes.clone();
+        tampered[i] ^= 0x40;
+        assert!(
+            store.verify(&tampered, BYTECODE).is_err(),
+            "byte {i} not covered"
+        );
+    }
+    // Trailing bytes too.
+    let mut longer = bytes.clone();
+    longer.push(0);
+    assert!(store.verify(&longer, BYTECODE).is_err());
+}
+
+#[test]
+fn only_trusted_roots_and_certified_apps() {
+    let k = keys(&["com.longbridge.*"]);
+    let bytes = build(&contents("com.longbridge.demo", 1), &k.release, &k.cert).unwrap();
+    let stranger = SecretKey::generate().unwrap();
+    assert!(matches!(
+        store(&[stranger.public()]).verify(&bytes, BYTECODE),
+        Err(Error::UntrustedKey(_))
+    ));
+    // A release key certified for other apps cannot sign for them.
+    assert!(matches!(
+        build(&contents("com.evil.app", 1), &k.release, &k.cert),
+        Err(Error::Certificate(m)) if m.contains("com.evil.app")
+    ));
+    // `com.longbridge.*` is not `com.longbridgex`.
+    assert!(build(&contents("com.longbridgex.app", 1), &k.release, &k.cert).is_err());
+    // A certificate for another key cannot be used.
+    let thief = SecretKey::generate().unwrap();
+    assert!(matches!(
+        build(&contents("com.longbridge.demo", 1), &thief, &k.cert),
+        Err(Error::Certificate(_))
+    ));
+}
+
+#[test]
+fn certificates_have_a_validity_window() {
+    let root = SecretKey::generate().unwrap();
+    let release = SecretKey::generate().unwrap();
+    // Expired a second after the epoch: signing refuses it.
+    let expired = certify(&root, &release.public(), &["*".into()], 0, 1);
+    assert!(matches!(
+        build(&contents("a.b", 1), &release, &expired),
+        Err(Error::Certificate(m)) if m.contains("outside")
+    ));
+}
+
+#[test]
+fn release_keys_rotate_under_the_same_root() {
+    let k = keys(&["*"]);
+    let next = SecretKey::generate().unwrap();
+    let next_cert = certify(&k.root, &next.public(), &["*".into()], 0, u64::MAX);
+    let store = store(&[k.root.public()]);
+    let old = build(&contents("a.b", 1), &k.release, &k.cert).unwrap();
+    let new = build(&contents("a.b", 2), &next, &next_cert).unwrap();
+    assert!(store.verify(&old, BYTECODE).is_ok());
+    assert!(store.verify(&new, BYTECODE).is_ok());
+}
+
+#[test]
+fn revocations_are_signed_newer_and_enforced() {
+    let k = keys(&["*"]);
+    let bytes = build(&contents("a.b", 1), &k.release, &k.cert).unwrap();
+    let mut store = store(&[k.root.public()]);
+    let sha = store.verify(&bytes, BYTECODE).unwrap().sha256;
+
+    // A list from an untrusted key is refused.
+    let stranger = SecretKey::generate().unwrap();
+    assert!(
+        store
+            .update_revocations(revoke(&stranger, 9, &[], std::slice::from_ref(&sha)))
+            .is_err()
+    );
+
+    // Revoking the package.
+    assert_eq!(
+        store
+            .update_revocations(revoke(&k.root, 1, &[], std::slice::from_ref(&sha)))
+            .unwrap(),
+        1
+    );
+    assert!(matches!(
+        store.verify(&bytes, BYTECODE),
+        Err(Error::Revoked(_))
+    ));
+
+    // An older list (or the same one again) cannot replace it.
+    assert!(matches!(
+        store.update_revocations(revoke(&k.root, 1, &[], &[])),
+        Err(Error::StaleRevocations { got: 1, have: 1 })
+    ));
+    assert!(matches!(
+        store.verify(&bytes, BYTECODE),
+        Err(Error::Revoked(_))
+    ));
+
+    // Revoking the release key refuses everything it signed.
+    let other = build(&contents("a.b", 2), &k.release, &k.cert).unwrap();
+    store
+        .update_revocations(revoke(&k.root, 2, &[k.release.public().id()], &[]))
+        .unwrap();
+    assert!(
+        matches!(store.verify(&other, BYTECODE), Err(Error::Revoked(m)) if m.contains("release key"))
+    );
+}
+
+#[test]
+fn older_builds_are_refused_once_a_newer_one_was_accepted() {
+    let k = keys(&["*"]);
+    let v1 = build(&contents("a.b", 1), &k.release, &k.cert).unwrap();
+    let v2 = build(&contents("a.b", 2), &k.release, &k.cert).unwrap();
+    let mut store = store(&[k.root.public()]);
+    let p2 = store.verify(&v2, BYTECODE).unwrap();
+    store.accept(&p2).unwrap();
+    assert!(matches!(
+        store.verify(&v1, BYTECODE),
+        Err(Error::Rollback {
+            build: 1,
+            accepted: 2,
+            ..
+        })
+    ));
+    // The same build again is fine (a reinstall); other apps are separate.
+    assert!(store.verify(&v2, BYTECODE).is_ok());
+    let other = build(&contents("c.d", 1), &k.release, &k.cert).unwrap();
+    assert!(store.verify(&other, BYTECODE).is_ok());
+}
+
+#[test]
+fn state_persists() {
+    let dir = std::env::temp_dir().join(format!("nsh-trust-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let k = keys(&["*"]);
+    let v1 = build(&contents("a.b", 1), &k.release, &k.cert).unwrap();
+    let v5 = build(&contents("a.b", 5), &k.release, &k.cert).unwrap();
+    {
+        let mut store = TrustStore::open(&dir).unwrap();
+        store.add_root(k.root.public());
+        let p = store.verify(&v5, BYTECODE).unwrap();
+        store.accept(&p).unwrap();
+        store
+            .update_revocations(revoke(&k.root, 7, &[], &[]))
+            .unwrap();
+    }
+    let mut store = TrustStore::open(&dir).unwrap();
+    store.add_root(k.root.public());
+    assert!(matches!(
+        store.verify(&v1, BYTECODE),
+        Err(Error::Rollback { accepted: 5, .. })
+    ));
+    assert!(matches!(
+        store.update_revocations(revoke(&k.root, 3, &[], &[])),
+        Err(Error::StaleRevocations { have: 7, .. })
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn keys_round_trip_through_base64() {
+    let key = SecretKey::generate().unwrap();
+    let again = SecretKey::from_base64(&key.to_base64()).unwrap();
+    assert_eq!(again.public(), key.public());
+    let public = PublicKey::from_base64(&key.public().to_base64()).unwrap();
+    assert_eq!(public.id(), key.public().id());
+    assert_eq!(public.id().len(), 16);
+    assert!(PublicKey::from_base64("not base64!").is_err());
+}

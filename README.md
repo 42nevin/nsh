@@ -57,7 +57,11 @@ nsh dev examples/gallery/App.tsx                                    # dev server
 nsh trace examples/counter/App.tsx                                  # headless: prints the native view operations and timings
 nsh package examples/gallery/App.tsx --target ios-simulator --run   # an installable app (.app / .ipa / .apk)
 nsh build examples/counter/App.tsx --release                        # bundle.js / bundle.qbc for embedding
+nsh publish App.tsx --key release.secret --cert release.cert        # a signed package (.nshpkg) for apps to download and verify
 ```
+
+Signing keys: `nsh keygen` (a root key kept offline and release keys), `nsh certify` (the root certifies a release
+key for some app ids), `nsh verify`, `nsh revoke` (a signed revocation list). See **Signed packages** in AGENTS.md.
 
 ## A new app
 
