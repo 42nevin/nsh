@@ -1,0 +1,514 @@
+package com.longbridge.nsh;
+
+import android.app.Activity;
+import android.content.Context;
+import android.content.ContextWrapper;
+import android.content.res.Configuration;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.TypedValue;
+import android.view.Choreographer;
+import android.view.Gravity;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowManager;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+
+/**
+ * A view running a nsh app. Add it anywhere in a view hierarchy, then load
+ * a bundle ({@link #loadBundleFile}, {@link #loadAssetBundle}) or, in
+ * development builds, connect to a `nsh dev` server. Call {@link #destroy}
+ * when done.
+ */
+public class NshView extends FrameLayout {
+    /** Receives fatal app errors on the UI thread. */
+    public interface ErrorListener {
+        void onError(String message);
+    }
+
+    long handle;
+    private final float density;
+    private final Box root;
+    private final Mounter mounter;
+    private final TouchTracker touches;
+
+    @Override
+    public boolean dispatchTouchEvent(android.view.MotionEvent e) {
+        boolean tracking = touches.onTouch(e);
+        // A tracked finger went down: hear the rest of the gesture even if
+        // no view takes it.
+        return super.dispatchTouchEvent(e) || tracking;
+    }
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private ErrorListener errorListener;
+    /** Where `asset:/…` files come from: an http base, a directory, or APK assets. */
+    private volatile String assetHttp;
+    private volatile File assetDir;
+    private volatile String assetApk;
+    private TextView status;
+    private View errorView;
+
+    public NshView(Context context) {
+        this(context, false);
+    }
+
+    /** @param trace log per-commit timings */
+    public NshView(Context context, boolean trace) {
+        super(context);
+        density = getResources().getDisplayMetrics().density;
+        TextLayouts.cacheDir = context.getCacheDir();
+        mounter = new Mounter(this, new Images(this::readAsset));
+        root = mounter.root;
+        addView(root, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+        touches = new TouchTracker(mounter, this);
+        mounter.touchTrackers.add(touches);
+        setClipChildren(false);
+        // Holds focus when no input does (see InputBox.blur).
+        setFocusable(true);
+        setFocusableInTouchMode(true);
+        // Not a visible focus target.
+        setDefaultFocusHighlightEnabled(false);
+        setDescendantFocusability(FOCUS_BEFORE_DESCENDANTS);
+        // Apps scroll inputs clear of the keyboard themselves: when the app
+        // sets no soft input mode, this makes the system resize (and report
+        // the keyboard as insets) instead of panning the window.
+        setScrollContainer(true);
+        handle = Native.create(this, density, trace);
+    }
+
+    public void setErrorListener(ErrorListener listener) {
+        errorListener = listener;
+    }
+
+    /** Runs a bundle written by `nsh build` (`bundle.qbc` or `bundle.js`); assets come from `assets/` next to it. */
+    public boolean loadBundleFile(File file) {
+        try {
+            byte[] code = Net.readAll(new FileInputStream(file));
+            String map = null;
+            File mapFile = new File(file.getParentFile(), "bundle.js.map");
+            if (mapFile.exists()) map = new String(Net.readAll(new FileInputStream(mapFile)), StandardCharsets.UTF_8);
+            assetHttp = null;
+            assetApk = null;
+            assetDir = new File(file.getParentFile(), "assets");
+            Native.load(handle, code, file.getName().endsWith(".qbc"), map);
+            return true;
+        } catch (Exception e) {
+            reportError("cannot read bundle " + file + ": " + e);
+            return false;
+        }
+    }
+
+    /** Runs `<dir>/bundle.qbc` from the APK's assets; app assets come from `<dir>/assets/`. */
+    public boolean loadAssetBundle(String dir) {
+        try {
+            byte[] code = Net.readAll(getContext().getAssets().open(dir + "/bundle.qbc"));
+            assetHttp = null;
+            assetDir = null;
+            assetApk = dir + "/assets/";
+            Native.load(handle, code, true, null);
+            return true;
+        } catch (Exception e) {
+            reportError("cannot read the app bundle: " + e);
+            return false;
+        }
+    }
+
+    /** Development: loads from a `nsh dev` server and reloads on every change. */
+    public boolean connectDevServer(String url) {
+        // ws://host:port/ws -> assets at http://host:port/assets/
+        if (url.startsWith("ws://")) {
+            String rest = url.substring(5);
+            int slash = rest.indexOf('/');
+            assetHttp = "http://" + (slash >= 0 ? rest.substring(0, slash) : rest) + "/assets/";
+        }
+        assetDir = null;
+        assetApk = null;
+        return Native.connectDevServer(handle, url);
+    }
+
+    /** Stops the app. The view can no longer be used. */
+    public void destroy() {
+        if (handle != 0) {
+            Native.destroy(handle);
+            handle = 0;
+        }
+    }
+
+    @Override
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        // The environment follows in onLayout.
+        if (handle != 0 && w > 0 && h > 0) Native.resize(handle, w / density, h / density);
+    }
+
+    // --- Environment ---------------------------------------------------------
+
+    private float keyboard;
+
+    @Override
+    public WindowInsets onApplyWindowInsets(WindowInsets insets) {
+        publishEnvironment(insets);
+        return super.onApplyWindowInsets(insets);
+    }
+
+    @Override
+    protected void onConfigurationChanged(Configuration config) {
+        super.onConfigurationChanged(config);
+        publishEnvironment(getRootWindowInsets());
+    }
+
+    private static Window windowOf(Context context) {
+        while (context instanceof ContextWrapper) {
+            if (context instanceof Activity) return ((Activity) context).getWindow();
+            context = ((ContextWrapper) context).getBaseContext();
+        }
+        return null;
+    }
+
+    /** Whether the app asked the system to pan the window over the keyboard. */
+    private boolean systemPans() {
+        Window window = windowOf(getContext());
+        return window != null
+            && (window.getAttributes().softInputMode & WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST) == WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN;
+    }
+
+    @Override
+    protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+        super.onLayout(changed, left, top, right, bottom);
+        // Insets depend on where the view sits in the window.
+        if (changed) publishEnvironment(getRootWindowInsets());
+    }
+
+    /**
+     * Publishes the safe area and keyboard as the parts of the system bars
+     * and the keyboard that overlap this view, like UIKit's safe area: an
+     * app embedded below a toolbar gets no top inset.
+     */
+    private void publishEnvironment(WindowInsets insets) {
+        if (handle == 0) return;
+        float top = 0, right = 0, bottom = 0, left = 0, ime = 0;
+        if (insets != null) {
+            int barsTop, barsRight, barsBottom, barsLeft, keyboardBottom = 0;
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                barsTop = bars.top;
+                barsRight = bars.right;
+                barsBottom = bars.bottom;
+                barsLeft = bars.left;
+                keyboardBottom = insets.getInsets(WindowInsets.Type.ime()).bottom;
+            } else {
+                barsTop = insets.getSystemWindowInsetTop();
+                barsRight = insets.getSystemWindowInsetRight();
+                barsBottom = insets.getSystemWindowInsetBottom();
+                barsLeft = insets.getSystemWindowInsetLeft();
+            }
+            View window = getRootView();
+            int[] at = new int[2];
+            getLocationInWindow(at);
+            int gapLeft = at[0], gapTop = at[1];
+            int gapRight = window.getWidth() - at[0] - getWidth();
+            int gapBottom = window.getHeight() - at[1] - getHeight();
+            top = Math.max(0, barsTop - gapTop);
+            right = Math.max(0, barsRight - gapRight);
+            bottom = Math.max(0, barsBottom - gapBottom);
+            left = Math.max(0, barsLeft - gapLeft);
+            // How far the keyboard reaches into the view (like UIKit: the
+            // bottom safe area under it included).
+            ime = Math.min(getHeight(), Math.max(0, keyboardBottom - gapBottom));
+        }
+        if (ime != keyboard) {
+            keyboard = ime;
+            // Nothing to do when the system pans the window instead.
+            int[] at = new int[2];
+            getLocationOnScreen(at);
+            mounter.keyboard(ime > 0 && !systemPans()
+                    ? at[1] + getHeight() - Math.round(ime) : Integer.MAX_VALUE);
+        }
+        Configuration c = getResources().getConfiguration();
+        boolean dark = (c.uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        safe = new float[] {top / density, right / density, bottom / density, left / density};
+        Native.environment(handle, new float[] {
+            top / density, right / density, bottom / density, left / density, ime / density, 0.25f, c.fontScale,
+            android.text.TextUtils.getLayoutDirectionFromLocale(java.util.Locale.getDefault()) == LAYOUT_DIRECTION_RTL ? 1 : 0,
+            // "Remove animations" sets the animator scale to 0.
+            android.provider.Settings.Global.getFloat(getContext().getContentResolver(),
+                    android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0 ? 1 : 0,
+            density,
+            accessibility().isTouchExplorationEnabled() ? 1 : 0,
+            Build.VERSION.SDK_INT,
+            (c.uiMode & Configuration.UI_MODE_TYPE_MASK) == Configuration.UI_MODE_TYPE_TELEVISION ? 3
+                    : c.smallestScreenWidthDp >= 600 ? 1 : 0,
+        }, dark);
+    }
+
+    private android.view.accessibility.AccessibilityManager accessibility() {
+        return (android.view.accessibility.AccessibilityManager) getContext().getSystemService(Context.ACCESSIBILITY_SERVICE);
+    }
+
+    /** TalkBack turning on or off: `AccessibilityInfo` and its events. */
+    private final android.view.accessibility.AccessibilityManager.TouchExplorationStateChangeListener screenReader =
+            enabled -> publishEnvironment(getRootWindowInsets());
+
+    /** The safe-area insets last published (dp: top, right, bottom, left). */
+    private float[] safe = new float[4];
+
+    float safeTop() {
+        return safe[0];
+    }
+
+    float safeRight() {
+        return safe[1];
+    }
+
+    float safeBottom() {
+        return safe[2];
+    }
+
+    float safeLeft() {
+        return safe[3];
+    }
+
+    // --- Back button -------------------------------------------------------------
+
+    private Object backCallback;
+    private boolean backRegistered;
+    private boolean exiting;
+
+    /**
+     * Handles the back button for the app: closes modals, pops screens, runs
+     * JS `BackHandler` listeners. Activities on Android 12 and older call it
+     * from {@code onBackPressed} and fall back to the default when it
+     * returns false; newer versions get the press through a callback.
+     */
+    public boolean handleBack() {
+        if (exiting || handle == 0) return false;
+        return mounter.handleBack();
+    }
+
+    /** Whether the app wants back presses (registers the callback). */
+    void setBackHandling(boolean wanted) {
+        if (Build.VERSION.SDK_INT < 33) return;
+        android.window.OnBackInvokedDispatcher dispatcher = findOnBackInvokedDispatcher();
+        if (dispatcher == null) return;
+        if (backCallback == null) backCallback = BackCallbacks.create(this, mounter);
+        android.window.OnBackInvokedCallback callback = (android.window.OnBackInvokedCallback) backCallback;
+        if (wanted && !backRegistered) {
+            dispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback);
+            backRegistered = true;
+        } else if (!wanted && backRegistered) {
+            dispatcher.unregisterOnBackInvokedCallback(callback);
+            backRegistered = false;
+        }
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        accessibility().addTouchExplorationStateChangeListener(screenReader);
+        // The dispatcher exists once attached.
+        if (handle != 0) mounter.updateBack();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+        accessibility().removeTouchExplorationStateChangeListener(screenReader);
+    }
+
+    /** `BackHandler.exitApp()`: what the back button does without the app. */
+    void exitApp() {
+        android.app.Activity activity = activity(getContext());
+        if (activity == null) return;
+        exiting = true;
+        if (Build.VERSION.SDK_INT >= 33) setBackHandling(false);
+        activity.onBackPressed();
+        exiting = false;
+        if (handle != 0) mounter.updateBack();
+    }
+
+    private static android.app.Activity activity(Context context) {
+        while (context instanceof android.content.ContextWrapper) {
+            if (context instanceof android.app.Activity) return (android.app.Activity) context;
+            context = ((android.content.ContextWrapper) context).getBaseContext();
+        }
+        return null;
+    }
+
+    // --- Animation frames ------------------------------------------------------
+
+    private boolean ticking;
+    private final Choreographer.FrameCallback frame = this::onFrame;
+
+    private void onFrame(long nanos) {
+        ticking = false;
+        if (handle != 0) mounter.outputs(Native.tick(handle, nanos));
+    }
+
+    /** Keeps frames coming while native values animate. */
+    void requestFrames() {
+        if (!ticking) {
+            ticking = true;
+            Choreographer.getInstance().postFrameCallback(frame);
+        }
+    }
+
+    // --- Called by libnsh (any thread) ----------------------------------------------
+
+    private final Choreographer.FrameCallback jsFrame = nanos -> {
+        if (handle != 0) Native.frame(handle);
+    };
+
+    /** JS waits for a display frame (`requestAnimationFrame`). */
+    void requestJsFrame() {
+        main.post(() -> Choreographer.getInstance().postFrameCallback(jsFrame));
+    }
+
+    void submit(byte[] ops, Object[] objects, long seq) {
+        main.post(() -> {
+            if (handle != 0) mounter.apply(ops, objects, seq);
+        });
+    }
+
+    void reportError(String message) {
+        android.util.Log.e("nsh", message);
+        main.post(() -> {
+            if (errorListener != null) errorListener.onError(message);
+        });
+    }
+
+    /** Bytes of an `asset:/…` URI, or null. Blocking: engine and image threads. */
+    byte[] readAsset(String uri) {
+        String path = uri.startsWith("asset:/") ? uri.substring(7) : uri;
+        try {
+            String http = assetHttp;
+            File dir = assetDir;
+            String apk = assetApk;
+            if (http != null) {
+                HttpURLConnection c = (HttpURLConnection) new URL(http + path).openConnection();
+                try {
+                    return Net.readAll(c.getInputStream());
+                } finally {
+                    c.disconnect();
+                }
+            }
+            if (dir != null) {
+                try (InputStream in = new FileInputStream(new File(dir, path))) {
+                    return Net.readAll(in);
+                }
+            }
+            if (apk != null) return Net.readAll(getContext().getAssets().open(apk + path));
+        } catch (Exception e) {
+            android.util.Log.w("nsh", "cannot read " + uri + ": " + e);
+        }
+        return null;
+    }
+
+    /**
+     * Points a media player at a URL or an {@code asset:/…} URI (streamed from
+     * the dev server, read from the asset directory or from the APK).
+     */
+    void setMediaSource(android.media.MediaPlayer player, String uri) throws java.io.IOException {
+        if (!uri.startsWith("asset:/")) {
+            player.setDataSource(getContext(), android.net.Uri.parse(uri));
+            return;
+        }
+        String path = uri.substring(7);
+        String http = assetHttp;
+        File dir = assetDir;
+        String apk = assetApk;
+        if (http != null) {
+            player.setDataSource(getContext(), android.net.Uri.parse(http + path));
+        } else if (dir != null) {
+            player.setDataSource(new File(dir, path).getPath());
+        } else if (apk != null) {
+            try (android.content.res.AssetFileDescriptor fd = getContext().getAssets().openFd(apk + path)) {
+                player.setDataSource(fd);
+            } catch (java.io.FileNotFoundException compressed) {
+                // Compressed in the APK: players need a seekable file.
+                File copy = new File(getContext().getCacheDir(), "nsh-media/" + path);
+                if (!copy.exists()) {
+                    copy.getParentFile().mkdirs();
+                    File tmp = new File(copy.getPath() + ".tmp");
+                    try (InputStream in = getContext().getAssets().open(apk + path);
+                            java.io.OutputStream out = new java.io.FileOutputStream(tmp)) {
+                        byte[] buf = new byte[64 * 1024];
+                        for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+                    }
+                    tmp.renameTo(copy);
+                }
+                player.setDataSource(copy.getPath());
+            }
+        }
+    }
+
+    /** How far the system bars reach into this view from the top (0 when embedded below them). */
+    private int topInset() {
+        WindowInsets insets = getRootWindowInsets();
+        if (insets == null) return 0;
+        int[] at = new int[2];
+        getLocationInWindow(at);
+        return Math.max(0, insets.getSystemWindowInsetTop() - at[1]);
+    }
+
+    /** Development: a status line over the app, or none. */
+    void devStatus(String text) {
+        main.post(() -> {
+            if (text == null) {
+                if (status != null) removeView(status);
+                status = null;
+                return;
+            }
+            if (status == null) {
+                status = new TextView(getContext());
+                status.setTextColor(Color.WHITE);
+                status.setBackgroundColor(0xd91a1a1a);
+                status.setGravity(Gravity.CENTER);
+                status.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+                LayoutParams lp = new LayoutParams(LayoutParams.MATCH_PARENT, Math.round(32 * density));
+                lp.gravity = Gravity.TOP;
+                status.setTranslationY(topInset());
+                addView(status, lp);
+            }
+            status.setText(text);
+            status.bringToFront();
+        });
+    }
+
+    /** Development: the error screen (tap to dismiss), or none. */
+    void devError(String title, String message) {
+        main.post(() -> {
+            if (errorView != null) removeView(errorView);
+            errorView = null;
+            if (title == null) return;
+            TextView text = new TextView(getContext());
+            text.setTextColor(Color.WHITE);
+            text.setTypeface(Typeface.MONOSPACE);
+            text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            text.setText(title + "\n\n" + message + "\n\n(tap to dismiss)");
+            int pad = Math.round(16 * density);
+            text.setPadding(pad, topInset() + pad, pad, pad);
+            HorizontalScrollView sideways = new HorizontalScrollView(getContext());
+            sideways.addView(text);
+            ScrollView view = new ScrollView(getContext());
+            view.setBackgroundColor(0xf78c1414);
+            view.addView(sideways);
+            view.setOnClickListener(v -> devError(null, null));
+            text.setOnClickListener(v -> devError(null, null));
+            errorView = view;
+            addView(view, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+        });
+    }
+}

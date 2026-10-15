@@ -1,6 +1,6 @@
 //! Android backend for nsh.
 //!
-//! Built as `libnsh.so`, loaded by the Java runtime in `java/dev/nsh`. The
+//! Built as `libnsh.so`, loaded by the Java runtime in `java/com/longbridge/nsh`. The
 //! split mirrors the Apple backend:
 //!
 //! - The engine thread runs JS and layout. Text is typeset there with

@@ -100,7 +100,7 @@ fn take(key: i64) -> Option<FetchDone> {
 
 /// `Net.nativeDone`: a request finished (`error` non-null on failure).
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Net_nativeDone(
+extern "system" fn Java_com_longbridge_nsh_Net_nativeDone(
     mut env: JNIEnv<'_>,
     _: JClass<'_>,
     key: jlong,

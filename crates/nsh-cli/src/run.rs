@@ -10,7 +10,7 @@ use serde::Deserialize;
 use crate::dev::DevSession;
 
 const APP_NAME: &str = "NshDev";
-const BUNDLE_ID: &str = "dev.nsh.host";
+const BUNDLE_ID: &str = "com.longbridge.nsh.host";
 
 /// Where `nsh run` runs the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -112,7 +112,7 @@ fn run_android(session: &DevSession, work: &Path, trace: bool) -> anyhow::Result
                 label: APP_NAME,
                 version_name: "0.1.0",
                 version_code: 1,
-                activity: "dev.nsh.DevActivity",
+                activity: "com.longbridge.nsh.DevActivity",
                 dev: true,
                 runtime: &runtime,
                 icon: None,
@@ -142,7 +142,7 @@ fn run_android(session: &DevSession, work: &Path, trace: bool) -> anyhow::Result
         "start",
         "-S",
         "-n",
-        "dev.nsh.host/dev.nsh.DevActivity",
+        "com.longbridge.nsh.host/com.longbridge.nsh.DevActivity",
         "--es",
         "url",
         &url,

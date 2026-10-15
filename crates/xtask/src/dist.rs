@@ -113,7 +113,7 @@ fn make_aar(built: &Path, abis: &[String], dev: bool, aar: &Path) -> anyhow::Res
         work.join("AndroidManifest.xml"),
         format!(
             r#"<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.nsh">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.longbridge.nsh">
     <uses-sdk android:minSdkVersion="{}" />
     <uses-permission android:name="android.permission.INTERNET" />{}
 </manifest>

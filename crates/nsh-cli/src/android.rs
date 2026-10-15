@@ -80,7 +80,7 @@ pub(crate) struct Apk<'a> {
     pub(crate) label: &'a str,
     pub(crate) version_name: &'a str,
     pub(crate) version_code: u32,
-    /// `dev.nsh.DevActivity` or `dev.nsh.AppActivity`.
+    /// `com.longbridge.nsh.DevActivity` or `com.longbridge.nsh.AppActivity`.
     pub(crate) activity: &'a str,
     /// Development builds: debuggable, cleartext HTTP (the dev server).
     pub(crate) dev: bool,

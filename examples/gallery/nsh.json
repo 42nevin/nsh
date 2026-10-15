@@ -1,6 +1,6 @@
 {
   "name": "Gallery",
-  "id": "dev.nsh.gallery",
+  "id": "com.longbridge.nsh.gallery",
   "version": "1.0.0",
   "build": 1,
   "icon": "icon.png",

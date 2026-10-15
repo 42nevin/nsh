@@ -14,7 +14,7 @@ use jni::{
 /// Everything Rust calls in Java.
 pub(crate) struct Java {
     pub(crate) vm: JavaVM,
-    /// `dev.nsh.TextLayouts`: text typesetting (engine thread).
+    /// `com.longbridge.nsh.TextLayouts`: text typesetting (engine thread).
     pub(crate) text: GlobalRef,
     pub(crate) text_prepare: JStaticMethodID,
     pub(crate) text_measure: JStaticMethodID,
@@ -22,11 +22,11 @@ pub(crate) struct Java {
     pub(crate) text_lines: JStaticMethodID,
     pub(crate) text_attachments: JStaticMethodID,
     pub(crate) text_register_font: JStaticMethodID,
-    /// `dev.nsh.Net`: HTTP (any thread).
+    /// `com.longbridge.nsh.Net`: HTTP (any thread).
     pub(crate) net: GlobalRef,
     pub(crate) net_fetch: JStaticMethodID,
     pub(crate) net_cancel: JStaticMethodID,
-    /// `dev.nsh.NshView` instance methods.
+    /// `com.longbridge.nsh.NshView` instance methods.
     pub(crate) view_submit: JMethodID,
     pub(crate) view_report_error: JMethodID,
     pub(crate) view_read_asset: JMethodID,
@@ -51,9 +51,9 @@ pub(crate) fn init(vm: JavaVM) -> jni::errors::Result<()> {
         let class = env.find_class(name)?;
         env.new_global_ref(class)
     };
-    let text = class(&mut env, "dev/nsh/TextLayouts")?;
-    let net = class(&mut env, "dev/nsh/Net")?;
-    let view = class(&mut env, "dev/nsh/NshView")?;
+    let text = class(&mut env, "com/longbridge/nsh/TextLayouts")?;
+    let net = class(&mut env, "com/longbridge/nsh/Net")?;
+    let view = class(&mut env, "com/longbridge/nsh/NshView")?;
     let text_class: &JClass<'_> = text.as_obj().into();
     let net_class: &JClass<'_> = net.as_obj().into();
     let view_class: &JClass<'_> = view.as_obj().into();

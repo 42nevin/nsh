@@ -270,7 +270,7 @@ impl Assets for ViewAssets {
     }
 }
 
-// --- JNI exports (`dev.nsh.Native`) ------------------------------------------
+// --- JNI exports (`com.longbridge.nsh.Native`) ------------------------------------------
 
 /// # Safety
 ///
@@ -281,7 +281,7 @@ unsafe fn host<'a>(handle: jlong) -> &'a Arc<Host> {
 }
 
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_create(
+extern "system" fn Java_com_longbridge_nsh_Native_create(
     env: JNIEnv<'_>,
     _: JClass<'_>,
     view: JObject<'_>,
@@ -310,7 +310,11 @@ extern "system" fn Java_dev_nsh_Native_create(
 }
 
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_destroy(_: JNIEnv<'_>, _: JClass<'_>, handle: jlong) {
+extern "system" fn Java_com_longbridge_nsh_Native_destroy(
+    _: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+) {
     if handle == 0 {
         return;
     }
@@ -322,7 +326,7 @@ extern "system" fn Java_dev_nsh_Native_destroy(_: JNIEnv<'_>, _: JClass<'_>, han
 }
 
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_load(
+extern "system" fn Java_com_longbridge_nsh_Native_load(
     mut env: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -349,7 +353,7 @@ extern "system" fn Java_dev_nsh_Native_load(
 }
 
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_connectDevServer(
+extern "system" fn Java_com_longbridge_nsh_Native_connectDevServer(
     mut env: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -375,7 +379,7 @@ extern "system" fn Java_dev_nsh_Native_connectDevServer(
 }
 
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_resize(
+extern "system" fn Java_com_longbridge_nsh_Native_resize(
     _: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -399,7 +403,7 @@ extern "system" fn Java_dev_nsh_Native_resize(
 /// animation duration, font scale, right to left (1), reduce motion (1),
 /// density, screen reader (1), API level, idiom (0 phone, 1 pad, 3 TV).
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_environment(
+extern "system" fn Java_com_longbridge_nsh_Native_environment(
     env: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -447,7 +451,7 @@ extern "system" fn Java_dev_nsh_Native_environment(
 /// scroll ends carry `(x, y)`, image loads `(width, height)`, errors
 /// `text`, text inputs `(text, count)`.
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_event(
+extern "system" fn Java_com_longbridge_nsh_Native_event(
     mut env: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -506,7 +510,7 @@ extern "system" fn Java_dev_nsh_Native_event(
 /// Touches for the JS responder system (see `Native.touch`).
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
-extern "system" fn Java_dev_nsh_Native_touch(
+extern "system" fn Java_com_longbridge_nsh_Native_touch(
     env: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -590,7 +594,7 @@ extern "system" fn Java_dev_nsh_Native_touch(
 /// An event with an object payload: `keys` and `values` (`Double`,
 /// `Boolean` or `String`), or with a single `value` when `keys` is null.
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_eventMap(
+extern "system" fn Java_com_longbridge_nsh_Native_eventMap(
     mut env: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -681,7 +685,7 @@ extern "system" fn Java_dev_nsh_Native_eventMap(
 /// Applies the animation items of batches up to `seq` (already applied by
 /// Java) and returns the bound values.
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_afterBatch(
+extern "system" fn Java_com_longbridge_nsh_Native_afterBatch(
     env: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -706,7 +710,7 @@ extern "system" fn Java_dev_nsh_Native_afterBatch(
 
 /// A `Choreographer` frame (nanoseconds).
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_tick(
+extern "system" fn Java_com_longbridge_nsh_Native_tick(
     env: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -723,7 +727,7 @@ extern "system" fn Java_dev_nsh_Native_tick(
 /// A scroll view moved: the engine (lists) and its scroll value learn the
 /// offset. Returns bound values when a scroll value changed, else null.
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_scroll(
+extern "system" fn Java_com_longbridge_nsh_Native_scroll(
     env: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -747,7 +751,7 @@ extern "system" fn Java_dev_nsh_Native_scroll(
 
 /// A zoomable scroll view's zoom scale changed (before its offset report).
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_zoom(
+extern "system" fn Java_com_longbridge_nsh_Native_zoom(
     _: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -763,7 +767,7 @@ extern "system" fn Java_dev_nsh_Native_zoom(
 
 /// Whether view `id` follows drags (it has `pan` values).
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_hasPan(
+extern "system" fn Java_com_longbridge_nsh_Native_hasPan(
     _: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -777,7 +781,7 @@ extern "system" fn Java_dev_nsh_Native_hasPan(
 /// A drag on view `id`: `state` 0 began, 1 moved, 2 ended, 3 cancelled;
 /// translation and velocity in points (per second).
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_pan(
+extern "system" fn Java_com_longbridge_nsh_Native_pan(
     env: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -820,7 +824,7 @@ extern "system" fn Java_dev_nsh_Native_pan(
 /// (`amount` in degrees) on view `id`: `state` 0 began, 1 moved, 2 ended,
 /// 3 cancelled.
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_transformGesture(
+extern "system" fn Java_com_longbridge_nsh_Native_transformGesture(
     env: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -866,7 +870,7 @@ extern "system" fn Java_dev_nsh_Native_transformGesture(
 /// The platform shows root `id` (a modal) at `width` x `height` dp, with
 /// insets covered by system UI.
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_rootSize(
+extern "system" fn Java_com_longbridge_nsh_Native_rootSize(
     _: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -896,7 +900,7 @@ extern "system" fn Java_dev_nsh_Native_rootSize(
 
 /// Interaction states of a view the core tracks (`active:`, `hover:`, `focus:`).
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_states(
+extern "system" fn Java_com_longbridge_nsh_Native_states(
     _: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
@@ -912,7 +916,11 @@ extern "system" fn Java_dev_nsh_Native_states(
 
 /// A display frame began after `NshView.requestJsFrame`.
 #[unsafe(no_mangle)]
-extern "system" fn Java_dev_nsh_Native_frame(_: JNIEnv<'_>, _: JClass<'_>, handle: jlong) {
+extern "system" fn Java_com_longbridge_nsh_Native_frame(
+    _: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+) {
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
     if let Some(control) = host.control() {

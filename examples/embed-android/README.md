@@ -7,7 +7,7 @@ its own native views.
    builds) to the app, e.g. in Gradle: `implementation(files("libs/nsh.aar"))`.
 2. Build the nsh bundle into the app's assets:
    `nsh build App.tsx --release --out app/src/main/assets/nsh`.
-3. Create a `dev.nsh.NshView`, add it to a layout and call
+3. Create a `com.longbridge.nsh.NshView`, add it to a layout and call
    `loadAssetBundle("nsh")`. Call `destroy()` when the activity goes away.
 
 With `nsh-dev.aar`, `connectDevServer("ws://<mac ip>:8790/ws")` loads from

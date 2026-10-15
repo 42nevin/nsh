@@ -85,7 +85,7 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
             .filter(|c| c.is_ascii_alphanumeric())
             .collect::<String>()
             .to_lowercase();
-        format!("dev.nsh.{slug}")
+        format!("com.example.{slug}")
     });
     let executable: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     let executable = if executable.is_empty() {
@@ -214,7 +214,7 @@ fn package_android(
             label: name,
             version_name: version,
             version_code: config.build.unwrap_or(1),
-            activity: "dev.nsh.AppActivity",
+            activity: "com.longbridge.nsh.AppActivity",
             dev: false,
             runtime: &runtime,
             icon: config.icon.as_deref(),
@@ -239,7 +239,7 @@ fn package_android(
                 "am",
                 "start",
                 "-n",
-                &format!("{id}/dev.nsh.AppActivity"),
+                &format!("{id}/com.longbridge.nsh.AppActivity"),
             ],
         )?;
         log::info!("launched {id} on {serial}");
