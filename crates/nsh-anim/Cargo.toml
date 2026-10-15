@@ -1,0 +1,11 @@
+[package]
+name = "nsh-anim"
+description = "Native animation graph: values, drivers (timing, spring, decay), interpolation and bindings."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+

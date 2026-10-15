@@ -1,5 +1,5 @@
 import { createSignal, For } from "solid-js";
-import { render, root } from "yf";
+import { render, root } from "nsh";
 
 function Button(props: { label: string; color: string; onPress: () => void }) {
   return (
@@ -30,7 +30,7 @@ function App() {
 
   return (
     <view style={{ flex: 1, backgroundColor: "#f4f5f7", padding: 24, paddingTop: 64, gap: 24 }}>
-      <text style={{ fontSize: 28, fontWeight: "bold", color: "#1f2328" }}>yf counter</text>
+      <text style={{ fontSize: 28, fontWeight: "bold", color: "#1f2328" }}>nsh counter</text>
       <view
         style={{
           backgroundColor: "#ffffff",

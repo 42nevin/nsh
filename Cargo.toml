@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-default-members = ["crates/yf-cli"]
+default-members = ["crates/nsh-cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,15 +15,15 @@ unreachable_pub = "deny"
 private_interfaces = "deny"
 
 [workspace.dependencies]
-yf-anim = { path = "crates/yf-anim" }
-yf-core = { path = "crates/yf-core" }
-yf-js = { path = "crates/yf-js" }
-yf-engine = { path = "crates/yf-engine" }
-yf-bundler = { path = "crates/yf-bundler" }
-yf-platform-apple = { path = "crates/yf-platform-apple" }
-yf-platform-android = { path = "crates/yf-platform-android" }
-yf-dev = { path = "crates/yf-dev" }
-yf-ffi = { path = "crates/yf-ffi" }
+nsh-anim = { path = "crates/nsh-anim" }
+nsh-core = { path = "crates/nsh-core" }
+nsh-js = { path = "crates/nsh-js" }
+nsh-engine = { path = "crates/nsh-engine" }
+nsh-bundler = { path = "crates/nsh-bundler" }
+nsh-platform-apple = { path = "crates/nsh-platform-apple" }
+nsh-platform-android = { path = "crates/nsh-platform-android" }
+nsh-dev = { path = "crates/nsh-dev" }
+nsh-ffi = { path = "crates/nsh-ffi" }
 
 anyhow = "1"
 thiserror = "2"

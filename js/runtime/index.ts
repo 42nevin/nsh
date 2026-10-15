@@ -1,11 +1,11 @@
-// yf runtime: the Solid universal renderer that turns JSX into a flat op
+// nsh runtime: the Solid universal renderer that turns JSX into a flat op
 // buffer for the Rust core.
 //
 // Performance rules (QuickJS is a plain interpreter, the slowest part of the
 // pipeline): do the minimum here. No parsing, no diffing, no string building.
 // Push raw values into one reused array and let Rust decode them.
 //
-// The opcode values must match `crates/yf-js/src/protocol.rs`.
+// The opcode values must match `crates/nsh-js/src/protocol.rs`.
 
 import {
   type Accessor,
@@ -25,8 +25,8 @@ import {
   useContext,
 } from "solid-js";
 import { createRenderer } from "solid-js/universal";
-// The app's Tailwind theme (`yf.json`), JSON or null.
-import tailwindTheme from "yf:tailwind-theme";
+// The app's Tailwind theme (`nsh.json`), JSON or null.
+import tailwindTheme from "nsh:tailwind-theme";
 import type {
   GestureResponderEvent,
   JSX,
@@ -70,7 +70,7 @@ const ANIM_STOP_ANIMATION = 9; // animation id
 const ANIM_RESET_COMPOSITE = 10; // composite key
 const ANIM_RELEASE_COMPOSITE = 11; // composite key
 
-declare function __yf_commit(ops: unknown[]): void;
+declare function __nsh_commit(ops: unknown[]): void;
 
 type Handler = (payload: unknown) => void;
 
@@ -509,7 +509,7 @@ function schedule() {
 function flush() {
   scheduled = false;
   if (ops.length > 0) {
-    __yf_commit(ops);
+    __nsh_commit(ops);
     ops.length = 0;
   }
 }
@@ -540,7 +540,7 @@ if (tailwindTheme) {
 // `document` as in a browser): without this global anchor the whole app —
 // nodes, handlers, signals and the registry itself — is one unreachable
 // cycle that the next GC collects.
-Object.defineProperty(globalThis, "__yf", { value: { root, registry, listening } });
+Object.defineProperty(globalThis, "__nsh", { value: { root, registry, listening } });
 
 function unlink(node: YNode) {
   const p = node.parent;
@@ -676,7 +676,7 @@ export function render(code: () => any, element: YNode): () => void {
       c = next;
     }
   };
-  (globalThis as any).__yf_hot?.rendered(dispose);
+  (globalThis as any).__nsh_hot?.rendered(dispose);
   return dispose;
 }
 
@@ -1042,7 +1042,7 @@ export const Animated: AnimatedModule = {
   diffClamp: (a: NativeNode, min: number, max: number) => a.diffClamp(min, max),
 };
 
-(globalThis as any).__yf_anim_end = (id: number, finished: boolean) => {
+(globalThis as any).__nsh_anim_end = (id: number, finished: boolean) => {
   const resolve = animationEnds.get(id);
   if (resolve) {
     animationEnds.delete(id);
@@ -1076,10 +1076,10 @@ interface Environment {
   idiom: "phone" | "pad" | "mac" | "tv";
 }
 
-const [environment, setEnvironment] = createSignal<Environment>((globalThis as any).__yf_env_value, {
+const [environment, setEnvironment] = createSignal<Environment>((globalThis as any).__nsh_env_value, {
   equals: false,
 });
-(globalThis as any).__yf_env = (env: Environment) => setEnvironment(env);
+(globalThis as any).__nsh_env = (env: Environment) => setEnvironment(env);
 
 // One memo per part, so a keyboard change does not rerun code that only
 // reads the safe area.
@@ -1123,7 +1123,7 @@ const initialEnvironment = untrack(environment);
 export interface PlatformSelectSpec<T> {
   ios?: T;
   android?: T;
-  /** Both platforms (yf only runs natively). */
+  /** Both platforms (nsh only runs natively). */
   native?: T;
   default?: T;
 }
@@ -1556,7 +1556,7 @@ export function Screen(props: ScreenProps): YNode {
 
 // --- Canvas ---------------------------------------------------------------------
 
-// Canvas operations: `crates/yf-js/src/canvas.rs`.
+// Canvas operations: `crates/nsh-js/src/canvas.rs`.
 const CV_SAVE = 0;
 const CV_RESTORE = 1;
 const CV_TRANSLATE = 2;
@@ -1602,7 +1602,7 @@ const CV_STROKE_TEXT = 41;
 const CV_DRAW_IMAGE = 42;
 const CV_SVG_PATH = 50;
 
-declare function __yf_measure_text(font: string, text: string): number;
+declare function __nsh_measure_text(font: string, text: string): number;
 
 /** A number in a drawing: a constant, or a native value the canvas reads
  * while it draws (its animations redraw natively, without JS). */
@@ -1965,7 +1965,7 @@ export class CanvasRenderingContext2D extends CanvasPath {
   }
   /** Measured by the platform's text engine with the current `font`. */
   measureText(text: string): TextMetrics {
-    return { width: __yf_measure_text(this.s.font, String(text)) };
+    return { width: __nsh_measure_text(this.s.font, String(text)) };
   }
 
   createLinearGradient(x0: number, y0: number, x1: number, y1: number): CanvasGradient {
@@ -2503,7 +2503,7 @@ export function List<T>(props: ListProps<T>): YNode {
 }
 
 
-(globalThis as any).__yf_list = (id: number, flat: number[]) => lists.get(id)?.(flat);
+(globalThis as any).__nsh_list = (id: number, flat: number[]) => lists.get(id)?.(flat);
 
 // --- Touches and the gesture responder system ------------------------------
 //
@@ -2799,7 +2799,7 @@ export const PanResponder = {
 };
 
 // Called by the engine for native input events.
-(globalThis as any).__yf_dispatch = (id: number, name: string, payload: unknown) => {
+(globalThis as any).__nsh_dispatch = (id: number, name: string, payload: unknown) => {
   if (name === "onTouch") return onTouch(payload as NativeTouches);
   const node = listening.get(id)?.deref();
   const handler = node?.handlers?.[name];

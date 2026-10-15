@@ -1,4 +1,4 @@
-// yf hot module replacement runtime (development bundles only).
+// nsh hot module replacement runtime (development bundles only).
 //
 // A development bundle defines every module as a factory (rolldown CommonJS
 // output with one chunk per module) and starts the entry. An update script
@@ -15,10 +15,10 @@
 // Written in plain JavaScript: it runs before any module, including the
 // TypeScript runtime.
 
-globalThis.__yf_hot = (() => {
+globalThis.__nsh_hot = (() => {
   /** id -> factory(module, exports, require) */
   const factories = new Map();
-  /** Ids of modules that never run again (solid-js, the yf runtime). */
+  /** Ids of modules that never run again (solid-js, the nsh runtime). */
   const fixed = new Set();
   /** id -> { id, exports, components, exportsComponents } */
   const modules = new Map();
@@ -55,7 +55,7 @@ globalThis.__yf_hot = (() => {
 
   function run(module) {
     const factory = factories.get(module.id);
-    if (!factory) throw new Error(`yf hot: no module ${module.id}`);
+    if (!factory) throw new Error(`nsh hot: no module ${module.id}`);
     const previous = current;
     current = module;
     module.components = 0;

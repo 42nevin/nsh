@@ -1,13 +1,13 @@
 //! The distribution: everything an app developer needs, prebuilt.
 //!
 //! ```text
-//! dist/yf/bin/yf                                     the CLI
-//! dist/yf/runtime/ios/iphoneos/yf-app                packaged app runner
-//! dist/yf/runtime/ios/iphonesimulator/{yf-app,yf-host}
-//! dist/yf/runtime/ios/maccatalyst/yf-host            development host
-//! dist/yf/runtime/android/{release,dev}/             classes.dex, lib/<abi>/libyf.so
-//! dist/yf/embed/ios/{YF,YFDev}.xcframework           embedding in iOS apps
-//! dist/yf/embed/android/{yf,yf-dev}.aar              embedding in Android apps
+//! dist/nsh/bin/nsh                                             the CLI
+//! dist/nsh/runtime/ios/iphoneos/nsh-app                        packaged app runner
+//! dist/nsh/runtime/ios/iphonesimulator/{nsh-app,nsh-host}
+//! dist/nsh/runtime/ios/maccatalyst/nsh-host                    development host
+//! dist/nsh/runtime/android/{release,dev}/                      classes.dex, lib/<abi>/libnsh.so
+//! dist/nsh/embed/ios/{NativeShell,NativeShellDev}.xcframework  embedding in iOS apps
+//! dist/nsh/embed/android/{nsh,nsh-dev}.aar                     embedding in Android apps
 //! ```
 
 use std::{
@@ -26,29 +26,29 @@ const CATALYST: &str = "aarch64-apple-ios-macabi";
 
 pub(crate) fn dist() -> anyhow::Result<()> {
     let root = android::root();
-    let out = root.join("dist/yf");
+    let out = root.join("dist/nsh");
     if out.exists() {
         fs::remove_dir_all(&out)?;
     }
     let release = root.join("target");
 
     // The CLI for this machine.
-    cargo(&["build", "--release", "-p", "yf-cli"])?;
-    copy(&release.join("release/yf"), &out.join("bin/yf"))?;
+    cargo(&["build", "--release", "-p", "nsh-cli"])?;
+    copy(&release.join("release/nsh"), &out.join("bin/nsh"))?;
 
     // iOS runtimes: release runners, development hosts.
     for (triple, dir) in [(IOS, "iphoneos"), (IOS_SIM, "iphonesimulator")] {
-        cargo(&["build", "--release", "-p", "yf-app", "--target", triple])?;
+        cargo(&["build", "--release", "-p", "nsh-app", "--target", triple])?;
         copy(
-            &release.join(triple).join("release/yf-app"),
-            &out.join("runtime/ios").join(dir).join("yf-app"),
+            &release.join(triple).join("release/nsh-app"),
+            &out.join("runtime/ios").join(dir).join("nsh-app"),
         )?;
     }
     for (triple, dir) in [(IOS_SIM, "iphonesimulator"), (CATALYST, "maccatalyst")] {
-        cargo(&["build", "--release", "-p", "yf-host", "--target", triple])?;
+        cargo(&["build", "--release", "-p", "nsh-host", "--target", triple])?;
         copy(
-            &release.join(triple).join("release/yf-host"),
-            &out.join("runtime/ios").join(dir).join("yf-host"),
+            &release.join(triple).join("release/nsh-host"),
+            &out.join("runtime/ios").join(dir).join("nsh-host"),
         )?;
     }
 
@@ -60,32 +60,32 @@ pub(crate) fn dist() -> anyhow::Result<()> {
         copy(&built.join("classes.dex"), &dest.join("classes.dex"))?;
         for abi in &abis {
             copy(
-                &built.join("lib").join(abi).join("libyf.so"),
-                &dest.join("lib").join(abi).join("libyf.so"),
+                &built.join("lib").join(abi).join("libnsh.so"),
+                &dest.join("lib").join(abi).join("libnsh.so"),
             )?;
         }
         let aar = out
             .join("embed/android")
-            .join(if dev { "yf-dev.aar" } else { "yf.aar" });
+            .join(if dev { "nsh-dev.aar" } else { "nsh.aar" });
         make_aar(&built, &abis, dev, &aar)?;
     }
 
     // iOS embedding: one static library per platform in an XCFramework.
-    for (dev, name) in [(false, "YF"), (true, "YFDev")] {
+    for (dev, name) in [(false, "NativeShell"), (true, "NativeShellDev")] {
         let mut libs = Vec::new();
         for triple in [IOS, IOS_SIM, CATALYST] {
-            let mut args = vec!["build", "--release", "-p", "yf-ffi", "--target", triple];
+            let mut args = vec!["build", "--release", "-p", "nsh-ffi", "--target", triple];
             if dev {
                 args.extend(["--features", "dev"]);
             }
             cargo(&args)?;
             // Separate copies: dev and release builds share the target dir.
-            let lib = out.join("work").join(name).join(triple).join("libyf.a");
-            copy(&release.join(triple).join("release/libyf.a"), &lib)?;
+            let lib = out.join("work").join(name).join(triple).join("libnsh.a");
+            copy(&release.join(triple).join("release/libnsh.a"), &lib)?;
             libs.push(lib);
         }
         let framework = out.join("embed/ios").join(format!("{name}.xcframework"));
-        let headers = root.join("crates/yf-ffi/include");
+        let headers = root.join("crates/nsh-ffi/include");
         let mut cmd = Command::new("xcodebuild");
         cmd.arg("-create-xcframework");
         for lib in &libs {
@@ -99,10 +99,10 @@ pub(crate) fn dist() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An Android library archive: the Java runtime and `libyf.so` per ABI.
+/// An Android library archive: the Java runtime and `libnsh.so` per ABI.
 ///
 /// The development library allows cleartext HTTP (merged into the app's
-/// manifest): it loads assets from the `yf dev` server over plain HTTP.
+/// manifest): it loads assets from the `nsh dev` server over plain HTTP.
 fn make_aar(built: &Path, abis: &[String], dev: bool, aar: &Path) -> anyhow::Result<()> {
     let work = aar.with_extension("aar-work");
     if work.exists() {
@@ -113,7 +113,7 @@ fn make_aar(built: &Path, abis: &[String], dev: bool, aar: &Path) -> anyhow::Res
         work.join("AndroidManifest.xml"),
         format!(
             r#"<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.yf">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.nsh">
     <uses-sdk android:minSdkVersion="{}" />
     <uses-permission android:name="android.permission.INTERNET" />{}
 </manifest>
@@ -130,8 +130,8 @@ fn make_aar(built: &Path, abis: &[String], dev: bool, aar: &Path) -> anyhow::Res
     copy(&built.join("classes.jar"), &work.join("classes.jar"))?;
     for abi in abis {
         copy(
-            &built.join("lib").join(abi).join("libyf.so"),
-            &work.join("jni").join(abi).join("libyf.so"),
+            &built.join("lib").join(abi).join("libnsh.so"),
+            &work.join("jni").join(abi).join("libnsh.so"),
         )?;
     }
     if let Some(dir) = aar.parent() {

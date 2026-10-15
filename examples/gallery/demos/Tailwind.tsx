@@ -1,7 +1,7 @@
 import { createSignal, For, Index } from "solid-js";
 import logo from "../logo@2x.png";
 
-const photo = "https://picsum.photos/seed/yf-tailwind/600/400";
+const photo = "https://picsum.photos/seed/nsh-tailwind/600/400";
 
 function Section(props: { title: string; children: any }) {
   return (

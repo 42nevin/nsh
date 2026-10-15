@@ -1,0 +1,20 @@
+[package]
+name = "nsh-app"
+description = "Release app runner: the executable of packaged nsh apps (no development features)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "nsh-app"
+path = "src/main.rs"
+
+[dependencies]
+log.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+nsh-platform-apple.workspace = true

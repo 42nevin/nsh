@@ -1,5 +1,5 @@
 import { createSignal, For } from "solid-js";
-import { createNativeValue, PanResponder, type GestureResponderEvent } from "yf";
+import { createNativeValue, PanResponder, type GestureResponderEvent } from "nsh";
 import { Button, colors, Section } from "../ui";
 
 /** Drag, pinch and rotate one card at the same time, all on the UI thread. */
@@ -29,7 +29,7 @@ function Card() {
             transform: [{ translateX: x }, { translateY: y }, { scale }, { rotate: angle }],
           }}
         >
-          <image src="https://picsum.photos/seed/yf-card/400/300" style={{ flex: 1 }} />
+          <image src="https://picsum.photos/seed/nsh-card/400/300" style={{ flex: 1 }} />
         </view>
       </view>
       <text style={{ color: colors.muted, fontSize: 13 }}>Drag with one finger; pinch and rotate with two (Option-drag in the simulator).</text>

@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { fontScale } from "yf";
+import { fontScale } from "nsh";
 import pacifico from "../fonts/Pacifico-Regular.ttf";
 import logo from "../logo@2x.png";
 
@@ -34,7 +34,7 @@ export function TextDemo() {
         <text style={{ fontSize: 16, lineHeight: 26 }}>
           {"Made with "}
           <image src={logo} style={{ width: 18, height: 18, borderRadius: 4 }} />
-          {" yf. Status "}
+          {" nsh. Status "}
           <view style={{ backgroundColor: "#1a7f37", borderRadius: 9, paddingHorizontal: 7, height: 18, justifyContent: "center" }}>
             <text style={{ color: "#ffffff", fontSize: 11, fontWeight: "700" }}>LIVE</text>
           </view>

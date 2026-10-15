@@ -1,0 +1,27 @@
+[package]
+name = "nsh-engine"
+description = "Engine thread that drives the JS host and the core and emits mount batches."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rustc-hash.workspace = true
+log.workspace = true
+oxc_sourcemap.workspace = true
+nsh-core.workspace = true
+nsh-anim.workspace = true
+nsh-js.workspace = true
+crossbeam-channel.workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+nsh-bundler.workspace = true
+nsh-js.workspace = true
+crossbeam-channel.workspace = true

@@ -1,7 +1,7 @@
-// Globals of the yf JS environment (QuickJS-NG plus yf's own): what an app
+// Globals of the nsh JS environment (QuickJS-NG plus nsh's own): what an app
 // can use besides the ECMAScript library. There is no DOM.
 //
-// Keep in sync with `crates/yf-js/src/console.rs`, `host.rs` (timers,
+// Keep in sync with `crates/nsh-js/src/console.rs`, `host.rs` (timers,
 // frames) and `web.js` (fetch and friends).
 
 declare var console: {
@@ -197,8 +197,8 @@ declare function fetch(input: string | URL | Request, init?: RequestInit): Promi
 
 // Imported files: images are asset descriptors (sized in points, `@2x`
 // files at half their pixel size), fonts the name of their family.
-// The app's Tailwind theme from `yf.json` (JSON), for the runtime.
-declare module "yf:tailwind-theme" {
+// The app's Tailwind theme from `nsh.json` (JSON), for the runtime.
+declare module "nsh:tailwind-theme" {
   const theme: string | null;
   export default theme;
 }

@@ -1,4 +1,4 @@
-//! Android runtime builds: Rust (`libyf.so`) with the NDK, Java with
+//! Android runtime builds: Rust (`libnsh.so`) with the NDK, Java with
 //! `javac` + `d8` from the SDK. No Gradle.
 
 use std::{
@@ -95,7 +95,7 @@ pub(crate) fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Builds `libyf.so` for `abis` and `classes.dex` into
+/// Builds `libnsh.so` for `abis` and `classes.dex` into
 /// `target/android/<profile>[-dev]`, returning that directory.
 pub(crate) fn build(release: bool, dev: bool, abis: &[String]) -> anyhow::Result<PathBuf> {
     let sdk = Sdk::find()?;
@@ -110,8 +110,8 @@ pub(crate) fn build(release: bool, dev: bool, abis: &[String]) -> anyhow::Result
         let so = cargo_lib(&sdk, triple, release, dev)?;
         let dest = out.join("lib").join(abi);
         fs::create_dir_all(&dest)?;
-        fs::copy(&so, dest.join("libyf.so"))?;
-        println!("{}", dest.join("libyf.so").display());
+        fs::copy(&so, dest.join("libnsh.so"))?;
+        println!("{}", dest.join("libnsh.so").display());
     }
     java(&sdk, &out)?;
     Ok(out)
@@ -145,7 +145,7 @@ pub(crate) fn clippy() -> anyhow::Result<()> {
         .args([
             "clippy",
             "-p",
-            "yf-platform-android",
+            "nsh-platform-android",
             "--target",
             "aarch64-linux-android",
             "--all-features",
@@ -162,7 +162,7 @@ pub(crate) fn clippy() -> anyhow::Result<()> {
 
 fn cargo_lib(sdk: &Sdk, triple: &str, release: bool, dev: bool) -> anyhow::Result<PathBuf> {
     let mut cmd = ndk_cargo(sdk, triple);
-    cmd.args(["build", "-p", "yf-platform-android", "--target", triple]);
+    cmd.args(["build", "-p", "nsh-platform-android", "--target", triple]);
     if release {
         cmd.arg("--release");
     }
@@ -171,19 +171,19 @@ fn cargo_lib(sdk: &Sdk, triple: &str, release: bool, dev: bool) -> anyhow::Resul
     }
     let status = cmd.status().context("run cargo")?;
     if !status.success() {
-        bail!("building libyf.so for {triple} failed");
+        bail!("building libnsh.so for {triple} failed");
     }
     let profile = if release { "release" } else { "debug" };
     Ok(root()
         .join("target")
         .join(triple)
         .join(profile)
-        .join("libyf.so"))
+        .join("libnsh.so"))
 }
 
 /// Compiles the Java runtime to `out/classes.dex`.
 fn java(sdk: &Sdk, out: &Path) -> anyhow::Result<()> {
-    let src = root().join("crates/yf-platform-android/java");
+    let src = root().join("crates/nsh-platform-android/java");
     let mut sources = Vec::new();
     collect(&src, &mut sources)?;
     let classes = out.join("classes");

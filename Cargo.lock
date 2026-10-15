@@ -1720,6 +1720,173 @@ dependencies = [
 ]
 
 [[package]]
+name = "nsh-anim"
+version = "0.1.0"
+
+[[package]]
+name = "nsh-app"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "nsh-platform-apple",
+]
+
+[[package]]
+name = "nsh-bundler"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dom-expressions-compiler",
+ "imagesize",
+ "log",
+ "nsh-core",
+ "oxc",
+ "oxc_sourcemap 9.0.0",
+ "rolldown",
+ "rolldown_common",
+ "rolldown_error",
+ "rolldown_sourcemap",
+ "serde_json",
+ "tokio",
+ "ttf-parser",
+]
+
+[[package]]
+name = "nsh-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossbeam-channel",
+ "image",
+ "libc",
+ "log",
+ "notify",
+ "nsh-bundler",
+ "nsh-core",
+ "nsh-dev",
+ "nsh-engine",
+ "nsh-js",
+ "plist",
+ "serde",
+ "serde_json",
+ "ureq",
+ "zip",
+]
+
+[[package]]
+name = "nsh-core"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "nsh-anim",
+ "rustc-hash",
+ "serde_json",
+ "slab",
+ "taffy",
+]
+
+[[package]]
+name = "nsh-dev"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "log",
+ "nsh-dev",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tungstenite 0.30.0",
+]
+
+[[package]]
+name = "nsh-engine"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "libc",
+ "log",
+ "nsh-anim",
+ "nsh-bundler",
+ "nsh-core",
+ "nsh-js",
+ "oxc_sourcemap 9.0.0",
+ "rustc-hash",
+]
+
+[[package]]
+name = "nsh-ffi"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "nsh-engine",
+ "nsh-platform-apple",
+ "objc2",
+ "objc2-core-foundation",
+ "objc2-ui-kit",
+]
+
+[[package]]
+name = "nsh-host"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "nsh-dev",
+ "nsh-platform-apple",
+]
+
+[[package]]
+name = "nsh-js"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "nsh-anim",
+ "nsh-core",
+ "rquickjs",
+ "rustc-hash",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
+name = "nsh-platform-android"
+version = "0.1.0"
+dependencies = [
+ "jni",
+ "libc",
+ "log",
+ "nsh-anim",
+ "nsh-core",
+ "nsh-dev",
+ "nsh-engine",
+ "rustc-hash",
+ "ttf-parser",
+]
+
+[[package]]
+name = "nsh-platform-apple"
+version = "0.1.0"
+dependencies = [
+ "block2",
+ "dispatch2",
+ "libc",
+ "log",
+ "nsh-anim",
+ "nsh-core",
+ "nsh-dev",
+ "nsh-engine",
+ "objc2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-text",
+ "objc2-foundation",
+ "objc2-image-io",
+ "objc2-quartz-core",
+ "objc2-ui-kit",
+ "rustc-hash",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5014,173 +5181,6 @@ name = "yansi"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
-
-[[package]]
-name = "yf-anim"
-version = "0.1.0"
-
-[[package]]
-name = "yf-app"
-version = "0.1.0"
-dependencies = [
- "log",
- "yf-platform-apple",
-]
-
-[[package]]
-name = "yf-bundler"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dom-expressions-compiler",
- "imagesize",
- "log",
- "oxc",
- "oxc_sourcemap 9.0.0",
- "rolldown",
- "rolldown_common",
- "rolldown_error",
- "rolldown_sourcemap",
- "serde_json",
- "tokio",
- "ttf-parser",
- "yf-core",
-]
-
-[[package]]
-name = "yf-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossbeam-channel",
- "image",
- "libc",
- "log",
- "notify",
- "plist",
- "serde",
- "serde_json",
- "ureq",
- "yf-bundler",
- "yf-core",
- "yf-dev",
- "yf-engine",
- "yf-js",
- "zip",
-]
-
-[[package]]
-name = "yf-core"
-version = "0.1.0"
-dependencies = [
- "log",
- "rustc-hash",
- "serde_json",
- "slab",
- "taffy",
- "yf-anim",
-]
-
-[[package]]
-name = "yf-dev"
-version = "0.1.0"
-dependencies = [
- "axum",
- "log",
- "serde",
- "serde_json",
- "tokio",
- "tungstenite 0.30.0",
- "yf-dev",
-]
-
-[[package]]
-name = "yf-engine"
-version = "0.1.0"
-dependencies = [
- "crossbeam-channel",
- "libc",
- "log",
- "oxc_sourcemap 9.0.0",
- "rustc-hash",
- "yf-anim",
- "yf-bundler",
- "yf-core",
- "yf-js",
-]
-
-[[package]]
-name = "yf-ffi"
-version = "0.1.0"
-dependencies = [
- "log",
- "objc2",
- "objc2-core-foundation",
- "objc2-ui-kit",
- "yf-engine",
- "yf-platform-apple",
-]
-
-[[package]]
-name = "yf-host"
-version = "0.1.0"
-dependencies = [
- "log",
- "yf-dev",
- "yf-platform-apple",
-]
-
-[[package]]
-name = "yf-js"
-version = "0.1.0"
-dependencies = [
- "log",
- "rquickjs",
- "rustc-hash",
- "thiserror 2.0.21",
- "url",
- "yf-anim",
- "yf-core",
-]
-
-[[package]]
-name = "yf-platform-android"
-version = "0.1.0"
-dependencies = [
- "jni",
- "libc",
- "log",
- "rustc-hash",
- "ttf-parser",
- "yf-anim",
- "yf-core",
- "yf-dev",
- "yf-engine",
-]
-
-[[package]]
-name = "yf-platform-apple"
-version = "0.1.0"
-dependencies = [
- "block2",
- "dispatch2",
- "libc",
- "log",
- "objc2",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-core-text",
- "objc2-foundation",
- "objc2-image-io",
- "objc2-quartz-core",
- "objc2-ui-kit",
- "rustc-hash",
- "yf-anim",
- "yf-core",
- "yf-dev",
- "yf-engine",
-]
 
 [[package]]
 name = "yoke"

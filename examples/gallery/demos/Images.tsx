@@ -1,11 +1,11 @@
 import { createSignal, For, Index } from "solid-js";
-import { Image } from "yf";
+import { Image } from "nsh";
 import bounce from "../bounce.gif";
 import logo from "../logo@2x.png";
 import spinner from "../spinner.webp";
 import { Button, colors, Section } from "../ui";
 
-const wide = "https://picsum.photos/seed/yf-wide/480/240";
+const wide = "https://picsum.photos/seed/nsh-wide/480/240";
 
 function Caption(props: { children: string }) {
   return <text style={{ fontSize: 12, color: colors.muted, textAlign: "center" }}>{props.children}</text>;
@@ -23,7 +23,7 @@ function Placeholders() {
           {(fade) => (
             <view style={{ gap: 4, alignItems: "center" }}>
               <image
-                src={`https://picsum.photos/seed/yf-fade-${seed()}-${fade()}/300/300`}
+                src={`https://picsum.photos/seed/nsh-fade-${seed()}-${fade()}/300/300`}
                 defaultSource={logo}
                 fadeDuration={fade()}
                 resizeMode="cover"
@@ -56,7 +56,7 @@ function Blur() {
 }
 
 function Info() {
-  const big = "https://picsum.photos/seed/yf-progress/2400/1600";
+  const big = "https://picsum.photos/seed/nsh-progress/2400/1600";
   const [size, setSize] = createSignal("");
   const [prefetched, setPrefetched] = createSignal("");
   const [progress, setProgress] = createSignal("");
@@ -162,7 +162,7 @@ export function Images() {
         <Section title="Events">
           <view style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
             <image
-              src="https://picsum.photos/seed/yf-load/300/200"
+              src="https://picsum.photos/seed/nsh-load/300/200"
               onLoadStart={() => log("onLoadStart")}
               onLoad={(e) => {
                 log("onLoad");

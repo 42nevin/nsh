@@ -1,0 +1,883 @@
+//! `<canvas>` drawings: what a `draw` callback recorded through the 2D
+//! context (an HTML Canvas 2D subset), decoded in Rust into an immutable
+//! list of operations that platforms replay natively (CGContext, Android
+//! Canvas). Numbers may be native values ([`Num::Slot`]): the platform
+//! reads them while replaying, so animations redraw on the UI thread
+//! without JS.
+
+use std::sync::Arc;
+
+use crate::style::Color;
+
+/// A number of a drawing: a constant or the value of native value slot
+/// `n` of the drawing ([`Drawing::slots`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Num {
+    /// A constant.
+    Const(f32),
+    /// The current value of a native value.
+    Slot(u16),
+}
+
+impl Num {
+    /// The value, reading slots through `slot`.
+    #[inline]
+    pub fn get(self, slot: impl Fn(u16) -> f32) -> f32 {
+        match self {
+            Num::Const(v) => v,
+            Num::Slot(s) => slot(s),
+        }
+    }
+}
+
+impl Default for Num {
+    fn default() -> Self {
+        Num::Const(0.0)
+    }
+}
+
+/// One element of a path (`beginPath` … `closePath`, `Path2D`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PathOp {
+    /// `moveTo(x, y)`.
+    MoveTo(Num, Num),
+    /// `lineTo(x, y)`.
+    LineTo(Num, Num),
+    /// `quadraticCurveTo(cpx, cpy, x, y)`.
+    QuadTo([Num; 4]),
+    /// `bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y)`.
+    CubicTo([Num; 6]),
+    /// `arc(x, y, radius, startAngle, endAngle, counterclockwise)`
+    /// (radians).
+    Arc {
+        /// Center and radius.
+        x: Num,
+        /// Center y.
+        y: Num,
+        /// Radius.
+        radius: Num,
+        /// Start angle.
+        start: Num,
+        /// End angle.
+        end: Num,
+        /// Counterclockwise.
+        ccw: bool,
+    },
+    /// `arcTo(x1, y1, x2, y2, radius)`.
+    ArcTo([Num; 5]),
+    /// `ellipse(x, y, radiusX, radiusY, rotation, startAngle, endAngle,
+    /// counterclockwise)`.
+    Ellipse {
+        /// Center and radii, rotation (radians).
+        geometry: [Num; 5],
+        /// Start angle.
+        start: Num,
+        /// End angle.
+        end: Num,
+        /// Counterclockwise.
+        ccw: bool,
+    },
+    /// `rect(x, y, w, h)`.
+    Rect([Num; 4]),
+    /// `roundRect(x, y, w, h, radii)`: corner radii top-left, top-right,
+    /// bottom-right, bottom-left.
+    RoundRect([Num; 4], [Num; 4]),
+    /// `closePath()`.
+    Close,
+}
+
+/// A path to fill, stroke or clip instead of the current one.
+pub type Path = Arc<[PathOp]>;
+
+/// `fill` / `clip` rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FillRule {
+    /// `nonzero`.
+    #[default]
+    NonZero,
+    /// `evenodd`.
+    EvenOdd,
+}
+
+/// `lineCap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineCap {
+    /// `butt`.
+    #[default]
+    Butt,
+    /// `round`.
+    Round,
+    /// `square`.
+    Square,
+}
+
+/// `lineJoin`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineJoin {
+    /// `miter`.
+    #[default]
+    Miter,
+    /// `round`.
+    Round,
+    /// `bevel`.
+    Bevel,
+}
+
+/// The geometry of a gradient (canvas coordinates).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GradientShape {
+    /// `createLinearGradient(x0, y0, x1, y1)`.
+    Linear([f32; 4]),
+    /// `createRadialGradient(x0, y0, r0, x1, y1, r1)`.
+    Radial([f32; 6]),
+    /// `createConicGradient(startAngle, x, y)`.
+    Conic([f32; 3]),
+}
+
+/// A `CanvasGradient`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanvasGradient {
+    /// Where it runs.
+    pub shape: GradientShape,
+    /// Offsets (0..1, ascending) and colors.
+    pub stops: Vec<(f32, Color)>,
+}
+
+/// `fillStyle` / `strokeStyle`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Paint {
+    /// A color.
+    Color(Color),
+    /// The current value of a native value interpolating colors.
+    Slot(u16),
+    /// A gradient.
+    Gradient(Arc<CanvasGradient>),
+}
+
+/// `globalCompositeOperation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(missing_docs)]
+pub enum Composite {
+    #[default]
+    SourceOver,
+    SourceIn,
+    SourceOut,
+    SourceAtop,
+    DestinationOver,
+    DestinationIn,
+    DestinationOut,
+    DestinationAtop,
+    Lighter,
+    Copy,
+    Xor,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    ColorDodge,
+    ColorBurn,
+    HardLight,
+    SoftLight,
+    Difference,
+    Exclusion,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
+}
+
+impl Composite {
+    /// Parses a `globalCompositeOperation` name.
+    pub fn parse(name: &str) -> Option<Composite> {
+        use Composite::*;
+        Some(match name {
+            "source-over" => SourceOver,
+            "source-in" => SourceIn,
+            "source-out" => SourceOut,
+            "source-atop" => SourceAtop,
+            "destination-over" => DestinationOver,
+            "destination-in" => DestinationIn,
+            "destination-out" => DestinationOut,
+            "destination-atop" => DestinationAtop,
+            "lighter" => Lighter,
+            "copy" => Copy,
+            "xor" => Xor,
+            "multiply" => Multiply,
+            "screen" => Screen,
+            "overlay" => Overlay,
+            "darken" => Darken,
+            "lighten" => Lighten,
+            "color-dodge" => ColorDodge,
+            "color-burn" => ColorBurn,
+            "hard-light" => HardLight,
+            "soft-light" => SoftLight,
+            "difference" => Difference,
+            "exclusion" => Exclusion,
+            "hue" => Hue,
+            "saturation" => Saturation,
+            "color" => Color,
+            "luminosity" => Luminosity,
+            _ => return None,
+        })
+    }
+}
+
+/// `font` (the CSS shorthand).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanvasFont {
+    /// Size in points.
+    pub size: f32,
+    /// 100..900.
+    pub weight: u16,
+    /// Italic.
+    pub italic: bool,
+    /// The first family; `None` is the system font (also for
+    /// `system-ui` / `sans-serif`).
+    pub family: Option<Arc<str>>,
+}
+
+impl Default for CanvasFont {
+    /// The canvas default, `10px sans-serif`.
+    fn default() -> Self {
+        Self {
+            size: 10.0,
+            weight: 400,
+            italic: false,
+            family: None,
+        }
+    }
+}
+
+impl CanvasFont {
+    /// Parses the CSS `font` shorthand (`italic bold 14px Inter`,
+    /// `600 12px/1.2 system-ui`); `None` if it is invalid (canvas keeps
+    /// the previous font then).
+    pub fn parse(s: &str) -> Option<CanvasFont> {
+        let mut font = CanvasFont {
+            size: 0.0,
+            ..CanvasFont::default()
+        };
+        let mut rest = s.trim();
+        // Style / variant / weight / stretch keywords until the size.
+        loop {
+            let (word, tail) = match rest.split_once(char::is_whitespace) {
+                Some((w, t)) => (w, t.trim_start()),
+                None => (rest, ""),
+            };
+            if let Some(size) = font_size(word) {
+                font.size = size;
+                rest = tail;
+                break;
+            }
+            match word {
+                "italic" | "oblique" => font.italic = true,
+                "normal" | "small-caps" | "condensed" | "expanded" => {}
+                "bold" | "bolder" => font.weight = 700,
+                "lighter" => font.weight = 300,
+                w => match w.parse::<u16>() {
+                    Ok(n) if (1..=1000).contains(&n) => font.weight = n,
+                    _ => return None,
+                },
+            }
+            if tail.is_empty() {
+                return None;
+            }
+            rest = tail;
+        }
+        let family = rest
+            .split(',')
+            .next()
+            .map(|f| f.trim().trim_matches(['"', '\'']))
+            .filter(|f| !f.is_empty())?;
+        font.family = match family {
+            "system-ui" | "sans-serif" | "-apple-system" | "ui-sans-serif" => None,
+            f => Some(f.into()),
+        };
+        Some(font)
+    }
+}
+
+/// `14px` / `14px/1.2` / `1.5rem` / `12pt`: the size in points.
+fn font_size(word: &str) -> Option<f32> {
+    let word = word.split('/').next()?;
+    let (num, scale) = if let Some(n) = word.strip_suffix("px") {
+        (n, 1.0)
+    } else if let Some(n) = word.strip_suffix("rem").or_else(|| word.strip_suffix("em")) {
+        (n, 16.0)
+    } else {
+        (word.strip_suffix("pt")?, 4.0 / 3.0)
+    };
+    num.parse::<f32>()
+        .ok()
+        .filter(|v| *v > 0.0)
+        .map(|v| v * scale)
+}
+
+impl CanvasFont {
+    /// The text style of this font.
+    pub fn text_style(&self) -> crate::text::ResolvedTextStyle {
+        crate::text::ResolvedTextStyle {
+            font_size: self.size,
+            font_weight: self.weight,
+            italic: self.italic,
+            font_family: self.family.as_deref().map(crate::style::FontFamily::new),
+            ..Default::default()
+        }
+    }
+}
+
+/// The width of `text` on one line in `font` (canvas `measureText`).
+pub fn measure_line(engine: &impl crate::text::TextEngine, font: &CanvasFont, text: &str) -> f32 {
+    let mut attributed = crate::text::AttributedText {
+        no_wrap: true,
+        max_lines: 1,
+        ..Default::default()
+    };
+    attributed.push(text, font.text_style());
+    if attributed.text.is_empty() {
+        return 0.0;
+    }
+    let prepared = engine.prepare(&attributed);
+    engine.measure(&prepared, None).width
+}
+
+/// `textAlign`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CanvasTextAlign {
+    /// `start` (left, or right right to left).
+    #[default]
+    Start,
+    /// `end`.
+    End,
+    /// `left`.
+    Left,
+    /// `right`.
+    Right,
+    /// `center`.
+    Center,
+}
+
+/// `textBaseline`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CanvasTextBaseline {
+    /// `alphabetic`.
+    #[default]
+    Alphabetic,
+    /// `top` (the em box's top: the ascent).
+    Top,
+    /// `hanging`.
+    Hanging,
+    /// `middle`.
+    Middle,
+    /// `ideographic`.
+    Ideographic,
+    /// `bottom`.
+    Bottom,
+}
+
+/// What `drawImage` draws: a URL or an imported asset.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanvasImage {
+    /// URL or `asset:/path`.
+    pub uri: Arc<str>,
+}
+
+/// One recorded operation.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(missing_docs)]
+pub enum CanvasOp {
+    Save,
+    Restore,
+    Translate(Num, Num),
+    Scale(Num, Num),
+    /// Radians.
+    Rotate(Num),
+    /// `transform(a, b, c, d, e, f)`.
+    Transform([Num; 6]),
+    /// `setTransform(a, b, c, d, e, f)` (relative to the view, not the
+    /// device).
+    SetTransform([Num; 6]),
+    BeginPath,
+    /// Adds to the current path.
+    Path(PathOp),
+    /// `fill(path?, rule)`: the current path when `None`.
+    Fill(Option<Path>, FillRule),
+    Stroke(Option<Path>),
+    Clip(Option<Path>, FillRule),
+    FillRect([Num; 4]),
+    StrokeRect([Num; 4]),
+    ClearRect([Num; 4]),
+    FillStyle(Paint),
+    StrokeStyle(Paint),
+    LineWidth(Num),
+    LineCap(LineCap),
+    LineJoin(LineJoin),
+    MiterLimit(f32),
+    /// `setLineDash` (an odd count is repeated, as in canvas).
+    LineDash(Arc<[f32]>),
+    LineDashOffset(Num),
+    GlobalAlpha(Num),
+    Composite(Composite),
+    ShadowColor(Color),
+    ShadowBlur(f32),
+    ShadowOffset(f32, f32),
+    Font(CanvasFont),
+    TextAlign(CanvasTextAlign),
+    TextBaseline(CanvasTextBaseline),
+    /// `fillText(text, x, y, maxWidth?)`.
+    FillText {
+        text: Arc<str>,
+        x: Num,
+        y: Num,
+        max_width: Option<f32>,
+    },
+    StrokeText {
+        text: Arc<str>,
+        x: Num,
+        y: Num,
+        max_width: Option<f32>,
+    },
+    /// `drawImage(image, [sx, sy, sw, sh,] dx, dy, dw, dh)`.
+    DrawImage {
+        image: CanvasImage,
+        source: Option<[f32; 4]>,
+        dest: [Num; 4],
+    },
+}
+
+/// One `draw` of a canvas.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Drawing {
+    /// The operations, in order.
+    pub ops: Vec<CanvasOp>,
+    /// The native values the operations read, by slot.
+    pub slots: Vec<nsh_anim::NodeId>,
+}
+
+impl Drawing {
+    /// The slot of native value `node`, adding it if new.
+    pub fn slot(&mut self, node: nsh_anim::NodeId) -> u16 {
+        match self.slots.iter().position(|&n| n == node) {
+            Some(i) => i as u16,
+            None => {
+                self.slots.push(node);
+                (self.slots.len() - 1) as u16
+            }
+        }
+    }
+
+    /// The images it draws.
+    pub fn images(&self) -> impl Iterator<Item = &CanvasImage> {
+        self.ops.iter().filter_map(|op| match op {
+            CanvasOp::DrawImage { image, .. } => Some(image),
+            _ => None,
+        })
+    }
+}
+
+/// The signed sweep of `arc` / `ellipse` from `start` to `end` (radians),
+/// as the Canvas spec defines it: a full turn when the angles are a turn
+/// or more apart in the drawing direction, else the angle between them
+/// going that way.
+pub fn arc_sweep(start: f32, end: f32, ccw: bool) -> f32 {
+    use std::f32::consts::TAU;
+    if !ccw {
+        if end - start >= TAU {
+            TAU
+        } else {
+            (end - start).rem_euclid(TAU)
+        }
+    } else if start - end >= TAU {
+        -TAU
+    } else {
+        -(start - end).rem_euclid(TAU)
+    }
+}
+
+/// Corner radii of `roundRect` scaled down to fit the box (CSS rule: all
+/// by the same factor when two on one side overlap).
+pub fn fit_radii(w: f32, h: f32, radii: [f32; 4]) -> [f32; 4] {
+    let r = radii.map(|r| r.max(0.0));
+    let (w, h) = (w.abs(), h.abs());
+    let sides = [r[0] + r[1], r[2] + r[3], r[0] + r[3], r[1] + r[2]];
+    let limits = [w, w, h, h];
+    let scale = sides
+        .iter()
+        .zip(limits)
+        .filter(|(s, _)| **s > 0.0)
+        .map(|(s, l)| l / s)
+        .fold(1.0f32, f32::min);
+    r.map(|r| r * scale)
+}
+
+// --- SVG path data (`new Path2D("M0 0 L10 10")`) ----------------------------
+
+/// Parses SVG path data into path operations (absolute coordinates;
+/// smooth curves made explicit, arcs as cubic Béziers). Parsing stops at
+/// the first error, keeping what came before, as SVG renderers do.
+pub fn parse_svg_path(d: &str) -> Vec<PathOp> {
+    let mut out = Vec::new();
+    let mut p = PathParser {
+        s: d.as_bytes(),
+        pos: 0,
+    };
+    let (mut x, mut y) = (0f32, 0f32);
+    let (mut sx, mut sy) = (0f32, 0f32);
+    // The last control point, for S / T.
+    let mut last_cubic: Option<(f32, f32)> = None;
+    let mut last_quad: Option<(f32, f32)> = None;
+    let mut command = 0u8;
+    let c = |v: f32| Num::Const(v);
+    loop {
+        p.skip_separators();
+        if p.pos >= p.s.len() {
+            break;
+        }
+        let b = p.s[p.pos];
+        if b.is_ascii_alphabetic() {
+            command = b;
+            p.pos += 1;
+        } else if command == 0 {
+            break;
+        } else if command == b'M' {
+            // Coordinates after a moveto are linetos.
+            command = b'L';
+        } else if command == b'm' {
+            command = b'l';
+        }
+        let rel = command.is_ascii_lowercase();
+        let (ox, oy) = if rel { (x, y) } else { (0.0, 0.0) };
+        let upper = command.to_ascii_uppercase();
+        let ok = (|| -> Option<()> {
+            match upper {
+                b'M' => {
+                    let (nx, ny) = (p.number()? + ox, p.number()? + oy);
+                    out.push(PathOp::MoveTo(c(nx), c(ny)));
+                    (x, y, sx, sy) = (nx, ny, nx, ny);
+                    last_cubic = None;
+                    last_quad = None;
+                }
+                b'L' => {
+                    let (nx, ny) = (p.number()? + ox, p.number()? + oy);
+                    out.push(PathOp::LineTo(c(nx), c(ny)));
+                    (x, y) = (nx, ny);
+                    last_cubic = None;
+                    last_quad = None;
+                }
+                b'H' => {
+                    x = p.number()? + ox;
+                    out.push(PathOp::LineTo(c(x), c(y)));
+                    last_cubic = None;
+                    last_quad = None;
+                }
+                b'V' => {
+                    y = p.number()? + oy;
+                    out.push(PathOp::LineTo(c(x), c(y)));
+                    last_cubic = None;
+                    last_quad = None;
+                }
+                b'C' | b'S' => {
+                    let (x1, y1) = if upper == b'C' {
+                        (p.number()? + ox, p.number()? + oy)
+                    } else {
+                        // The reflection of the last control point.
+                        last_cubic.map_or((x, y), |(cx, cy)| (2.0 * x - cx, 2.0 * y - cy))
+                    };
+                    let (x2, y2) = (p.number()? + ox, p.number()? + oy);
+                    let (nx, ny) = (p.number()? + ox, p.number()? + oy);
+                    out.push(PathOp::CubicTo([x1, y1, x2, y2, nx, ny].map(c)));
+                    last_cubic = Some((x2, y2));
+                    last_quad = None;
+                    (x, y) = (nx, ny);
+                }
+                b'Q' | b'T' => {
+                    let (x1, y1) = if upper == b'Q' {
+                        (p.number()? + ox, p.number()? + oy)
+                    } else {
+                        last_quad.map_or((x, y), |(cx, cy)| (2.0 * x - cx, 2.0 * y - cy))
+                    };
+                    let (nx, ny) = (p.number()? + ox, p.number()? + oy);
+                    out.push(PathOp::QuadTo([x1, y1, nx, ny].map(c)));
+                    last_quad = Some((x1, y1));
+                    last_cubic = None;
+                    (x, y) = (nx, ny);
+                }
+                b'A' => {
+                    let rx = p.number()?.abs();
+                    let ry = p.number()?.abs();
+                    let rotation = p.number()?;
+                    let large = p.flag()?;
+                    let sweep = p.flag()?;
+                    let (nx, ny) = (p.number()? + ox, p.number()? + oy);
+                    arc_to_cubics(&mut out, (x, y), (rx, ry), rotation, large, sweep, (nx, ny));
+                    (x, y) = (nx, ny);
+                    last_cubic = None;
+                    last_quad = None;
+                }
+                b'Z' => {
+                    out.push(PathOp::Close);
+                    (x, y) = (sx, sy);
+                    last_cubic = None;
+                    last_quad = None;
+                    // Z takes no numbers: a number after it starts nothing.
+                    command = 0;
+                }
+                _ => return None,
+            }
+            Some(())
+        })();
+        if ok.is_none() {
+            break;
+        }
+    }
+    out
+}
+
+struct PathParser<'a> {
+    s: &'a [u8],
+    pos: usize,
+}
+
+impl PathParser<'_> {
+    fn skip_separators(&mut self) {
+        while self.pos < self.s.len()
+            && (self.s[self.pos].is_ascii_whitespace() || self.s[self.pos] == b',')
+        {
+            self.pos += 1;
+        }
+    }
+
+    fn number(&mut self) -> Option<f32> {
+        self.skip_separators();
+        let start = self.pos;
+        let s = self.s;
+        let mut i = self.pos;
+        if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
+            i += 1;
+        }
+        let mut digits = false;
+        while i < s.len() && s[i].is_ascii_digit() {
+            i += 1;
+            digits = true;
+        }
+        if i < s.len() && s[i] == b'.' {
+            i += 1;
+            while i < s.len() && s[i].is_ascii_digit() {
+                i += 1;
+                digits = true;
+            }
+        }
+        if !digits {
+            return None;
+        }
+        if i < s.len() && (s[i] == b'e' || s[i] == b'E') {
+            let mut j = i + 1;
+            if j < s.len() && (s[j] == b'+' || s[j] == b'-') {
+                j += 1;
+            }
+            if j < s.len() && s[j].is_ascii_digit() {
+                while j < s.len() && s[j].is_ascii_digit() {
+                    j += 1;
+                }
+                i = j;
+            }
+        }
+        self.pos = i;
+        std::str::from_utf8(&s[start..i]).ok()?.parse().ok()
+    }
+
+    /// Arc flags may be written without separators (`a1 1 0 0110 10`).
+    fn flag(&mut self) -> Option<bool> {
+        self.skip_separators();
+        let b = *self.s.get(self.pos)?;
+        self.pos += 1;
+        match b {
+            b'0' => Some(false),
+            b'1' => Some(true),
+            _ => None,
+        }
+    }
+}
+
+/// An SVG elliptical arc as cubic Béziers (SVG implementation notes,
+/// F.6.5 and F.6.6).
+fn arc_to_cubics(
+    out: &mut Vec<PathOp>,
+    from: (f32, f32),
+    radii: (f32, f32),
+    rotation_deg: f32,
+    large: bool,
+    sweep: bool,
+    to: (f32, f32),
+) {
+    let c = |v: f64| Num::Const(v as f32);
+    let (x1, y1) = (from.0 as f64, from.1 as f64);
+    let (x2, y2) = (to.0 as f64, to.1 as f64);
+    let (mut rx, mut ry) = (radii.0 as f64, radii.1 as f64);
+    if (x1 == x2 && y1 == y2) || rx == 0.0 || ry == 0.0 {
+        if x1 != x2 || y1 != y2 {
+            out.push(PathOp::LineTo(c(x2), c(y2)));
+        }
+        return;
+    }
+    let phi = (rotation_deg as f64).to_radians();
+    let (sin, cos) = phi.sin_cos();
+    let dx = (x1 - x2) / 2.0;
+    let dy = (y1 - y2) / 2.0;
+    let x1p = cos * dx + sin * dy;
+    let y1p = -sin * dx + cos * dy;
+    // Radii too small to reach: scale them up.
+    let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+    if lambda > 1.0 {
+        let s = lambda.sqrt();
+        rx *= s;
+        ry *= s;
+    }
+    let num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+    let den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+    let mut coef = (num / den).max(0.0).sqrt();
+    if large == sweep {
+        coef = -coef;
+    }
+    let cxp = coef * rx * y1p / ry;
+    let cyp = -coef * ry * x1p / rx;
+    let cx = cos * cxp - sin * cyp + (x1 + x2) / 2.0;
+    let cy = sin * cxp + cos * cyp + (y1 + y2) / 2.0;
+    let angle = |ux: f64, uy: f64, vx: f64, vy: f64| (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
+    let theta1 = angle(1.0, 0.0, (x1p - cxp) / rx, (y1p - cyp) / ry);
+    let mut delta = angle(
+        (x1p - cxp) / rx,
+        (y1p - cyp) / ry,
+        (-x1p - cxp) / rx,
+        (-y1p - cyp) / ry,
+    );
+    if !sweep && delta > 0.0 {
+        delta -= std::f64::consts::TAU;
+    } else if sweep && delta < 0.0 {
+        delta += std::f64::consts::TAU;
+    }
+    // At most a quarter turn per segment.
+    let segments = (delta.abs() / std::f64::consts::FRAC_PI_2).ceil().max(1.0) as usize;
+    let step = delta / segments as f64;
+    let k = 4.0 / 3.0 * (step / 4.0).tan();
+    let point = |t: f64| {
+        let (s, co) = t.sin_cos();
+        (
+            cx + rx * co * cos - ry * s * sin,
+            cy + rx * co * sin + ry * s * cos,
+        )
+    };
+    let derivative = |t: f64| {
+        let (s, co) = t.sin_cos();
+        (-rx * s * cos - ry * co * sin, -rx * s * sin + ry * co * cos)
+    };
+    let mut t = theta1;
+    for i in 0..segments {
+        let t2 = t + step;
+        let (p1x, p1y) = point(t);
+        let (d1x, d1y) = derivative(t);
+        let (p2x, p2y) = if i + 1 == segments {
+            (x2, y2)
+        } else {
+            point(t2)
+        };
+        let (d2x, d2y) = derivative(t2);
+        out.push(PathOp::CubicTo([
+            c(p1x + k * d1x),
+            c(p1y + k * d1y),
+            c(p2x - k * d2x),
+            c(p2y - k * d2y),
+            c(p2x),
+            c(p2y),
+        ]));
+        t = t2;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn consts(op: &PathOp) -> Vec<f32> {
+        let v = |n: &Num| match n {
+            Num::Const(v) => *v,
+            Num::Slot(_) => f32::NAN,
+        };
+        match op {
+            PathOp::MoveTo(a, b) | PathOp::LineTo(a, b) => vec![v(a), v(b)],
+            PathOp::QuadTo(n) => n.iter().map(v).collect(),
+            PathOp::CubicTo(n) => n.iter().map(v).collect(),
+            _ => vec![],
+        }
+    }
+
+    #[test]
+    fn svg_paths_parse_to_absolute_ops() {
+        let ops = parse_svg_path("M10 20 l5-5 H30 v10 z m1 1 2 2");
+        assert_eq!(ops.len(), 7);
+        assert_eq!(consts(&ops[1]), vec![15.0, 15.0]);
+        assert_eq!(consts(&ops[2]), vec![30.0, 15.0]);
+        assert_eq!(consts(&ops[3]), vec![30.0, 25.0]);
+        assert_eq!(ops[4], PathOp::Close);
+        // After Z the current point is the subpath's start.
+        assert_eq!(consts(&ops[5]), vec![11.0, 21.0]);
+        // Implicit lineto after a moveto.
+        assert_eq!(consts(&ops[6]), vec![13.0, 23.0]);
+        // Compact numbers: `.5.5` is two numbers, `1e2` an exponent.
+        let ops = parse_svg_path("M.5.5L1e1-2");
+        assert_eq!(consts(&ops[0]), vec![0.5, 0.5]);
+        assert_eq!(consts(&ops[1]), vec![10.0, -2.0]);
+    }
+
+    #[test]
+    fn smooth_curves_reflect_control_points() {
+        let ops = parse_svg_path("M0 0 C0 10 10 10 10 0 S20 -10 20 0");
+        assert_eq!(consts(&ops[2]), vec![10.0, -10.0, 20.0, -10.0, 20.0, 0.0]);
+    }
+
+    #[test]
+    fn arcs_become_cubics_ending_on_the_point() {
+        // A half circle of radius 10, flags without separators.
+        let ops = parse_svg_path("M0 0 A10 10 0 0120 0");
+        assert_eq!(ops.len(), 3);
+        let last = consts(&ops[2]);
+        assert!((last[4] - 20.0).abs() < 1e-4 && last[5].abs() < 1e-4);
+        // Its top: the end of the first quarter, 10 above the center.
+        let mid = consts(&ops[1]);
+        assert!((mid[4] - 10.0).abs() < 1e-3 && (mid[5] + 10.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn bad_path_data_keeps_what_parsed() {
+        let ops = parse_svg_path("M0 0 L10 10 L oops");
+        assert_eq!(ops.len(), 2);
+    }
+
+    #[test]
+    fn arc_sweeps_follow_the_canvas_spec() {
+        use std::f32::consts::{PI, TAU};
+        assert_eq!(arc_sweep(0.0, PI, false), PI);
+        // Backwards clockwise: the long way round.
+        assert!((arc_sweep(PI, 0.0, false) - PI).abs() < 1e-6);
+        assert!((arc_sweep(0.0, -PI / 2.0, false) - 1.5 * PI).abs() < 1e-5);
+        assert_eq!(arc_sweep(0.0, 3.0 * TAU, false), TAU);
+        assert!((arc_sweep(0.0, PI / 2.0, true) + 1.5 * PI).abs() < 1e-5);
+        assert_eq!(arc_sweep(TAU, 0.0, true), -TAU);
+        assert_eq!(
+            fit_radii(10.0, 100.0, [8.0, 8.0, 0.0, 0.0]),
+            [5.0, 5.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn fonts_parse_the_css_shorthand() {
+        let f = CanvasFont::parse("italic bold 14px \"Inter\", sans-serif").unwrap();
+        assert_eq!((f.size, f.weight, f.italic), (14.0, 700, true));
+        assert_eq!(f.family.as_deref(), Some("Inter"));
+        let f = CanvasFont::parse("600 12px/1.5 system-ui").unwrap();
+        assert_eq!((f.size, f.weight, f.family), (12.0, 600, None));
+        assert!(CanvasFont::parse("bold").is_none());
+        assert!(CanvasFont::parse("14px").is_none());
+    }
+}

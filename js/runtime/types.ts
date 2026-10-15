@@ -1,8 +1,8 @@
-// Types of yf apps: styles, the props of host elements and the JSX
+// Types of nsh apps: styles, the props of host elements and the JSX
 // namespace. Types only: nothing here reaches a bundle.
 //
-// Keep in sync with what the core accepts: `crates/yf-core/src/style.rs`
-// (styles) and `crates/yf-js/src/protocol.rs` (props and events).
+// Keep in sync with what the core accepts: `crates/nsh-core/src/style.rs`
+// (styles) and `crates/nsh-js/src/protocol.rs` (props and events).
 
 import type { NativeNode, NativeValue, YNode } from "./index";
 

@@ -1,0 +1,26 @@
+[package]
+name = "nsh-dev"
+description = "Development tooling: dev-server protocol, server (CLI side) and client (host side)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+client = ["dep:tungstenite"]
+server = ["dep:axum", "dep:tokio"]
+
+[dependencies]
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tungstenite = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Enables both sides for the round-trip test.
+nsh-dev = { path = ".", features = ["client", "server"] }

@@ -1,5 +1,5 @@
 import { createSignal, For } from "solid-js";
-import { createNativeValue, I18nManager, List } from "yf";
+import { createNativeValue, I18nManager, List } from "nsh";
 
 const card = {
   width: 150,
@@ -154,7 +154,7 @@ export function Styles() {
         <Label>{clip() ? "Clipped (tap)" : "Visible (tap)"}</Label>
       </view>
       <image
-        src="https://picsum.photos/seed/yf/300/220"
+        src="https://picsum.photos/seed/nsh/300/220"
         style={{
           width: 150,
           height: 110,

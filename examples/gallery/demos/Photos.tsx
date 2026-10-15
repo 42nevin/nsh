@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { createNativeValue, List } from "yf";
+import { createNativeValue, List } from "nsh";
 import logo from "../logo@2x.png";
 
 type Photo = { id: number; title: string; author: string };

@@ -1,5 +1,5 @@
 import { createSignal, For, Index } from "solid-js";
-import { List, windowSize, type ScrollEvent, type YNode } from "yf";
+import { List, windowSize, type ScrollEvent, type YNode } from "nsh";
 import { Button, colors, Section, Toggle as Switch } from "../ui";
 
 const palette = ["#0969da", "#8250df", "#bf3989", "#cf222e", "#bc4c00", "#1a7f37", "#0a3069"];

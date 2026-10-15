@@ -1,8 +1,8 @@
 //! Maintainer tasks, run with `cargo xtask <task>`:
 //!
-//! - `android`: the Android runtime (`libyf.so` per ABI, `classes.dex`)
-//!   into `target/android/<profile>`, where `yf run` / `yf package` find it.
-//! - `dist`: the distribution in `dist/yf`: the `yf` CLI plus every
+//! - `android`: the Android runtime (`libnsh.so` per ABI, `classes.dex`)
+//!   into `target/android/<profile>`, where `nsh run` / `nsh package` find it.
+//! - `dist`: the distribution in `dist/nsh`: the `nsh` CLI plus every
 //!   prebuilt runtime, so app developers never need Rust.
 
 mod android;
@@ -33,7 +33,7 @@ enum Task {
     },
     /// Run clippy on the Android crate (with the NDK set up).
     ClippyAndroid,
-    /// Build the distribution in `dist/yf`.
+    /// Build the distribution in `dist/nsh`.
     Dist,
 }
 

@@ -1,5 +1,5 @@
 import { createSignal, For, onCleanup } from "solid-js";
-import { ActionSheetIOS, Alert, colorScheme, fontScale, keyboard, safeArea, StatusBar, ToastAndroid, windowSize } from "yf";
+import { ActionSheetIOS, Alert, colorScheme, fontScale, keyboard, safeArea, StatusBar, ToastAndroid, windowSize } from "nsh";
 import { Button, colors, Section } from "../ui";
 
 function Row(props: { label: string; value: string }) {
@@ -137,7 +137,7 @@ export function System() {
               </text>
             )}
           </For>
-          <Button label="console.log (shown by yf run)" color="#57606a" onPress={() => console.log("hello from the gallery", { at: new Date().toISOString() })} />
+          <Button label="console.log (shown by nsh run)" color="#57606a" onPress={() => console.log("hello from the gallery", { at: new Date().toISOString() })} />
         </Section>
       </view>
     </scroll>

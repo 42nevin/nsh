@@ -1,10 +1,10 @@
-// An existing UIKit app that embeds a yf app below its own native UI.
+// An existing UIKit app that embeds a nsh app below its own native UI.
 //
-// Build: see README.md. The yf bundle (`yf build`) is copied into the app
-// as `yf/bundle.qbc` (+ `yf/assets`).
+// Build: see README.md. The nsh bundle (`nsh build`) is copied into the app
+// as `nsh/bundle.qbc` (+ `nsh/assets`).
 
 import UIKit
-import YF
+import NativeShell
 
 final class EmbedController: UIViewController {
     private var app: OpaquePointer?
@@ -19,7 +19,7 @@ final class EmbedController: UIViewController {
         title.text = "Native host app"
         title.font = .boldSystemFont(ofSize: 24)
         let reload = UIButton(type: .system)
-        reload.setTitle("Reload yf", for: .normal)
+        reload.setTitle("Reload nsh", for: .normal)
         reload.addTarget(self, action: #selector(load), for: .touchUpInside)
         reloads.font = .systemFont(ofSize: 13)
         reloads.textColor = .secondaryLabel
@@ -30,7 +30,7 @@ final class EmbedController: UIViewController {
         header.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(header)
 
-        // The embedded yf app.
+        // The embedded nsh app.
         let container = UIView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.layer.borderColor = UIColor.systemPurple.cgColor
@@ -47,13 +47,13 @@ final class EmbedController: UIViewController {
             container.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
         ])
 
-        let app = yf_app_create(container.bounds, false)
+        let app = nsh_app_create(container.bounds, false)
         self.app = app
-        let yfView = yf_app_view(app)
-        yfView.frame = container.bounds
-        container.addSubview(yfView)
-        yf_app_set_error_handler(app, { _, message in
-            print("yf error: \(String(cString: message))")
+        let nshView = nsh_app_view(app)
+        nshView.frame = container.bounds
+        container.addSubview(nshView)
+        nsh_app_set_error_handler(app, { _, message in
+            print("nsh error: \(String(cString: message))")
         }, nil)
         load()
     }
@@ -61,21 +61,21 @@ final class EmbedController: UIViewController {
     private var count = 0
 
     @objc private func load() {
-        guard let app, let path = Bundle.main.path(forResource: "bundle", ofType: "qbc", inDirectory: "yf") else {
+        guard let app, let path = Bundle.main.path(forResource: "bundle", ofType: "qbc", inDirectory: "nsh") else {
             return
         }
         count += 1
         reloads.text = "loaded \(count)×"
-        yf_app_load_bundle(app, path)
+        nsh_app_load_bundle(app, path)
     }
 
     // Let the embedded app's `StatusBar` set the status bar.
-    override var preferredStatusBarStyle: UIStatusBarStyle { yf_status_bar_style() }
-    override var prefersStatusBarHidden: Bool { yf_status_bar_hidden() }
-    override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation { yf_status_bar_animation() }
+    override var preferredStatusBarStyle: UIStatusBarStyle { nsh_status_bar_style() }
+    override var prefersStatusBarHidden: Bool { nsh_status_bar_hidden() }
+    override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation { nsh_status_bar_animation() }
 
     deinit {
-        yf_app_destroy(app)
+        nsh_app_destroy(app)
     }
 }
 

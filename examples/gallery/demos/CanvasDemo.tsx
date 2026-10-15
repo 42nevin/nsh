@@ -1,5 +1,5 @@
 import { createSignal, For } from "solid-js";
-import { Canvas, createNativeValue, Easing, Path2D, type GestureResponderEvent } from "yf";
+import { Canvas, createNativeValue, Easing, Path2D, type GestureResponderEvent } from "nsh";
 import logo from "../logo@2x.png";
 import { Button, colors, Section } from "../ui";
 

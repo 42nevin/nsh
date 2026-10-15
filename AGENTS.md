@@ -1,45 +1,45 @@
 # AGENTS.md
 
-yf is a React Native–like cross-platform UI framework: app code is written in TSX + SolidJS and runs in QuickJS; layout uses Taffy; everything renders with the system's native views (UIKit / Android View), so embedding native components such as maps or web views has no layering problems. The toolchain is pure Rust and does not need Node.js; app developers get a prebuilt distribution (`cargo xtask dist`) and never need Rust either.
+native-shell (nsh for short: crates, the CLI, the JS module and Java package all use `nsh`) is a React Native–like cross-platform UI framework: app code is written in TSX + SolidJS and runs in QuickJS; layout uses Taffy; everything renders with the system's native views (UIKit / Android View), so embedding native components such as maps or web views has no layering problems. The toolchain is pure Rust and does not need Node.js; app developers get a prebuilt distribution (`cargo xtask dist`) and never need Rust either.
 
 ## Layout
 
 ```
 crates/
-  yf-core/            Platform-independent core: shadow tree, styles (RN semantics), Taffy layout (flex + grid), text merging, list virtualization,
-                      mount items; CSS values (`css.rs`: colors, lengths, shadows, gradients, filters), effects (`effects.rs`), Tailwind (`tailwind/`)
-  yf-anim/            Native animation graph (pure Rust): value / interpolate / math nodes, timing / spring / decay drivers
-  yf-js/              QuickJS host: console / timers / op bridge, op buffer decoding, bytecode compilation and loading
-  yf-engine/          Engine thread: drives yf-js + yf-core and hands one MountBatch per frame to the platform
-  yf-bundler/         Bundler: rolldown + Oxc (TS stripping) + Solid universal JSX compiler + embedded JS packages + source maps;
-                      the `yf:tailwind-theme` module (yf.json `tailwind`) and the unknown-class check (`classes.rs`);
-                      development bundles with hot module replacement (`hot.rs`); the TypeScript declarations of `.yf/types` (`types.rs`)
-  yf-dev/             Dev tooling: dev server protocol, server (CLI, feature `server`), client (host, feature `client`)
-  yf-platform-apple/  UIKit backend (iOS / simulator / Mac Catalyst): native view mounting, CoreText text engine, input, AppView, standalone app;
-                      feature `dev`: dev server client, log forwarding, error overlay
-  yf-platform-android/ Android backend: `libyf.so` (JNI glue, StaticLayout text engine, batch encoding, UI-thread animator) + the Java
-                      runtime in `java/dev/yf` (YfView, Mounter, views, images, networking); feature `dev` as above
-  yf-host/            Development host app (Catalyst / iOS simulator); connects to a dev server or runs a local bundle
-  yf-app/             Release runner: the executable of iOS apps built by `yf package`
-  yf-ffi/             C ABI (`include/yf.h`, `libyf.a`) for embedding yf in existing iOS apps; shipped as an XCFramework
-  yf-cli/             The `yf` command line: init / build / trace / dev / run / package
-  xtask/              Maintainer tasks: `cargo xtask android` (Android runtime), `cargo xtask dist` (the distribution)
-js/runtime/index.ts   Solid universal renderer (JS side) and the runtime components (List, Stack, Modal, Canvas, ...), bundled by yf-bundler
-js/runtime/types.ts   Style, element-prop and JSX types (types only; also the source of `.yf/types/yf/types.d.ts`)
+  nsh-core/            Platform-independent core: shadow tree, styles (RN semantics), Taffy layout (flex + grid), text merging, list virtualization,
+                       mount items; CSS values (`css.rs`: colors, lengths, shadows, gradients, filters), effects (`effects.rs`), Tailwind (`tailwind/`)
+  nsh-anim/            Native animation graph (pure Rust): value / interpolate / math nodes, timing / spring / decay drivers
+  nsh-js/              QuickJS host: console / timers / op bridge, op buffer decoding, bytecode compilation and loading
+  nsh-engine/          Engine thread: drives nsh-js + nsh-core and hands one MountBatch per frame to the platform
+  nsh-bundler/         Bundler: rolldown + Oxc (TS stripping) + Solid universal JSX compiler + embedded JS packages + source maps;
+                       the `nsh:tailwind-theme` module (nsh.json `tailwind`) and the unknown-class check (`classes.rs`);
+                       development bundles with hot module replacement (`hot.rs`); the TypeScript declarations of `.nsh/types` (`types.rs`)
+  nsh-dev/             Dev tooling: dev server protocol, server (CLI, feature `server`), client (host, feature `client`)
+  nsh-platform-apple/  UIKit backend (iOS / simulator / Mac Catalyst): native view mounting, CoreText text engine, input, AppView, standalone app;
+                       feature `dev`: dev server client, log forwarding, error overlay
+  nsh-platform-android/ Android backend: `libnsh.so` (JNI glue, StaticLayout text engine, batch encoding, UI-thread animator) + the Java
+                       runtime in `java/dev/nsh` (NshView, Mounter, views, images, networking); feature `dev` as above
+  nsh-host/            Development host app (Catalyst / iOS simulator); connects to a dev server or runs a local bundle
+  nsh-app/             Release runner: the executable of iOS apps built by `nsh package`
+  nsh-ffi/             C ABI (`include/nsh.h`, `libnsh.a`) for embedding nsh in existing iOS apps; shipped as an XCFramework
+  nsh-cli/             The `nsh` command line: init / build / trace / dev / run / package
+  xtask/               Maintainer tasks: `cargo xtask android` (Android runtime), `cargo xtask dist` (the distribution)
+js/runtime/index.ts   Solid universal renderer (JS side) and the runtime components (List, Stack, Modal, Canvas, ...), bundled by nsh-bundler
+js/runtime/types.ts   Style, element-prop and JSX types (types only; also the source of `.nsh/types/nsh/types.d.ts`)
 js/runtime/globals.d.ts  Declarations of the JS globals (console, timers, fetch, ...) and of asset imports
 js/runtime/hot.js     Hot module replacement runtime of development bundles (module registry, component proxies)
-js/vendor/solid-js/   Embedded solid-js (version in VERSION) and its type declarations (`types/`, `jsx.d.ts` replaced by yf's)
+js/vendor/solid-js/   Embedded solid-js (version in VERSION) and its type declarations (`types/`, `jsx.d.ts` replaced by nsh's)
 examples/             Example apps (gallery: a demo index, one module per demo; counter) and embedding samples (embed-ios, embed-android)
 ```
 
-Dependency direction: `yf-core` ← `yf-js` ← `yf-engine` ← `yf-platform-*` ← `yf-host` / `yf-app` / `yf-ffi`; `yf-cli` depends on `yf-bundler`, `yf-js` and `yf-engine`. `yf-core` must not depend on any platform or JS crate.
+Dependency direction: `nsh-core` ← `nsh-js` ← `nsh-engine` ← `nsh-platform-*` ← `nsh-host` / `nsh-app` / `nsh-ffi`; `nsh-cli` depends on `nsh-bundler`, `nsh-js` and `nsh-engine`. `nsh-core` must not depend on any platform or JS crate.
 
 ## Data flow and threads
 
 ```
-JS (engine thread, QuickJS)  Solid components -> js/runtime pushes changes into one flat array -> __yf_commit(ops) in a microtask
-yf-js                        decodes the op buffer in Rust (tags, style objects and event names are parsed here) -> Vec<Op>
-yf-core (engine thread)      apply(Op) maintains the shadow tree -> commit(): rebuild text, Taffy layout, diff frames -> MountBatch
+JS (engine thread, QuickJS)  Solid components -> js/runtime pushes changes into one flat array -> __nsh_commit(ops) in a microtask
+nsh-js                        decodes the op buffer in Rust (tags, style objects and event names are parsed here) -> Vec<Op>
+nsh-core (engine thread)      apply(Op) maintains the shadow tree -> commit(): rebuild text, Taffy layout, diff frames -> MountBatch
 Platform (main thread)       one main-queue hop per commit, applying MountItems to native views in order
 Input                        native gestures -> EngineControl::dispatch_event -> engine thread -> JS handler
 ```
@@ -52,57 +52,57 @@ Input                        native gestures -> EngineControl::dispatch_event ->
 - Measure cache: one content-addressed LRU per engine (`MeasureCache`, two generations of hash maps, ≤1024 entries), keyed by a hash of the
   layout-relevant content (`AttributedText::layout_hash`, colors excluded) + the width constraint; nodes also cache `Prepared` and the final layout.
   A color-only change does not trigger layout, only a new final layout.
-- One `Surface` (Apple) / `YfView` (Android) is one engine (one QuickJS runtime), with no global singletons, so yf can be embedded in
+- One `Surface` (Apple) / `NshView` (Android) is one engine (one QuickJS runtime), with no global singletons, so nsh can be embedded in
   existing apps with several instances. `AppView` (Apple) wraps a surface for embedding and owns its dev session; a standalone app is
   just "one AppView filling the window".
 - **Android**: the engine thread typesets with `StaticLayout` through cached JNI method ids (classes are cached in `JNI_OnLoad`:
   native threads only see the system class loader). Each commit is encoded (`encode.rs`) into one `byte[]` plus an object table
-  (strings, layouts) and handed to `YfView.submit` → `Mounter.java` on the UI thread. Animation items stay in Rust: Java calls
+  (strings, layouts) and handed to `NshView.submit` → `Mounter.java` on the UI thread. Animation items stay in Rust: Java calls
   `Native.afterBatch(seq)` after applying a batch, and `Choreographer` frames call `Native.tick`; both return
   `[animating, (view, prop, value)*]` float arrays. Units cross as dp; Java converts to px.
 - **Networking**: `fetch` (and `Headers`, `Request`, `Response`, `AbortController`, `URL`, `URLSearchParams`, `TextEncoder`/`Decoder`)
-  is defined by `crates/yf-js/src/web.js`, precompiled to bytecode at build time and loaded on first use of any of those globals
-  (zero startup cost for apps that do not use them). Requests go to the platform stack through `yf_engine::Network`
-  (NSURLSession, HttpURLConnection; ureq for `yf trace`).
+  is defined by `crates/nsh-js/src/web.js`, precompiled to bytecode at build time and loaded on first use of any of those globals
+  (zero startup cost for apps that do not use them). Requests go to the platform stack through `nsh_engine::Network`
+  (NSURLSession, HttpURLConnection; ureq for `nsh trace`).
 
 ## Commands
 
 ```sh
-cargo build -p yf-cli                                         # build the yf CLI
-./target/debug/yf init my-app                                 # new app: App.tsx, yf.json, tsconfig.json, .yf/types
-cargo build -p yf-host --target aarch64-apple-ios-macabi      # build the Catalyst development host (needed by yf run)
-cargo build -p yf-host --target aarch64-apple-ios-sim         # the iOS simulator host (`yf run --target ios`)
-cargo build -p yf-app --target aarch64-apple-ios-sim          # the release runner (`yf package --target ios-simulator`)
-./target/debug/yf trace examples/counter/App.tsx              # headless run: prints mount items and the time of every commit
-./target/release/yf trace examples/gallery/Bench.tsx --scroll 3000 --taps 0   # headless scrolling (10pt per frame): per-frame list cost
-./target/debug/yf run examples/counter/App.tsx --trace        # dev server + Catalyst host (390×844), hot reload on save
-./target/debug/yf run examples/gallery/App.tsx --target ios   # in an iOS simulator (boots one; needs the yf-host sim build)
-./target/debug/yf run examples/gallery/App.tsx --target android   # on an emulator / device (needs `cargo xtask android --dev`)
-./target/debug/yf package examples/gallery/App.tsx --target ios-simulator --run   # installable app (.app / .ipa / .apk)
-cargo xtask android [--release] [--dev]                       # Android runtime into target/android/<profile>[-dev]
-cargo xtask dist                                              # the distribution in dist/yf
-./target/debug/yf dev examples/counter/App.tsx                # dev server only (for simulators / devices); prints local and LAN URLs
-./target/debug/yf build examples/counter/App.tsx --release    # writes bundle.js / bundle.qbc
+cargo build -p nsh-cli                                                             # build the nsh CLI
+./target/debug/nsh init my-app                                                     # new app: App.tsx, nsh.json, tsconfig.json, .nsh/types
+cargo build -p nsh-host --target aarch64-apple-ios-macabi                          # build the Catalyst development host (needed by nsh run)
+cargo build -p nsh-host --target aarch64-apple-ios-sim                             # the iOS simulator host (`nsh run --target ios`)
+cargo build -p nsh-app --target aarch64-apple-ios-sim                              # the release runner (`nsh package --target ios-simulator`)
+./target/debug/nsh trace examples/counter/App.tsx                                  # headless run: prints mount items and the time of every commit
+./target/release/nsh trace examples/gallery/Bench.tsx --scroll 3000 --taps 0       # headless scrolling (10pt per frame): per-frame list cost
+./target/debug/nsh run examples/counter/App.tsx --trace                            # dev server + Catalyst host (390×844), hot reload on save
+./target/debug/nsh run examples/gallery/App.tsx --target ios                       # in an iOS simulator (boots one; needs the nsh-host sim build)
+./target/debug/nsh run examples/gallery/App.tsx --target android                   # on an emulator / device (needs `cargo xtask android --dev`)
+./target/debug/nsh package examples/gallery/App.tsx --target ios-simulator --run   # installable app (.app / .ipa / .apk)
+cargo xtask android [--release] [--dev]                                            # Android runtime into target/android/<profile>[-dev]
+cargo xtask dist                                                                   # the distribution in dist/nsh
+./target/debug/nsh dev examples/counter/App.tsx                                    # dev server only (for simulators / devices); prints local and LAN URLs
+./target/debug/nsh build examples/counter/App.tsx --release                        # writes bundle.js / bundle.qbc
 
 cargo test --workspace
-cargo test --release -p yf-engine --test list_bench -- --ignored --nocapture   # gallery scroll benchmark (JS + core)
-cargo test --release -p yf-core bench_ -- --ignored --nocapture                # row / cell relayout benchmarks
-cargo +nightly fmt --all                                      # .rustfmt.toml uses nightly options
+cargo test --release -p nsh-engine --test list_bench -- --ignored --nocapture   # gallery scroll benchmark (JS + core)
+cargo test --release -p nsh-core bench_ -- --ignored --nocapture                # row / cell relayout benchmarks
+cargo +nightly fmt --all                                                        # .rustfmt.toml uses nightly options
 cargo clippy --workspace --all-targets
-cargo clippy -p yf-platform-apple -p yf-host --target aarch64-apple-ios-macabi
+cargo clippy -p nsh-platform-apple -p nsh-host --target aarch64-apple-ios-macabi
 ```
 
-`yf-platform-apple` only compiles for `target_os = "ios"` (iOS devices, the iOS simulator and Catalyst); on a macOS host it is an empty crate, so always run clippy on platform code with the Catalyst target. Likewise `yf-platform-android` is empty off Android: check it with `cargo xtask android` (which sets up the NDK linker, `CC`, `AR` and bindgen's sysroot) and `cargo xtask clippy-android`.
+`nsh-platform-apple` only compiles for `target_os = "ios"` (iOS devices, the iOS simulator and Catalyst); on a macOS host it is an empty crate, so always run clippy on platform code with the Catalyst target. Likewise `nsh-platform-android` is empty off Android: check it with `cargo xtask android` (which sets up the NDK linker, `CC`, `AR` and bindgen's sysroot) and `cargo xtask clippy-android`.
 
 The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distribution layout) or, in a checkout, in
-`target/<triple>/<profile>` and `target/android/<profile>[-dev]` with the CLI's own profile (`YF_RUNTIME` overrides).
+`target/<triple>/<profile>` and `target/android/<profile>[-dev]` with the CLI's own profile (`NSH_RUNTIME` overrides).
 `.cargo/config.toml` sets `IPHONEOS_DEPLOYMENT_TARGET = 15.0` for Rust and C alike.
 
 ## Elements and capabilities
 
 | JSX | Native (Apple) | Notes |
 |---|---|---|
-| `<view>` | `YFView` (UIView) | `onPress` / `onLongPress` / `onPressIn` / `onPressOut`, `activeOpacity`, `pan={{x, y}}` + `onPanStart` / `onPanEnd`, `pinch` / `rotation` |
+| `<view>` | `NshView` (UIView) | `onPress` / `onLongPress` / `onPressIn` / `onPressOut`, `activeOpacity`, `pan={{x, y}}` + `onPanStart` / `onPanEnd`, `pinch` / `rotation` |
 | `<text>` | `TextView` (CTFrame) | nested `<text>` is a span, other elements are inline attachments (see **Text**); `numberOfLines`, `ellipsizeMode`, `allowFontScaling`, `maxFontSizeMultiplier`, `adjustsFontSizeToFit` + `minimumFontScale`, `selectable`, `onTextLayout` |
 | `<image src>` | UIView + image CALayer | `src` is a URL or `import img from "./a.png"` (an asset descriptor with its size); `resizeMode`; `defaultSource` (placeholder), `blurRadius`, `fadeDuration`; `onLoadStart` / `onProgress` (`loaded` / `total` bytes) / `onLoad` (the source's pixel size) / `onError` / `onLoadEnd`; `tintColor`; animated GIF / WebP / APNG; `Image.getSize(uri)` / `Image.prefetch(uri)` |
 | `<scroll>` | UIScrollView | `horizontal`, `refreshing` + `onRefresh`, `scrollValue`, `onScrollEnd`, `keyboardDismissMode`, zooming, see **Scrolling** below |
@@ -111,7 +111,7 @@ The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distributi
 | `<input>` | UITextField / UITextView in a container | `value` / `defaultValue` / `onChangeText` / `onSubmitEditing` / `onFocus` / `onBlur`, `placeholder`, `secureTextEntry`, `keyboardType`, `returnKeyType`, `autoCapitalize`, `autoCorrect`, `multiline`, `maxLength`, `editable`, `autoFocus`, `selectionColor`, `blurOnSubmit`, `selection` + `onSelectionChange` (UTF-16 `start` / `end`), `onKeyPress` (`key`: the text, `Backspace`, `Enter`), `autoComplete` / `textContentType` (autofill), `caretHidden`, `onContentSizeChange` (the text's size, for growing inputs); ref `setSelection(start, end)` |
 | `Stack` / `Screen` (runtime) | UINavigationController | `createNavigator(route)`: `push` / `pop` / `popToTop` / `replace` / `reset`; screens keep their state while stacked; native header (`title`, `headerLeft` / `headerRight` / `headerTitle` elements, `headerLargeTitle`, `headerTransparent`, colors, `headerBackTitle`), swipe back |
 | `Modal` (runtime) | presented UIViewController | `visible`, `animationType`, `presentationStyle` (`pageSheet` / `formSheet` on iOS), `transparent`, `statusBarTranslucent` (Android; otherwise the content starts below the status bar), `supportedOrientations` (iOS), `onRequestClose` (controlled), `onShow`, `onDismiss` |
-| `InputAccessoryView` (runtime, iOS) | `<inputaccessory>`: a YFView set as `inputAccessoryView` | `nativeID`; inputs name it with `inputAccessoryViewID`. A layout root as wide as the window and as tall as its content; the core resolves the id (`InputConfig::accessory`). Renders nothing on Android (as React Native) |
+| `InputAccessoryView` (runtime, iOS) | `<inputaccessory>`: a NshView set as `inputAccessoryView` | `nativeID`; inputs name it with `inputAccessoryViewID`. A layout root as wide as the window and as tall as its content; the core resolves the id (`InputConfig::accessory`). Renders nothing on Android (as React Native) |
 | `WebView` | WKWebView (WebKit loaded on first use) | `source` (`uri` / `html` + `baseUrl`), `injectedJavaScript(BeforeContentLoaded)`, `onMessage` (pages call `window.ReactNativeWebView.postMessage`), `onLoad*`, `onNavigationStateChange`; ref: `reload()`, `goBack()`, `goForward()`, `postMessage(data)`, `injectJavaScript(js)` |
 | `Video` | AVPlayerLayer / AVPlayerViewController (AVFoundation loaded on first use) | `source`, `paused`, `muted`, `volume`, `rate`, `repeat`, `resizeMode`, `controls`, `onLoad` / `onProgress` / `onEnd` / `onBuffer` / `onError`; ref: `seek(seconds)` |
 
@@ -120,7 +120,7 @@ On Android the same elements map to `Box` (ViewGroup), `TextBox`, `ImageBox`, `S
 (MediaPlayer on a TextureView, MediaController); both are `WidgetBox`es. Every host element and runtime component is typed in
 `js/runtime/types.ts` / `index.ts`.
 
-**Primitives only.** yf provides the basic capabilities; components are the UI library's (built on yf, separately), drawn with
+**Primitives only.** nsh provides the basic capabilities; components are the UI library's (built on nsh, separately), drawn with
 views, classes, canvases and native animations so they look the same on iOS and Android (like the gallery's `Toggle` in
 `examples/gallery/ui.tsx`). Do not add platform-styled widgets (UISwitch / SeekBar wrappers and the like), and do not add
 components that are only compositions of existing primitives in JS (section lists, touchables, drawers, ...). React Native
@@ -183,7 +183,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
 - **Zooming** (`<scroll>`, not lists): `maximumZoomScale` above `minimumZoomScale` makes the content zoomable; `zoomScale`
   zooms when it changes, `bouncesZoom`, `pinchGestureEnabled`, `centerContent` (content smaller than the viewport is centered);
   ref `zoomTo({ scale, x, y, animated })` (content point `x`, `y` in the middle); `onScroll` reports `zoomScale` and the zoomed
-  content size. iOS: the children live in a `YFZoomView` (`zoom.rs`) that UIKit scales (`viewForZoomingInScrollView:`), its
+  content size. iOS: the children live in a `NshZoomView` (`zoom.rs`) that UIKit scales (`viewForZoomingInScrollView:`), its
   bounds the unzoomed content size, so the core's frames stay valid; texts and canvases are drawn again at the zoomed
   resolution when a zoom ends. Android has no zooming scroll view: `ScrollBox` switches to its `ZScroll`, which scales the
   content around its top left and scrolls both ways itself (ScaleGestureDetector around the focal point, panning with any
@@ -197,7 +197,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   the velocity. Lists keep the visible rows in place when items are inserted above them (`splice`).
 - **System UI**: `StatusBar` (component and static methods; the last mounted wins, prop by prop), `Alert.alert`,
   `ActionSheetIOS.showActionSheetWithOptions` (a list dialog on Android), `ToastAndroid`. Answers come back as the root's
-  `onDialog` event. Embedding apps forward their controller's status bar to `yf_status_bar_style()` / `_hidden()` / `_animation()`.
+  `onDialog` event. Embedding apps forward their controller's status bar to `nsh_status_bar_style()` / `_hidden()` / `_animation()`.
 - **Right to left**: `I18nManager` (`isRTL`, reactive; `allowRTL`, `forceRTL`, applied at once) sets the root's direction;
   `direction` (`inherit` / `ltr` / `rtl`) overrides it per view. The core resolves each node's direction (inherited, also for
   subtrees built detached), sets taffy's `direction` (rows run from the right) and, right to left, swaps the left and right
@@ -210,7 +210,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   negative offsets), starting at the right end and keeping their distance from it; horizontal lists are flipped natively
   (`ScrollConfig::mirrored`: the scroll view and each cell get scaleX −1, composed with their transforms), so the list's
   offset logic stays left to right.
-- **Environment** (reactive accessors from `"yf"`): `windowSize()`, `safeArea()`, `keyboard()` (`{ height, duration }`: how
+- **Environment** (reactive accessors from `"nsh"`): `windowSize()`, `safeArea()`, `keyboard()` (`{ height, duration }`: how
   far the keyboard reaches into the surface, the bottom safe area under it included, on every platform),
   `colorScheme()`, `fontScale()`. `KeyboardAvoidingView` pads its bottom by `keyboard().height`, animated with the keyboard,
   for content outside scroll views (message bars). Inputs inside a scroll view are kept clear of the keyboard natively (bottom inset + scroll to the
@@ -229,10 +229,10 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   `odd:` / `even:` / `only:`, `placeholder:`, `!` (important). Interaction states are reported natively only for the bits a node's
   classes read (`MountItem::TrackStates` → `EngineControl::set_states`); `focus-within` propagates to ancestors in the core.
   `disabled` (any element) applies `disabled:` and drops the node's press listeners from what is mounted, so it shows no press
-  feedback either. The theme is Tailwind 4's (palette converted from OKLCH to sRGB) extended by `yf.json` `"tailwind"` (`colors`,
+  feedback either. The theme is Tailwind 4's (palette converted from OKLCH to sRGB) extended by `nsh.json` `"tailwind"` (`colors`,
   `spacing`, `breakpoints`, `fontSize`, `radius`, `shadow`, ...; unknown keys are build errors), compiled into the bundle as
-  `yf:tailwind-theme` and pushed as a root prop at startup. `yf build` / `yf dev` warn about unknown static classes
-  (`file:line:col: unknown class '...'`, target `yf::build`); the core logs each unknown class once at run time. Class-only
+  `nsh:tailwind-theme` and pushed as a root prop at startup. `nsh build` / `nsh dev` warn about unknown static classes
+  (`file:line:col: unknown class '...'`, target `nsh::build`); the core logs each unknown class once at run time. Class-only
   settings that are props in React Native (`line-clamp-*`, `truncate`, `whitespace-nowrap`, `pointer-events-*`, `object-*`,
   `placeholder:text-*`, `caret-*`) lose to explicit props. Not supported: `peer-*`, pseudo-elements, arbitrary CSS properties;
   `space-x/y-*` are gaps.
@@ -263,7 +263,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
 - **View styles**: `backgroundColor`, `borderWidth` / `borderColor` (also per side: `borderTopWidth`, `borderLeftColor`, ...),
   `borderStyle` (`solid` / `dashed` / `dotted`), `borderRadius` + the four `borderTopLeftRadius`-style corners, `borderCurve`
   (`continuous`: corners easing into the edges, Figma's 60% corner smoothing, shrinking to circular where the box is too
-  small, so pills stay pills; the outline geometry is `yf_core::shape::rounded_rect`, ported to `Decor.java`; iOS layers that
+  small, so pills stay pills; the outline geometry is `nsh_core::shape::rounded_rect`, ported to `Decor.java`; iOS layers that
   draw their own corners use `cornerCurve`), `overflow`, `opacity`,
   `transform` (translate / scale / rotate / rotateX / rotateY / skew / perspective, applied right to left like CSS; Android has no
   skew), `zIndex` (stable order of the native views), `shadowColor` / `shadowOffset` / `shadowOpacity` / `shadowRadius` (RN
@@ -280,12 +280,12 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   Known limits: scroll / list only support one radius (the largest wins) and clip their shadow; `<text>` with different radii is masked, which
   clips its shadow too.
 - **Canvas** (`Canvas` component, `<canvas>` element): an HTML Canvas 2D subset recorded in JS and replayed natively
-  (`yf_core::canvas`: `Drawing { ops, slots }`). `draw={(ctx, { width, height }) => ...}` runs again when the signals it reads
+  (`nsh_core::canvas`: `Drawing { ops, slots }`). `draw={(ctx, { width, height }) => ...}` runs again when the signals it reads
   change (sizes come from `onLayout`). `CanvasRenderingContext2D`: state (`save` / `restore`, `globalAlpha`,
   `globalCompositeOperation`, line styles and dashes, shadows, `font` (CSS shorthand), `textAlign` / `textBaseline`),
   transforms, paths (`arc`, `arcTo`, `ellipse`, curves, `rect`, `roundRect`), `fill` / `stroke` / `clip` (also of a `Path2D`,
   which takes SVG path data; arcs become cubics), `fillRect` / `strokeRect` / `clearRect`, `fillText` / `strokeText` /
-  `measureText` (synchronous, through the shared text engine: `__yf_measure_text`; only `width`), linear / radial / conic
+  `measureText` (synchronous, through the shared text engine: `__nsh_measure_text`; only `width`), linear / radial / conic
   gradients, `drawImage` (all three forms, images by URI or asset). Any number argument and colors may be native values
   (`createNativeValue`, `interpolate`, ...): those become slots bound like style values (`AnimProp::CanvasArg`) and the
   platform redraws on its own while they animate, without JS. Drawings travel in their own op (`OP_DRAW`), recorded into a
@@ -300,7 +300,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   `refreshing` / `onRefresh`, `scrollValue`. Positions, columns, sticky travel and viewability are all computed in the core; sticky cells
   are pinned natively on every scroll (`MountItem::StickyCells`: translate by `clamp(offset - start, 0, end - start)`).
 - **List internals**: the window is computed in Rust (`core/list.rs`, Fenwick prefix sums over rows), rendering one extra screen above and below the viewport.
-  Rust asks JS to bind cells with `__yf_list(listId, [slot, index, …])`; JS updates the cell content inside `batch` and then sets `cellIndex` to
+  Rust asks JS to bind cells with `__nsh_list(listId, [slot, index, …])`; JS updates the cell content inside `batch` and then sets `cellIndex` to
   confirm, and core only measures / positions confirmed cells. New cells are created with their first index. The engine runs at most 8
   "bind → JS → layout" rounds per frame, merged into one batch. Row-local state travels with recycled cells: keep it outside, keyed by id.
   Unbound cells keep their last content, so the core moves them out of sight; the header, footer and empty placeholder are cells with
@@ -309,7 +309,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   `"deg"` / `"rad"` angles; `extrapolate` / `extrapolateLeft` / `extrapolateRight`: `clamp` (default) / `extend` / `identity`;
   `easing`), `add/sub/mul/div/mod`, `diffClamp(min, max)`. `Easing` (React Native's: `linear`, `ease`, `quad`, `cubic`, `poly`,
   `sin`, `circle`, `exp`, `elastic`, `back`, `bounce`, `bezier`, `in` / `out` / `inOut`) is data decoded in Rust
-  (`yf_anim::Easing::Curve`), never a JS function. `Animated.timing` / `spring` / `decay` / `sequence` / `parallel` / `stagger` /
+  (`nsh_anim::Easing::Curve`), never a JS function. `Animated.timing` / `spring` / `decay` / `sequence` / `parallel` / `stagger` /
   `delay` / `loop` build a `Composite` tree that runs entirely natively (`AnimOp::StartComposite`): each step starts at the exact end
   time of the previous one (no frame gaps), `stop()` / `reset()` (back to the values at start) / `start(cb)` report `finished` once
   for the whole tree; leaf animations get internal ids (`LEAF_IDS`) that never reach JS. Composites are released by
@@ -321,7 +321,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
 - **Images**: background NSURLSession / file read → ImageIO downsampling decode at the view's pixel size → `NSCache` (purged under memory pressure);
   requests for the same key are coalesced and downloads nobody waits for are cancelled (Android: HttpURLConnection / APK assets →
   `BitmapFactory` power-of-two sampling → `LruCache`, same coalescing). During development `asset:/path` goes through the dev
-  server's `/assets/`; `yf build` copies assets to `out/assets/`, `yf package` puts them in the app. Cache keys include the decode
+  server's `/assets/`; `nsh build` copies assets to `out/assets/`, `nsh package` puts them in the app. Cache keys include the decode
   size and the blur radius. `blurRadius` is a stack blur on the decoding thread (`blur.rs`, `Blur.java`: the same algorithm, in
   pixels). `defaultSource` loads after the image request and shows until the image arrives; the image then fades in over
   `fadeDuration` (iOS: `CATransition`; Android: alpha over the placeholder; default 0 on iOS and 300ms on Android, as in React
@@ -339,36 +339,36 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
 
 ## Packaging and embedding
 
-- `yf package <entry> --target ios|ios-simulator|android` builds an installable app from the prebuilt runtime: metadata from
-  `yf.json` next to the entry (`name`, `id`, `version`, `build`, `icon`) or flags. iOS: `.app`, `.ipa` with `--sign <identity>
+- `nsh package <entry> --target ios|ios-simulator|android` builds an installable app from the prebuilt runtime: metadata from
+  `nsh.json` next to the entry (`name`, `id`, `version`, `build`, `icon`) or flags. iOS: `.app`, `.ipa` with `--sign <identity>
   --profile <file.mobileprovision>` (entitlements come from the profile; icons are compiled by `actool` into `Assets.car`).
   Android: an APK assembled without Gradle (`aapt2 link`, native libraries stored uncompressed and 16 KB aligned, `apksigner`;
   the debug key unless `--keystore`).
-- Embedding: iOS apps link `YF.xcframework` and use the C API in `crates/yf-ffi/include/yf.h` (`import YF` in Swift); Android apps
-  add `yf.aar` and use `dev.yf.YfView`. `*Dev` / `-dev` variants can also load from a dev server. See `examples/embed-*`.
+- Embedding: iOS apps link `NativeShell.xcframework` and use the C API in `crates/nsh-ffi/include/nsh.h` (`import NativeShell` in Swift); Android apps
+  add `nsh.aar` and use `dev.nsh.NshView`. `*Dev` / `-dev` variants can also load from a dev server. See `examples/embed-*`.
 
 ## TypeScript
 
-- Every command that builds an app writes `.yf/types` next to its entry (only changed files): `yf/index.d.ts` and `yf/types.d.ts`
-  generated from the runtime sources with Oxc isolated declarations, `yf/jsx-runtime.d.ts`, `yf/globals.d.ts`, and solid-js's
-  declarations. `yf init` writes a `tsconfig.json` mapping `yf`, `yf/jsx-runtime` and `solid-js` there (`jsxImportSource: "yf"`,
+- Every command that builds an app writes `.nsh/types` next to its entry (only changed files): `nsh/index.d.ts` and `nsh/types.d.ts`
+  generated from the runtime sources with Oxc isolated declarations, `nsh/jsx-runtime.d.ts`, `nsh/globals.d.ts`, and solid-js's
+  declarations. `nsh init` writes a `tsconfig.json` mapping `nsh`, `nsh/jsx-runtime` and `solid-js` there (`jsxImportSource: "nsh"`,
   no DOM library), so editors type-check apps without `node_modules`.
-- Exports of `js/runtime/index.ts` and `types.ts` need explicit types (isolated declarations cannot infer); a yf-bundler test
+- Exports of `js/runtime/index.ts` and `types.ts` need explicit types (isolated declarations cannot infer); a nsh-bundler test
   enforces it. Keep `types.ts` in sync with what `style.rs` and `protocol.rs` accept.
 - To check the declarations themselves, run `tsc -p .` in an app with `skipLibCheck` off (only solid's `hydration.d.ts`
   mentions the DOM `Element`).
 
-## Dev server (yf dev / yf run)
+## Dev server (nsh dev / nsh run)
 
 - The CLI watches sources with notify and pushes every rebuild over WebSocket (`/ws`, default port 8790, the next free port if taken) to all
-  connected hosts; new clients subscribe before receiving the current state, so no event is missed. Protocol: `crates/yf-dev/src/protocol.rs`
+  connected hosts; new clients subscribe before receiving the current state, so no event is missed. Protocol: `crates/nsh-dev/src/protocol.rs`
   (JSON text frames + binary frames).
 - Bytecode version negotiation: the client reports `BYTECODE_VERSION` in its handshake; on a mismatch the server sends JS source instead.
 - The host's `log` output (including JS `console.*`, target `js`) is forwarded to the CLI terminal with the device name while connected, and goes
   to stderr when disconnected.
 - Build failures, bundle evaluation failures and uncaught exceptions show a red overlay on the host (tap to dismiss); it disappears on the next
   successful reload.
-- **Hot module replacement** (`yf dev` / `yf run` without `--release`): development bundles keep one CommonJS chunk per module
+- **Hot module replacement** (`nsh dev` / `nsh run` without `--release`): development bundles keep one CommonJS chunk per module
   (rolldown `preserveModules`, tree shaking off so solid-js and the runtime export everything), each registered with the hot
   runtime (`js/runtime/hot.js`). After a rebuild the CLI compares the chunks with the last good build and publishes a patch
   (`ServerMessage::Patch`, protocol v2) before the full bundle; hosts running the patch's base apply it in place
@@ -388,7 +388,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   - Every public API has a doc comment.
   - Items in private modules are `pub(crate)`, never `pub`.
 - Everything is written in English: code comments, docs, logs and this file. Comments explain why, not what the code says.
-- Library crates only log through the `log` facade (no `eprintln!`); performance logs use target `yf::perf`, JS logs target `js`. Binaries install the logger.
+- Library crates only log through the `log` facade (no `eprintln!`); performance logs use target `nsh::perf`, JS logs target `js`. Binaries install the logger.
 - Dependencies are declared once in the root `Cargo.toml` `[workspace.dependencies]`; crates only write `.workspace = true`.
 - Every `unsafe` block has a `// SAFETY:` comment.
 
@@ -396,14 +396,14 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
 
 1. **QuickJS is the slowest link: JS does as little as possible.** `js/runtime` only pushes primitive values into one reused array. Parsing,
    diffing and string processing all happen in Rust. No JSON serialization on the JS side.
-2. **Cross threads in batches.** One JS turn → one `__yf_commit` → one `Core::commit` → one `MountBatch` → one main-thread hop. Never cross FFI
+2. **Cross threads in batches.** One JS turn → one `__nsh_commit` → one `Core::commit` → one `MountBatch` → one main-thread hop. Never cross FFI
    or threads per item.
 3. **No needless allocation on hot paths.** Node ids are dense: index `Vec`s (`slots`), not hash maps. Internal links use slab keys. Reuse
    buffers (`take_ops`, `queue`).
 4. **Do not send mount items that are not needed.** New views get no default style and no empty event mask; unchanged styles and frames are not
-   sent. Check item counts with `yf trace`.
+   sent. Check item counts with `nsh trace`.
 5. **Text**: measurements are cached per constraint (`TextContext.cache`); platforms cache font objects (`FontCache`).
-6. **Changes to hot paths come with before / after `yf trace` timings and item counts.** Current baselines (Apple Silicon):
+6. **Changes to hot paths come with before / after `nsh trace` timings and item counts.** Current baselines (Apple Silicon):
    - counter, headless (debug): first frame ~0.5–0.65ms (58 ops / 49 mount items), one tap ~0.15ms (12 ops / 8 items).
    - counter, Catalyst (release): first frame ~1.05–1.15ms (of which ~0.7ms is cold CoreText layout of 10 texts), one tap ~0.12ms.
    - Hot reload: ~120ms from saving a file to the device running the new version (file event latency and ~60ms of development
@@ -414,7 +414,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
      no batch. `list_bench` runs at ~20–30µs per frame back to back (JS ~20µs) and ~40µs with caches flushed between frames, but ~150µs after the
      thread sleeps 10ms. The difference is the CPU clocking down while the thread sleeps (Apple CLPC), not the code path; neither QoS (the engine
      thread is USER_INTERACTIVE) nor the Mach time-constraint policy changes it. Judge optimizations by the back-to-back and flushed-cache numbers:
-     single-frame `yf trace` timings are dominated by the clock state.
+     single-frame `nsh trace` timings are dominated by the clock state.
    - On Catalyst (release), rebinding one row while scrolling slowly takes ~0.4ms (clocked down) and rebinding a whole screen of ~32 rows on a
      fast fling 0.9–1.6ms.
    - Host startup (`Host::new`, release): ~155µs. The web APIs add nothing until first used (they used to cost ~0.8ms as source,
@@ -429,20 +429,20 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   have no prebuilt bindings and need the `bindgen` feature (and libclang).
 - **QuickJS microtasks are run by the host.** Call `Host::run_jobs()` after every call from Rust into JS. `setTimeout` / `console` are our own;
   `queueMicrotask`, `WeakRef` and `FinalizationRegistry` are built into QuickJS-NG.
-- **The JS object graph must be reachable from a global.** `js/runtime` keeps the root, the registry and `listening` on `globalThis.__yf`.
+- **The JS object graph must be reachable from a global.** `js/runtime` keeps the root, the registry and `listening` on `globalThis.__nsh`.
   Without it the whole rendered app (nodes, handlers, signals, registry) is an isolated cycle that idle GC collects, and taps stop working.
-  `yf trace` taps after 1.2s of idling by default; `crates/yf-engine/tests/counter.rs` is the regression test.
+  `nsh trace` taps after 1.2s of idling by default; `crates/nsh-engine/tests/counter.rs` is the regression test.
 - **Nodes are released by GC, not by Remove.** Solid may keep removed nodes in a memo and insert them again, so `Remove` only detaches;
   `Release` (from FinalizationRegistry) frees the node and its native view.
-- **`yf_js::BUNDLE_NAME` (`bundle.js`)** is the module name of every bundle and is how stacks are matched for symbolication; `BYTECODE_VERSION`
+- **`nsh_js::BUNDLE_NAME` (`bundle.js`)** is the module name of every bundle and is how stacks are matched for symbolication; `BYTECODE_VERSION`
   is tested against the linked QuickJS version: update both when upgrading rquickjs.
 - **Use `oxc_sourcemap` 9.x** (matching rolldown / oxc 0.153); the oxc 0.118 inside the Solid compiler uses 6.x and only exchanges JSON strings,
   so never mix the types.
-- **Our plugin's own compile errors** are kept in `YfPlugin.error` and shown directly (clean code frame + relative path) instead of rolldown's
+- **Our plugin's own compile errors** are kept in `NshPlugin.error` and shown directly (clean code frame + relative path) instead of rolldown's
   wrapped report.
 - **UIFont and CTFont are toll-free bridged**: the text engine gets system fonts with `UIFont::systemFontOfSize_weight` and uses them as
   CTFonts (verified by rendering). CoreText attributes must use CT keys (colors are CGColors), not UIKit's NSForegroundColor.
-- **Op buffer opcodes** are defined in both `js/runtime/index.ts` and `crates/yf-js/src/protocol.rs` and must stay in sync.
+- **Op buffer opcodes** are defined in both `js/runtime/index.ts` and `crates/nsh-js/src/protocol.rs` and must stay in sync.
 - **Text nodes outside `<text>`** (e.g. empty placeholders of `<Show>` / `<For>`) create no native view and take no part in layout. A `<text>`
   nested in `<text>` is a span without a native view; the whole block is merged into one `AttributedText`.
 - **`TextSpan` offsets are UTF-16**, like NSAttributedString / Android Spannable.
@@ -466,7 +466,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
 - **Mac idiom custom pull to refresh**: on release, the system's bounce already targets the old inset (back to 0), so changing only
   `contentInset` hides the spinner; once refreshing starts, the offset is animated to `-REFRESH_INSET` on the next main-queue turn. Synthetic
   tests need continuous scroll events with phases (began / changed / ended); plain wheel events never overscroll.
-- **`yf run` installs the host by copying to a temporary file and renaming it**: overwriting in place an executable that another session is
+- **`nsh run` installs the host by copying to a temporary file and renaming it**: overwriting in place an executable that another session is
   running makes the kernel SIGKILL the newly launched process for a code signature mismatch.
 - **Set backgrounds on `layer.backgroundColor`, not `UIView.backgroundColor`**: views with `drawRect:` (`TextView`) paint the latter into their
   contents bitmap, where corners cannot round it.
@@ -493,7 +493,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
 - **objc2 crates are used with `default-features = false`** and an explicit feature list in the root `Cargo.toml` (one feature per
   header): the defaults link CloudKit, CoreData, CoreImage, CoreLocation, Metal, ... into every app (each one costs dyld time at
   launch). When a method is missing after using a new API, enable the header feature named in its `#[cfg(feature = ...)]`; check
-  `otool -L` on a release `yf-app` afterwards (only UIKit, Foundation, CoreFoundation, CoreGraphics, CoreText, QuartzCore, ImageIO).
+  `otool -L` on a release `nsh-app` afterwards (only UIKit, Foundation, CoreFoundation, CoreGraphics, CoreText, QuartzCore, ImageIO).
 - **iOS simulator: launch apps only after `simctl bootstatus -b`**; apps launched while the simulator boots are sent to the
   background when SpringBoard comes up.
 - **IPAs are zipped with `ditto -c -k --norsrc --keepParent`**: `--sequesterRsrc` adds `__MACOSX/` resource forks.
@@ -505,17 +505,17 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   measures again. A layout of precomputed text does not draw `UnderlineSpan` / `StrikethroughSpan` (even ones set after
   `create`): runs carry a `TextLayouts.Decoration` marker and `TextBox` draws the lines. `Layout.Alignment` is relative to each
   paragraph's direction: absolute left / right alignment sets an `AlignmentSpan` per paragraph from its resolved direction.
-- **Android, JNI event maps intern their keys from a fixed list** (`Java_dev_yf_Native_eventMap`): a new payload key must be
+- **Android, JNI event maps intern their keys from a fixed list** (`Java_dev_nsh_Native_eventMap`): a new payload key must be
   added there or it is dropped silently.
 - **Android, inputs**: `EditText` reconfiguration (input type, filters, single line) sets the same text again and fires
   `afterTextChanged`: only text that differs from the last known one counts as an edit, or JS values are rejected as stale.
   Soft keyboards edit through the input connection (`KeyConnection`: composing text, commits, deletes), hardware keys arrive
   as key events; both feed `onKeyPress`. A hardware Enter reports its down and its up — act on the down only and consume the up, or the up advances
-  focus again in the next field; blur by focusing the (focusable, highlight-free) `YfView`, as `clearFocus()` hands focus to the
+  focus again in the next field; blur by focusing the (focusable, highlight-free) `NshView`, as `clearFocus()` hands focus to the
   first focusable view; set the typeface after the input type (password types reset it to monospace).
 - **Android, keyboard avoidance**: the keyboard's height becomes bottom padding of the scroll around the focused input, and
   `ScrollBox.reveal` scrolls it into view; `requestRectangleOnScreen` cannot, as ScrollView ignores its padding when it decides
-  whether a rectangle is visible. `YfView` is a scroll container (`setScrollContainer(true)`) so that windows without a soft
+  whether a rectangle is visible. `NshView` is a scroll container (`setScrollContainer(true)`) so that windows without a soft
   input mode resize instead of panning: the system picks the mode at the first layout, before the app's content is mounted,
   and a mode set from code afterwards is overridden. Windows that ask for `adjustPan` are left to the system.
 - **Android, drags that start on a child**: a pannable `Box` intercepts the move that exceeds the slop and starts its pan right
@@ -526,9 +526,9 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   copies the activity's bar appearance (light / dark icons).
 - **Android, nested scrolling**: scroll views enable nested scrolling, or an outer vertical ScrollView intercepts every vertical
   drag meant for an inner one.
-- **Android, safe area**: `YfView` reports only the parts of the system bars / keyboard that overlap it (like UIKit's
+- **Android, safe area**: `NshView` reports only the parts of the system bars / keyboard that overlap it (like UIKit's
   `safeAreaInsets`), so embedded views below a toolbar get no top inset. Overlays use the same overlap (`topInset()`).
-- **Android, dev assets come over plain HTTP**, which apps block by default (API 28+): the dev host APK and `yf-dev.aar` set
+- **Android, dev assets come over plain HTTP**, which apps block by default (API 28+): the dev host APK and `nsh-dev.aar` set
   `usesCleartextTraffic`; the release AAR does not.
 - **Android, activities**: create the decor view (`getDecorView()`) before asking for the insets controller; apps draw edge to edge
   and get the system bars through `safeArea()`.
@@ -561,7 +561,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   events (with phases), which also produce drag and momentum callbacks. Mouse drags do reach views as touches.
 - **Catalyst's Mac idiom presents page / form sheets as macOS sheets** at a default size wider than a 390pt window: they get
   the window's size as `preferredContentSize`. Standalone apps have a white root view (UIKit windows are black).
-- **Development hosts never restore windows**: `yf run` launches the Catalyst host with `-ApplePersistenceIgnoreState YES`;
+- **Development hosts never restore windows**: `nsh run` launches the Catalyst host with `-ApplePersistenceIgnoreState YES`;
   after a crash, macOS would otherwise show a modal "reopen windows?" alert over it.
 - **Android widgets**: `MediaPlayer.setPlaybackParams` starts playback (set the rate only while playing) and a paused player draws nothing until
   it seeks; `WebView` JavaScript bridge calls arrive on a binder thread (post to the UI thread).
@@ -583,8 +583,8 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
 ## Verification after changes
 
 1. `cargo test --workspace`, plus fmt and clippy as listed above (including the Catalyst target and `cargo xtask clippy-android`).
-2. Changes to the JS runtime, engine or core: run `yf trace` and check item counts and timings.
-3. Changes to the platform layer: launch with `yf run`, check screenshots and simulate input where needed (the terminal needs the Screen
+2. Changes to the JS runtime, engine or core: run `nsh trace` and check item counts and timings.
+3. Changes to the platform layer: launch with `nsh run`, check screenshots and simulate input where needed (the terminal needs the Screen
    Recording and Accessibility permissions; while the screen is locked the frontmost app is `loginwindow` and clicks fail, but window
    screenshots still work). iOS simulator: `xcrun simctl io booted screenshot`, `xcrun simctl ui booted appearance dark`.
    Android: `adb exec-out screencap -p`, `adb shell input tap|swipe|text|keyevent` (all work with the screen locked).

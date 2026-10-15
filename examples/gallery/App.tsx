@@ -1,5 +1,5 @@
 import { For } from "solid-js";
-import { render, root, Screen, Stack } from "yf";
+import { render, root, Screen, Stack } from "nsh";
 import { Animations } from "./demos/Animations";
 import { CanvasDemo } from "./demos/CanvasDemo";
 import { Components } from "./demos/Components";

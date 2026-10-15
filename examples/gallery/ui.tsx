@@ -1,4 +1,4 @@
-import type { JSX } from "yf";
+import type { JSX } from "nsh";
 
 export const colors = {
   text: "#1f2328",

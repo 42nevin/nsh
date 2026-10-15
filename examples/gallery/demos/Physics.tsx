@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { createNativeValue } from "yf";
+import { createNativeValue } from "nsh";
 
 export function Physics() {
   const x = createNativeValue(0);
