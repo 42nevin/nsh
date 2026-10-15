@@ -21,3 +21,6 @@ oxc_sourcemap.workspace = true
 imagesize.workspace = true
 ttf-parser.workspace = true
 tokio.workspace = true
+yf-core.workspace = true
+serde_json.workspace = true
+log.workspace = true

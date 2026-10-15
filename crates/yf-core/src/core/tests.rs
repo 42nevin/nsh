@@ -3,7 +3,7 @@ use std::cell::Cell;
 use yf_anim::{AnimOp, AnimProp};
 
 use super::*;
-use crate::{EventKind, StyleValue};
+use crate::{Color, EventKind, StyleValue};
 
 /// 8pt per char, 16pt per line, wraps at `max_width`. Counts calls.
 #[derive(Default)]
@@ -44,6 +44,15 @@ fn style(props: &[(&str, StyleValue<'_>)]) -> Box<Style> {
         s.set(k, v).unwrap();
     }
     Box::new(s)
+}
+
+fn style_op(id: NodeId, props: &[(&str, StyleValue<'_>)]) -> Op {
+    let mut style = Box::<Style>::default();
+    let mut patch = StylePatch::default();
+    for &(k, v) in props {
+        patch.set(&mut style, k, v).unwrap();
+    }
+    Op::SetStyle { id, style, patch }
 }
 
 fn apply(core: &mut Core<FakeEngine>, ops: Vec<Op>) {
@@ -87,10 +96,7 @@ fn mounts_subtree_built_detached() {
                 child: 3,
                 before: None,
             },
-            Op::SetStyle {
-                id: 2,
-                style: style(&[("padding", StyleValue::Number(10.0))]),
-            },
+            style_op(2, &[("padding", StyleValue::Number(10.0))]),
             Op::Insert {
                 parent: ROOT_ID,
                 child: 2,
@@ -185,29 +191,23 @@ fn flex_text_in_a_row_shrinks_and_wraps() {
                 id: 2,
                 tag: Tag::View,
             },
-            Op::SetStyle {
-                id: 2,
-                style: style(&[("flexDirection", StyleValue::Str("row"))]),
-            },
+            style_op(2, &[("flexDirection", StyleValue::Str("row"))]),
             Op::Create {
                 id: 3,
                 tag: Tag::View,
             },
-            Op::SetStyle {
-                id: 3,
-                style: style(&[
+            style_op(
+                3,
+                &[
                     ("width", StyleValue::Number(120.0)),
                     ("height", StyleValue::Number(10.0)),
-                ]),
-            },
+                ],
+            ),
             Op::Create {
                 id: 4,
                 tag: Tag::Text,
             },
-            Op::SetStyle {
-                id: 4,
-                style: style(&[("flex", StyleValue::Number(1.0))]),
-            },
+            style_op(4, &[("flex", StyleValue::Number(1.0))]),
             Op::CreateText {
                 id: 5,
                 text: "x".repeat(50),
@@ -265,10 +265,7 @@ fn nested_spans_merge_with_styles() {
                 id: 4,
                 tag: Tag::Text,
             },
-            Op::SetStyle {
-                id: 4,
-                style: style(&[("fontWeight", StyleValue::Str("bold"))]),
-            },
+            style_op(4, &[("fontWeight", StyleValue::Str("bold"))]),
             Op::CreateText {
                 id: 5,
                 text: "1".into(),
@@ -547,11 +544,8 @@ fn color_change_skips_layout_and_identical_texts_share_measurements() {
         })
     );
 
-    c.apply(Op::SetStyle {
-        id: 10,
-        style: style(&[("color", StyleValue::Str("red"))]),
-    })
-    .unwrap();
+    c.apply(style_op(10, &[("color", StyleValue::Str("red"))]))
+        .unwrap();
     let batch = c.commit().unwrap();
     assert_eq!(
         batch.items.len(),
@@ -594,13 +588,13 @@ fn image_uses_natural_size_and_aspect_ratio() {
                 id: 3,
                 tag: Tag::Image,
             },
-            Op::SetStyle {
-                id: 3,
-                style: style(&[
+            style_op(
+                3,
+                &[
                     ("width", StyleValue::Number(50.0)),
                     ("alignSelf", StyleValue::Str("flex-start")),
-                ]),
-            },
+                ],
+            ),
             Op::SetProp {
                 id: 3,
                 prop: Prop::Source(Some(ImageSource {
@@ -650,10 +644,7 @@ fn scroll_reports_content_size() {
             id: 2,
             tag: Tag::Scroll,
         },
-        Op::SetStyle {
-            id: 2,
-            style: style(&[("height", StyleValue::Number(200.0))]),
-        },
+        style_op(2, &[("height", StyleValue::Number(200.0))]),
         Op::Insert {
             parent: ROOT_ID,
             child: 2,
@@ -665,10 +656,7 @@ fn scroll_reports_content_size() {
             id: 10 + i,
             tag: Tag::View,
         });
-        ops.push(Op::SetStyle {
-            id: 10 + i,
-            style: style(&[("height", StyleValue::Number(100.0))]),
-        });
+        ops.push(style_op(10 + i, &[("height", StyleValue::Number(100.0))]));
         ops.push(Op::Insert {
             parent: 2,
             child: 10 + i,
@@ -734,10 +722,10 @@ fn render_binds(
             // New content for the item, then the confirmation, as the
             // runtime does.
             let cell = cells[slot as usize];
-            c.apply(Op::SetStyle {
-                id: cell,
-                style: style(&[("height", StyleValue::Number(row_height))]),
-            })
+            c.apply(style_op(
+                cell,
+                &[("height", StyleValue::Number(row_height))],
+            ))
             .unwrap();
             c.apply(Op::SetProp {
                 id: cell,
@@ -759,10 +747,7 @@ fn list_renders_window_and_recycles_cells() {
                 id: 2,
                 tag: Tag::List,
             },
-            Op::SetStyle {
-                id: 2,
-                style: style(&[("height", StyleValue::Number(400.0))]),
-            },
+            style_op(2, &[("height", StyleValue::Number(400.0))]),
             Op::SetProp {
                 id: 2,
                 prop: Prop::EstimatedItemSize(50.0),
@@ -825,10 +810,7 @@ fn list_keeps_visible_content_anchored() {
                 id: 2,
                 tag: Tag::List,
             },
-            Op::SetStyle {
-                id: 2,
-                style: style(&[("height", StyleValue::Number(400.0))]),
-            },
+            style_op(2, &[("height", StyleValue::Number(400.0))]),
             Op::SetProp {
                 id: 2,
                 prop: Prop::EstimatedItemSize(50.0),
@@ -889,6 +871,7 @@ fn anim_ops_and_bindings_are_forwarded_in_order() {
             Op::SetStyle {
                 id: 2,
                 style: Box::new(s),
+                patch: StylePatch::default(),
             },
             Op::Insert {
                 parent: ROOT_ID,
@@ -923,10 +906,7 @@ fn leaf_styles_are_resolved() {
                 id: 2,
                 tag: Tag::Text,
             },
-            Op::SetStyle {
-                id: 2,
-                style: style(&[("padding", StyleValue::Number(10.0))]),
-            },
+            style_op(2, &[("padding", StyleValue::Number(10.0))]),
             Op::CreateText {
                 id: 3,
                 text: "abc".into(),
@@ -946,14 +926,14 @@ fn leaf_styles_are_resolved() {
                 id: 4,
                 tag: Tag::View,
             },
-            Op::SetStyle {
-                id: 4,
-                style: style(&[
+            style_op(
+                4,
+                &[
                     ("width", StyleValue::Number(100.0)),
                     ("aspectRatio", StyleValue::Number(2.0)),
                     ("alignSelf", StyleValue::Str("flex-start")),
-                ]),
-            },
+                ],
+            ),
             Op::Insert {
                 parent: ROOT_ID,
                 child: 4,
@@ -963,10 +943,7 @@ fn leaf_styles_are_resolved() {
                 id: 5,
                 tag: Tag::View,
             },
-            Op::SetStyle {
-                id: 5,
-                style: style(&[("minHeight", StyleValue::Number(80.0))]),
-            },
+            style_op(5, &[("minHeight", StyleValue::Number(80.0))]),
             Op::Insert {
                 parent: ROOT_ID,
                 child: 5,
@@ -1018,6 +995,7 @@ fn bench_row_relayout() {
                     ("gap", StyleValue::Number(12.0)),
                     ("padding", StyleValue::Number(8.0)),
                 ]),
+                patch: StylePatch::default(),
             },
             Op::Create {
                 id: 3,
@@ -1029,6 +1007,7 @@ fn bench_row_relayout() {
                     ("width", StyleValue::Number(48.0)),
                     ("height", StyleValue::Number(48.0)),
                 ]),
+                patch: StylePatch::default(),
             },
             Op::Insert {
                 parent: 2,
@@ -1042,6 +1021,7 @@ fn bench_row_relayout() {
             Op::SetStyle {
                 id: 4,
                 style: row(&[("flex", StyleValue::Number(1.0))]),
+                patch: StylePatch::default(),
             },
             Op::Insert {
                 parent: 2,
@@ -1124,6 +1104,7 @@ fn bench_cell_relayout() {
         Op::SetStyle {
             id: 2,
             style: s(&[("flex", StyleValue::Number(1.0))]),
+            patch: StylePatch::default(),
         },
         Op::SetProp {
             id: 2,
@@ -1173,6 +1154,7 @@ fn bench_cell_relayout() {
                 ("paddingHorizontal", StyleValue::Number(16.0)),
                 ("paddingVertical", StyleValue::Number(8.0)),
             ]),
+            patch: StylePatch::default(),
         },
         Op::Insert {
             parent: 10,
@@ -1189,6 +1171,7 @@ fn bench_cell_relayout() {
                 ("width", StyleValue::Number(48.0)),
                 ("height", StyleValue::Number(48.0)),
             ]),
+            patch: StylePatch::default(),
         },
         Op::Insert {
             parent: 11,
@@ -1205,6 +1188,7 @@ fn bench_cell_relayout() {
                 ("flex", StyleValue::Number(1.0)),
                 ("gap", StyleValue::Number(2.0)),
             ]),
+            patch: StylePatch::default(),
         },
         Op::Insert {
             parent: 11,
@@ -1294,10 +1278,7 @@ fn input_core() -> Core<FakeEngine> {
                 id: 2,
                 prop: Prop::Placeholder("Name".into()),
             },
-            Op::SetStyle {
-                id: 2,
-                style: style(&[("padding", StyleValue::Number(6.0))]),
-            },
+            style_op(2, &[("padding", StyleValue::Number(6.0))]),
             Op::Insert {
                 parent: ROOT_ID,
                 child: 2,
@@ -1442,6 +1423,7 @@ fn z_index_orders_native_views() {
             Op::SetStyle {
                 id: 2,
                 style: z(5.0),
+                patch: StylePatch::default(),
             },
             Op::Insert {
                 parent: 1,
@@ -1464,6 +1446,7 @@ fn z_index_orders_native_views() {
         vec![Op::SetStyle {
             id: 3,
             style: z(9.0),
+            patch: StylePatch::default(),
         }],
     );
     let batch = c.commit().unwrap();
@@ -1491,10 +1474,7 @@ fn layout_events_carry_frames_and_late_listeners_get_one() {
                 id: 2,
                 tag: Tag::View,
             },
-            Op::SetStyle {
-                id: 2,
-                style: style(&[("height", StyleValue::Number(40.0))]),
-            },
+            style_op(2, &[("height", StyleValue::Number(40.0))]),
             Op::Listen {
                 id: 2,
                 event: EventKind::Layout,
@@ -1693,10 +1673,7 @@ fn screens_fill_their_stack_below_the_header() {
                 id: 2,
                 tag: Tag::Stack,
             },
-            Op::SetStyle {
-                id: 2,
-                style: style(&[("flex", StyleValue::Number(1.0))]),
-            },
+            style_op(2, &[("flex", StyleValue::Number(1.0))]),
             Op::Create {
                 id: 3,
                 tag: Tag::Screen,
@@ -1705,10 +1682,7 @@ fn screens_fill_their_stack_below_the_header() {
                 id: 4,
                 tag: Tag::View,
             },
-            Op::SetStyle {
-                id: 4,
-                style: style(&[("flex", StyleValue::Number(1.0))]),
-            },
+            style_op(4, &[("flex", StyleValue::Number(1.0))]),
             Op::Insert {
                 parent: 3,
                 child: 4,
@@ -1784,10 +1758,7 @@ fn modals_lay_out_at_the_reported_size() {
                 id: 3,
                 tag: Tag::View,
             },
-            Op::SetStyle {
-                id: 3,
-                style: style(&[("flex", StyleValue::Number(1.0))]),
-            },
+            style_op(3, &[("flex", StyleValue::Number(1.0))]),
             Op::Insert {
                 parent: 2,
                 child: 3,
@@ -1818,14 +1789,14 @@ fn right_to_left_layouts() {
             id: 2,
             tag: Tag::View,
         },
-        Op::SetStyle {
-            id: 2,
-            style: style(&[
+        style_op(
+            2,
+            &[
                 ("flexDirection", s("row")),
                 ("width", n(300.0)),
                 ("height", n(50.0)),
-            ]),
-        },
+            ],
+        ),
     ];
     // Two boxes in a row: the first with `marginStart`, the second with
     // `marginLeft` (swapped right to left, as in React Native).
@@ -1834,6 +1805,7 @@ fn right_to_left_layouts() {
         ops.push(Op::SetStyle {
             id,
             style: style(&[("width", n(50.0)), ("height", n(50.0)), (key, n(10.0))]),
+            patch: StylePatch::default(),
         });
         ops.push(Op::Insert {
             parent: 2,
@@ -1881,26 +1853,26 @@ fn right_to_left_layouts() {
                 id: 5,
                 tag: Tag::View,
             },
-            Op::SetStyle {
-                id: 5,
-                style: style(&[
+            style_op(
+                5,
+                &[
                     ("flexDirection", s("row")),
                     ("direction", s("ltr")),
                     ("height", n(20.0)),
-                ]),
-            },
+                ],
+            ),
             Op::Create {
                 id: 6,
                 tag: Tag::View,
             },
-            Op::SetStyle {
-                id: 6,
-                style: style(&[
+            style_op(
+                6,
+                &[
                     ("width", n(20.0)),
                     ("start", n(5.0)),
                     ("position", s("absolute")),
-                ]),
-            },
+                ],
+            ),
             Op::Insert {
                 parent: 5,
                 child: 6,
@@ -1946,20 +1918,21 @@ fn right_to_left_horizontal_scrolls() {
             id: 2,
             prop: Prop::Horizontal(true),
         },
-        Op::SetStyle {
-            id: 2,
-            style: style(&[
+        style_op(
+            2,
+            &[
                 ("width", n(150.0)),
                 ("height", n(50.0)),
                 ("paddingStart", n(10.0)),
-            ]),
-        },
+            ],
+        ),
     ];
     for id in [3, 4] {
         ops.push(Op::Create { id, tag: Tag::View });
         ops.push(Op::SetStyle {
             id,
             style: style(&[("width", n(100.0)), ("height", n(50.0))]),
+            patch: StylePatch::default(),
         });
         ops.push(Op::Insert {
             parent: 2,
@@ -1985,4 +1958,284 @@ fn right_to_left_horizontal_scrolls() {
             command: Command::ScrollTo { x, .. }
         } if *x == 60.0
     )));
+}
+
+fn class_op(id: NodeId, classes: &str) -> Op {
+    Op::SetProp {
+        id,
+        prop: Prop::Class(classes.into()),
+    }
+}
+
+fn view_style_of(batch: &MountBatch, id: NodeId) -> Option<ViewStyle> {
+    batch.items.iter().rev().find_map(|i| match i {
+        MountItem::ViewStyle { id: i, style } if *i == id => Some((**style).clone()),
+        _ => None,
+    })
+}
+
+fn view_with_classes(c: &mut Core<FakeEngine>, id: NodeId, classes: &str) {
+    apply(
+        c,
+        vec![
+            Op::Create { id, tag: Tag::View },
+            class_op(id, classes),
+            Op::Insert {
+                parent: ROOT_ID,
+                child: id,
+                before: None,
+            },
+        ],
+    );
+}
+
+#[test]
+fn classes_style_views_and_inline_styles_win() {
+    let mut c = core();
+    view_with_classes(&mut c, 2, "w-20 h-10 p-2 bg-blue-500 rounded-lg");
+    let batch = c.commit().unwrap();
+    assert_eq!(frame_of(&batch, 2).unwrap().width, 80.0);
+    let v = view_style_of(&batch, 2).unwrap();
+    assert_eq!(v.background_color, Color(0x2b7f_ffff));
+    assert_eq!(v.border_radius, 8.0);
+    // The inline style applies over the classes, and survives a class change.
+    c.apply(style_op(
+        2,
+        &[("backgroundColor", StyleValue::Str("#ff0000"))],
+    ))
+    .unwrap();
+    let batch = c.commit().unwrap();
+    assert_eq!(
+        view_style_of(&batch, 2).unwrap().background_color,
+        Color(0xff00_00ff)
+    );
+    c.apply(class_op(2, "w-24 h-10 bg-green-500")).unwrap();
+    let batch = c.commit().unwrap();
+    assert_eq!(frame_of(&batch, 2).unwrap().width, 96.0);
+    let v = view_style_of(&batch, 2).unwrap();
+    assert_eq!(v.background_color, Color(0xff00_00ff));
+    assert_eq!(v.border_radius, 0.0);
+    // Same classes again: nothing to do.
+    c.apply(class_op(2, "w-24 h-10 bg-green-500")).unwrap();
+    assert!(c.commit().is_none());
+}
+
+#[test]
+fn dark_mode_and_breakpoints_restyle_natively() {
+    let mut c = core();
+    view_with_classes(&mut c, 2, "bg-white dark:bg-black p-2 md:p-8");
+    let batch = c.commit().unwrap();
+    assert_eq!(
+        view_style_of(&batch, 2).unwrap().background_color,
+        Color(0xffff_ffff)
+    );
+    c.set_class_environment(crate::tailwind::ClassEnvironment {
+        dark: true,
+        ..Default::default()
+    });
+    let batch = c.commit().unwrap();
+    assert_eq!(
+        view_style_of(&batch, 2).unwrap().background_color,
+        Color(0x0000_00ff)
+    );
+    // A wide window crosses `md`: the padding changes, the child moves.
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 3,
+                tag: Tag::View,
+            },
+            style_op(3, &[("height", StyleValue::Number(5.0))]),
+            Op::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    assert_eq!(frame_of(&batch, 3).unwrap().x, 8.0);
+    c.set_viewport(Size::new(1024.0, 768.0));
+    let batch = c.commit().unwrap();
+    assert_eq!(frame_of(&batch, 3).unwrap().x, 32.0);
+}
+
+#[test]
+fn press_and_group_states() {
+    let mut c = core();
+    view_with_classes(&mut c, 2, "group bg-white active:bg-zinc-200");
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 3,
+                tag: Tag::View,
+            },
+            class_op(3, "h-4 opacity-100 group-active:opacity-50"),
+            Op::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    // The platform is asked to report the group's presses.
+    assert!(batch.items.iter().any(|i| matches!(i, MountItem::TrackStates { id: 2, states } if states & crate::tailwind::state::PRESSED != 0)));
+    c.set_states(2, crate::tailwind::state::PRESSED);
+    let batch = c.commit().unwrap();
+    assert_eq!(
+        view_style_of(&batch, 2).unwrap().background_color,
+        Color(0xe4e4_e7ff)
+    );
+    assert_eq!(view_style_of(&batch, 3).unwrap().opacity, 0.5);
+    c.set_states(2, 0);
+    let batch = c.commit().unwrap();
+    assert_eq!(view_style_of(&batch, 3).unwrap().opacity, 1.0);
+}
+
+#[test]
+fn text_inherits_from_views_and_classes_set_props() {
+    let mut c = core();
+    view_with_classes(&mut c, 2, "text-white text-lg text-center");
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 3,
+                tag: Tag::Text,
+            },
+            class_op(3, "line-clamp-2 font-bold"),
+            Op::CreateText {
+                id: 4,
+                text: "hello".into(),
+            },
+            Op::Insert {
+                parent: 3,
+                child: 4,
+                before: None,
+            },
+            Op::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    let text = batch
+        .items
+        .iter()
+        .find_map(|i| match i {
+            MountItem::Text { id: 3, text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(text.spans[0].style.color, Color(0xffff_ffff));
+    assert_eq!(text.spans[0].style.font_size, 18.0);
+    assert_eq!(text.spans[0].style.font_weight, 700);
+    assert_eq!(text.align, TextAlign::Center);
+    assert_eq!(text.max_lines, 2);
+    // A container's text style change reaches the text inside.
+    c.apply(class_op(2, "text-black text-lg")).unwrap();
+    let batch = c.commit().unwrap();
+    assert!(batch.items.iter().any(|i| matches!(i, MountItem::Text { id: 3, text, .. } if text.spans[0].style.color == Color(0x0000_00ff))));
+}
+
+#[test]
+fn sibling_positions() {
+    let mut c = core();
+    view_with_classes(&mut c, 2, "flex-row");
+    for id in 3..6 {
+        apply(
+            &mut c,
+            vec![
+                Op::Create { id, tag: Tag::View },
+                class_op(id, "w-2 h-2 bg-red-500 first:bg-green-500 last:bg-blue-500"),
+                Op::Insert {
+                    parent: 2,
+                    child: id,
+                    before: None,
+                },
+            ],
+        );
+    }
+    let batch = c.commit().unwrap();
+    assert_eq!(
+        view_style_of(&batch, 3).unwrap().background_color,
+        Color(0x00c9_50ff)
+    );
+    assert_eq!(
+        view_style_of(&batch, 4).unwrap().background_color,
+        Color(0xfb2c_36ff)
+    );
+    assert_eq!(
+        view_style_of(&batch, 5).unwrap().background_color,
+        Color(0x2b7f_ffff)
+    );
+    // Removing the last child makes the middle one last.
+    c.apply(Op::Remove {
+        parent: 2,
+        child: 5,
+    })
+    .unwrap();
+    let batch = c.commit().unwrap();
+    assert_eq!(
+        view_style_of(&batch, 4).unwrap().background_color,
+        Color(0x2b7f_ffff)
+    );
+}
+
+#[test]
+fn fractional_translations_follow_the_size() {
+    let mut c = core();
+    view_with_classes(&mut c, 2, "w-20 h-10 -translate-x-1/2 translate-y-full");
+    let batch = c.commit().unwrap();
+    let v = view_style_of(&batch, 2).unwrap();
+    let ops = v.transform.ops();
+    assert_eq!(
+        (ops[0].kind, ops[0].value),
+        (crate::TransformKind::TranslateX, -40.0)
+    );
+    assert_eq!(
+        (ops[1].kind, ops[1].value),
+        (crate::TransformKind::TranslateY, 40.0)
+    );
+    c.apply(class_op(2, "w-40 h-10 -translate-x-1/2 translate-y-full"))
+        .unwrap();
+    let batch = c.commit().unwrap();
+    assert_eq!(
+        view_style_of(&batch, 2).unwrap().transform.ops()[0].value,
+        -80.0
+    );
+}
+
+#[test]
+fn disabled_views_take_no_presses() {
+    let mut c = core();
+    view_with_classes(&mut c, 2, "disabled:opacity-40");
+    let press = |enabled| Op::Listen {
+        id: 2,
+        event: EventKind::Press,
+        enabled,
+    };
+    let disabled = |d| Op::SetProp {
+        id: 2,
+        prop: Prop::Native(NativeProp::Disabled(d)),
+    };
+    let events_of = |batch: &MountBatch| {
+        batch.items.iter().rev().find_map(|i| match i {
+            MountItem::Events { id: 2, events } => Some(*events),
+            _ => None,
+        })
+    };
+    apply(&mut c, vec![press(true), disabled(true)]);
+    let batch = c.commit().unwrap();
+    assert!(!events_of(&batch).unwrap().contains(EventKind::Press));
+    assert_eq!(view_style_of(&batch, 2).unwrap().opacity, 0.4);
+    apply(&mut c, vec![disabled(false)]);
+    let batch = c.commit().unwrap();
+    assert!(events_of(&batch).unwrap().contains(EventKind::Press));
+    assert_eq!(view_style_of(&batch, 2).unwrap().opacity, 1.0);
 }

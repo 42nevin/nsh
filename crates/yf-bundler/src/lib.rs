@@ -6,6 +6,7 @@
 //! `solid-js` and the `yf` runtime are embedded in the binary, so apps
 //! need no `node_modules` for them.
 
+mod classes;
 mod embedded;
 mod hot;
 mod plugin;
@@ -107,6 +108,26 @@ pub struct Bundle {
     pub elapsed_ms: f64,
 }
 
+/// The `"tailwind"` object of the `yf.json` next to the entry, checked.
+fn tailwind_setup(dir: &std::path::Path) -> Result<Arc<plugin::TailwindSetup>, BundleError> {
+    let path = dir.join("yf.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(Arc::default());
+    };
+    let config: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| BundleError::other(format!("yf.json: {e}")))?;
+    let Some(tailwind) = config.get("tailwind") else {
+        return Ok(Arc::default());
+    };
+    let json = tailwind.to_string();
+    let theme = yf_core::tailwind::Theme::from_json(&json)
+        .map_err(|e| BundleError::other(format!("yf.json: tailwind: {e}")))?;
+    Ok(Arc::new(plugin::TailwindSetup {
+        json: Some(json),
+        theme,
+    }))
+}
+
 /// Bundles an app, blocking the current thread.
 pub fn bundle(options: &BundleOptions) -> Result<Bundle, BundleError> {
     tokio::runtime::Builder::new_current_thread()
@@ -127,6 +148,7 @@ pub async fn bundle_async(options: &BundleOptions) -> Result<Bundle, BundleError
         .to_path_buf();
     let cwd_for_errors = cwd.clone();
     let cwd_root = cwd.clone();
+    let tailwind = tailwind_setup(&cwd)?;
     let plugin_error = Arc::new(Mutex::new(None));
     let assets = Arc::new(Mutex::new(Vec::new()));
     let mut bundler = Bundler::with_plugins(
@@ -153,6 +175,7 @@ pub async fn bundle_async(options: &BundleOptions) -> Result<Bundle, BundleError
             error: plugin_error.clone(),
             assets: assets.clone(),
             hot: false,
+            tailwind,
         })],
     )
     .map_err(|e| BundleError::new(e.into_vec()))?;
@@ -338,6 +361,7 @@ pub async fn bundle_hot_async(entry: &std::path::Path) -> Result<HotBundle, Bund
         .to_path_buf();
     let plugin_error = Arc::new(Mutex::new(None));
     let assets = Arc::new(Mutex::new(Vec::new()));
+    let tailwind = tailwind_setup(&cwd)?;
     let mut bundler = Bundler::with_plugins(
         BundlerOptions {
             input: Some(vec![InputItem {
@@ -364,6 +388,7 @@ pub async fn bundle_hot_async(entry: &std::path::Path) -> Result<HotBundle, Bund
             error: plugin_error.clone(),
             assets: assets.clone(),
             hot: true,
+            tailwind,
         })],
     )
     .map_err(|e| BundleError::new(e.into_vec()))?;

@@ -126,14 +126,21 @@ impl ImageLoader {
         }
     }
 
-    /// Cache key: the same URI decoded at different sizes (or blurred
-    /// differently) is a different image.
-    pub(crate) fn key(uri: &str, max_pixels: u32, blur: f32) -> String {
-        if blur > 0.0 {
-            format!("{max_pixels}@{blur}@{uri}")
-        } else {
-            format!("{max_pixels}@{uri}")
+    /// Cache key: the same URI decoded at different sizes (or blurred or
+    /// filtered differently) is a different image.
+    pub(crate) fn key(uri: &str, max_pixels: u32, look: Look) -> String {
+        let mut key = format!("{max_pixels}@");
+        if look.blur > 0.0 {
+            key.push_str(&format!("b{}@", look.blur));
         }
+        if let Some(m) = look.matrix {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::hash::DefaultHasher::new();
+            m.map(f32::to_bits).hash(&mut h);
+            key.push_str(&format!("m{:x}@", h.finish()));
+        }
+        key.push_str(uri);
+        key
     }
 
     /// Requests `uri` for `view`, decoded to at most `max_pixels` on its
@@ -145,14 +152,15 @@ impl ImageLoader {
         uri: &str,
         max_pixels: u32,
         scale: f64,
-        blur: f32,
+        look: Look,
         done: impl Fn(String, Result<DecodedImage, String>) + Clone + Send + 'static,
     ) -> Request {
-        let key = Self::key(uri, max_pixels, blur);
+        let key = Self::key(uri, max_pixels, look);
         let decoding = Decoding {
             max_pixels,
             scale,
-            blur: blur as f64 * scale,
+            blur: look.blur as f64 * scale,
+            matrix: look.matrix,
         };
         // SAFETY: NSString key and CachedImage value, as declared.
         if let Some(cached) = unsafe { self.cache.objectForKey(&NSString::from_str(&key)) } {
@@ -257,13 +265,22 @@ fn url(s: &str) -> Option<Retained<NSURL>> {
     NSURL::URLWithString(&NSString::from_str(s))
 }
 
+/// How a decoded image is changed: `blurRadius` plus `blur()` filters (in
+/// points), and the composed color matrix of the other filters.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct Look {
+    pub(crate) blur: f32,
+    pub(crate) matrix: Option<[f32; 20]>,
+}
+
 /// How to decode: the longer side in pixels (0: natural), the screen
-/// scale, the blur radius in pixels.
+/// scale, the blur radius in pixels, a color matrix.
 #[derive(Clone, Copy)]
 struct Decoding {
     max_pixels: u32,
     scale: f64,
     blur: f64,
+    matrix: Option<[f32; 20]>,
 }
 
 fn fetch_url(
@@ -330,6 +347,7 @@ fn decode(data: &CFData, d: Decoding) -> Option<DecodedImage> {
         max_pixels,
         scale,
         blur,
+        matrix,
     } = d;
     // SAFETY: valid data and option dictionaries of the documented types.
     unsafe {
@@ -350,8 +368,8 @@ fn decode(data: &CFData, d: Decoding) -> Option<DecodedImage> {
         let options: &CFDictionary = options.as_opaque();
         let frame = |i: usize| -> Option<Retained<UIImage>> {
             let image = source.thumbnail_at_index(i, Some(options))?;
-            let image = match blur > 0.0 {
-                true => crate::blur::blurred(&image, blur).unwrap_or(image),
+            let image = match blur > 0.0 || matrix.is_some() {
+                true => crate::blur::filtered(&image, blur, matrix).unwrap_or(image),
                 false => image,
             };
             Some(UIImage::imageWithCGImage_scale_orientation(

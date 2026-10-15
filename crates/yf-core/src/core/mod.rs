@@ -1,3 +1,4 @@
+mod classes;
 mod list;
 #[cfg(test)]
 mod tests;
@@ -21,7 +22,8 @@ use crate::{
         ResizeMode, ScreenProp, ScrollProp, Tag,
     },
     props::{AccessibilityProp, EdgeInsets, GestureValues, LayoutAnimation, ViewProps},
-    style::{EllipsizeMode, Style, TextAlign, TextStyle, ViewStyle},
+    style::{EllipsizeMode, Style, StylePatch, TextAlign, TextStyle, ViewStyle},
+    tailwind::{ClassEnvironment, ClassList, ClassProps, Tailwind},
     text::{AttributedText, MeasureCache, ResolvedTextStyle, TextEngine, TextLayout},
 };
 
@@ -107,6 +109,8 @@ struct Paragraph {
     allow_font_scaling: bool,
     /// `maxFontSizeMultiplier`; 0 means no limit.
     max_font_multiplier: f32,
+    /// `ellipsizeMode` was set (it then wins over classes).
+    ellipsize_set: bool,
 }
 
 impl Default for Paragraph {
@@ -116,6 +120,7 @@ impl Default for Paragraph {
             ellipsize: EllipsizeMode::Tail,
             allow_font_scaling: true,
             max_font_multiplier: 0.0,
+            ellipsize_set: false,
         }
     }
 }
@@ -270,6 +275,22 @@ struct Node {
     view_style: ViewStyle,
     text_style: TextStyle,
     animated: Vec<(AnimProp, yf_anim::NodeId)>,
+    /// The `style` prop as written, applied over the class styles.
+    inline_style: StylePatch,
+    /// `class` / `classList` as set.
+    class_names: Option<Box<classes::ClassNames>>,
+    /// Their parsed form.
+    classes: Option<Arc<ClassList>>,
+    /// Node props the classes set.
+    class_props: Option<Box<ClassProps>>,
+    /// Interaction states (`tailwind::state` bits).
+    states: u8,
+    /// States the platform reports for the view.
+    tracked: u8,
+    /// A child's classes read their position among siblings.
+    positional_children: bool,
+    /// Padding added to the style's (`insetPadding`).
+    inset_padding: EdgeInsets,
     events: EventMask,
     /// `zIndex`: native views are ordered by it (stable) among siblings.
     z_index: i32,
@@ -310,6 +331,34 @@ struct Node {
 }
 
 impl Node {
+    /// The listeners as platforms take them: a `disabled` view takes no
+    /// presses (React Native's `Pressable` / touchables), so it shows no
+    /// press feedback either.
+    fn mounted_events(&self) -> EventMask {
+        let mut events = self.events;
+        if self.states & crate::tailwind::state::DISABLED != 0 {
+            for e in PRESSES {
+                events.set(e, false);
+            }
+        }
+        events
+    }
+
+    /// The view style as platforms take it: translations by a fraction of
+    /// the size resolved with the current frame.
+    fn mounted_view_style(&self) -> Box<ViewStyle> {
+        let mut style = Box::new(self.view_style.clone());
+        if style.transform.has_fractions() {
+            let (w, h) = if self.frame.width.is_nan() {
+                (0.0, 0.0)
+            } else {
+                (self.frame.width, self.frame.height)
+            };
+            style.transform = style.transform.resolve_fractions(w, h);
+        }
+        style
+    }
+
     fn new(id: NodeId, kind: Kind) -> Self {
         Self {
             id,
@@ -322,6 +371,14 @@ impl Node {
             view_style: ViewStyle::default(),
             text_style: TextStyle::default(),
             animated: Vec::new(),
+            inline_style: StylePatch::default(),
+            class_names: None,
+            classes: None,
+            class_props: None,
+            states: 0,
+            tracked: 0,
+            positional_children: false,
+            inset_padding: EdgeInsets::default(),
             events: EventMask::default(),
             z_index: 0,
             rtl: false,
@@ -464,6 +521,10 @@ pub struct Core<M: TextEngine> {
     font_scale: f32,
     queue: Vec<Key>,
     needs_layout: bool,
+    /// Parsed classes and the theme.
+    tailwind: Tailwind,
+    /// What class variants read from the environment.
+    class_env: ClassEnvironment,
 }
 
 impl<M: TextEngine> Core<M> {
@@ -503,6 +564,8 @@ impl<M: TextEngine> Core<M> {
             font_scale: 1.0,
             queue: Vec::new(),
             needs_layout: true,
+            tailwind: Tailwind::new(),
+            class_env: ClassEnvironment::default(),
         }
     }
 
@@ -603,6 +666,7 @@ impl<M: TextEngine> Core<M> {
                 .set_style(root, root_style(viewport))
                 .expect("taffy root");
             self.needs_layout = true;
+            self.restyle_where(crate::tailwind::deps::WIDTH | crate::tailwind::deps::HEIGHT);
         }
     }
 
@@ -712,7 +776,7 @@ impl<M: TextEngine> Core<M> {
                 }
                 Ok(())
             }
-            Op::SetStyle { id, style } => self.set_style(id, *style),
+            Op::SetStyle { id, style, patch } => self.set_inline_style(id, style, patch),
             Op::SetProp { id, prop } => self.set_prop(id, prop),
             Op::Listen { id, event, enabled } => {
                 let key = self.key(id)?;
@@ -968,7 +1032,7 @@ impl<M: TextEngine> Core<M> {
             ..AttributedText::default()
         };
         let style = scaled(
-            ResolvedTextStyle::default().inherit(&node.text_style),
+            self.inherited_text_style(key).inherit(&node.text_style),
             node.paragraph.font_multiplier(self.font_scale),
         );
         let content = if !input.value.is_empty() {
@@ -1053,6 +1117,22 @@ impl<M: TextEngine> Core<M> {
         self.needs_layout = true;
     }
 
+    fn set_inline_style(
+        &mut self,
+        id: NodeId,
+        style: Box<Style>,
+        patch: StylePatch,
+    ) -> Result<(), ApplyError> {
+        let key = self.key(id)?;
+        let node = &mut self.nodes[key as usize];
+        node.inline_style = patch;
+        if node.classes.is_some() {
+            self.restyle(key);
+            return Ok(());
+        }
+        self.set_style(id, *style)
+    }
+
     fn set_style(&mut self, id: NodeId, style: Style) -> Result<(), ApplyError> {
         let key = self.key(id)?;
         let node = &mut self.nodes[key as usize];
@@ -1072,6 +1152,19 @@ impl<M: TextEngine> Core<M> {
         let rtl = self.resolved_rtl(key);
         crate::style::apply_direction(&mut layout, &mut view, &logical, rtl);
         let node = &mut self.nodes[key as usize];
+        let extra = node.inset_padding;
+        if extra != EdgeInsets::default() {
+            // On top of points; percentages cannot take an addition.
+            let add = |p: &mut taffy::LengthPercentage, d: f32| {
+                if let taffy::style::ExpandedLengthPercentage::Length(v) = p.expand() {
+                    *p = taffy::LengthPercentage::length(v + d);
+                }
+            };
+            add(&mut layout.padding.top, extra.top);
+            add(&mut layout.padding.right, extra.right);
+            add(&mut layout.padding.bottom, extra.bottom);
+            add(&mut layout.padding.left, extra.left);
+        }
         let flipped = node.rtl != rtl;
         node.rtl = rtl;
         let view_changed = node.view_style != view;
@@ -1110,6 +1203,8 @@ impl<M: TextEngine> Core<M> {
                     self.measure_input(key);
                     self.mark(key, dirty::INPUT);
                 }
+                // Text inside inherits it (CSS).
+                _ if text_changed => self.mark_inheriting_text(key),
                 _ => {}
             }
         }
@@ -1160,7 +1255,7 @@ impl<M: TextEngine> Core<M> {
         };
         let node = &mut self.nodes[key as usize];
         node.rtl = rtl;
-        let mut view = node.view_style;
+        let mut view = node.view_style.clone();
         let kind = node.kind;
         if let Some(base) = node.base_layout.as_deref_mut() {
             crate::style::swap_sides(base, &mut view);
@@ -1176,6 +1271,9 @@ impl<M: TextEngine> Core<M> {
             self.needs_layout = true;
         }
         self.mark(key, dirty::VIEW);
+        if self.reads_direction(key) {
+            self.restyle(key);
+        }
         let node = &mut self.nodes[key as usize];
         let id = node.id;
         if let Some(scroll) = node.scroll.as_mut()
@@ -1405,6 +1503,7 @@ impl<M: TextEngine> Core<M> {
                 }
             }
             Prop::EllipsizeMode(mode) => {
+                node.paragraph.ellipsize_set = true;
                 if node.paragraph.ellipsize != mode {
                     node.paragraph.ellipsize = mode;
                     self.mark_text_block(key);
@@ -1435,6 +1534,25 @@ impl<M: TextEngine> Core<M> {
                     props.hit_slop = value;
                     flags |= dirty::VIEW_PROPS;
                 }
+            }
+            Prop::InsetPadding(insets) => {
+                if node.inset_padding != insets {
+                    node.inset_padding = insets;
+                    self.restyle(key);
+                }
+                return Ok(());
+            }
+            Prop::Class(names) => {
+                self.set_classes(key, Some(names), None);
+                return Ok(());
+            }
+            Prop::ClassList(list) => {
+                self.set_classes(key, None, Some(list));
+                return Ok(());
+            }
+            Prop::TailwindTheme(json) => {
+                self.set_tailwind_theme(&json);
+                return Ok(());
             }
             Prop::LayoutDirection(rtl) => {
                 // The surface's direction (the root's): JS's `I18nManager`.
@@ -1554,6 +1672,11 @@ impl<M: TextEngine> Core<M> {
                 }
             }
             Prop::Native(prop) => {
+                if let NativeProp::Disabled(d) = prop {
+                    // `disabled:` classes, on any element.
+                    self.set_disabled(key, d);
+                }
+                let node = &mut self.nodes[key as usize];
                 if let Some(control) = node.control.as_mut() {
                     let resize = apply_native(control, prop, self.control_sizes);
                     flags |= dirty::NATIVE;
@@ -1712,6 +1835,16 @@ impl<M: TextEngine> Core<M> {
         self.nodes[child as usize].parent = parent;
         self.nodes[parent as usize].children.insert(pos, child);
         self.update_direction(child);
+        if self.nodes[child as usize]
+            .classes
+            .as_ref()
+            .is_some_and(|c| c.deps() & crate::tailwind::deps::POSITION != 0)
+        {
+            self.nodes[parent as usize].positional_children = true;
+        }
+        if self.nodes[parent as usize].positional_children {
+            self.positions_changed(parent);
+        }
 
         if inline {
             self.mark_text_block(parent);
@@ -1776,6 +1909,9 @@ impl<M: TextEngine> Core<M> {
         siblings.remove(pos);
         if let Some(list) = self.nodes[parent as usize].list.as_mut() {
             list.remove_cell(key);
+        }
+        if self.nodes[parent as usize].positional_children {
+            self.positions_changed(parent);
         }
         let node = &mut self.nodes[key as usize];
         node.parent = NO_KEY;
@@ -2004,6 +2140,9 @@ impl<M: TextEngine> Core<M> {
             id,
             kind: kind.view_kind(),
         });
+        if let Some(item) = self.creation_tracking(key) {
+            self.mount.push(item);
+        }
         self.mark(key, flags);
         if !kind.is_container() {
             return;
@@ -2076,24 +2215,27 @@ impl<M: TextEngine> Core<M> {
             }
             let id = node.id;
             if flags & dirty::VIEW != 0 {
-                self.mount.push(MountItem::ViewStyle {
-                    id,
-                    style: Box::new(node.view_style),
-                });
+                let style = node.mounted_view_style();
+                self.mount.push(MountItem::ViewStyle { id, style });
             }
             if flags & dirty::EVENTS != 0 {
                 self.mount.push(MountItem::Events {
                     id,
-                    events: node.events,
+                    events: node.mounted_events(),
                 });
             }
             if flags & dirty::IMAGE != 0
                 && let Some(image) = &node.image
             {
+                // An explicit `resizeMode` wins over `object-*` classes.
+                let resize_mode = match node.class_props.as_ref().and_then(|c| c.resize_mode) {
+                    Some(m) if image.resize_mode == ResizeMode::default() => m,
+                    _ => image.resize_mode,
+                };
                 self.mount.push(MountItem::Image {
                     id,
                     source: image.source.clone(),
-                    resize_mode: image.resize_mode,
+                    resize_mode,
                     options: image.options.clone(),
                 });
             }
@@ -2134,10 +2276,13 @@ impl<M: TextEngine> Core<M> {
                 });
             }
             if flags & dirty::VIEW_PROPS != 0 {
-                self.mount.push(MountItem::ViewProps {
-                    id,
-                    props: node.props.clone().unwrap_or_default(),
-                });
+                let mut props = node.props.clone().unwrap_or_default();
+                if let Some(p) = node.class_props.as_ref().and_then(|c| c.pointer_events)
+                    && props.pointer_events == crate::props::PointerEvents::Auto
+                {
+                    props.pointer_events = p;
+                }
+                self.mount.push(MountItem::ViewProps { id, props });
             }
             if flags & dirty::SCREEN != 0
                 && let Some(config) = self.screen_config(key)
@@ -2167,8 +2312,12 @@ impl<M: TextEngine> Core<M> {
             if let Some(input) = &node.input {
                 if flags & dirty::INPUT != 0 {
                     let mut config = input.config.clone();
+                    if let Some(c) = node.class_props.as_deref() {
+                        config.placeholder_color = config.placeholder_color.or(c.placeholder_color);
+                        config.selection_color = config.selection_color.or(c.caret_color);
+                    }
                     config.style = scaled(
-                        ResolvedTextStyle::default().inherit(&node.text_style),
+                        self.inherited_text_style(key).inherit(&node.text_style),
                         node.paragraph.font_multiplier(self.font_scale),
                     );
                     config.align =
@@ -2204,22 +2353,93 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
+    /// The text style `key` inherits from the views around it, as CSS
+    /// does: `color` / `text-white` on a container styles the text in it
+    /// (React Native views ignore text styles).
+    fn inherited_text_style(&self, key: Key) -> ResolvedTextStyle {
+        let mut chain: Vec<Key> = Vec::new();
+        let mut k = self.nodes[key as usize].parent;
+        while k != NO_KEY {
+            let node = &self.nodes[k as usize];
+            if node.kind != Kind::Text && node.text_style != TextStyle::default() {
+                chain.push(k);
+            }
+            k = node.parent;
+        }
+        chain
+            .iter()
+            .rev()
+            .fold(ResolvedTextStyle::default(), |style, &k| {
+                style.inherit(&self.nodes[k as usize].text_style)
+            })
+    }
+
+    /// The nearest `textAlign` set on a view around `key`.
+    fn inherited_text_align(&self, key: Key) -> Option<TextAlign> {
+        let mut k = self.nodes[key as usize].parent;
+        while k != NO_KEY {
+            let node = &self.nodes[k as usize];
+            if let Some(a) = node.text_style.text_align {
+                return Some(a);
+            }
+            k = node.parent;
+        }
+        None
+    }
+
+    /// Text blocks and inputs inside `key` inherit its new text style.
+    fn mark_inheriting_text(&mut self, key: Key) {
+        let mut stack: Vec<Key> = self.nodes[key as usize].children.clone();
+        while let Some(k) = stack.pop() {
+            match self.nodes[k as usize].kind {
+                Kind::Text => self.mark_text_block(k),
+                Kind::Input => {
+                    self.measure_input(k);
+                    self.mark(k, dirty::INPUT);
+                }
+                Kind::RawText => {}
+                _ => stack.extend_from_slice(&self.nodes[k as usize].children),
+            }
+        }
+    }
+
     /// Rebuilds the attributed text of a block. Returns true if it changed.
     ///
     /// Only layout-relevant changes invalidate measurement and layout; a
     /// color change keeps both and just needs a new final layout.
     fn rebuild_text(&mut self, key: Key) -> bool {
         let node = &self.nodes[key as usize];
+        let class = node.class_props.as_deref();
+        // Explicit props win over classes (`numberOfLines` over
+        // `line-clamp-*`).
+        let max_lines = match (node.paragraph.lines, class.and_then(|c| c.number_of_lines)) {
+            (0, Some(n)) => n,
+            (n, _) => n,
+        };
+        let ellipsize = match class.and_then(|c| c.ellipsize) {
+            Some(m) if !node.paragraph.ellipsize_set => m,
+            _ => node.paragraph.ellipsize,
+        };
+        let inherited = self.inherited_text_style(key);
         let mut text = AttributedText {
-            align: directed_align(node.text_style.text_align.unwrap_or_default(), node.rtl),
+            align: directed_align(
+                node.text_style
+                    .text_align
+                    .or(self.inherited_text_align(key))
+                    .unwrap_or_default(),
+                node.rtl,
+            ),
             writing_direction: node.text_style.writing_direction,
             rtl: node.rtl,
-            max_lines: node.paragraph.lines,
-            ellipsize: node.paragraph.ellipsize,
+            max_lines,
+            ellipsize,
+            // A line clamp already keeps lines from wrapping past it, and
+            // must ellipsize at the box (`truncate`).
+            no_wrap: max_lines == 0 && class.and_then(|c| c.no_wrap).unwrap_or(false),
             shadow: node.text_style.shadow(),
             ..AttributedText::default()
         };
-        let base = ResolvedTextStyle::default().inherit(&node.text_style);
+        let base = inherited.inherit(&node.text_style);
         self.collect_text(key, base, &mut text);
         let multiplier = node.paragraph.font_multiplier(self.font_scale);
         if multiplier != 1.0 {
@@ -2523,11 +2743,15 @@ impl<M: TextEngine> Core<M> {
                     |_, _| 0.0,
                     |known, available| match ctx {
                         Some(LeafContext::Text(ctx)) => {
-                            let max_width = known.width.or(match available.width {
-                                AvailableSpace::Definite(w) => Some(w),
-                                // Text has no cheap min-content; use the natural width.
-                                AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
-                            });
+                            let max_width = if ctx.text.no_wrap {
+                                None
+                            } else {
+                                known.width.or(match available.width {
+                                    AvailableSpace::Definite(w) => Some(w),
+                                    // Text has no cheap min-content; use the natural width.
+                                    AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
+                                })
+                            };
                             let measured = measure_text(engine, cache, ctx, max_width);
                             taffy::Size {
                                 width: known.width.unwrap_or(measured.width),
@@ -2572,12 +2796,19 @@ impl<M: TextEngine> Core<M> {
             if !created {
                 continue;
             }
-            let content = content_box(self.layout.layout(layout).expect("taffy layout"));
-            let size = Size::new(content.width, content.height);
+            let mut content = content_box(self.layout.layout(layout).expect("taffy layout"));
             let engine = &self.text_engine;
+            let cache = &mut self.measure_cache;
             let Some(LeafContext::Text(ctx)) = self.layout.get_node_context_mut(layout) else {
                 continue;
             };
+            if ctx.text.no_wrap {
+                // One line at its natural width, past the box if need be.
+                content.width = content
+                    .width
+                    .max(measure_text(engine, cache, ctx, None).width);
+            }
+            let size = Size::new(content.width, content.height);
             if matches!(&ctx.laid_out, Some((s, _)) if *s == size) {
                 continue;
             }
@@ -2683,6 +2914,12 @@ impl<M: TextEngine> Core<M> {
                 ));
             }
             self.mount.push(MountItem::Frame { id, frame });
+            let node = &self.nodes[key as usize];
+            // Translations by a fraction of the size follow it.
+            if node.view_style.transform.has_fractions() {
+                let style = node.mounted_view_style();
+                self.mount.push(MountItem::ViewStyle { id, style });
+            }
             if is_text {
                 self.queue_text(key);
             }
@@ -3192,14 +3429,15 @@ fn directed_align(align: TextAlign, rtl: bool) -> TextAlign {
     }
 }
 
+/// The press events.
+const PRESSES: [EventKind; 4] = [
+    EventKind::Press,
+    EventKind::LongPress,
+    EventKind::PressIn,
+    EventKind::PressOut,
+];
+
 /// Whether a span with `events` takes presses (a link in its text block).
 fn pressable(events: EventMask) -> bool {
-    [
-        EventKind::Press,
-        EventKind::LongPress,
-        EventKind::PressIn,
-        EventKind::PressOut,
-    ]
-    .iter()
-    .any(|&e| events.contains(e))
+    PRESSES.iter().any(|&e| events.contains(e))
 }

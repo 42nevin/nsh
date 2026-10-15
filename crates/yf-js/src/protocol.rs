@@ -18,7 +18,8 @@ use yf_core::{
     LayoutProperty, LayoutTransition, ListContentStyle, LiveRegion, ModalAnimation,
     ModalPresentation, ModalProp, NativeProp, NodeId, Op, PointerEvents, Prop, ResizeMode,
     ReturnKeyType, ScreenAnimation, ScreenProp, ScrollProp, SnapAlignment, StatusBarConfig,
-    StatusBarStyle, Style, StyleError, StyleValue, Tag, TransformKind, Viewability, WebSource,
+    StatusBarStyle, Style, StyleDecl, StyleError, StylePatch, StyleValue, Tag, TransformKind,
+    Viewability, WebSource,
 };
 
 // Must match the constants in `js/runtime/index.ts`.
@@ -511,8 +512,8 @@ fn decode_prop<'js>(
         "style" => {
             let mut entries = Vec::new();
             style_entries(&value, &mut entries)?;
-            let style = decode_style(entries, warnings)?;
-            return Ok(Some(Op::SetStyle { id, style }));
+            let (style, patch) = decode_style(entries, warnings)?;
+            return Ok(Some(Op::SetStyle { id, style, patch }));
         }
         "src" => Prop::Source(decode_source(&value)?),
         "defaultSource" => Prop::Image(ImageProp::DefaultSource(decode_source(&value)?)),
@@ -769,7 +770,30 @@ fn decode_prop<'js>(
             None => insets(&value)?,
         }),
         "activeOpacity" => Prop::ActiveOpacity(number(&value).map(|n| n.clamp(0.0, 1.0))),
+        "insetPadding" => Prop::InsetPadding(insets(&value)?),
         "layoutDirectionRtl" => Prop::LayoutDirection(value.as_bool().unwrap_or(false)),
+        "class" => Prop::Class(match value.as_string() {
+            Some(s) => s.to_string()?.into(),
+            None => "".into(),
+        }),
+        // `{ "bg-red-500": hasError() }`: the names whose value is truthy.
+        "classList" => Prop::ClassList(match value.as_object() {
+            Some(o) => {
+                let mut names = Vec::new();
+                for entry in o.props::<String, Value>() {
+                    let (name, on) = entry?;
+                    if truthy(&on) {
+                        names.push(name.into());
+                    }
+                }
+                names
+            }
+            None => Vec::new(),
+        }),
+        "tailwindTheme" => match value.as_string() {
+            Some(s) => Prop::TailwindTheme(s.to_string()?.into()),
+            None => return Ok(None),
+        },
         "delayLongPress" => Prop::LongPressDelay(number(&value).map(|n| n.max(0.0))),
         "android_ripple" => Prop::Ripple(match value.as_object() {
             Some(o) => {
@@ -1035,11 +1059,12 @@ fn style_entries<'js>(
 fn decode_style<'js>(
     entries: Vec<(String, Value<'js>)>,
     warnings: &mut Warnings,
-) -> rquickjs::Result<Box<Style>> {
+) -> rquickjs::Result<(Box<Style>, StylePatch)> {
     let mut style = Box::<Style>::default();
+    let mut patch = StylePatch::default();
     for (key, value) in entries {
         if key == "transform" {
-            decode_transform(&value, &mut style, warnings)?;
+            decode_transform(&value, &mut style, &mut patch, warnings)?;
             continue;
         }
         if (key == "fontVariant" || key == "transformOrigin")
@@ -1056,7 +1081,7 @@ fn decode_style<'js>(
                 }
             }
             let joined = words.join(" ");
-            if let Err(e) = style.set(&key, StyleValue::Str(&joined)) {
+            if let Err(e) = patch.set(&mut style, &key, StyleValue::Str(&joined)) {
                 warnings.warn(format!("style `{key}`: {e:?}"));
             }
             continue;
@@ -1069,7 +1094,7 @@ fn decode_style<'js>(
                 )),
                 None => None,
             };
-            style.set_text_shadow_offset(offset);
+            let _ = patch.push(&mut style, StyleDecl::TextShadowOffset(offset));
             continue;
         }
         if key == "shadowOffset" {
@@ -1085,12 +1110,14 @@ fn decode_style<'js>(
                     continue;
                 }
             };
-            style.set_shadow_offset(offset);
+            let _ = patch.push(&mut style, StyleDecl::ShadowOffset(offset));
             continue;
         }
         if let Some(node) = native_value(&value) {
             match AnimProp::from_name(&key) {
-                Some(prop) => style.animated.push((prop, node)),
+                Some(prop) => {
+                    let _ = patch.push(&mut style, StyleDecl::Animated(prop, node));
+                }
                 None => warnings.warn(format!("style `{key}` cannot be animated natively")),
             }
             continue;
@@ -1110,7 +1137,7 @@ fn decode_style<'js>(
                 continue;
             }
         };
-        match style.set(&key, v) {
+        match patch.set(&mut style, &key, v) {
             Ok(()) => {}
             Err(StyleError::UnknownProperty) => {
                 warnings.warn(format!("unsupported style property `{key}`"))
@@ -1120,15 +1147,18 @@ fn decode_style<'js>(
             }
         }
     }
-    Ok(style)
+    Ok((style, patch))
 }
 
 /// `transform: [{ translateX: 10 }, { rotate: "45deg" }, { scale: nativeValue }]`.
 fn decode_transform(
     value: &Value<'_>,
     style: &mut Style,
+    patch: &mut StylePatch,
     warnings: &mut Warnings,
 ) -> rquickjs::Result<()> {
+    // A `transform` replaces the class transforms (and an earlier one).
+    let _ = patch.push(style, StyleDecl::ClearTransform);
     let Some(items) = value.as_array() else {
         return Ok(());
     };
@@ -1156,12 +1186,8 @@ fn decode_transform(
                 warnings.warn(format!("invalid transform `{key}`"));
                 continue;
             };
-            match style.push_transform(&key, amount) {
-                Ok(index) => {
-                    if let Some(node) = node {
-                        style.animated.push((AnimProp::Transform(index), node));
-                    }
-                }
+            match patch.push(style, StyleDecl::Transform(kind, amount, node)) {
+                Ok(()) => {}
                 Err(_) => warnings.warn(format!(
                     "too many transforms (at most {})",
                     yf_core::MAX_TRANSFORMS
@@ -1170,6 +1196,20 @@ fn decode_transform(
         }
     }
     Ok(())
+}
+
+/// JS truthiness.
+fn truthy(v: &Value<'_>) -> bool {
+    if let Some(b) = v.as_bool() {
+        return b;
+    }
+    if let Some(n) = v.as_number() {
+        return n != 0.0 && !n.is_nan();
+    }
+    if let Some(s) = v.as_string() {
+        return s.to_string().is_ok_and(|s| !s.is_empty());
+    }
+    !(v.is_null() || v.is_undefined())
 }
 
 /// `"45deg"` / `"0.5rad"` -> degrees.

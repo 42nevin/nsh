@@ -15,8 +15,11 @@ use yf_core::{AttributedText, EllipsizeMode, Size, TextAlign, TextEngine, TextLa
 use crate::java::{java, with_env};
 
 /// Ints per span: start, end, weight, flags, color, decoration color,
-/// family index.
-const SPAN_INTS: usize = 7;
+/// family index, font variant bits, decoration style.
+const SPAN_INTS: usize = 9;
+/// Floats per span: size, line height, letter spacing, decoration
+/// thickness (0: the font's), underline offset (NaN: the font's).
+const SPAN_FLOATS: usize = 5;
 const ITALIC: i32 = 1;
 const UNDERLINE: i32 = 2;
 const STRIKE: i32 = 4;
@@ -45,7 +48,7 @@ impl TextEngine for AndroidTextEngine {
 
     fn prepare(&self, text: &AttributedText) -> Prepared {
         let mut ints = Vec::with_capacity(text.spans.len() * SPAN_INTS);
-        let mut floats = Vec::with_capacity(text.spans.len() * 3);
+        let mut floats = Vec::with_capacity(text.spans.len() * SPAN_FLOATS);
         let mut families: Vec<Arc<str>> = Vec::new();
         for span in &text.spans {
             let s = &span.style;
@@ -81,8 +84,21 @@ impl TextEngine for AndroidTextEngine {
                 argb(s.decoration_color.unwrap_or(s.color)),
                 family,
                 s.font_variant.0 as i32,
+                match s.decoration_style {
+                    yf_core::DecorationStyle::Solid => 0,
+                    yf_core::DecorationStyle::Double => 1,
+                    yf_core::DecorationStyle::Dotted => 2,
+                    yf_core::DecorationStyle::Dashed => 3,
+                    yf_core::DecorationStyle::Wavy => 4,
+                },
             ]);
-            floats.extend_from_slice(&[s.font_size, s.line_height, s.letter_spacing]);
+            floats.extend_from_slice(&[
+                s.font_size,
+                s.line_height,
+                s.letter_spacing,
+                s.decoration_thickness.unwrap_or(0.0),
+                s.underline_offset.unwrap_or(f32::NAN),
+            ]);
         }
         // Alignment, writing direction (0 from the content, 1 left to
         // right, 2 right to left) << 4, layout right to left << 8.

@@ -124,6 +124,10 @@ impl Native {
 #[derive(Default)]
 struct Gestures {
     press: Option<Retained<PressRecognizer>>,
+    /// Reports `hover:` (pointers).
+    hover: Option<Retained<objc2_ui_kit::UIHoverGestureRecognizer>>,
+    /// `cursor`: the pointer's look.
+    pointer: Option<Retained<objc2_ui_kit::UIPointerInteraction>>,
     pan: Option<Retained<UIPanGestureRecognizer>>,
     pinch: Option<Retained<UIPinchGestureRecognizer>>,
     rotation: Option<Retained<UIRotationGestureRecognizer>>,
@@ -261,6 +265,10 @@ struct Slot {
     placeholder_key: Option<String>,
     /// The image (not its placeholder) is shown.
     image_shown: bool,
+    /// Interaction states the core wants reported (`tailwind::state`).
+    tracked: u8,
+    /// Current interaction states.
+    states: u8,
 }
 
 impl Slot {
@@ -290,6 +298,8 @@ impl Slot {
             image_options: yf_core::ImageOptions::default(),
             placeholder_key: None,
             image_shown: false,
+            tracked: 0,
+            states: 0,
         }
     }
 }
@@ -600,6 +610,19 @@ impl Mounter {
                         self.decorate(id);
                     }
                 }
+                // A bounce jumps by a quarter of the height.
+                if let Some(s) = self.slot(id)
+                    && let Some(a) = s
+                        .style
+                        .animation
+                        .filter(|a| a.keyframes == yf_core::Keyframes::Bounce)
+                {
+                    crate::interaction::keyframes(
+                        &s.native.view().layer(),
+                        Some(&a),
+                        frame.height as f64,
+                    );
+                }
                 // The origin of the transform depends on the size.
                 if let Some(s) = self.slot(id)
                     && s.style.transform_origin != yf_core::TransformOrigin::CENTER
@@ -610,19 +633,8 @@ impl Mounter {
                         .setTransform(dynamic_transform(s, &self.animator));
                 }
             }
-            MountItem::ViewStyle { id, style } => {
-                if let Some(s) = self.slot_mut(id) {
-                    s.native
-                        .view()
-                        .layer()
-                        .setDoubleSided(!style.backface_hidden);
-                    s.style = *style;
-                    self.decorate(id);
-                    if let Some(s) = self.slot(id) {
-                        apply_dynamic(s, &self.animator);
-                    }
-                }
-            }
+            MountItem::TrackStates { id, states } => self.track_states(id, states),
+            MountItem::ViewStyle { id, style } => self.set_view_style(id, *style),
             MountItem::Text {
                 id,
                 text,
@@ -942,6 +954,7 @@ impl Mounter {
     }
 
     pub(crate) fn input_focused(&mut self, id: NodeId, focused: bool) {
+        self.report_state(id, yf_core::tailwind::state::FOCUSED, focused);
         let Some(s) = self.slot(id) else { return };
         let event = if focused {
             EventKind::Focus
@@ -1295,6 +1308,154 @@ impl Mounter {
     }
 
     /// Reshapes a view's background, border, corners, clipping and shadow.
+    /// Applies a view style; with a transition, changes animate.
+    fn set_view_style(&mut self, id: NodeId, style: ViewStyle) {
+        let mtm = self.mtm;
+        let target = self.target.clone();
+        let Some(s) = self.slot_mut(id) else { return };
+        let view = s.native.view().retain();
+        let layer = view.layer();
+        layer.setDoubleSided(!style.backface_hidden);
+        let old_filters = s
+            .style
+            .effects
+            .as_ref()
+            .map(|e| e.filters.clone())
+            .unwrap_or_default();
+        let keyframes_changed = s.style.animation != style.animation;
+        let blend_changed = s.style.blend_mode != style.blend_mode;
+        let cursor_changed = s.style.cursor != style.cursor;
+        // Transitions apply to changes of a view already on screen.
+        let transition = style
+            .transition
+            .filter(|t| t.duration > 0.0 && view.window().is_some());
+        s.style = style;
+        view.setHidden(s.style.hidden);
+        match transition {
+            Some(t) => {
+                // Sublayers animate implicitly in the transaction; the
+                // view's layer gets explicit animations.
+                let this: *mut Self = self;
+                crate::interaction::transition(&view, &t, || {
+                    // SAFETY: `self` is borrowed mutably for the whole call;
+                    // the closure runs synchronously inside it.
+                    let this = unsafe { &mut *this };
+                    this.decorate_animated(id);
+                    if let Some(s) = this.slot(id) {
+                        apply_dynamic(s, &this.animator);
+                    }
+                });
+            }
+            None => {
+                self.decorate(id);
+                if let Some(s) = self.slot(id) {
+                    apply_dynamic(s, &self.animator);
+                }
+            }
+        }
+        let Some(s) = self.slot_mut(id) else { return };
+        if keyframes_changed {
+            let height = view.bounds().size.height;
+            crate::interaction::keyframes(&layer, s.style.animation.as_ref(), height);
+        }
+        if blend_changed {
+            crate::interaction::blend(&layer, s.style.blend_mode);
+        }
+        if cursor_changed {
+            let wanted = s.style.cursor != yf_core::Cursor::Auto;
+            match (&s.gestures.pointer, wanted) {
+                (None, true) => {
+                    let delegate = ProtocolObject::from_ref(&*target);
+                    let i = objc2_ui_kit::UIPointerInteraction::initWithDelegate(
+                        objc2_ui_kit::UIPointerInteraction::alloc(mtm),
+                        Some(delegate),
+                    );
+                    view.addInteraction(ProtocolObject::from_ref(&*i));
+                    s.gestures.pointer = Some(i);
+                }
+                (Some(i), false) => {
+                    view.removeInteraction(ProtocolObject::from_ref(&**i));
+                    s.gestures.pointer = None;
+                }
+                (Some(i), true) => i.invalidate(),
+                _ => {}
+            }
+        }
+        // Filters of images apply to their pixels: decode again.
+        let new_filters = s
+            .style
+            .effects
+            .as_ref()
+            .map(|e| e.filters.clone())
+            .unwrap_or_default();
+        if matches!(s.native, Native::Image(_)) && old_filters != new_filters && s.image.is_some() {
+            s.image_shown = false;
+            if let Some(key) = s.image_key.take() {
+                self.images.cancel(id, &key);
+            }
+            if !self.pending_images.contains(&id) {
+                self.pending_images.push(id);
+            }
+        }
+    }
+
+    /// Restyles with Core Animation's implicit animations on.
+    fn decorate_animated(&mut self, id: NodeId) {
+        let (mtm, animator) = (self.mtm, &self.animator);
+        let Some(s) = self.views.get_mut(id as usize).and_then(Option::as_mut) else {
+            return;
+        };
+        let background = dynamic_background(s, animator);
+        let kind = s.native.kind();
+        s.decor.apply_animated(
+            s.native.view(),
+            kind,
+            &s.style,
+            background.0,
+            background.1,
+            mtm,
+        );
+    }
+
+    /// The core asked for the states of `id` it reads (`active:`, ...).
+    fn track_states(&mut self, id: NodeId, states: u8) {
+        let Some(s) = self.slot_mut(id) else { return };
+        if s.tracked == states {
+            return;
+        }
+        s.tracked = states;
+        let events = s.events;
+        self.set_events(id, events);
+    }
+
+    /// An interaction state of `id` changed: tells the core if it reads it.
+    fn report_state(&mut self, id: NodeId, bit: u8, on: bool) {
+        let Some(s) = self.slot_mut(id) else { return };
+        let states = if on { s.states | bit } else { s.states & !bit };
+        if states == s.states {
+            return;
+        }
+        s.states = states;
+        let tracked = s.tracked;
+        if tracked & bit != 0 {
+            self.control.set_states(id, states & tracked);
+        }
+    }
+
+    /// A pointer entered or left view `id`.
+    pub(crate) fn hover_changed(&mut self, id: NodeId, on: bool) {
+        self.report_state(id, yf_core::tailwind::state::HOVERED, on);
+    }
+
+    /// The pointer's look over view `id`.
+    pub(crate) fn pointer_style(
+        &self,
+        id: NodeId,
+    ) -> Option<Retained<objc2_ui_kit::UIPointerStyle>> {
+        let s = self.slot(id)?;
+        crate::interaction::pointer_style(s.native.view(), s.style.cursor, self.mtm)
+    }
+
     fn decorate(&mut self, id: NodeId) {
         let (mtm, animator) = (self.mtm, &self.animator);
         let Some(s) = self.views.get_mut(id as usize).and_then(Option::as_mut) else {
@@ -1361,10 +1522,19 @@ impl Mounter {
             };
             let size = view.bounds().size;
             let max_pixels = (size.width.max(size.height) * scale).ceil() as u32;
-            let (source, placeholder, blur) = (
+            let filters = s
+                .style
+                .effects
+                .as_ref()
+                .map(|e| &e.filters[..])
+                .unwrap_or(&[]);
+            let look = crate::image::Look {
+                blur: s.image_options.blur_radius + yf_core::blur_radius(filters),
+                matrix: yf_core::compose_color_matrices(filters),
+            };
+            let (source, placeholder) = (
                 s.image.as_ref().map(|s| s.uri.clone()),
                 s.image_options.placeholder.as_ref().map(|s| s.uri.clone()),
-                s.image_options.blur_radius,
             );
             let shared = self.shared.clone();
             let done = move |key: String, result: Result<DecodedImage, String>| {
@@ -1376,7 +1546,7 @@ impl Mounter {
             if let Some(uri) = source {
                 match self
                     .images
-                    .request(id, &uri, max_pixels, scale, blur, done.clone())
+                    .request(id, &uri, max_pixels, scale, look, done.clone())
                 {
                     Request::Ready(decoded) => {
                         if let Some(s) = self.slot_mut(id) {
@@ -1387,7 +1557,7 @@ impl Mounter {
                     }
                     Request::Pending => {
                         if let Some(s) = self.slot_mut(id) {
-                            s.image_key = Some(ImageLoader::key(&uri, max_pixels, blur));
+                            s.image_key = Some(ImageLoader::key(&uri, max_pixels, look));
                             if s.events.contains(EventKind::LoadStart) {
                                 self.control.dispatch_event(
                                     id,
@@ -1402,7 +1572,11 @@ impl Mounter {
             // The placeholder, until the image shows.
             let shown = self.slot(id).is_some_and(|s| s.image_shown);
             if let Some(uri) = placeholder.filter(|_| !shown) {
-                match self.images.request(id, &uri, max_pixels, scale, 0.0, done) {
+                let plain = crate::image::Look::default();
+                match self
+                    .images
+                    .request(id, &uri, max_pixels, scale, plain, done)
+                {
                     Request::Ready(decoded) => {
                         if let Some(s) = self.slot_mut(id) {
                             s.decor.set_image(Some(&decoded.image), 0.0);
@@ -1410,7 +1584,7 @@ impl Mounter {
                     }
                     Request::Pending => {
                         if let Some(s) = self.slot_mut(id) {
-                            s.placeholder_key = Some(ImageLoader::key(&uri, max_pixels, 0.0));
+                            s.placeholder_key = Some(ImageLoader::key(&uri, max_pixels, plain));
                         }
                     }
                 }
@@ -1508,7 +1682,8 @@ impl Mounter {
             EventKind::LongPress,
             EventKind::PressIn,
             EventKind::PressOut,
-        ]) || slot.active_opacity.is_some();
+        ]) || slot.active_opacity.is_some()
+            || slot.tracked & yf_core::tailwind::state::PRESSED != 0;
         let (links, links_long_press) = match &slot.native {
             Native::Text(t) => (t.has_links(), t.links_long_press()),
             _ => (false, false),
@@ -1562,8 +1737,20 @@ impl Mounter {
             press.set_own(own_press);
             press.set_long_press_delay(slot.long_press_delay);
         }
+        let wants_hover = slot.tracked & yf_core::tailwind::state::HOVERED != 0;
+        toggle(&mut slot.gestures.hover, wants_hover, view, || {
+            // SAFETY: `handleHover:` is implemented by the target, which
+            // outlives the recognizer.
+            unsafe {
+                objc2_ui_kit::UIHoverGestureRecognizer::initWithTarget_action(
+                    objc2_ui_kit::UIHoverGestureRecognizer::alloc(mtm),
+                    Some(&target),
+                    Some(sel!(handleHover:)),
+                )
+            }
+        });
         let wants_touch = events.contains(EventKind::Touch);
-        if wants_press || wants_pan || wants_pinch || wants_rotation || wants_touch {
+        if wants_press || wants_pan || wants_pinch || wants_rotation || wants_touch || wants_hover {
             view.setUserInteractionEnabled(true);
         }
         if let Some(yf) = slot.native.yf() {
@@ -1978,6 +2165,7 @@ impl Mounter {
 
     /// A finger went down on (or left) a pressable view.
     pub(crate) fn press_changed(&mut self, id: NodeId, pressed: bool) {
+        self.report_state(id, yf_core::tailwind::state::PRESSED, pressed);
         let Some(s) = self.slot_mut(id) else { return };
         s.pressed = pressed;
         let event = if pressed {
@@ -2412,8 +2600,22 @@ fn set_frame(view: &UIView, frame: Rect) {
 
 /// The opacity to show: the style's or its animated value, dimmed while
 /// pressed with `activeOpacity`.
+fn dynamic_background(slot: &Slot, animator: &Animator) -> (Color, bool) {
+    let mut background = slot.style.background_color;
+    let mut animated = false;
+    for &(prop, node) in &slot.bindings {
+        if prop == AnimProp::BackgroundColor {
+            animated = true;
+            if let AnimValue::Color(c) = animator.eval(node) {
+                background = Color(c);
+            }
+        }
+    }
+    (background, animated)
+}
+
 fn dynamic_opacity(slot: &Slot, animator: &Animator) -> f32 {
-    let mut opacity = slot.style.opacity;
+    let mut opacity = slot.style.opacity * crate::visual::filter_opacity(&slot.style);
     for &(prop, node) in &slot.bindings {
         if prop == AnimProp::Opacity {
             opacity = animator.eval(node).number().clamp(0.0, 1.0);

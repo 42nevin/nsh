@@ -49,6 +49,7 @@ const NATIVE_PROPS: i32 = 23;
 const STICKY_CELLS: i32 = 24;
 const SCROLL_BEHAVIOR: i32 = 25;
 const LAYOUT_DIRECTION: i32 = 26;
+const TRACK_STATES: i32 = 27;
 
 /// An entry of the object table.
 pub(crate) enum Obj {
@@ -259,6 +260,11 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
             MountItem::LayoutDirection { rtl } => {
                 e.int(LAYOUT_DIRECTION);
                 e.bool(rtl);
+            }
+            MountItem::TrackStates { id, states } => {
+                e.int(TRACK_STATES);
+                e.int(id as i32);
+                e.int(states as i32);
             }
             MountItem::ScrollBehavior { id, behavior } => {
                 let b = &*behavior;
@@ -519,6 +525,180 @@ fn view_style(e: &mut Encoded, s: &ViewStyle) {
         }
     }
     e.bool(s.backface_hidden);
+    effects(e, s);
+}
+
+/// The effects of `Mounter.java` `style`: shadows, gradients, filters,
+/// blend mode, outline, visibility, cursor, transition, animation.
+fn effects(e: &mut Encoded, s: &ViewStyle) {
+    use yf_core::{BlendMode, Cursor, Filter, GradientKind, GradientSize, Keyframes};
+    let fx = s.effects.as_deref();
+    let shadows = fx.map_or(&[][..], |f| &f.box_shadows[..]);
+    e.int(shadows.len() as i32);
+    for sh in shadows {
+        for v in [sh.offset_x, sh.offset_y, sh.blur, sh.spread] {
+            e.float(v);
+        }
+        e.int(argb(sh.color));
+        e.bool(sh.inset);
+    }
+    let gradients = fx.map_or(&[][..], |f| &f.background_images[..]);
+    e.int(gradients.len() as i32);
+    for g in gradients {
+        match g.kind {
+            GradientKind::Linear { angle } => {
+                e.int(0);
+                e.float(angle);
+                e.int(0);
+                e.int(0);
+            }
+            GradientKind::LinearCorner { right, bottom } => {
+                e.int(1);
+                e.float(0.0);
+                e.bool(right);
+                e.bool(bottom);
+            }
+            GradientKind::Radial { circle, size, x, y } => {
+                e.int(2);
+                e.bool(circle);
+                e.int(match size {
+                    GradientSize::ClosestSide => 0,
+                    GradientSize::ClosestCorner => 1,
+                    GradientSize::FarthestSide => 2,
+                    GradientSize::FarthestCorner => 3,
+                });
+                e.float(x);
+                e.float(y);
+            }
+            GradientKind::Conic { from, x, y } => {
+                e.int(3);
+                e.float(from);
+                e.float(x);
+                e.float(y);
+            }
+        }
+        let stops = g.resolved_stops();
+        e.int(stops.len() as i32);
+        for (c, p) in stops {
+            e.int(argb(c));
+            e.float(p);
+        }
+    }
+    let filter_list = |e: &mut Encoded, list: &[Filter]| {
+        // Color filters as one composed matrix, then blur, then the drop
+        // shadow (what Android's render effects take).
+        let matrix = yf_core::compose_color_matrices(list);
+        e.bool(matrix.is_some());
+        for v in matrix.unwrap_or([0.0; 20]) {
+            e.float(v);
+        }
+        e.float(yf_core::blur_radius(list));
+        let shadow = list.iter().find_map(|f| match *f {
+            Filter::DropShadow {
+                offset_x,
+                offset_y,
+                blur,
+                color,
+            } => Some((offset_x, offset_y, blur, color)),
+            _ => None,
+        });
+        e.bool(shadow.is_some());
+        let (x, y, b, c) = shadow.unwrap_or((0.0, 0.0, 0.0, Color::TRANSPARENT));
+        e.float(x);
+        e.float(y);
+        e.float(b);
+        e.int(argb(c));
+    };
+    filter_list(e, fx.map_or(&[][..], |f| &f.filters[..]));
+    filter_list(e, fx.map_or(&[][..], |f| &f.backdrop_filters[..]));
+    e.int(match s.blend_mode {
+        BlendMode::Normal => 0,
+        BlendMode::Multiply => 1,
+        BlendMode::Screen => 2,
+        BlendMode::Overlay => 3,
+        BlendMode::Darken => 4,
+        BlendMode::Lighten => 5,
+        BlendMode::ColorDodge => 6,
+        BlendMode::ColorBurn => 7,
+        BlendMode::HardLight => 8,
+        BlendMode::SoftLight => 9,
+        BlendMode::Difference => 10,
+        BlendMode::Exclusion => 11,
+        BlendMode::Hue => 12,
+        BlendMode::Saturation => 13,
+        BlendMode::Color => 14,
+        BlendMode::Luminosity => 15,
+        BlendMode::PlusDarker => 16,
+        BlendMode::PlusLighter => 17,
+    });
+    let o = s.outline;
+    e.float(if o.is_visible() { o.width } else { 0.0 });
+    e.int(argb(o.color));
+    e.int(match o.style {
+        BorderStyle::Solid => 0,
+        BorderStyle::Dashed => 1,
+        BorderStyle::Dotted => 2,
+    });
+    e.float(o.offset);
+    e.bool(s.hidden);
+    e.int(match s.cursor {
+        Cursor::Auto => 0,
+        Cursor::Default => 1,
+        Cursor::Pointer => 2,
+        Cursor::Text => 3,
+        Cursor::Wait => 4,
+        Cursor::Progress => 5,
+        Cursor::Help => 6,
+        Cursor::Crosshair => 7,
+        Cursor::Move => 8,
+        Cursor::Grab => 9,
+        Cursor::Grabbing => 10,
+        Cursor::NotAllowed => 11,
+        Cursor::ZoomIn => 12,
+        Cursor::ZoomOut => 13,
+        Cursor::ColResize => 14,
+        Cursor::RowResize => 15,
+        Cursor::None => 16,
+    });
+    match s.transition.filter(|t| t.duration > 0.0) {
+        Some(t) => {
+            e.int(t.properties.0 as i32);
+            e.float(t.duration);
+            e.float(t.delay);
+            for v in t.easing {
+                e.float(v);
+            }
+        }
+        None => {
+            e.int(0);
+            for _ in 0..6 {
+                e.float(0.0);
+            }
+        }
+    }
+    match s.animation {
+        Some(a) => {
+            e.int(match a.keyframes {
+                Keyframes::Spin => 1,
+                Keyframes::Ping => 2,
+                Keyframes::Pulse => 3,
+                Keyframes::Bounce => 4,
+            });
+            e.float(a.duration);
+            e.float(a.delay);
+            for v in a.easing {
+                e.float(v);
+            }
+            e.int(a.iterations.map_or(-1, |n| n as i32));
+        }
+        None => {
+            e.int(0);
+            for _ in 0..6 {
+                e.float(0.0);
+            }
+            e.int(0);
+        }
+    }
 }
 
 fn opt_color(e: &mut Encoded, c: Option<Color>) {

@@ -61,6 +61,8 @@ pub(crate) struct Decor {
     ring: Vec<Retained<CAShapeLayer>>,
     /// The shapes depend on the view's size: update them on resize.
     sized: bool,
+    /// Layered shadows, gradients, outline, backdrop blur.
+    visual: crate::visual::Visual,
 }
 
 impl Decor {
@@ -247,6 +249,20 @@ impl Decor {
         quiet(|| self.apply_quietly(view, kind, style, background, animated_background, mtm));
     }
 
+    /// Like [`Decor::apply`], letting the current transaction animate the
+    /// changes of the extra layers (transitions).
+    pub(crate) fn apply_animated(
+        &mut self,
+        view: &UIView,
+        kind: Kind,
+        style: &ViewStyle,
+        background: Color,
+        animated_background: bool,
+        mtm: MainThreadMarker,
+    ) {
+        self.apply_quietly(view, kind, style, background, animated_background, mtm);
+    }
+
     fn apply_quietly(
         &mut self,
         view: &UIView,
@@ -281,7 +297,8 @@ impl Decor {
             (kind == Kind::Scroll).then(|| raw.to_array().into_iter().fold(0.0, f32::max))
         });
         let corners = corner_mask(&raw);
-        let content = kind == Kind::View && style.overflow_hidden && shadow;
+        let outside = shadow || crate::visual::draws_outside(style);
+        let content = kind == Kind::View && style.overflow_hidden && outside;
 
         // Text draws into the layer's own contents, below every sublayer: it
         // cannot have a fill layer, so its odd corners clip it instead.
@@ -290,10 +307,27 @@ impl Decor {
         let stroke = border && (shared.is_none() || border_behind || dashed);
         let mask = shared.is_none() && (style.overflow_hidden || kind == Kind::Text) && !content;
 
-        self.sized = kind == Kind::Image || shadow || shared.is_none() || content || stroke || ring;
+        self.sized = kind == Kind::Image
+            || shadow
+            || shared.is_none()
+            || content
+            || stroke
+            || ring
+            || style.effects.is_some()
+            || style.outline.is_visible();
 
-        // Corners of the layer itself.
-        let r = shared.unwrap_or(0.0) as CGFloat;
+        // Corners of the layer itself. Core Animation draws nothing for a
+        // radius over half the short side (`rounded-full` is 9999): clamp
+        // it, and do so again when the size changes.
+        let half = w.min(h) / 2.0;
+        let r = match shared {
+            Some(r) if w > 0.0 && h > 0.0 => r.min(half),
+            Some(r) => r,
+            None => 0.0,
+        } as CGFloat;
+        if shared.is_some_and(|r| r > 0.0 && (w == 0.0 || r >= half)) {
+            self.sized = true;
+        }
         layer.setCornerRadius(r);
         layer.setMaskedCorners(corners);
 
@@ -462,10 +496,19 @@ impl Decor {
             let solid = !style.background_color.is_transparent() || animated_background;
             let path = solid.then(|| rounded(local, radii));
             layer.setShadowPath(path.as_deref().map(|p| &**p));
+        } else if let Some((x, y, blur, color)) = crate::visual::drop_shadow(style) {
+            // `drop-shadow()`: follows the content's shape (no path).
+            layer.setShadowColor(cg_color(Color(color.0 | 0xff)).as_deref());
+            layer.setShadowOpacity((color.0 & 0xff) as f32 / 255.0);
+            layer.setShadowOffset(CGSize::new(x as CGFloat, y as CGFloat));
+            layer.setShadowRadius(blur as CGFloat / 2.0);
+            layer.setShadowPath(None);
         } else {
             layer.setShadowOpacity(0.0);
             layer.setShadowPath(None);
         }
+        self.visual
+            .apply(view, style, local, radii, kind == Kind::Text, mtm);
     }
 
     /// Draws borders with differing sides: the ring between the outer and
@@ -573,7 +616,7 @@ pub(crate) fn quiet_frame(layer: &CALayer, frame: CGRect) {
 
 /// Runs `f` without Core Animation's implicit animations (standalone
 /// layers animate every property change for 0.25s by default).
-fn quiet<R>(f: impl FnOnce() -> R) -> R {
+pub(crate) fn quiet<R>(f: impl FnOnce() -> R) -> R {
     CATransaction::begin();
     CATransaction::setDisableActions(true);
     let result = f();
@@ -612,7 +655,7 @@ fn corner_mask(radii: &CornerRadii) -> CACornerMask {
     }
 }
 
-fn inset(rect: CGRect, d: CGFloat) -> CGRect {
+pub(crate) fn inset(rect: CGRect, d: CGFloat) -> CGRect {
     CGRect::new(
         CGPoint::new(rect.origin.x + d, rect.origin.y + d),
         CGSize::new(
@@ -700,7 +743,7 @@ fn ring_path(rect: CGRect, radii: CornerRadii, widths: [CGFloat; 4]) -> CFRetain
 }
 
 /// A rectangle with circular corners of the given radii.
-fn rounded(rect: CGRect, radii: CornerRadii) -> CFRetained<CGMutablePath> {
+pub(crate) fn rounded(rect: CGRect, radii: CornerRadii) -> CFRetained<CGMutablePath> {
     let (x0, y0) = (rect.origin.x, rect.origin.y);
     let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
     let [tl, tr, br, bl] = radii.to_array().map(|r| r as CGFloat);
@@ -727,7 +770,7 @@ fn ui_color(color: Color) -> Option<Retained<UIColor>> {
     Some(UIColor::colorWithRed_green_blue_alpha(r, g, b, a))
 }
 
-fn cg_color(color: Color) -> Option<Retained<CGColor>> {
+pub(crate) fn cg_color(color: Color) -> Option<Retained<CGColor>> {
     // SAFETY: the CGColor is retained for as long as the caller keeps it.
     ui_color(color).map(|c| unsafe { c.CGColor() })
 }

@@ -34,6 +34,12 @@ pub enum TransformKind {
     SkewY,
     /// `perspective`, the distance of the viewer in points.
     Perspective,
+    /// A translation by a fraction of the view's width (`translate-x-1/2`);
+    /// the core turns it into `TranslateX` with the view's size before it
+    /// reaches a platform.
+    TranslateXFraction,
+    /// A translation by a fraction of the view's height.
+    TranslateYFraction,
 }
 
 impl TransformKind {
@@ -121,6 +127,40 @@ impl Transform {
         Some(i as u8)
     }
 
+    /// Whether some entry is a fraction of the view's size.
+    pub fn has_fractions(&self) -> bool {
+        self.ops().iter().any(|op| {
+            matches!(
+                op.kind,
+                TransformKind::TranslateXFraction | TransformKind::TranslateYFraction
+            )
+        })
+    }
+
+    /// The list with size fractions turned into points for a `width` ×
+    /// `height` view.
+    pub fn resolve_fractions(&self, width: f32, height: f32) -> Transform {
+        let mut t = *self;
+        for op in &mut t.ops[..t.len as usize] {
+            match op.kind {
+                TransformKind::TranslateXFraction => {
+                    *op = TransformOp {
+                        kind: TransformKind::TranslateX,
+                        value: op.value * width,
+                    }
+                }
+                TransformKind::TranslateYFraction => {
+                    *op = TransformOp {
+                        kind: TransformKind::TranslateY,
+                        value: op.value * height,
+                    }
+                }
+                _ => {}
+            }
+        }
+        t
+    }
+
     /// True if the list is empty or every entry is an identity.
     pub fn is_identity(&self) -> bool {
         self.ops().iter().all(|op| op.value == op.kind.identity())
@@ -185,6 +225,8 @@ impl Matrix {
                     a[11] = -1.0 / v;
                 }
             }
+            // Resolved by the core (`Transform::resolve_fractions`).
+            TransformKind::TranslateXFraction | TransformKind::TranslateYFraction => {}
         }
         m
     }

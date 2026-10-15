@@ -40,7 +40,22 @@ pub(crate) struct YfPlugin {
     /// Development bundle with hot module replacement: components and
     /// contexts of app modules are registered with the hot runtime.
     pub(crate) hot: bool,
+    /// The app's Tailwind theme (`yf.json`).
+    pub(crate) tailwind: Arc<TailwindSetup>,
 }
+
+/// The `"tailwind"` object of the app's `yf.json`.
+#[derive(Debug, Default)]
+pub(crate) struct TailwindSetup {
+    /// As JSON, for the runtime (`None`: the default theme).
+    pub(crate) json: Option<String>,
+    /// Parsed, to check classes at build time.
+    pub(crate) theme: yf_core::tailwind::Theme,
+}
+
+/// Virtual module with the app's theme, imported by the runtime.
+const THEME_SPECIFIER: &str = "yf:tailwind-theme";
+const THEME_ID: &str = "\0yf:tailwind-theme";
 
 /// File types imported as image assets.
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "heic"];
@@ -107,10 +122,27 @@ impl Plugin for YfPlugin {
         _ctx: &PluginContext,
         args: &HookResolveIdArgs<'_>,
     ) -> HookResolveIdReturn {
+        if args.specifier == THEME_SPECIFIER {
+            return Ok(Some(HookResolveIdOutput::from_id(THEME_ID)));
+        }
         Ok(embedded::resolve(args.specifier).map(|m| HookResolveIdOutput::from_id(m.id)))
     }
 
     async fn load(&self, _ctx: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> HookLoadReturn {
+        if args.id == THEME_ID {
+            let code = match &self.tailwind.json {
+                Some(json) => format!(
+                    "export default {};",
+                    serde_json::Value::String(json.clone())
+                ),
+                None => "export default null;".to_owned(),
+            };
+            return Ok(Some(HookLoadOutput {
+                code: code.into(),
+                module_type: Some(ModuleType::Js),
+                ..Default::default()
+            }));
+        }
         if let Some(m) = embedded::load(args.id) {
             return Ok(Some(HookLoadOutput {
                 code: m.source.into(),
@@ -198,6 +230,16 @@ impl Plugin for YfPlugin {
             ModuleType::Ts => SourceType::ts(),
             _ => SourceType::mjs(),
         };
+        if jsx_module && app_module {
+            let rel = path
+                .strip_prefix(&self.root)
+                .unwrap_or(path)
+                .display()
+                .to_string();
+            for u in crate::classes::check(args.code, source_type, &self.tailwind.theme) {
+                log::warn!(target: "yf::build", "{rel}:{}:{}: unknown class `{}`", u.line, u.column, u.class);
+            }
+        }
         let (jsx, jsx_map) = strip_types(path, source_type, args.code, hot_key.as_deref())
             .map_err(|detail| self.fail(path, &detail))?;
         if !jsx_module {

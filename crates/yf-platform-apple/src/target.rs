@@ -12,9 +12,10 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSRange, NSString};
 use objc2_quartz_core::CADisplayLink;
 use objc2_ui_kit::{
     UIControl, UIGestureRecognizer, UIGestureRecognizerDelegate, UIGestureRecognizerState,
-    UIPanGestureRecognizer, UIPinchGestureRecognizer, UIRefreshControl,
-    UIRotationGestureRecognizer, UIScrollView, UIScrollViewDelegate, UITapGestureRecognizer,
-    UITextField, UITextFieldDelegate, UITextView, UITextViewDelegate, UITouch, UIView,
+    UIInteraction, UIPanGestureRecognizer, UIPinchGestureRecognizer, UIPointerInteractionDelegate,
+    UIRefreshControl, UIRotationGestureRecognizer, UIScrollView, UIScrollViewDelegate,
+    UITapGestureRecognizer, UITextField, UITextFieldDelegate, UITextView, UITextViewDelegate,
+    UITouch, UIView,
 };
 use yf_core::{EventKind, EventPayload, KeyboardTaps, NodeId};
 use yf_engine::EngineControl;
@@ -53,6 +54,17 @@ define_class!(
                     None => self.with_mounter(move |m| m.pressed(id)),
                 }
             }
+        }
+
+        #[unsafe(method(handleHover:))]
+        fn handle_hover(&self, recognizer: &objc2_ui_kit::UIHoverGestureRecognizer) {
+            let Some(view) = recognizer.view() else { return };
+            let id = view.tag() as NodeId;
+            let on = matches!(
+                recognizer.state(),
+                UIGestureRecognizerState::Began | UIGestureRecognizerState::Changed
+            );
+            self.with_mounter(move |m| m.hover_changed(id, on));
         }
 
         #[unsafe(method(handlePinch:))]
@@ -128,6 +140,21 @@ define_class!(
             let text = field.text().map(|t| t.to_string()).unwrap_or_default();
             let id = field.tag() as NodeId;
             self.with_mounter(move |m| m.input_changed(id, text));
+        }
+    }
+
+    unsafe impl UIPointerInteractionDelegate for EventTarget {
+        #[unsafe(method_id(pointerInteraction:styleForRegion:))]
+        fn pointer_style(
+            &self,
+            interaction: &objc2_ui_kit::UIPointerInteraction,
+            _region: &objc2_ui_kit::UIPointerRegion,
+        ) -> Option<Retained<objc2_ui_kit::UIPointerStyle>> {
+            let id = interaction.view().map(|v| v.tag() as NodeId);
+            match (id, self.ivars().mounter.get(self.mtm()).try_borrow()) {
+                (Some(id), Ok(m)) => m.as_ref().and_then(|m| m.pointer_style(id)),
+                _ => None,
+            }
         }
     }
 

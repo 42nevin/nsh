@@ -114,4 +114,7 @@ final class Native {
 
     /** A display frame began after {@code YfView.requestJsFrame}. */
     static native void frame(long handle);
+
+    /** Interaction states of view {@code id} the core tracks ({@code Mounter.STATE_*}). */
+    static native void states(long handle, int id, int states);
 }

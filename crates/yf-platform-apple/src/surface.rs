@@ -208,6 +208,7 @@ impl RootView {
             // The body text style is 17pt at the default size.
             font_scale: (body / 17.0) as f32,
             rtl: preferred_language_rtl(),
+            reduce_motion: objc2_ui_kit::UIAccessibilityIsReduceMotionEnabled(),
         }
     }
 
@@ -243,6 +244,22 @@ impl RootView {
             ]
         };
         let mut observers = this.ivars().observers.borrow_mut();
+        // Accessibility settings that classes (`motion-reduce:`) and JS read.
+        let weak = Weak::from_retained(this);
+        let settings = RcBlock::new(move |_: NonNull<NSNotification>| {
+            if let Some(view) = weak.load() {
+                view.publish_environment();
+            }
+        });
+        // SAFETY: as below.
+        observers.push(unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(objc2_ui_kit::UIAccessibilityReduceMotionStatusDidChangeNotification),
+                None,
+                Some(&NSOperationQueue::mainQueue()),
+                &settings,
+            )
+        });
         for name in names {
             // SAFETY: as above; the observer is removed when the view stops.
             observers.push(unsafe {

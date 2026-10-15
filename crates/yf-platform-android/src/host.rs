@@ -403,7 +403,7 @@ extern "system" fn Java_dev_yf_Native_resize(
 }
 
 /// `values`: safe area top, right, bottom, left, keyboard height, keyboard
-/// animation duration, font scale.
+/// animation duration, font scale, right to left (1), reduce motion (1).
 #[unsafe(no_mangle)]
 extern "system" fn Java_dev_yf_Native_environment(
     env: JNIEnv<'_>,
@@ -414,7 +414,7 @@ extern "system" fn Java_dev_yf_Native_environment(
 ) {
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
-    let mut v = [0f32; 8];
+    let mut v = [0f32; 9];
     if env.get_float_array_region(&values, 0, &mut v).is_err() {
         return;
     }
@@ -429,6 +429,7 @@ extern "system" fn Java_dev_yf_Native_environment(
     environment.keyboard_duration = v[5];
     environment.font_scale = v[6];
     environment.rtl = v[7] != 0.0;
+    environment.reduce_motion = v[8] != 0.0;
     environment.color_scheme = if dark != 0 {
         ColorScheme::Dark
     } else {
@@ -870,6 +871,22 @@ extern "system" fn Java_dev_yf_Native_rootSize(
                 left,
             },
         );
+    }
+}
+
+/// Interaction states of a view the core tracks (`active:`, `hover:`, `focus:`).
+#[unsafe(no_mangle)]
+extern "system" fn Java_dev_yf_Native_states(
+    _: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    id: jint,
+    states: jint,
+) {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    if let Some(control) = host.control() {
+        control.set_states(id as u32, states as u8);
     }
 }
 

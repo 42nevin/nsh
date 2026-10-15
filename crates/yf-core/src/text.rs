@@ -11,8 +11,8 @@ use crate::{
     geometry::Size,
     ops::{EventMask, NodeId},
     style::{
-        Color, EllipsizeMode, FontFamily, FontVariant, TextAlign, TextDecoration, TextShadow,
-        TextStyle, TextTransform,
+        Color, DecorationStyle, EllipsizeMode, FontFamily, FontVariant, TextAlign, TextDecoration,
+        TextShadow, TextStyle, TextTransform,
     },
 };
 
@@ -33,10 +33,19 @@ pub struct ResolvedTextStyle {
     pub italic: bool,
     /// Extra space between characters in points.
     pub letter_spacing: f32,
+    /// A line height set as a multiple of the font size (0: none), kept
+    /// so nested text with another size gets its own line height.
+    pub line_height_multiple: f32,
     /// Underline / strikethrough.
     pub decoration: TextDecoration,
     /// Color of the decoration lines; `None` uses `color`.
     pub decoration_color: Option<Color>,
+    /// How the decoration lines are drawn.
+    pub decoration_style: DecorationStyle,
+    /// Thickness of the decoration lines in points; `None` is the font's.
+    pub decoration_thickness: Option<f32>,
+    /// Distance of the underline below the baseline; `None` is the font's.
+    pub underline_offset: Option<f32>,
     /// Case transform (applied by the core when building the text).
     pub transform: TextTransform,
     /// OpenType features (`fontVariant`).
@@ -59,6 +68,10 @@ impl Default for ResolvedTextStyle {
                 line_through: false,
             },
             decoration_color: None,
+            decoration_style: DecorationStyle::Solid,
+            decoration_thickness: None,
+            underline_offset: None,
+            line_height_multiple: 0.0,
             transform: TextTransform::None,
             font_variant: FontVariant(0),
         }
@@ -69,16 +82,37 @@ impl ResolvedTextStyle {
     /// Applies the properties set on a node on top of the inherited style.
     #[inline]
     pub(crate) fn inherit(self, style: &TextStyle) -> Self {
+        let font_size = style.font_size.unwrap_or(self.font_size);
+        // A multiple follows each nested font size (unitless CSS
+        // line-height); points stay points.
+        let (line_height, line_height_multiple) =
+            match (style.line_height_multiple, style.line_height) {
+                (Some(m), _) => (m * font_size, m),
+                (None, Some(points)) => (points, 0.0),
+                (None, None) if self.line_height_multiple > 0.0 => (
+                    self.line_height_multiple * font_size,
+                    self.line_height_multiple,
+                ),
+                (None, None) => (self.line_height, 0.0),
+            };
         Self {
             color: style.color.unwrap_or(self.color),
-            font_size: style.font_size.unwrap_or(self.font_size),
+            font_size,
             font_weight: style.font_weight.unwrap_or(self.font_weight),
-            line_height: style.line_height.unwrap_or(self.line_height),
+            line_height,
+            line_height_multiple,
             font_family: style.font_family.or(self.font_family),
             italic: style.italic.unwrap_or(self.italic),
-            letter_spacing: style.letter_spacing.unwrap_or(self.letter_spacing),
+            // Ems are of the node's own font size, then inherited as points.
+            letter_spacing: match style.letter_spacing_em {
+                Some(em) => em * font_size,
+                None => style.letter_spacing.unwrap_or(self.letter_spacing),
+            },
             decoration: style.decoration.unwrap_or(self.decoration),
             decoration_color: style.decoration_color.or(self.decoration_color),
+            decoration_style: style.decoration_style.unwrap_or(self.decoration_style),
+            decoration_thickness: style.decoration_thickness.or(self.decoration_thickness),
+            underline_offset: style.underline_offset.or(self.underline_offset),
             transform: style.transform.unwrap_or(self.transform),
             font_variant: style.font_variant.unwrap_or(self.font_variant),
         }
@@ -126,6 +160,9 @@ pub struct AttributedText {
     pub max_lines: u32,
     /// How text beyond `max_lines` is cut.
     pub ellipsize: EllipsizeMode,
+    /// Lines never wrap (`whitespace-nowrap`): measured at their natural
+    /// width, overflowing the box.
+    pub no_wrap: bool,
     /// Shadow behind the whole block (drawing only, not layout).
     pub shadow: Option<TextShadow>,
     /// Nested `<text>` spans that take presses (they may nest).
@@ -196,6 +233,7 @@ impl AttributedText {
             && self.rtl == other.rtl
             && self.max_lines == other.max_lines
             && self.ellipsize == other.ellipsize
+            && self.no_wrap == other.no_wrap
             && self.text == other.text
             && self.spans.len() == other.spans.len()
             && self
@@ -211,7 +249,7 @@ impl AttributedText {
         let mut h = std::hash::DefaultHasher::new();
         self.text.hash(&mut h);
         (self.align as u8, self.writing_direction, self.rtl).hash(&mut h);
-        (self.max_lines, self.ellipsize).hash(&mut h);
+        (self.max_lines, self.ellipsize, self.no_wrap).hash(&mut h);
         for s in &self.spans {
             (s.start, s.end, s.style.font_weight).hash(&mut h);
             (s.style.font_family, s.style.italic, s.style.font_variant).hash(&mut h);

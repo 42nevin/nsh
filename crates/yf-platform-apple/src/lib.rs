@@ -22,6 +22,7 @@ mod decor;
 pub mod dev;
 mod image;
 mod input;
+mod interaction;
 mod mount;
 mod native_view;
 mod navigation;
@@ -35,6 +36,7 @@ mod text_view;
 mod touch;
 mod video;
 mod view;
+mod visual;
 mod web;
 
 pub use yf_engine::Bundle;

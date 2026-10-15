@@ -113,15 +113,32 @@ public final class TextLayouts {
                     }
                 }
             }
-            if (base == null) base = Typeface.create(family, Typeface.NORMAL);
+            if (base == null) {
+                // CSS generic families (`font-mono`, `font-serif`).
+                switch (family) {
+                    case "system-ui": case "sans-serif": case "ui-sans-serif": case "-apple-system":
+                        base = Typeface.DEFAULT;
+                        break;
+                    case "monospace": case "ui-monospace":
+                        base = Typeface.MONOSPACE;
+                        break;
+                    case "serif": case "ui-serif":
+                        base = Typeface.SERIF;
+                        break;
+                    default:
+                        base = Typeface.create(family, Typeface.NORMAL);
+                }
+            }
         }
         if (base == null) base = Typeface.DEFAULT;
         return Typeface.create(base, Math.max(1, Math.min(1000, weight)), italic);
     }
 
     // Span ints: start, end, weight, flags, color, decoration color, family,
-    // font variant bits.
-    private static final int SPAN_INTS = 8;
+    // font variant bits, decoration style. Floats: size, line height, letter
+    // spacing, decoration thickness, underline offset.
+    private static final int SPAN_INTS = 9;
+    private static final int SPAN_FLOATS = 5;
     private static final int ITALIC = 1;
     private static final int UNDERLINE = 2;
     private static final int STRIKE = 4;
@@ -163,9 +180,23 @@ public final class TextLayouts {
                 } else {
                     w = Layout.getDesiredWidth(text, paint);
                 }
-                desired = (int) Math.ceil(w);
+                // Minikin gives each glyph half the letter spacing on both
+                // sides and trims the halves at line edges: a negative
+                // spacing (`tracking-tight`) makes a line wider than its sum
+                // of advances, and text laid out at that sum wraps.
+                desired = (int) Math.ceil(w + negativeSpacing());
             }
             return desired;
+        }
+
+        /** The largest negative letter spacing of any run, as positive px. */
+        private float negativeSpacing() {
+            float most = Math.max(0, -paint.getLetterSpacing() * paint.getTextSize());
+            if (text instanceof Spanned) {
+                Spanned spanned = (Spanned) text;
+                for (FontSpan f : spanned.getSpans(0, text.length(), FontSpan.class)) most = Math.max(most, -f.spacingPx);
+            }
+            return most;
         }
 
         private boolean singleParagraph() {
@@ -213,9 +244,11 @@ public final class TextLayouts {
             if (start >= end) continue;
             int weight = ints[o + 2], flags = ints[o + 3], color = ints[o + 4];
             String family = ints[o + 6] >= 0 ? families[ints[o + 6]] : null;
-            float size = floats[i * 3] * density;
-            float lineHeight = floats[i * 3 + 1] * density;
-            float spacing = floats[i * 3 + 2] * density;
+            float size = floats[i * SPAN_FLOATS] * density;
+            float lineHeight = floats[i * SPAN_FLOATS + 1] * density;
+            float spacing = floats[i * SPAN_FLOATS + 2] * density;
+            float thickness = floats[i * SPAN_FLOATS + 3] * density;
+            float offset = floats[i * SPAN_FLOATS + 4] * density;
             Typeface typeface = typeface(family, weight, (flags & ITALIC) != 0);
             if (i == 0) {
                 // Base metrics (empty lines, ellipsis) follow the first run.
@@ -230,7 +263,8 @@ public final class TextLayouts {
             // StaticLayout does not draw decorations of precomputed text:
             // TextBox draws these.
             if ((flags & (UNDERLINE | STRIKE)) != 0) {
-                s.setSpan(new Decoration((flags & UNDERLINE) != 0, (flags & STRIKE) != 0, ints[o + 5], size), start, end, f);
+                s.setSpan(new Decoration((flags & UNDERLINE) != 0, (flags & STRIKE) != 0, ints[o + 5], size,
+                        ints[o + 8], thickness, offset), start, end, f);
             }
         }
         // `encode` packs the writing direction and the layout direction in.
@@ -316,12 +350,22 @@ public final class TextLayouts {
         final boolean underline, strike;
         final int color;
         final float sizePx;
+        /** 0 solid, 1 double, 2 dotted, 3 dashed, 4 wavy. */
+        final int style;
+        /** Px; 0 is the font's. */
+        final float thicknessPx;
+        /** Px below the baseline; NaN is the font's. */
+        final float offsetPx;
 
-        Decoration(boolean underline, boolean strike, int color, float sizePx) {
+        Decoration(boolean underline, boolean strike, int color, float sizePx, int style, float thicknessPx,
+                   float offsetPx) {
             this.underline = underline;
             this.strike = strike;
             this.color = color;
             this.sizePx = sizePx;
+            this.style = style;
+            this.thicknessPx = thicknessPx;
+            this.offsetPx = offsetPx;
         }
     }
 

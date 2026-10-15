@@ -197,6 +197,11 @@ declare function fetch(input: string | URL | Request, init?: RequestInit): Promi
 
 // Imported files: images are asset descriptors (sized in points, `@2x`
 // files at half their pixel size), fonts the name of their family.
+// The app's Tailwind theme from `yf.json` (JSON), for the runtime.
+declare module "yf:tailwind-theme" {
+  const theme: string | null;
+  export default theme;
+}
 declare module "*.png" {
   const asset: { uri: string; width: number; height: number };
   export default asset;

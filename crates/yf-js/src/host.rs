@@ -364,6 +364,7 @@ fn environment_object<'js>(ctx: &Ctx<'js>, env: &Environment) -> rquickjs::Resul
     )?;
     obj.set("fontScale", env.font_scale)?;
     obj.set("rtl", env.rtl)?;
+    obj.set("reduceMotion", env.reduce_motion)?;
     Ok(obj.into_value())
 }
 
@@ -577,7 +578,7 @@ mod tests {
                 tag: Tag::View
             }
         ));
-        let Op::SetStyle { id: 2, style } = &ops[1] else {
+        let Op::SetStyle { id: 2, style, .. } = &ops[1] else {
             panic!("{:?}", ops[1])
         };
         assert_eq!(format!("{:?}", style.layout.flex_direction), "Row");

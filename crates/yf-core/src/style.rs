@@ -1,9 +1,19 @@
+use std::sync::Arc;
+
 use taffy::{
     AlignContent, AlignItems, Dimension, Display, FlexDirection, FlexWrap, LengthPercentage,
     LengthPercentageAuto, Position,
 };
 
-use crate::transform::{Transform, TransformKind};
+use crate::{
+    css,
+    effects::{
+        BlendMode, BoxShadow, Cursor, Effects, Filter, Gradient, KeyframeAnimation, Keyframes,
+        Outline, Transition, TransitionProps,
+    },
+    grid,
+    transform::{Transform, TransformKind},
+};
 
 /// An sRGB color packed as `0xRRGGBBAA`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -39,81 +49,11 @@ impl Color {
         self.0 & 0xff == 0
     }
 
-    /// Parses a CSS-like color: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`,
-    /// `rgb(...)`, `rgba(...)` or a small set of named colors.
+    /// Parses a CSS color: hex, `rgb()` / `rgba()`, `hsl()` / `hsla()`,
+    /// `oklch()`, `oklab()` or a CSS named color.
     pub fn parse(s: &str) -> Option<Color> {
-        let s = s.trim();
-        if let Some(hex) = s.strip_prefix('#') {
-            return parse_hex(hex.as_bytes());
-        }
-        if let Some(args) = s.strip_prefix("rgba(").or_else(|| s.strip_prefix("rgb(")) {
-            return parse_rgb_args(args.strip_suffix(')')?);
-        }
-        Some(match s {
-            "transparent" => Color::TRANSPARENT,
-            "black" => Color::BLACK,
-            "white" => Color(0xffff_ffff),
-            "red" => Color(0xff00_00ff),
-            "green" => Color(0x0080_00ff),
-            "blue" => Color(0x0000_ffff),
-            "yellow" => Color(0xffff_00ff),
-            "orange" => Color(0xffa5_00ff),
-            "purple" => Color(0x8000_80ff),
-            "gray" | "grey" => Color(0x8080_80ff),
-            _ => return None,
-        })
+        crate::css::color(s)
     }
-}
-
-#[inline]
-fn hex_digit(b: u8) -> Option<u32> {
-    match b {
-        b'0'..=b'9' => Some((b - b'0') as u32),
-        b'a'..=b'f' => Some((b - b'a' + 10) as u32),
-        b'A'..=b'F' => Some((b - b'A' + 10) as u32),
-        _ => None,
-    }
-}
-
-fn parse_hex(hex: &[u8]) -> Option<Color> {
-    let mut v = 0u32;
-    for &b in hex {
-        v = v << 4 | hex_digit(b)?;
-    }
-    Some(match hex.len() {
-        3 | 4 => {
-            // Expand each nibble: 0xabc -> 0xaabbcc.
-            let (rgb, a) = if hex.len() == 3 {
-                (v, 0xf)
-            } else {
-                (v >> 4, v & 0xf)
-            };
-            let r = (rgb >> 8) & 0xf;
-            let g = (rgb >> 4) & 0xf;
-            let b = rgb & 0xf;
-            Color((r * 0x11) << 24 | (g * 0x11) << 16 | (b * 0x11) << 8 | (a * 0x11))
-        }
-        6 => Color(v << 8 | 0xff),
-        8 => Color(v),
-        _ => return None,
-    })
-}
-
-fn parse_rgb_args(args: &str) -> Option<Color> {
-    let mut it = args.split(',').map(str::trim);
-    let channel =
-        |s: Option<&str>| -> Option<u8> { Some(s?.parse::<f32>().ok()?.clamp(0.0, 255.0) as u8) };
-    let r = channel(it.next())?;
-    let g = channel(it.next())?;
-    let b = channel(it.next())?;
-    let a = match it.next() {
-        Some(a) => (a.parse::<f32>().ok()?.clamp(0.0, 1.0) * 255.0).round() as u8,
-        None => 255,
-    };
-    if it.next().is_some() {
-        return None;
-    }
-    Some(Color::rgba(r, g, b, a))
 }
 
 /// Horizontal alignment of a text block.
@@ -178,6 +118,22 @@ impl TextDecoration {
     pub const fn is_none(self) -> bool {
         !self.underline && !self.line_through
     }
+}
+
+/// How decoration lines are drawn (`textDecorationStyle`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DecorationStyle {
+    /// One solid line (default).
+    #[default]
+    Solid,
+    /// Two lines.
+    Double,
+    /// Dots.
+    Dotted,
+    /// Dashes.
+    Dashed,
+    /// A wavy line.
+    Wavy,
 }
 
 /// Case changes applied to text (`textTransform`).
@@ -412,7 +368,7 @@ impl Default for Borders {
 }
 
 /// Visual (non-layout) properties of a native view.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ViewStyle {
     /// Background fill.
     pub background_color: Color,
@@ -439,6 +395,20 @@ pub struct ViewStyle {
     pub transform_origin: TransformOrigin,
     /// `backfaceVisibility: "hidden"`: invisible when turned away.
     pub backface_hidden: bool,
+    /// Layered / inset shadows, gradients and filters.
+    pub effects: Option<Arc<Effects>>,
+    /// `mixBlendMode`.
+    pub blend_mode: BlendMode,
+    /// `outline*`.
+    pub outline: Outline,
+    /// `visibility: "hidden"`: not drawn and not touchable, still laid out.
+    pub hidden: bool,
+    /// `cursor`.
+    pub cursor: Cursor,
+    /// `transition*`: style changes animate.
+    pub transition: Option<Transition>,
+    /// `animation*`: a keyframe animation runs.
+    pub animation: Option<KeyframeAnimation>,
 }
 
 /// A coordinate of [`TransformOrigin`].
@@ -635,6 +605,13 @@ impl Default for ViewStyle {
             elevation: 0.0,
             transform_origin: TransformOrigin::CENTER,
             backface_hidden: false,
+            effects: None,
+            blend_mode: BlendMode::Normal,
+            outline: Outline::NONE,
+            hidden: false,
+            cursor: Cursor::Auto,
+            transition: None,
+            animation: None,
         }
     }
 }
@@ -672,8 +649,20 @@ pub struct TextStyle {
     pub italic: Option<bool>,
     /// Extra space between characters in points.
     pub letter_spacing: Option<f32>,
+    /// Extra space between characters in ems of this node's font size
+    /// (`"0.05em"`); overrides `letter_spacing` when set after it.
+    pub letter_spacing_em: Option<f32>,
+    /// Line height as a multiple of the font size (`"1.5"`, `"1.5em"`),
+    /// inherited as a multiple.
+    pub line_height_multiple: Option<f32>,
     /// Underline / strikethrough.
     pub decoration: Option<TextDecoration>,
+    /// `textDecorationStyle`.
+    pub decoration_style: Option<DecorationStyle>,
+    /// `textDecorationThickness` in points.
+    pub decoration_thickness: Option<f32>,
+    /// `textUnderlineOffset` in points below the baseline.
+    pub underline_offset: Option<f32>,
     /// Color of the decoration lines; the text color by default.
     pub decoration_color: Option<Color>,
     /// Case transform.
@@ -864,6 +853,173 @@ impl Default for Style {
     }
 }
 
+macro_rules! style_keys {
+    ($($key:ident = $name:literal),* $(,)?) => {
+        /// A style property, by its React Native name.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum StyleKey {
+            $(
+                #[doc = concat!("`", $name, "`")]
+                $key,
+            )*
+        }
+
+        impl StyleKey {
+            /// The key named `name` (React Native's camel case).
+            pub fn parse(name: &str) -> Option<StyleKey> {
+                Some(match name {
+                    $($name => StyleKey::$key,)*
+                    _ => return None,
+                })
+            }
+
+            /// The React Native name.
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(StyleKey::$key => $name,)*
+                }
+            }
+        }
+    };
+}
+
+style_keys! {
+    Display = "display",
+    Position = "position",
+    FlexDirection = "flexDirection",
+    FlexWrap = "flexWrap",
+    Flex = "flex",
+    FlexGrow = "flexGrow",
+    FlexShrink = "flexShrink",
+    FlexBasis = "flexBasis",
+    JustifyContent = "justifyContent",
+    AlignItems = "alignItems",
+    AlignSelf = "alignSelf",
+    AlignContent = "alignContent",
+    Width = "width",
+    Height = "height",
+    MinWidth = "minWidth",
+    MinHeight = "minHeight",
+    MaxWidth = "maxWidth",
+    MaxHeight = "maxHeight",
+    AspectRatio = "aspectRatio",
+    Top = "top",
+    Right = "right",
+    Bottom = "bottom",
+    Left = "left",
+    Margin = "margin",
+    MarginHorizontal = "marginHorizontal",
+    MarginVertical = "marginVertical",
+    MarginTop = "marginTop",
+    MarginRight = "marginRight",
+    MarginBottom = "marginBottom",
+    MarginLeft = "marginLeft",
+    Padding = "padding",
+    PaddingHorizontal = "paddingHorizontal",
+    PaddingVertical = "paddingVertical",
+    PaddingTop = "paddingTop",
+    PaddingRight = "paddingRight",
+    PaddingBottom = "paddingBottom",
+    PaddingLeft = "paddingLeft",
+    Gap = "gap",
+    RowGap = "rowGap",
+    ColumnGap = "columnGap",
+    BorderWidth = "borderWidth",
+    BorderTopWidth = "borderTopWidth",
+    BorderRightWidth = "borderRightWidth",
+    BorderBottomWidth = "borderBottomWidth",
+    BorderLeftWidth = "borderLeftWidth",
+    ZIndex = "zIndex",
+    BoxShadow = "boxShadow",
+    BackgroundImage = "backgroundImage",
+    ExperimentalBackgroundImage = "experimental_backgroundImage",
+    Filter = "filter",
+    BackdropFilter = "backdropFilter",
+    MixBlendMode = "mixBlendMode",
+    OutlineWidth = "outlineWidth",
+    OutlineColor = "outlineColor",
+    OutlineStyle = "outlineStyle",
+    OutlineOffset = "outlineOffset",
+    Visibility = "visibility",
+    Cursor = "cursor",
+    TransitionProperty = "transitionProperty",
+    TransitionDuration = "transitionDuration",
+    TransitionDelay = "transitionDelay",
+    TransitionTimingFunction = "transitionTimingFunction",
+    AnimationName = "animationName",
+    AnimationDuration = "animationDuration",
+    AnimationDelay = "animationDelay",
+    AnimationTimingFunction = "animationTimingFunction",
+    AnimationIterationCount = "animationIterationCount",
+    TextDecorationStyle = "textDecorationStyle",
+    TextDecorationThickness = "textDecorationThickness",
+    TextUnderlineOffset = "textUnderlineOffset",
+    GridTemplateColumns = "gridTemplateColumns",
+    GridTemplateRows = "gridTemplateRows",
+    GridAutoColumns = "gridAutoColumns",
+    GridAutoRows = "gridAutoRows",
+    GridAutoFlow = "gridAutoFlow",
+    GridColumn = "gridColumn",
+    GridColumnStart = "gridColumnStart",
+    GridColumnEnd = "gridColumnEnd",
+    GridRow = "gridRow",
+    GridRowStart = "gridRowStart",
+    GridRowEnd = "gridRowEnd",
+    JustifyItems = "justifyItems",
+    JustifySelf = "justifySelf",
+    Direction = "direction",
+    MarginStart = "marginStart",
+    MarginEnd = "marginEnd",
+    PaddingStart = "paddingStart",
+    PaddingEnd = "paddingEnd",
+    Start = "start",
+    End = "end",
+    BorderStartWidth = "borderStartWidth",
+    BorderEndWidth = "borderEndWidth",
+    BorderStartColor = "borderStartColor",
+    BorderEndColor = "borderEndColor",
+    BorderTopStartRadius = "borderTopStartRadius",
+    BorderTopEndRadius = "borderTopEndRadius",
+    BorderBottomEndRadius = "borderBottomEndRadius",
+    BorderBottomStartRadius = "borderBottomStartRadius",
+    BackgroundColor = "backgroundColor",
+    BorderRadius = "borderRadius",
+    BorderTopLeftRadius = "borderTopLeftRadius",
+    BorderTopRightRadius = "borderTopRightRadius",
+    BorderBottomRightRadius = "borderBottomRightRadius",
+    BorderBottomLeftRadius = "borderBottomLeftRadius",
+    ShadowColor = "shadowColor",
+    ShadowOpacity = "shadowOpacity",
+    ShadowRadius = "shadowRadius",
+    BorderColor = "borderColor",
+    BorderTopColor = "borderTopColor",
+    BorderRightColor = "borderRightColor",
+    BorderBottomColor = "borderBottomColor",
+    BorderLeftColor = "borderLeftColor",
+    BorderStyle = "borderStyle",
+    TintColor = "tintColor",
+    Elevation = "elevation",
+    BackfaceVisibility = "backfaceVisibility",
+    TransformOrigin = "transformOrigin",
+    Opacity = "opacity",
+    Overflow = "overflow",
+    Color = "color",
+    FontSize = "fontSize",
+    FontWeight = "fontWeight",
+    LineHeight = "lineHeight",
+    FontFamily = "fontFamily",
+    FontStyle = "fontStyle",
+    LetterSpacing = "letterSpacing",
+    TextDecorationLine = "textDecorationLine",
+    TextDecorationColor = "textDecorationColor",
+    WritingDirection = "writingDirection",
+    FontVariant = "fontVariant",
+    TextShadowColor = "textShadowColor",
+    TextShadowRadius = "textShadowRadius",
+    TextTransform = "textTransform",
+    TextAlign = "textAlign",
+}
+
 /// A style property value as read from JS.
 #[derive(Debug, Clone, Copy)]
 pub enum StyleValue<'a> {
@@ -873,6 +1029,145 @@ pub enum StyleValue<'a> {
     Str(&'a str),
     /// `null` / `undefined`: resets the property to its default.
     Null,
+}
+
+/// A style property value owned by a [`StylePatch`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum PatchValue {
+    /// A number.
+    Number(f32),
+    /// A string.
+    Str(Box<str>),
+    /// Resets the property to its default.
+    Null,
+}
+
+impl PatchValue {
+    /// The value as [`Style::set`] takes it.
+    pub fn as_value(&self) -> StyleValue<'_> {
+        match self {
+            PatchValue::Number(n) => StyleValue::Number(*n),
+            PatchValue::Str(s) => StyleValue::Str(s),
+            PatchValue::Null => StyleValue::Null,
+        }
+    }
+}
+
+impl From<StyleValue<'_>> for PatchValue {
+    fn from(v: StyleValue<'_>) -> Self {
+        match v {
+            StyleValue::Number(n) => PatchValue::Number(n),
+            StyleValue::Str(s) => PatchValue::Str(s.into()),
+            StyleValue::Null => PatchValue::Null,
+        }
+    }
+}
+
+/// One declaration of a [`StylePatch`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum StyleDecl {
+    /// A property.
+    Set(StyleKey, PatchValue),
+    /// Starts the `transform` list over: a `transform` replaces the
+    /// transforms set before it (by classes).
+    ClearTransform,
+    /// Appends a `transform` entry, driven by a native value when given
+    /// (the amount is then the identity until it is bound).
+    Transform(TransformKind, f32, Option<yf_anim::NodeId>),
+    /// `shadowOffset`; `None` restores the default.
+    ShadowOffset(Option<(f32, f32)>),
+    /// `textShadowOffset`.
+    TextShadowOffset(Option<(f32, f32)>),
+    /// A property driven by a native animation node.
+    Animated(yf_anim::AnimProp, yf_anim::NodeId),
+}
+
+impl StyleDecl {
+    /// Applies the declaration to `style`.
+    pub fn apply(&self, style: &mut Style) -> Result<(), StyleError> {
+        match self {
+            StyleDecl::Set(key, value) => style.set_key(*key, value.as_value()),
+            StyleDecl::ClearTransform => {
+                style.view.transform = Transform::IDENTITY;
+                style
+                    .animated
+                    .retain(|(prop, _)| !matches!(prop, yf_anim::AnimProp::Transform(_)));
+                Ok(())
+            }
+            StyleDecl::Transform(kind, amount, node) => {
+                let index = style
+                    .view
+                    .transform
+                    .push(*kind, *amount)
+                    .ok_or(StyleError::InvalidValue)?;
+                if let Some(node) = node {
+                    style
+                        .animated
+                        .push((yf_anim::AnimProp::Transform(index), *node));
+                }
+                Ok(())
+            }
+            StyleDecl::ShadowOffset(offset) => {
+                style.set_shadow_offset(*offset);
+                Ok(())
+            }
+            StyleDecl::TextShadowOffset(offset) => {
+                style.set_text_shadow_offset(*offset);
+                Ok(())
+            }
+            StyleDecl::Animated(prop, node) => {
+                style.animated.push((*prop, *node));
+                Ok(())
+            }
+        }
+    }
+}
+
+/// A style as written (`style={...}`): its declarations in order, kept so
+/// the core can apply them again over class styles when those change.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StylePatch {
+    decls: Vec<StyleDecl>,
+}
+
+impl StylePatch {
+    /// Applies `decl` to `style` and records it if it applied.
+    pub fn push(&mut self, style: &mut Style, decl: StyleDecl) -> Result<(), StyleError> {
+        decl.apply(style)?;
+        self.decls.push(decl);
+        Ok(())
+    }
+
+    /// Sets property `key` on `style` and records it.
+    pub fn set(
+        &mut self,
+        style: &mut Style,
+        key: &str,
+        value: StyleValue<'_>,
+    ) -> Result<(), StyleError> {
+        let key = StyleKey::parse(key).ok_or(StyleError::UnknownProperty)?;
+        style.set_key(key, value)?;
+        self.decls.push(StyleDecl::Set(key, value.into()));
+        Ok(())
+    }
+
+    /// Applies every declaration to `style`, in order.
+    pub fn apply(&self, style: &mut Style) {
+        for decl in &self.decls {
+            // Declarations were checked when they were recorded.
+            let _ = decl.apply(style);
+        }
+    }
+
+    /// Whether there are no declarations.
+    pub fn is_empty(&self) -> bool {
+        self.decls.is_empty()
+    }
+
+    /// The declarations.
+    pub fn decls(&self) -> &[StyleDecl] {
+        &self.decls
+    }
 }
 
 /// Why a style property was rejected.
@@ -1040,7 +1335,171 @@ fn font_weight(v: StyleValue<'_>) -> Result<Option<u16>, StyleError> {
     })
 }
 
+/// A length in points from a number or a string (`"2px"`, `"0.5rem"`).
+fn length_value(v: StyleValue<'_>, default: f32) -> Result<f32, StyleError> {
+    match v {
+        StyleValue::Number(n) => Ok(n),
+        StyleValue::Str(s) => css::length(s).ok_or(StyleError::InvalidValue),
+        StyleValue::Null => Ok(default),
+    }
+}
+
+/// Milliseconds from a number or `"150ms"` / `"0.2s"`.
+fn duration(v: StyleValue<'_>) -> Result<f32, StyleError> {
+    match v {
+        StyleValue::Number(n) => Ok(n.max(0.0)),
+        StyleValue::Null => Ok(0.0),
+        StyleValue::Str(s) => {
+            let s = s.trim();
+            let ms = if let Some(n) = s.strip_suffix("ms") {
+                css::number(n)
+            } else if let Some(n) = s.strip_suffix('s') {
+                css::number(n).map(|n| n * 1000.0)
+            } else {
+                css::number(s)
+            };
+            ms.map(|n| n.max(0.0)).ok_or(StyleError::InvalidValue)
+        }
+    }
+}
+
+/// A CSS timing function as cubic Bézier control points.
+fn timing_function(v: StyleValue<'_>) -> Result<[f32; 4], StyleError> {
+    let Some(s) = keyword(v)? else {
+        return Ok(Transition::EASE);
+    };
+    Ok(match s.trim() {
+        "linear" => [0.0, 0.0, 1.0, 1.0],
+        "ease" => Transition::EASE,
+        "ease-in" => [0.42, 0.0, 1.0, 1.0],
+        "ease-out" => [0.0, 0.0, 0.58, 1.0],
+        "ease-in-out" => [0.42, 0.0, 0.58, 1.0],
+        s => {
+            let args = s
+                .strip_prefix("cubic-bezier(")
+                .and_then(|a| a.strip_suffix(')'))
+                .ok_or(StyleError::InvalidValue)?;
+            let n: Vec<f32> = args.split(',').filter_map(css::number).collect();
+            let [a, b, c, d] = n.as_slice() else {
+                return Err(StyleError::InvalidValue);
+            };
+            [*a, *b, *c, *d]
+        }
+    })
+}
+
+/// `transitionProperty`: CSS property names, mapped to the groups that
+/// transition natively.
+fn transition_properties(s: &str) -> Option<TransitionProps> {
+    let mut bits = 0;
+    for name in s.split(',').map(str::trim) {
+        bits |= match name {
+            "all" => TransitionProps::ALL,
+            "none" => 0,
+            "color"
+            | "colors"
+            | "background-color"
+            | "backgroundColor"
+            | "border-color"
+            | "borderColor"
+            | "outline-color"
+            | "text-decoration-color"
+            | "fill"
+            | "stroke"
+            | "--tw-gradient-from"
+            | "--tw-gradient-via"
+            | "--tw-gradient-to" => TransitionProps::COLORS,
+            "opacity" => TransitionProps::OPACITY,
+            "transform" | "translate" | "scale" | "rotate" => TransitionProps::TRANSFORM,
+            "box-shadow" | "boxShadow" | "shadow" => TransitionProps::SHADOW,
+            "border-radius" | "borderRadius" | "border-width" | "borderWidth" => {
+                TransitionProps::SHAPE
+            }
+            // Properties that do not animate natively.
+            "filter" | "backdrop-filter" | "display" | "visibility" | "content-visibility"
+            | "overlay" | "pointer-events" => 0,
+            _ => return None,
+        };
+    }
+    Some(TransitionProps(bits))
+}
+
+fn grid_value<T>(
+    v: StyleValue<'_>,
+    parse: impl Fn(&str) -> Option<Vec<T>>,
+) -> Result<Vec<T>, StyleError> {
+    match keyword(v)? {
+        None => Ok(Vec::new()),
+        Some(s) => parse(s).ok_or(StyleError::InvalidValue),
+    }
+}
+
+fn grid_placement(v: StyleValue<'_>) -> Result<taffy::GridPlacement<String>, StyleError> {
+    match v {
+        StyleValue::Null => Ok(taffy::GridPlacement::Auto),
+        StyleValue::Number(n) => {
+            grid::placement(&(n as i32).to_string()).ok_or(StyleError::InvalidValue)
+        }
+        StyleValue::Str(s) => grid::placement(s).ok_or(StyleError::InvalidValue),
+    }
+}
+
+fn grid_line(v: StyleValue<'_>) -> Result<taffy::Line<taffy::GridPlacement<String>>, StyleError> {
+    match v {
+        StyleValue::Null => Ok(taffy::Line {
+            start: taffy::GridPlacement::Auto,
+            end: taffy::GridPlacement::Auto,
+        }),
+        StyleValue::Number(n) => {
+            grid::line(&(n as i32).to_string()).ok_or(StyleError::InvalidValue)
+        }
+        StyleValue::Str(s) => grid::line(s).ok_or(StyleError::InvalidValue),
+    }
+}
+
 impl Style {
+    /// Changes the effects lists (copying them if shared).
+    pub fn edit_effects(&mut self, f: impl FnOnce(&mut Effects)) {
+        let mut effects = self
+            .view
+            .effects
+            .take()
+            .map(|e| (*e).clone())
+            .unwrap_or_default();
+        f(&mut effects);
+        self.view.effects = crate::effects::shared(effects);
+    }
+
+    /// Sets the box shadows (top layer first).
+    pub fn set_box_shadows(&mut self, shadows: Vec<BoxShadow>) {
+        self.edit_effects(|e| e.box_shadows = shadows);
+    }
+
+    /// Sets the gradient backgrounds (top layer first).
+    pub fn set_background_images(&mut self, images: Vec<Gradient>) {
+        self.edit_effects(|e| e.background_images = images);
+    }
+
+    /// Sets the filters.
+    pub fn set_filters(&mut self, filters: Vec<Filter>, backdrop: bool) {
+        self.edit_effects(|e| {
+            if backdrop {
+                e.backdrop_filters = filters;
+            } else {
+                e.filters = filters;
+            }
+        });
+    }
+
+    fn transition_mut(&mut self) -> &mut Transition {
+        self.view.transition.get_or_insert(Transition {
+            properties: TransitionProps(TransitionProps::ALL),
+            duration: 0.0,
+            delay: 0.0,
+            easing: Transition::EASE,
+        })
+    }
+
     /// Appends an entry to the `transform` list (`translateX`, `scale`,
     /// ...); rotations and skews are degrees (`"45deg"` strings are parsed
     /// by the caller). Returns the entry's index.
@@ -1098,24 +1557,33 @@ impl Style {
 
     /// Sets one property using its React Native name.
     pub fn set(&mut self, key: &str, value: StyleValue<'_>) -> Result<(), StyleError> {
+        self.set_key(
+            StyleKey::parse(key).ok_or(StyleError::UnknownProperty)?,
+            value,
+        )
+    }
+
+    /// Sets one property.
+    pub fn set_key(&mut self, key: StyleKey, value: StyleValue<'_>) -> Result<(), StyleError> {
         let l = &mut self.layout;
         match key {
             // Layout
-            "display" => {
+            StyleKey::Display => {
                 l.display = match keyword(value)? {
                     None | Some("flex") => Display::Flex,
+                    Some("grid") => Display::Grid,
                     Some("none") => Display::None,
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
             }
-            "position" => {
+            StyleKey::Position => {
                 l.position = match keyword(value)? {
                     None | Some("relative") => Position::Relative,
                     Some("absolute") => Position::Absolute,
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
             }
-            "flexDirection" => {
+            StyleKey::FlexDirection => {
                 l.flex_direction = match keyword(value)? {
                     None | Some("column") => FlexDirection::Column,
                     Some("row") => FlexDirection::Row,
@@ -1124,7 +1592,7 @@ impl Style {
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
             }
-            "flexWrap" => {
+            StyleKey::FlexWrap => {
                 l.flex_wrap = match keyword(value)? {
                     None | Some("nowrap") => FlexWrap::NoWrap,
                     Some("wrap") => FlexWrap::Wrap,
@@ -1132,7 +1600,7 @@ impl Style {
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
             }
-            "flex" => {
+            StyleKey::Flex => {
                 // React Native semantics, not the CSS shorthand.
                 let f = number(value, 0.0)?;
                 if f > 0.0 {
@@ -1149,30 +1617,36 @@ impl Style {
                     l.flex_basis = Dimension::auto();
                 }
             }
-            "flexGrow" => l.flex_grow = number(value, 0.0)?,
-            "flexShrink" => l.flex_shrink = number(value, 0.0)?,
-            "flexBasis" => l.flex_basis = Len::parse(value)?.dim(),
-            "justifyContent" => l.justify_content = align_content(value, AlignContent::FLEX_START)?,
-            "alignItems" => l.align_items = align_items(value)?.unwrap_or(AlignItems::STRETCH),
-            "alignSelf" => {
+            StyleKey::FlexGrow => l.flex_grow = number(value, 0.0)?,
+            StyleKey::FlexShrink => l.flex_shrink = number(value, 0.0)?,
+            StyleKey::FlexBasis => l.flex_basis = Len::parse(value)?.dim(),
+            StyleKey::JustifyContent => {
+                l.justify_content = align_content(value, AlignContent::FLEX_START)?
+            }
+            StyleKey::AlignItems => {
+                l.align_items = align_items(value)?.unwrap_or(AlignItems::STRETCH)
+            }
+            StyleKey::AlignSelf => {
                 l.align_self = match value {
                     StyleValue::Str("auto") => None,
                     v => align_items(v)?,
                 }
             }
-            "alignContent" => l.align_content = align_content(value, AlignContent::FLEX_START)?,
-            "width" => l.size.width = Len::parse(value)?.dim(),
-            "height" => l.size.height = Len::parse(value)?.dim(),
-            "minWidth" => l.min_size.width = min_len(value)?,
-            "minHeight" => l.min_size.height = min_len(value)?,
-            "maxWidth" => l.max_size.width = Len::parse(value)?.lpa(),
-            "maxHeight" => l.max_size.height = Len::parse(value)?.lpa(),
-            "aspectRatio" => l.aspect_ratio = opt_number(value)?,
-            "top" => l.inset.top = Len::parse(value)?.lpa(),
-            "right" => l.inset.right = Len::parse(value)?.lpa(),
-            "bottom" => l.inset.bottom = Len::parse(value)?.lpa(),
-            "left" => l.inset.left = Len::parse(value)?.lpa(),
-            "margin" => {
+            StyleKey::AlignContent => {
+                l.align_content = align_content(value, AlignContent::FLEX_START)?
+            }
+            StyleKey::Width => l.size.width = Len::parse(value)?.dim(),
+            StyleKey::Height => l.size.height = Len::parse(value)?.dim(),
+            StyleKey::MinWidth => l.min_size.width = min_len(value)?,
+            StyleKey::MinHeight => l.min_size.height = min_len(value)?,
+            StyleKey::MaxWidth => l.max_size.width = Len::parse(value)?.lpa(),
+            StyleKey::MaxHeight => l.max_size.height = Len::parse(value)?.lpa(),
+            StyleKey::AspectRatio => l.aspect_ratio = opt_number(value)?,
+            StyleKey::Top => l.inset.top = Len::parse(value)?.lpa(),
+            StyleKey::Right => l.inset.right = Len::parse(value)?.lpa(),
+            StyleKey::Bottom => l.inset.bottom = Len::parse(value)?.lpa(),
+            StyleKey::Left => l.inset.left = Len::parse(value)?.lpa(),
+            StyleKey::Margin => {
                 let v = lpa_or_zero(value)?;
                 l.margin = taffy::Rect {
                     left: v,
@@ -1181,19 +1655,19 @@ impl Style {
                     bottom: v,
                 };
             }
-            "marginHorizontal" => {
+            StyleKey::MarginHorizontal => {
                 let v = lpa_or_zero(value)?;
                 (l.margin.left, l.margin.right) = (v, v);
             }
-            "marginVertical" => {
+            StyleKey::MarginVertical => {
                 let v = lpa_or_zero(value)?;
                 (l.margin.top, l.margin.bottom) = (v, v);
             }
-            "marginTop" => l.margin.top = lpa_or_zero(value)?,
-            "marginRight" => l.margin.right = lpa_or_zero(value)?,
-            "marginBottom" => l.margin.bottom = lpa_or_zero(value)?,
-            "marginLeft" => l.margin.left = lpa_or_zero(value)?,
-            "padding" => {
+            StyleKey::MarginTop => l.margin.top = lpa_or_zero(value)?,
+            StyleKey::MarginRight => l.margin.right = lpa_or_zero(value)?,
+            StyleKey::MarginBottom => l.margin.bottom = lpa_or_zero(value)?,
+            StyleKey::MarginLeft => l.margin.left = lpa_or_zero(value)?,
+            StyleKey::Padding => {
                 let v = lp_or_zero(value)?;
                 l.padding = taffy::Rect {
                     left: v,
@@ -1202,34 +1676,34 @@ impl Style {
                     bottom: v,
                 };
             }
-            "paddingHorizontal" => {
+            StyleKey::PaddingHorizontal => {
                 let v = lp_or_zero(value)?;
                 (l.padding.left, l.padding.right) = (v, v);
             }
-            "paddingVertical" => {
+            StyleKey::PaddingVertical => {
                 let v = lp_or_zero(value)?;
                 (l.padding.top, l.padding.bottom) = (v, v);
             }
-            "paddingTop" => l.padding.top = lp_or_zero(value)?,
-            "paddingRight" => l.padding.right = lp_or_zero(value)?,
-            "paddingBottom" => l.padding.bottom = lp_or_zero(value)?,
-            "paddingLeft" => l.padding.left = lp_or_zero(value)?,
-            "gap" => {
+            StyleKey::PaddingTop => l.padding.top = lp_or_zero(value)?,
+            StyleKey::PaddingRight => l.padding.right = lp_or_zero(value)?,
+            StyleKey::PaddingBottom => l.padding.bottom = lp_or_zero(value)?,
+            StyleKey::PaddingLeft => l.padding.left = lp_or_zero(value)?,
+            StyleKey::Gap => {
                 let v = lp_or_zero(value)?;
                 l.gap = taffy::Size {
                     width: v,
                     height: v,
                 };
             }
-            "rowGap" => l.gap.height = lp_or_zero(value)?,
-            "columnGap" => l.gap.width = lp_or_zero(value)?,
-            "borderWidth" => self.set_border_width(&[0, 1, 2, 3], value)?,
-            "borderTopWidth" => self.set_border_width(&[0], value)?,
-            "borderRightWidth" => self.set_border_width(&[1], value)?,
-            "borderBottomWidth" => self.set_border_width(&[2], value)?,
-            "borderLeftWidth" => self.set_border_width(&[3], value)?,
-            "zIndex" => self.z_index = number(value, 0.0)? as i32,
-            "direction" => {
+            StyleKey::RowGap => l.gap.height = lp_or_zero(value)?,
+            StyleKey::ColumnGap => l.gap.width = lp_or_zero(value)?,
+            StyleKey::BorderWidth => self.set_border_width(&[0, 1, 2, 3], value)?,
+            StyleKey::BorderTopWidth => self.set_border_width(&[0], value)?,
+            StyleKey::BorderRightWidth => self.set_border_width(&[1], value)?,
+            StyleKey::BorderBottomWidth => self.set_border_width(&[2], value)?,
+            StyleKey::BorderLeftWidth => self.set_border_width(&[3], value)?,
+            StyleKey::ZIndex => self.z_index = number(value, 0.0)? as i32,
+            StyleKey::Direction => {
                 self.direction = match keyword(value)? {
                     None | Some("inherit") => None,
                     Some("ltr") => Some(false),
@@ -1237,49 +1711,49 @@ impl Style {
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
             }
-            "marginStart" => self.logical.margin[0] = opt_lpa(value)?,
-            "marginEnd" => self.logical.margin[1] = opt_lpa(value)?,
-            "paddingStart" => self.logical.padding[0] = opt_lp(value)?,
-            "paddingEnd" => self.logical.padding[1] = opt_lp(value)?,
-            "start" => self.logical.inset[0] = opt_lpa(value)?,
-            "end" => self.logical.inset[1] = opt_lpa(value)?,
-            "borderStartWidth" => {
+            StyleKey::MarginStart => self.logical.margin[0] = opt_lpa(value)?,
+            StyleKey::MarginEnd => self.logical.margin[1] = opt_lpa(value)?,
+            StyleKey::PaddingStart => self.logical.padding[0] = opt_lp(value)?,
+            StyleKey::PaddingEnd => self.logical.padding[1] = opt_lp(value)?,
+            StyleKey::Start => self.logical.inset[0] = opt_lpa(value)?,
+            StyleKey::End => self.logical.inset[1] = opt_lpa(value)?,
+            StyleKey::BorderStartWidth => {
                 self.logical.border_width[0] = opt_number(value)?.map(|w| w.max(0.0))
             }
-            "borderEndWidth" => {
+            StyleKey::BorderEndWidth => {
                 self.logical.border_width[1] = opt_number(value)?.map(|w| w.max(0.0))
             }
-            "borderStartColor" => self.logical.border_color[0] = color(value)?,
-            "borderEndColor" => self.logical.border_color[1] = color(value)?,
-            "borderTopStartRadius" => self.logical.radius[0] = opt_number(value)?,
-            "borderTopEndRadius" => self.logical.radius[1] = opt_number(value)?,
-            "borderBottomEndRadius" => self.logical.radius[2] = opt_number(value)?,
-            "borderBottomStartRadius" => self.logical.radius[3] = opt_number(value)?,
+            StyleKey::BorderStartColor => self.logical.border_color[0] = color(value)?,
+            StyleKey::BorderEndColor => self.logical.border_color[1] = color(value)?,
+            StyleKey::BorderTopStartRadius => self.logical.radius[0] = opt_number(value)?,
+            StyleKey::BorderTopEndRadius => self.logical.radius[1] = opt_number(value)?,
+            StyleKey::BorderBottomEndRadius => self.logical.radius[2] = opt_number(value)?,
+            StyleKey::BorderBottomStartRadius => self.logical.radius[3] = opt_number(value)?,
 
             // View
-            "backgroundColor" => {
+            StyleKey::BackgroundColor => {
                 self.view.background_color = color(value)?.unwrap_or(Color::TRANSPARENT)
             }
-            "borderRadius" => self.view.border_radius = number(value, 0.0)?,
-            "borderTopLeftRadius" => self.view.corner_radius[0] = opt_number(value)?,
-            "borderTopRightRadius" => self.view.corner_radius[1] = opt_number(value)?,
-            "borderBottomRightRadius" => self.view.corner_radius[2] = opt_number(value)?,
-            "borderBottomLeftRadius" => self.view.corner_radius[3] = opt_number(value)?,
-            "shadowColor" => {
+            StyleKey::BorderRadius => self.view.border_radius = number(value, 0.0)?,
+            StyleKey::BorderTopLeftRadius => self.view.corner_radius[0] = opt_number(value)?,
+            StyleKey::BorderTopRightRadius => self.view.corner_radius[1] = opt_number(value)?,
+            StyleKey::BorderBottomRightRadius => self.view.corner_radius[2] = opt_number(value)?,
+            StyleKey::BorderBottomLeftRadius => self.view.corner_radius[3] = opt_number(value)?,
+            StyleKey::ShadowColor => {
                 self.view.shadow.color = color(value)?.unwrap_or(Shadow::DEFAULT.color)
             }
-            "shadowOpacity" => {
+            StyleKey::ShadowOpacity => {
                 self.view.shadow.opacity = number(value, Shadow::DEFAULT.opacity)?.clamp(0.0, 1.0)
             }
-            "shadowRadius" => {
+            StyleKey::ShadowRadius => {
                 self.view.shadow.radius = number(value, Shadow::DEFAULT.radius)?.max(0.0)
             }
-            "borderColor" => self.set_border_color(&[0, 1, 2, 3], value)?,
-            "borderTopColor" => self.set_border_color(&[0], value)?,
-            "borderRightColor" => self.set_border_color(&[1], value)?,
-            "borderBottomColor" => self.set_border_color(&[2], value)?,
-            "borderLeftColor" => self.set_border_color(&[3], value)?,
-            "borderStyle" => {
+            StyleKey::BorderColor => self.set_border_color(&[0, 1, 2, 3], value)?,
+            StyleKey::BorderTopColor => self.set_border_color(&[0], value)?,
+            StyleKey::BorderRightColor => self.set_border_color(&[1], value)?,
+            StyleKey::BorderBottomColor => self.set_border_color(&[2], value)?,
+            StyleKey::BorderLeftColor => self.set_border_color(&[3], value)?,
+            StyleKey::BorderStyle => {
                 self.view.borders.style = match keyword(value)? {
                     None | Some("solid") => BorderStyle::Solid,
                     Some("dashed") => BorderStyle::Dashed,
@@ -1287,23 +1761,23 @@ impl Style {
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
             }
-            "tintColor" => self.view.tint_color = color(value)?,
-            "elevation" => self.view.elevation = number(value, 0.0)?.max(0.0),
-            "backfaceVisibility" => {
+            StyleKey::TintColor => self.view.tint_color = color(value)?,
+            StyleKey::Elevation => self.view.elevation = number(value, 0.0)?.max(0.0),
+            StyleKey::BackfaceVisibility => {
                 self.view.backface_hidden = match keyword(value)? {
                     None | Some("visible") => false,
                     Some("hidden") => true,
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
             }
-            "transformOrigin" => {
+            StyleKey::TransformOrigin => {
                 self.view.transform_origin = match keyword(value)? {
                     None => TransformOrigin::CENTER,
                     Some(s) => TransformOrigin::parse(s).ok_or(StyleError::InvalidValue)?,
                 }
             }
-            "opacity" => self.view.opacity = number(value, 1.0)?.clamp(0.0, 1.0),
-            "overflow" => {
+            StyleKey::Opacity => self.view.opacity = number(value, 1.0)?.clamp(0.0, 1.0),
+            StyleKey::Overflow => {
                 self.view.overflow_hidden = match keyword(value)? {
                     None | Some("visible") => false,
                     Some("hidden") => true,
@@ -1312,14 +1786,32 @@ impl Style {
             }
 
             // Text
-            "color" => self.text.color = color(value)?,
-            "fontSize" => self.text.font_size = opt_number(value)?,
-            "fontWeight" => self.text.font_weight = font_weight(value)?,
-            "lineHeight" => self.text.line_height = opt_number(value)?,
-            "fontFamily" => {
+            StyleKey::Color => self.text.color = color(value)?,
+            StyleKey::FontSize => self.text.font_size = opt_number(value)?,
+            StyleKey::FontWeight => self.text.font_weight = font_weight(value)?,
+            StyleKey::LineHeight => {
+                // Numbers are points (React Native); strings may be a
+                // multiple of the font size (`"1.5"`, `"1.5em"`) or points.
+                let (points, multiple) = match value {
+                    StyleValue::Str(s)
+                        if s.ends_with("px") || s.ends_with("pt") || s.ends_with("rem") =>
+                    {
+                        (Some(css::length(s).ok_or(StyleError::InvalidValue)?), None)
+                    }
+                    StyleValue::Str(s) => {
+                        let n = css::number(s.strip_suffix("em").unwrap_or(s))
+                            .ok_or(StyleError::InvalidValue)?;
+                        (None, Some(n.max(0.0)))
+                    }
+                    v => (opt_number(v)?, None),
+                };
+                self.text.line_height = points;
+                self.text.line_height_multiple = multiple;
+            }
+            StyleKey::FontFamily => {
                 self.text.font_family = keyword(value)?.map(|name| FontFamily::new(name.trim()))
             }
-            "fontStyle" => {
+            StyleKey::FontStyle => {
                 self.text.italic = match keyword(value)? {
                     None => None,
                     Some("normal") => Some(false),
@@ -1327,8 +1819,21 @@ impl Style {
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
             }
-            "letterSpacing" => self.text.letter_spacing = opt_number(value)?,
-            "textDecorationLine" => {
+            StyleKey::LetterSpacing => {
+                let (points, em) = match value {
+                    StyleValue::Str(s) if s.ends_with("em") && !s.ends_with("rem") => {
+                        let n = css::number(&s[..s.len() - 2]).ok_or(StyleError::InvalidValue)?;
+                        (None, Some(n))
+                    }
+                    StyleValue::Str(s) => {
+                        (Some(css::length(s).ok_or(StyleError::InvalidValue)?), None)
+                    }
+                    v => (opt_number(v)?, None),
+                };
+                self.text.letter_spacing = points;
+                self.text.letter_spacing_em = em;
+            }
+            StyleKey::TextDecorationLine => {
                 self.text.decoration = match keyword(value)? {
                     None => None,
                     Some(words) => {
@@ -1345,8 +1850,8 @@ impl Style {
                     }
                 }
             }
-            "textDecorationColor" => self.text.decoration_color = color(value)?,
-            "writingDirection" => {
+            StyleKey::TextDecorationColor => self.text.decoration_color = color(value)?,
+            StyleKey::WritingDirection => {
                 self.text.writing_direction = match keyword(value)? {
                     None | Some("auto") => None,
                     Some("ltr") => Some(false),
@@ -1354,15 +1859,15 @@ impl Style {
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
             }
-            "fontVariant" => {
+            StyleKey::FontVariant => {
                 self.text.font_variant = match keyword(value)? {
                     None => None,
                     Some(s) => Some(FontVariant::parse(s).ok_or(StyleError::InvalidValue)?),
                 }
             }
-            "textShadowColor" => self.text.shadow_color = color(value)?,
-            "textShadowRadius" => self.text.shadow_radius = opt_number(value)?,
-            "textTransform" => {
+            StyleKey::TextShadowColor => self.text.shadow_color = color(value)?,
+            StyleKey::TextShadowRadius => self.text.shadow_radius = opt_number(value)?,
+            StyleKey::TextTransform => {
                 self.text.transform = match keyword(value)? {
                     None => None,
                     Some("none") => Some(TextTransform::None),
@@ -1372,7 +1877,7 @@ impl Style {
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
             }
-            "textAlign" => {
+            StyleKey::TextAlign => {
                 self.text.text_align = match keyword(value)? {
                     None => None,
                     Some("auto") => Some(TextAlign::Auto),
@@ -1383,7 +1888,198 @@ impl Style {
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
             }
-            _ => return Err(StyleError::UnknownProperty),
+
+            // Effects
+            StyleKey::BoxShadow => {
+                let list = match keyword(value)? {
+                    None => Vec::new(),
+                    Some(s) => css::box_shadows(s).ok_or(StyleError::InvalidValue)?,
+                };
+                self.edit_effects(|e| e.box_shadows = list);
+            }
+            StyleKey::BackgroundImage | StyleKey::ExperimentalBackgroundImage => {
+                let list = match keyword(value)? {
+                    None => Vec::new(),
+                    Some(s) => css::gradients(s).ok_or(StyleError::InvalidValue)?,
+                };
+                self.edit_effects(|e| e.background_images = list);
+            }
+            StyleKey::Filter => {
+                let list = match keyword(value)? {
+                    None => Vec::new(),
+                    Some(s) => css::filters(s).ok_or(StyleError::InvalidValue)?,
+                };
+                self.edit_effects(|e| e.filters = list);
+            }
+            StyleKey::BackdropFilter => {
+                let list = match keyword(value)? {
+                    None => Vec::new(),
+                    Some(s) => css::filters(s).ok_or(StyleError::InvalidValue)?,
+                };
+                self.edit_effects(|e| e.backdrop_filters = list);
+            }
+            StyleKey::MixBlendMode => {
+                self.view.blend_mode = match keyword(value)? {
+                    None => BlendMode::Normal,
+                    Some(s) => BlendMode::parse(s).ok_or(StyleError::InvalidValue)?,
+                }
+            }
+            StyleKey::OutlineWidth => self.view.outline.width = length_value(value, 0.0)?.max(0.0),
+            StyleKey::OutlineColor => {
+                self.view.outline.color = color(value)?.unwrap_or(Outline::NONE.color)
+            }
+            StyleKey::OutlineOffset => self.view.outline.offset = length_value(value, 0.0)?,
+            StyleKey::OutlineStyle => {
+                self.view.outline.style = match keyword(value)? {
+                    None | Some("solid") | Some("double") => BorderStyle::Solid,
+                    Some("dashed") => BorderStyle::Dashed,
+                    Some("dotted") => BorderStyle::Dotted,
+                    Some("none") | Some("hidden") => {
+                        self.view.outline.width = 0.0;
+                        BorderStyle::Solid
+                    }
+                    Some(_) => return Err(StyleError::InvalidValue),
+                }
+            }
+            StyleKey::Visibility => {
+                self.view.hidden = match keyword(value)? {
+                    None | Some("visible") => false,
+                    Some("hidden") | Some("collapse") => true,
+                    Some(_) => return Err(StyleError::InvalidValue),
+                }
+            }
+            StyleKey::Cursor => {
+                self.view.cursor = match keyword(value)? {
+                    None => Cursor::Auto,
+                    Some(s) => Cursor::parse(s).ok_or(StyleError::InvalidValue)?,
+                }
+            }
+            StyleKey::TransitionProperty => {
+                let props = match keyword(value)? {
+                    None => TransitionProps(TransitionProps::ALL),
+                    Some(s) => transition_properties(s).ok_or(StyleError::InvalidValue)?,
+                };
+                self.transition_mut().properties = props;
+            }
+            StyleKey::TransitionDuration => {
+                let ms = duration(value)?;
+                self.transition_mut().duration = ms;
+            }
+            StyleKey::TransitionDelay => {
+                let ms = duration(value)?;
+                self.transition_mut().delay = ms;
+            }
+            StyleKey::TransitionTimingFunction => {
+                let easing = timing_function(value)?;
+                self.transition_mut().easing = easing;
+            }
+            StyleKey::AnimationName => {
+                let keyframes = match keyword(value)? {
+                    None | Some("none") => None,
+                    Some("spin") => Some(Keyframes::Spin),
+                    Some("ping") => Some(Keyframes::Ping),
+                    Some("pulse") => Some(Keyframes::Pulse),
+                    Some("bounce") => Some(Keyframes::Bounce),
+                    Some(_) => return Err(StyleError::InvalidValue),
+                };
+                self.view.animation = keyframes.map(|keyframes| {
+                    let base = self.view.animation.unwrap_or(KeyframeAnimation {
+                        keyframes,
+                        duration: 1000.0,
+                        delay: 0.0,
+                        easing: [0.0, 0.0, 1.0, 1.0],
+                        iterations: None,
+                    });
+                    KeyframeAnimation { keyframes, ..base }
+                });
+            }
+            StyleKey::AnimationDuration => {
+                let ms = duration(value)?;
+                if let Some(a) = self.view.animation.as_mut() {
+                    a.duration = ms;
+                }
+            }
+            StyleKey::AnimationDelay => {
+                let ms = duration(value)?;
+                if let Some(a) = self.view.animation.as_mut() {
+                    a.delay = ms;
+                }
+            }
+            StyleKey::AnimationTimingFunction => {
+                let easing = timing_function(value)?;
+                if let Some(a) = self.view.animation.as_mut() {
+                    a.easing = easing;
+                }
+            }
+            StyleKey::AnimationIterationCount => {
+                let count = match value {
+                    StyleValue::Str("infinite") | StyleValue::Null => None,
+                    v => Some(number(v, 1.0)?.max(0.0) as u32),
+                };
+                if let Some(a) = self.view.animation.as_mut() {
+                    a.iterations = count;
+                }
+            }
+            StyleKey::TextDecorationStyle => {
+                self.text.decoration_style = match keyword(value)? {
+                    None => None,
+                    Some("solid") => Some(DecorationStyle::Solid),
+                    Some("double") => Some(DecorationStyle::Double),
+                    Some("dotted") => Some(DecorationStyle::Dotted),
+                    Some("dashed") => Some(DecorationStyle::Dashed),
+                    Some("wavy") => Some(DecorationStyle::Wavy),
+                    Some(_) => return Err(StyleError::InvalidValue),
+                }
+            }
+            StyleKey::TextDecorationThickness => {
+                self.text.decoration_thickness = match value {
+                    StyleValue::Null | StyleValue::Str("auto") | StyleValue::Str("from-font") => {
+                        None
+                    }
+                    v => Some(length_value(v, 1.0)?.max(0.0)),
+                }
+            }
+            StyleKey::TextUnderlineOffset => {
+                self.text.underline_offset = match value {
+                    StyleValue::Null | StyleValue::Str("auto") => None,
+                    v => Some(length_value(v, 0.0)?),
+                }
+            }
+
+            // Grid
+            StyleKey::GridTemplateColumns => {
+                l.grid_template_columns = grid_value(value, grid::template)?;
+            }
+            StyleKey::GridTemplateRows => {
+                l.grid_template_rows = grid_value(value, grid::template)?;
+            }
+            StyleKey::GridAutoColumns => {
+                l.grid_auto_columns = grid_value(value, grid::auto_tracks)?;
+            }
+            StyleKey::GridAutoRows => {
+                l.grid_auto_rows = grid_value(value, grid::auto_tracks)?;
+            }
+            StyleKey::GridAutoFlow => {
+                l.grid_auto_flow = match keyword(value)? {
+                    None => taffy::GridAutoFlow::Row,
+                    Some(s) => grid::auto_flow(s).ok_or(StyleError::InvalidValue)?,
+                }
+            }
+            StyleKey::GridColumn => l.grid_column = grid_line(value)?,
+            StyleKey::GridRow => l.grid_row = grid_line(value)?,
+            StyleKey::GridColumnStart => l.grid_column.start = grid_placement(value)?,
+            StyleKey::GridColumnEnd => l.grid_column.end = grid_placement(value)?,
+            StyleKey::GridRowStart => l.grid_row.start = grid_placement(value)?,
+            StyleKey::GridRowEnd => l.grid_row.end = grid_placement(value)?,
+            StyleKey::JustifyItems => {
+                l.justify_items = align_items(value)?.unwrap_or(AlignItems::STRETCH);
+            }
+            StyleKey::JustifySelf => {
+                l.justify_self = match value {
+                    StyleValue::Str("auto") => None,
+                    v => align_items(v)?,
+                }
+            }
         }
         Ok(())
     }

@@ -108,6 +108,7 @@ final class InputBox extends FrameLayout implements Node {
         });
         edit.setOnFocusChangeListener((v, focused) -> {
             mounter.inputFocused(this, focused);
+            mounter.reportState(id, Mounter.STATE_FOCUSED, focused);
             if (mounter.wants(id, focused ? Native.FOCUS : Native.BLUR)) {
                 mounter.event(id, focused ? Native.FOCUS : Native.BLUR);
             }

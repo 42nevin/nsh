@@ -13,6 +13,7 @@ import { Physics } from "./demos/Physics";
 import { Scrolling } from "./demos/Scrolling";
 import { Styles } from "./demos/Styles";
 import { System } from "./demos/System";
+import { Tailwind } from "./demos/Tailwind";
 import { TextDemo } from "./demos/TextDemo";
 import { type DemoEntry, nav } from "./nav";
 import { colors } from "./ui";
@@ -28,6 +29,7 @@ const demos: DemoEntry[] = [
   { name: "Physics", detail: "Drags and springs on the UI thread", screen: Physics },
   { name: "Animations", detail: "Easing, sequence / parallel / stagger / loop, springs, interpolation, diffClamp", screen: Animations },
   { name: "Images", detail: "Resize modes, tint, GIF / WebP, placeholders, blur, fade, events", screen: Images },
+  { name: "Tailwind", detail: "class=\"…\" resolved natively: variants, grid, shadows, gradients, motion", screen: Tailwind },
   { name: "Styles", detail: "Corners, borders, shadows, clipping, 3D transforms", screen: Styles },
   { name: "Text", detail: "Fonts, spans, decorations, truncation, shadows", screen: TextDemo },
   { name: "Web and video", detail: "WKWebView / WebView, AVPlayer / MediaPlayer", screen: Media },

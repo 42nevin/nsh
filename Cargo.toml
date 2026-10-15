@@ -47,7 +47,7 @@ slab = "0.4"
 url = "2.5"
 ureq = "3.1"
 jni = "0.21"
-taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "block_layout", "content_size"] }
+taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "content_size"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "fs"] }
 
 # `full` is avoided on purpose: it enables `dyn-load` (dlopen2), which does not build for iOS / Catalyst.
@@ -157,6 +157,20 @@ objc2-ui-kit = { version = "0.3.2", default-features = false, features = [
   "UIViewController",
   "UIWindow",
   "UIWindowScene",
+  "UIBlurEffect",
+  "UIHoverGestureRecognizer",
+  "UIHoverStyle",
+  "UIInteraction",
+  "UIPointerInteraction",
+  "UIPointerRegion",
+  "UIPointerStyle",
+  "UITargetedPreview",
+  "UITimingCurveProvider",
+  "UITimingParameters",
+  "UIViewAnimating",
+  "UIViewPropertyAnimator",
+  "UIVisualEffect",
+  "UIVisualEffectView",
 ] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
   "std",
@@ -211,6 +225,9 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
   "CAMediaTiming",
   "CAShapeLayer",
   "CATransaction",
+  "CAGradientLayer",
+  "CAMediaTimingFunction",
+  "CABase",
 ] }
 dispatch2 = "0.3.1"
 

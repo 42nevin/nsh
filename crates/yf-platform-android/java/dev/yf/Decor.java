@@ -83,9 +83,38 @@ final class Decor extends Drawable {
         return a + b > side ? side / (a + b) : 1;
     }
 
+    // Box shadows (px): dx, dy, blur, spread, inset (1) per layer, top
+    // layer first (CSS order), and their colors.
+    float[] boxShadows = new float[0];
+    int[] boxShadowColors = new int[0];
+    // Gradients, top layer first.
+    Gradient[] gradients = new Gradient[0];
+    // `outline*` (px): width (0: none), color, style (0 solid, 1 dashed, 2
+    // dotted), offset.
+    float outlineWidth, outlineOffset;
+    int outlineColor, outlineStyle;
+
+    /** A gradient background (`encode.rs` `effects`). */
+    static final class Gradient {
+        /** 0 linear (angle), 1 to a corner, 2 radial, 3 conic. */
+        int kind;
+        float angle;
+        boolean right, bottom, circle;
+        /** Radial: 0 closest side, 1 closest corner, 2 farthest side, 3 farthest corner. */
+        int size;
+        float x = 0.5f, y = 0.5f;
+        int[] colors;
+        float[] positions;
+    }
+
+    /** Distance shadow casters are moved away to draw only their shadows. */
+    private static final float AWAY = 1 << 14;
+    private final Path shadowPath = new Path();
+
     @Override
     public void draw(Canvas canvas) {
         Rect b = getBounds();
+        drawOuterShadows(canvas, b);
         if (Color.alpha(fill) > 0) {
             paint.setStyle(Paint.Style.FILL);
             paint.setColor(fill);
@@ -94,7 +123,172 @@ final class Decor extends Drawable {
             canvas.drawPath(shape(b, 0, path), paint);
             paint.clearShadowLayer();
         }
+        drawGradients(canvas, b);
+        drawInsetShadows(canvas, b);
         if (!bordersAbove) drawBorders(canvas);
+        drawOutline(canvas, b);
+    }
+
+    /** CSS blur (twice the deviation) as a Skia shadow radius. */
+    private static float shadowRadius(float blur) {
+        // Skia: sigma = radius / sqrt(3) + 0.5.
+        return Math.max(0.01f, (blur / 2 - 0.5f) * 1.7320508f);
+    }
+
+    /** Outer box shadows: only outside the box, as CSS draws them. */
+    private void drawOuterShadows(Canvas canvas, Rect b) {
+        boolean any = false;
+        for (int n = 0; n < boxShadowColors.length; n++) any |= boxShadows[n * 5 + 4] == 0 && Color.alpha(boxShadowColors[n]) > 0;
+        if (!any) return;
+        canvas.save();
+        if (android.os.Build.VERSION.SDK_INT >= 26) canvas.clipOutPath(shape(b, 0, path));
+        paint.setStyle(Paint.Style.FILL);
+        // Bottom layer first.
+        for (int n = boxShadowColors.length - 1; n >= 0; n--) {
+            int i = n * 5;
+            if (boxShadows[i + 4] != 0) continue;
+            int color = boxShadowColors[n];
+            if (Color.alpha(color) == 0) continue;
+            float spread = boxShadows[i + 3];
+            // The caster sits far away; only its shadow lands here.
+            paint.setColor(0xff000000);
+            paint.setShadowLayer(shadowRadius(boxShadows[i + 2]), boxShadows[i] + AWAY, boxShadows[i + 1], color);
+            shadowPath.reset();
+            grown(b, spread, shadowPath);
+            shadowPath.offset(-AWAY, 0);
+            canvas.drawPath(shadowPath, paint);
+        }
+        paint.clearShadowLayer();
+        canvas.restore();
+    }
+
+    /** Inset box shadows: inside the padding box, above the background. */
+    private void drawInsetShadows(Canvas canvas, Rect b) {
+        boolean any = false;
+        for (int n = 0; n < boxShadowColors.length; n++) any |= boxShadows[n * 5 + 4] != 0 && Color.alpha(boxShadowColors[n]) > 0;
+        if (!any) return;
+        float t = borderWidths[0], r = borderWidths[1], bo = borderWidths[2], l = borderWidths[3];
+        Rect pad = new Rect(Math.round(b.left + l), Math.round(b.top + t), Math.round(b.right - r), Math.round(b.bottom - bo));
+        canvas.save();
+        canvas.clipPath(shape(pad, 0, path));
+        paint.setStyle(Paint.Style.FILL);
+        for (int n = boxShadowColors.length - 1; n >= 0; n--) {
+            int i = n * 5;
+            if (boxShadows[i + 4] == 0) continue;
+            int color = boxShadowColors[n];
+            if (Color.alpha(color) == 0) continue;
+            float dx = boxShadows[i], dy = boxShadows[i + 1], blur = boxShadows[i + 2], spread = boxShadows[i + 3];
+            // A frame around the shifted, shrunk inner shape casts the shadow
+            // inwards.
+            float reach = Math.abs(dx) + Math.abs(dy) + Math.abs(spread) + blur * 2 + 4;
+            shadowPath.reset();
+            shadowPath.setFillType(Path.FillType.EVEN_ODD);
+            shadowPath.addRect(pad.left - reach, pad.top - reach, pad.right + reach, pad.bottom + reach, Path.Direction.CW);
+            Path hole = new Path();
+            grown(pad, -spread, hole);
+            hole.offset(dx, dy);
+            shadowPath.addPath(hole);
+            shadowPath.offset(-AWAY, 0);
+            paint.setColor(0xff000000);
+            paint.setShadowLayer(shadowRadius(blur), AWAY, 0, color);
+            canvas.drawPath(shadowPath, paint);
+        }
+        paint.clearShadowLayer();
+        canvas.restore();
+    }
+
+    /** The box's rounded shape grown by `d` px (corners grow with it). */
+    private void grown(Rect b, float d, Path out) {
+        float[] fitted = fit(b);
+        rect.set(b.left - d, b.top - d, b.right + d, b.bottom + d);
+        for (int i = 0; i < 4; i++) {
+            float r = fitted[i] > 0 ? Math.max(0, fitted[i] + d) : 0;
+            corners[i * 2] = r;
+            corners[i * 2 + 1] = r;
+        }
+        out.addRoundRect(rect, corners, Path.Direction.CW);
+    }
+
+    private final android.graphics.Matrix gradientMatrix = new android.graphics.Matrix();
+
+    private void drawGradients(Canvas canvas, Rect b) {
+        if (gradients.length == 0) return;
+        float w = Math.max(1, b.width()), h = Math.max(1, b.height());
+        paint.setStyle(Paint.Style.FILL);
+        Path box = shape(b, 0, path);
+        for (int i = gradients.length - 1; i >= 0; i--) {
+            Gradient g = gradients[i];
+            android.graphics.Shader shader;
+            switch (g.kind) {
+                case 2: {
+                    float cx = b.left + g.x * w, cy = b.top + g.y * h;
+                    float ax = g.x * w, ay = g.y * h;
+                    float dx, dy;
+                    switch (g.size) {
+                        case 0: dx = Math.min(ax, w - ax); dy = Math.min(ay, h - ay); break;
+                        case 2: dx = Math.max(ax, w - ax); dy = Math.max(ay, h - ay); break;
+                        case 1: dx = Math.min(ax, w - ax) * 1.4142135f; dy = Math.min(ay, h - ay) * 1.4142135f; break;
+                        default: dx = Math.max(ax, w - ax) * 1.4142135f; dy = Math.max(ay, h - ay) * 1.4142135f;
+                    }
+                    if (g.circle) {
+                        float r = g.size == 0 ? Math.min(dx, dy) : g.size == 2 ? Math.max(dx, dy)
+                                : (float) Math.hypot(dx / 1.4142135f, dy / 1.4142135f);
+                        dx = dy = r;
+                    }
+                    shader = new android.graphics.RadialGradient(cx, cy, Math.max(0.5f, dx), g.colors, g.positions,
+                            android.graphics.Shader.TileMode.CLAMP);
+                    // An ellipse: the circle scaled vertically.
+                    gradientMatrix.setScale(1, dy / Math.max(0.5f, dx), cx, cy);
+                    shader.setLocalMatrix(gradientMatrix);
+                    break;
+                }
+                case 3: {
+                    float cx = b.left + g.x * w, cy = b.top + g.y * h;
+                    shader = new android.graphics.SweepGradient(cx, cy, g.colors, g.positions);
+                    // Sweeps start right; CSS starts up.
+                    gradientMatrix.setRotate(g.angle - 90, cx, cy);
+                    shader.setLocalMatrix(gradientMatrix);
+                    break;
+                }
+                default: {
+                    float angle = g.angle;
+                    if (g.kind == 1) {
+                        float a = (float) Math.toDegrees(Math.atan2(h, w));
+                        angle = g.right ? (g.bottom ? 90 + a : 90 - a) : (g.bottom ? 270 - a : 270 + a);
+                    }
+                    double rad = Math.toRadians(angle);
+                    float sin = (float) Math.sin(rad), cos = (float) Math.cos(rad);
+                    float len = Math.abs(w * sin) + Math.abs(h * cos);
+                    float cx = b.left + w / 2, cy = b.top + h / 2;
+                    float dx = sin * len / 2, dy = -cos * len / 2;
+                    shader = new android.graphics.LinearGradient(cx - dx, cy - dy, cx + dx, cy + dy, g.colors,
+                            g.positions, android.graphics.Shader.TileMode.CLAMP);
+                }
+            }
+            paint.setShader(shader);
+            paint.setColor(0xff000000);
+            canvas.drawPath(box, paint);
+            paint.setShader(null);
+        }
+    }
+
+    private void drawOutline(Canvas canvas, Rect b) {
+        if (outlineWidth <= 0 || Color.alpha(outlineColor) == 0) return;
+        float w = outlineWidth;
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(w);
+        paint.setColor(outlineColor);
+        if (outlineStyle == 1) {
+            paint.setPathEffect(new DashPathEffect(new float[] {w * 3, w * 3}, 0));
+        } else if (outlineStyle == 2) {
+            paint.setPathEffect(new DashPathEffect(new float[] {0, w * 2}, 0));
+            paint.setStrokeCap(Paint.Cap.ROUND);
+        }
+        shadowPath.reset();
+        grown(b, outlineOffset + w / 2, shadowPath);
+        canvas.drawPath(shadowPath, paint);
+        paint.setPathEffect(null);
+        paint.setStrokeCap(Paint.Cap.BUTT);
     }
 
     /** The view draws the borders itself, above its content (images, like
@@ -200,10 +394,14 @@ final class Decor extends Drawable {
         view.setPivotY(originYFraction ? originY * view.getHeight() : originY);
     }
 
-    /** Hides `view` while it is turned away, with `backfaceVisibility: hidden`. */
+    /** `visibility: hidden`. */
+    boolean hidden;
+
+    /** Hides `view` while it is turned away, with `backfaceVisibility: hidden`,
+     * or `visibility: hidden`. */
     void applyBackface(View view) {
-        boolean away = false;
-        if (backfaceHidden) {
+        boolean away = hidden;
+        if (backfaceHidden && !away) {
             double rx = Math.toRadians(view.getRotationX()), ry = Math.toRadians(view.getRotationY());
             away = Math.cos(rx) * Math.cos(ry) < 0;
         }

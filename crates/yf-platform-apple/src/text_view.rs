@@ -2,7 +2,8 @@ use std::{cell::RefCell, sync::Arc};
 
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained};
 use objc2_core_foundation::{
-    CFDictionary, CFRange, CFString, CFType, CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize,
+    CFArray, CFDictionary, CFIndex, CFNumber, CFRange, CFString, CFType, CGAffineTransform,
+    CGFloat, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{CGColor, CGContext};
 use objc2_core_text::{CTFont, CTRun, kCTFontAttributeName};
@@ -15,11 +16,12 @@ use yf_core::{AttributedText, Rect, TextLayout, TextLink};
 
 use crate::{
     native_view::YFView,
-    text::{CoreTextLayout, LaidLine, strikethrough_key},
+    text::{CoreTextLayout, LaidLine, decoration_key, strikethrough_key, underline_key},
 };
 
-/// Draws the strikethrough runs of `line` (CoreText draws underlines only).
-fn draw_strikethrough(ctx: &CGContext, line: &LaidLine) {
+/// Draws the decoration lines CoreText does not: strikethroughs, and
+/// underlines with a style, thickness or offset (y-up text space).
+fn draw_decorations(ctx: &CGContext, line: &LaidLine) {
     // SAFETY: the line's own run array (of CTRuns) and their attribute
     // dictionaries, whose values have the types set by the text engine.
     unsafe {
@@ -28,22 +30,43 @@ fn draw_strikethrough(ctx: &CGContext, line: &LaidLine) {
             let run = &*runs.value_at_index(i).cast::<CTRun>();
             let attributes = run.attributes();
             let attributes: &CFDictionary<CFString, CFType> = attributes.cast_unchecked();
-            let Some(color) = attributes.get(strikethrough_key()) else {
+            let strike = attributes
+                .get(strikethrough_key())
+                .and_then(|c| c.downcast::<CGColor>().ok());
+            let under = attributes
+                .get(underline_key())
+                .and_then(|c| c.downcast::<CGColor>().ok());
+            if strike.is_none() && under.is_none() {
                 continue;
-            };
-            let color = color
-                .downcast_ref::<CGColor>()
-                .expect("strikethrough color");
+            }
             let Some(font) = attributes
                 .get(kCTFontAttributeName)
                 .and_then(|f| f.downcast::<CTFont>().ok())
             else {
                 continue;
             };
+            let (mut style, mut thickness, mut offset) = (0, 0.0, CGFloat::NAN);
+            if let Some(d) = attributes
+                .get(decoration_key())
+                .and_then(|d| d.downcast::<CFArray>().ok())
+            {
+                let n = |i: CFIndex| {
+                    (*d.value_at_index(i).cast::<CFNumber>())
+                        .as_cgfloat()
+                        .unwrap_or(0.0)
+                };
+                style = n(0) as i32;
+                thickness = n(1);
+                offset = n(2);
+            }
+            if thickness <= 0.0 {
+                thickness = font.underline_thickness().max(1.0);
+            }
             let range = run.string_range();
-            let x = line
-                .line
-                .offset_for_string_index(range.location, std::ptr::null_mut());
+            let x = line.origin.x
+                + line
+                    .line
+                    .offset_for_string_index(range.location, std::ptr::null_mut());
             let width = run.typographic_bounds(
                 CFRange {
                     location: 0,
@@ -53,18 +76,85 @@ fn draw_strikethrough(ctx: &CGContext, line: &LaidLine) {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
             );
-            let thickness = font.underline_thickness().max(1.0);
-            let y = line.origin.y + font.x_height() / 2.0 - thickness / 2.0;
-            CGContext::set_fill_color_with_color(Some(ctx), Some(color));
-            CGContext::fill_rect(
-                Some(ctx),
-                CGRect::new(
-                    CGPoint::new(line.origin.x + x, y),
-                    CGSize::new(width, thickness),
-                ),
-            );
+            if let Some(color) = strike {
+                let y = line.origin.y + font.x_height() / 2.0;
+                stroke_decoration(ctx, &color, style, x, y, width, thickness);
+            }
+            if let Some(color) = under {
+                // Below the baseline: the font's position, or the offset.
+                let below = if offset.is_nan() {
+                    -font.underline_position()
+                } else {
+                    offset + thickness / 2.0
+                };
+                stroke_decoration(
+                    ctx,
+                    &color,
+                    style,
+                    x,
+                    line.origin.y - below,
+                    width,
+                    thickness,
+                );
+            }
         }
     }
+}
+
+/// One decoration line centered on `y` (y-up), `style` as encoded by the
+/// text engine: solid, double, dotted, dashed, wavy.
+fn stroke_decoration(
+    ctx: &CGContext,
+    color: &CGColor,
+    style: i32,
+    x: CGFloat,
+    y: CGFloat,
+    width: CGFloat,
+    thickness: CGFloat,
+) {
+    let c = Some(ctx);
+    CGContext::save_g_state(c);
+    CGContext::set_stroke_color_with_color(c, Some(color));
+    CGContext::set_line_width(c, thickness);
+    let line = |y: CGFloat| {
+        CGContext::move_to_point(c, x, y);
+        CGContext::add_line_to_point(c, x + width, y);
+    };
+    match style {
+        1 => {
+            // Two lines a thickness apart.
+            line(y + thickness);
+            line(y - thickness);
+        }
+        2 => {
+            let pattern = [0.0, thickness * 2.0];
+            // SAFETY: a two-element pattern.
+            unsafe { CGContext::set_line_dash(c, 0.0, pattern.as_ptr(), 2) };
+            CGContext::set_line_cap(c, objc2_core_graphics::CGLineCap::Round);
+            line(y);
+        }
+        3 => {
+            let pattern = [thickness * 3.0, thickness * 2.0];
+            // SAFETY: a two-element pattern.
+            unsafe { CGContext::set_line_dash(c, 0.0, pattern.as_ptr(), 2) };
+            line(y);
+        }
+        4 => {
+            // A sine wave, one period per four thicknesses.
+            let amplitude = thickness * 1.5;
+            let period = (thickness * 4.0).max(4.0);
+            let steps = ((width / period) * 8.0).ceil().max(2.0) as usize;
+            CGContext::move_to_point(c, x, y);
+            for i in 1..=steps {
+                let t = width * i as CGFloat / steps as CGFloat;
+                let phase = t / period * std::f64::consts::TAU;
+                CGContext::add_line_to_point(c, x + t, y + amplitude * phase.sin());
+            }
+        }
+        _ => line(y),
+    }
+    CGContext::stroke_path(c);
+    CGContext::restore_g_state(c);
 }
 
 #[derive(Default)]
@@ -136,7 +226,7 @@ define_class!(
                 // SAFETY: a valid line and context.
                 unsafe { line.line.draw(&ctx) };
                 if text.strikethrough {
-                    draw_strikethrough(&ctx, line);
+                    draw_decorations(&ctx, line);
                 }
             }
             CGContext::restore_g_state(c);

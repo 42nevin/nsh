@@ -526,6 +526,15 @@ pub enum MountItem {
         /// View kind.
         kind: ViewKind,
     },
+    /// Report the view's interaction states named by these bits
+    /// (`tailwind::state`: pressed, hovered, focused, focus within) with
+    /// `EngineControl::set_states`; 0 stops reporting.
+    TrackStates {
+        /// View id.
+        id: NodeId,
+        /// The states.
+        states: u8,
+    },
     /// Insert (or move) `child` into `parent`, below sibling `before` (or
     /// on top when `None`). Siblings rather than indices, so platform-owned
     /// subviews (refresh controls, scroll indicators) cannot shift positions.

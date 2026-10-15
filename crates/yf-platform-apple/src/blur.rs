@@ -11,11 +11,16 @@ use objc2_core_graphics::{
     CGImageByteOrderInfo,
 };
 
-/// `image` blurred by `radius` pixels (premultiplied RGBA).
-pub(crate) fn blurred(image: &CGImage, radius: f64) -> Option<CFRetained<CGImage>> {
+/// `image` blurred by `radius` pixels and passed through a 4×5 color
+/// `matrix` (CSS filters on images).
+pub(crate) fn filtered(
+    image: &CGImage,
+    radius: f64,
+    matrix: Option<[f32; 20]>,
+) -> Option<CFRetained<CGImage>> {
     let radius = radius.round().clamp(0.0, 254.0) as usize;
     let (width, height) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
-    if radius == 0 || width == 0 || height == 0 {
+    if (radius == 0 && matrix.is_none()) || width == 0 || height == 0 {
         return None;
     }
     let space = CGColorSpace::new_device_rgb()?;
@@ -43,8 +48,49 @@ pub(crate) fn blurred(image: &CGImage, radius: f64) -> Option<CFRetained<CGImage
         }
         let stride = CGBitmapContextGetBytesPerRow(Some(&context));
         let pixels = std::slice::from_raw_parts_mut(data, stride * height);
-        stack_blur(pixels, width, height, stride, radius);
+        if radius > 0 {
+            stack_blur(pixels, width, height, stride, radius);
+        }
+        if let Some(m) = matrix {
+            color_matrix(pixels, width, height, stride, &m);
+        }
         CGBitmapContextCreateImage(Some(&context))
+    }
+}
+
+/// Applies a 4×5 color matrix (unpremultiplied sRGB, offsets in 0..1) to
+/// premultiplied RGBA pixels in place.
+pub(crate) fn color_matrix(
+    pixels: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    m: &[f32; 20],
+) {
+    for y in 0..height {
+        let row = &mut pixels[y * stride..y * stride + width * 4];
+        for px in row.as_chunks_mut::<4>().0 {
+            let a = px[3] as f32 / 255.0;
+            if a == 0.0 && m[19] == 0.0 {
+                continue;
+            }
+            let un = |c: u8| {
+                if a > 0.0 {
+                    (c as f32 / 255.0 / a).min(1.0)
+                } else {
+                    0.0
+                }
+            };
+            let (r, g, b) = (un(px[0]), un(px[1]), un(px[2]));
+            let out = |i: usize| {
+                (m[i] * r + m[i + 1] * g + m[i + 2] * b + m[i + 3] * a + m[i + 4]).clamp(0.0, 1.0)
+            };
+            let na = out(15);
+            px[0] = (out(0) * na * 255.0).round() as u8;
+            px[1] = (out(5) * na * 255.0).round() as u8;
+            px[2] = (out(10) * na * 255.0).round() as u8;
+            px[3] = (na * 255.0).round() as u8;
+        }
     }
 }
 

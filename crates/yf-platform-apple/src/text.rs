@@ -38,6 +38,22 @@ pub(crate) fn strikethrough_key() -> &'static CFString {
         .0
 }
 
+/// Attribute carrying the color of an underline CoreText cannot draw
+/// (styled, thick or offset): [`crate::text_view::TextView`] draws it.
+pub(crate) fn underline_key() -> &'static CFString {
+    static KEY: std::sync::OnceLock<CFStringKey> = std::sync::OnceLock::new();
+    &KEY.get_or_init(|| CFStringKey(CFString::from_static_str("YFUnderlineColor")))
+        .0
+}
+
+/// Attribute carrying how drawn decoration lines look: a `CFArray` of
+/// [style, thickness (0: the font's), offset (NaN: the font's)].
+pub(crate) fn decoration_key() -> &'static CFString {
+    static KEY: std::sync::OnceLock<CFStringKey> = std::sync::OnceLock::new();
+    &KEY.get_or_init(|| CFStringKey(CFString::from_static_str("YFDecorationStyle")))
+        .0
+}
+
 struct CFStringKey(CFRetained<CFString>);
 // SAFETY: CFStrings are immutable and thread-safe.
 unsafe impl Send for CFStringKey {}
@@ -86,7 +102,11 @@ fn make_font(style: &ResolvedTextStyle) -> CFRetained<CTFont> {
     let size = style.font_size as CGFloat;
     let font = style
         .font_family
-        .and_then(|family| family_font(&family.name(), size, style.font_weight))
+        .and_then(|family| {
+            let name = family.name();
+            generic_font(&name, size, style.font_weight)
+                .unwrap_or_else(|| family_font(&name, size, style.font_weight))
+        })
         .unwrap_or_else(|| system_font(size, style.font_weight));
     let font = if style.italic {
         let italic = CTFontSymbolicTraits::TraitItalic;
@@ -135,6 +155,41 @@ pub(crate) fn ui_font(style: &ResolvedTextStyle) -> Retained<UIFont> {
     let ptr = CFRetained::into_raw(font).as_ptr().cast::<UIFont>();
     // SAFETY: toll-free bridging; ownership of the +1 reference moves over.
     unsafe { Retained::from_raw(ptr).expect("non-null font") }
+}
+
+/// CSS generic families (`font-mono`, `font-serif`): the system font's
+/// designs. `Some(None)` is the plain system font; `None` is not generic.
+fn generic_font(family: &str, size: CGFloat, weight: u16) -> Option<Option<CFRetained<CTFont>>> {
+    use objc2_ui_kit::{
+        UIFontDescriptorSystemDesign, UIFontDescriptorSystemDesignRounded,
+        UIFontDescriptorSystemDesignSerif,
+    };
+    let design: &UIFontDescriptorSystemDesign = match family {
+        "system-ui" | "sans-serif" | "ui-sans-serif" | "-apple-system" => return Some(None),
+        "monospace" | "ui-monospace" => {
+            let font = UIFont::monospacedSystemFontOfSize_weight(size, font_weight(weight));
+            return Some(Some(bridge(font)));
+        }
+        // SAFETY: immutable UIKit constants.
+        "serif" | "ui-serif" => unsafe { UIFontDescriptorSystemDesignSerif },
+        "ui-rounded" => unsafe { UIFontDescriptorSystemDesignRounded },
+        _ => return None,
+    };
+    let base = UIFont::systemFontOfSize_weight(size, font_weight(weight));
+    // SAFETY: a plain getter of a valid font.
+    let descriptor = unsafe { base.fontDescriptor() };
+    let font = descriptor
+        .fontDescriptorWithDesign(design)
+        .map(|d| UIFont::fontWithDescriptor_size(&d, size))
+        .unwrap_or(base);
+    Some(Some(bridge(font)))
+}
+
+/// A `UIFont` as the `CTFont` it is (toll-free bridged).
+fn bridge(font: Retained<UIFont>) -> CFRetained<CTFont> {
+    let ptr = Retained::into_raw(font).cast::<CTFont>();
+    // SAFETY: toll-free bridging; ownership of the +1 reference moves over.
+    unsafe { CFRetained::from_raw(NonNull::new(ptr).expect("non-null font")) }
 }
 
 /// A font of an installed or registered family, or `None` (logged) if the
@@ -294,7 +349,32 @@ impl CoreTextEngine {
                 set(range, unsafe { kCTKernAttributeName }, kern.as_ref());
             }
             let decoration = cg_color(style.decoration_color.unwrap_or(style.color));
-            if style.decoration.underline {
+            let custom = style.decoration_style != yf_core::DecorationStyle::Solid
+                || style.decoration_thickness.is_some()
+                || style.underline_offset.is_some();
+            if custom && !style.decoration.is_none() {
+                let code = match style.decoration_style {
+                    yf_core::DecorationStyle::Solid => 0,
+                    yf_core::DecorationStyle::Double => 1,
+                    yf_core::DecorationStyle::Dotted => 2,
+                    yf_core::DecorationStyle::Dashed => 3,
+                    yf_core::DecorationStyle::Wavy => 4,
+                };
+                let numbers = [
+                    CFNumber::new_i32(code),
+                    CFNumber::new_cgfloat(style.decoration_thickness.unwrap_or(0.0) as CGFloat),
+                    CFNumber::new_cgfloat(
+                        style
+                            .underline_offset
+                            .map_or(CGFloat::NAN, |o| o as CGFloat),
+                    ),
+                ];
+                let array = CFArray::from_retained_objects(&numbers);
+                set(range, decoration_key(), array.as_ref());
+            }
+            if style.decoration.underline && custom {
+                set(range, underline_key(), decoration.as_ref());
+            } else if style.decoration.underline {
                 // kCTUnderlineStyleSingle.
                 let single = CFNumber::new_i32(1);
                 set(
@@ -592,6 +672,20 @@ fn has_strikethrough(prepared: &Prepared) -> bool {
         };
         if value.is_some() {
             return true;
+        }
+        let mut other = CFRange {
+            location: 0,
+            length: 0,
+        };
+        // SAFETY: as above.
+        let underline = unsafe {
+            CFAttributedString::attribute(source, index, Some(underline_key()), &mut other)
+        };
+        if underline.is_some() {
+            return true;
+        }
+        if other.location + other.length < range.location + range.length {
+            range = other;
         }
         index = (range.location + range.length).max(index + 1);
     }

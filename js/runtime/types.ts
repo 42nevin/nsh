@@ -316,6 +316,16 @@ export type TextContentType =
 export interface CommonProps extends TouchProps {
   ref?: YNode | ((node: YNode) => void);
   children?: JSX.Element;
+  /**
+   * Tailwind CSS classes (`"flex-row gap-2 p-4 bg-white dark:bg-zinc-900"`),
+   * resolved natively. Later classes win over earlier ones; `style` wins
+   * over both.
+   */
+  class?: string;
+  /** Classes applied while their value is truthy (`{ "opacity-50": busy() }`). */
+  classList?: Record<string, boolean | null | undefined>;
+  /** Ignores presses (no press feedback either), applies `disabled:` classes and disables controls. */
+  disabled?: boolean;
   /** Touch handling of the view and its children (React Native semantics). */
   pointerEvents?: "auto" | "none" | "box-none" | "box-only";
   /** Extends the touch area beyond the bounds. */

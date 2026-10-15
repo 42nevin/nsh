@@ -185,6 +185,7 @@ enum Message {
     Environment(Environment),
     RootSize(NodeId, Size, EdgeInsets),
     Frame,
+    States(NodeId, u8),
     FetchDone(RequestId, Result<HttpResponse, String>),
     Hot(HotUpdate),
     Shutdown,
@@ -261,6 +262,14 @@ impl EngineControl {
     /// `requestAnimationFrame` callbacks.
     pub fn frame(&self) {
         let _ = self.tx.send(Message::Frame);
+    }
+
+    /// Reports the interaction states of view `id` that the core asked to
+    /// track ([`yf_core::MountItem::TrackStates`]; bits of
+    /// [`yf_core::tailwind::state`]). Class styles that depend on them
+    /// (`active:`, `hover:`, `focus:`) update without JS.
+    pub fn set_states(&self, id: NodeId, states: u8) {
+        let _ = self.tx.send(Message::States(id, states));
     }
 }
 
@@ -362,6 +371,7 @@ fn run<M: TextEngine, S: MountSink>(
     }));
     let mut core = Core::new(text_engine, config.viewport);
     core.set_font_scale(config.environment.font_scale);
+    core.set_class_environment(class_environment(&config.environment));
     core.set_header_heights(config.header_heights.0, config.header_heights.1);
     core.set_control_sizes(config.control_sizes);
     core.set_safe_area(insets(&config.environment));
@@ -684,6 +694,19 @@ fn insets(env: &Environment) -> EdgeInsets {
 }
 
 /// Returns false on shutdown.
+/// What class variants read from the environment.
+fn class_environment(env: &Environment) -> yf_core::tailwind::ClassEnvironment {
+    yf_core::tailwind::ClassEnvironment {
+        dark: env.color_scheme == yf_js::ColorScheme::Dark,
+        platform: if cfg!(target_os = "android") {
+            yf_core::tailwind::Platform::Android
+        } else {
+            yf_core::tailwind::Platform::Ios
+        },
+        reduce_motion: env.reduce_motion,
+    }
+}
+
 fn handle<M: TextEngine>(host: &Host, state: &mut State<M>, message: Message) -> bool {
     match message {
         Message::Event(id, event, payload) => {
@@ -743,6 +766,7 @@ fn handle<M: TextEngine>(host: &Host, state: &mut State<M>, message: Message) ->
         Message::Resize(size) => state.core.set_viewport(size),
         Message::Environment(env) => {
             state.core.set_font_scale(env.font_scale);
+            state.core.set_class_environment(class_environment(&env));
             state.core.set_safe_area(insets(&env));
             host.set_environment(&env);
         }
@@ -751,6 +775,7 @@ fn handle<M: TextEngine>(host: &Host, state: &mut State<M>, message: Message) ->
             state.frame_requested = false;
             host.run_frame();
         }
+        Message::States(id, states) => state.core.set_states(id, states),
         Message::FetchDone(id, result) => {
             // Results of cancelled requests are dropped.
             if state.net.inflight.remove(&id).is_some() || state.net.network.is_none() {

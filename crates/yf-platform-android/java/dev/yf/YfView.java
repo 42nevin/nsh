@@ -243,6 +243,9 @@ public class YfView extends FrameLayout {
         Native.environment(handle, new float[] {
             top / density, right / density, bottom / density, left / density, ime / density, 0.25f, c.fontScale,
             android.text.TextUtils.getLayoutDirectionFromLocale(java.util.Locale.getDefault()) == LAYOUT_DIRECTION_RTL ? 1 : 0,
+            // "Remove animations" sets the animator scale to 0.
+            android.provider.Settings.Global.getFloat(getContext().getContentResolver(),
+                    android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0 ? 1 : 0,
         }, dark);
     }
 

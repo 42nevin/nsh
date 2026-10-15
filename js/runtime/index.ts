@@ -25,6 +25,8 @@ import {
   useContext,
 } from "solid-js";
 import { createRenderer } from "solid-js/universal";
+// The app's Tailwind theme (`yf.json`), JSON or null.
+import tailwindTheme from "yf:tailwind-theme";
 import type {
   GestureResponderEvent,
   JSX,
@@ -472,6 +474,12 @@ const registry = new FinalizationRegistry<number>((id) => {
 
 /** The surface root view. */
 export const root: YNode = new YNode(1, false);
+
+// Before anything renders: classes resolve against it.
+if (tailwindTheme) {
+  ops.push(OP_SET_PROP, 1, "tailwindTheme", tailwindTheme);
+  schedule();
+}
 
 // Nothing else references the tree once rendering is done (there is no
 // `document` as in a browser): without this global anchor the whole app —
@@ -1140,44 +1148,23 @@ export interface SafeAreaViewProps extends ViewProps {
   edges?: ("top" | "right" | "bottom" | "left")[];
 }
 
-/** A style prop as one object: arrays are merged left to right, falsy
- * entries skipped (as the core does for `style`). */
-function flattenStyle(style: StyleProp<ViewStyle>): Record<string, any> {
-  if (!Array.isArray(style)) return (style as Record<string, any>) ?? {};
-  const out: Record<string, any> = {};
-  for (const s of style) if (s) Object.assign(out, flattenStyle(s as StyleProp<ViewStyle>));
-  return out;
-}
-
-/** The padding a style sets on one edge (`paddingTop`, `paddingVertical`,
- * `padding`), in points. */
-function edgePadding(s: Record<string, any>, edge: "top" | "right" | "bottom" | "left"): number {
-  const key = `padding${edge[0].toUpperCase()}${edge.slice(1)}`;
-  const axis = edge === "top" || edge === "bottom" ? "paddingVertical" : "paddingHorizontal";
-  const v = s[key] ?? s[axis] ?? s.padding ?? 0;
-  return typeof v === "number" ? v : 0;
-}
-
-/** A view padded by the safe-area insets where it renders. */
+/** A view padded by the safe-area insets where it renders (on top of its
+ * own padding, from `style` or classes). */
 export function SafeAreaView(props: SafeAreaViewProps): YNode {
   const insets = useSafeAreaInsets();
-  const [local, others] = splitProps(props, ["style", "edges", "children"]);
+  const [local, others] = splitProps(props, ["edges", "children"]);
   const node = createElement("view");
-  const pad = (edge: "top" | "right" | "bottom" | "left", _key: string) => {
-    const own = edgePadding(flattenStyle(local.style), edge);
-    const on = !local.edges || local.edges.includes(edge);
-    return own + (on ? insets()[edge] : 0);
-  };
   spread(
     node,
     mergeSolidProps(others, {
-      get style() {
+      get insetPadding() {
+        const i = insets();
+        const on = (edge: "top" | "right" | "bottom" | "left") => !local.edges || local.edges.includes(edge);
         return {
-          ...flattenStyle(local.style),
-          paddingTop: pad("top", "paddingTop"),
-          paddingRight: pad("right", "paddingRight"),
-          paddingBottom: pad("bottom", "paddingBottom"),
-          paddingLeft: pad("left", "paddingLeft"),
+          top: on("top") ? i.top : 0,
+          right: on("right") ? i.right : 0,
+          bottom: on("bottom") ? i.bottom : 0,
+          left: on("left") ? i.left : 0,
         };
       },
     }),
@@ -1194,15 +1181,16 @@ export interface KeyboardAvoidingViewProps extends ViewProps {
 
 /**
  * A view that keeps its content above the software keyboard by padding its
- * bottom by the keyboard's height, animated with the keyboard. For content
- * outside scroll views, such as a message bar at the bottom of a screen
- * (inputs inside scroll views are kept visible natively). It assumes it
- * reaches the bottom of the surface, as a screen's content does. Where the
- * window shrinks for the keyboard instead (an Android host that resizes),
- * the keyboard covers nothing and the padding stays 0.
+ * bottom by the keyboard's height (on top of its own padding), animated
+ * with the keyboard. For content outside scroll views, such as a message
+ * bar at the bottom of a screen (inputs inside scroll views are kept
+ * visible natively). It assumes it reaches the bottom of the surface, as a
+ * screen's content does. Where the window shrinks for the keyboard instead
+ * (an Android host that resizes), the keyboard covers nothing and the
+ * padding stays 0.
  */
 export function KeyboardAvoidingView(props: KeyboardAvoidingViewProps): YNode {
-  const [local, others] = splitProps(props, ["style", "enabled", "children"]);
+  const [local, others] = splitProps(props, ["enabled", "children"]);
   const node = createElement("view");
   const lift = createMemo(() => (local.enabled === false ? 0 : keyboard().height));
   let last = 0;
@@ -1218,9 +1206,8 @@ export function KeyboardAvoidingView(props: KeyboardAvoidingViewProps): YNode {
   spread(
     node,
     mergeSolidProps(others, {
-      get style() {
-        const s = flattenStyle(local.style);
-        return { ...s, paddingBottom: edgePadding(s, "bottom") + lift() };
+      get insetPadding() {
+        return { top: 0, right: 0, bottom: lift(), left: 0 };
       },
     }),
     true,

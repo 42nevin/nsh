@@ -4,7 +4,7 @@ use yf_anim::AnimOp;
 
 use crate::{
     props::{AccessibilityProp, EdgeInsets, LayoutAnimation, PointerEvents},
-    style::{Color, EllipsizeMode, Style},
+    style::{Color, EllipsizeMode, Style, StylePatch},
 };
 
 /// Identifier of a node, assigned by the JS renderer.
@@ -943,6 +943,15 @@ pub enum Prop {
     /// The surface lays out right to left (on the root, from
     /// `I18nManager`).
     LayoutDirection(bool),
+    /// Padding added to the style's own (safe areas, the keyboard), in
+    /// points on the physical edges.
+    InsetPadding(EdgeInsets),
+    /// `class`: Tailwind classes.
+    Class(Box<str>),
+    /// `classList`: the names whose value is truthy.
+    ClassList(Vec<Box<str>>),
+    /// The app's Tailwind theme (JSON, on the root).
+    TailwindTheme(Box<str>),
     /// An image option.
     Image(ImageProp),
     /// `delayLongPress`: milliseconds before a press becomes a long press.
@@ -1082,6 +1091,9 @@ pub enum Op {
         id: NodeId,
         /// The new style; boxed because layout styles are large.
         style: Box<Style>,
+        /// The declarations `style` was built from, applied again over the
+        /// node's class styles.
+        patch: StylePatch,
     },
     /// Sets a non-style property.
     SetProp {

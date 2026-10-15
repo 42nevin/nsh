@@ -53,6 +53,7 @@ final class Mounter {
     private static final int STICKY_CELLS = 24;
     private static final int SCROLL_BEHAVIOR = 25;
     private static final int LAYOUT_DIRECTION = 26;
+    private static final int TRACK_STATES = 27;
     /** The surface lays out right to left: native widgets mirror. */
     boolean rtl;
 
@@ -236,6 +237,11 @@ final class Mounter {
                         ((ScrollBox) v).configure(horizontal, indicator, dismiss);
                         setMirrored((ScrollBox) v, mirrored);
                     }
+                    break;
+                }
+                case TRACK_STATES: {
+                    int id = b.getInt(), states = b.getInt();
+                    trackStates(id, states);
                     break;
                 }
                 case LAYOUT_DIRECTION: {
@@ -664,11 +670,15 @@ final class Mounter {
         boolean originYFraction = b.getInt() == 1;
         float originY = b.getFloat();
         boolean backfaceHidden = b.getInt() != 0;
+        Effects fx = Effects.read(b, density);
         d.opacity = opacity;
         d.background = background;
         if (v == null) return;
+        Dynamic old = statics.get(id);
         statics.put(id, d);
         Decor decor = decor(v);
+        // A transition animates from what is on screen now.
+        Snapshot from = fx.transitionProps != 0 && old != null && v.isAttachedToWindow() ? new Snapshot(v, decor, old) : null;
         if (decor != null) {
             for (int i = 0; i < 4; i++) {
                 decor.radii[i] = radii[i] * density;
@@ -686,8 +696,22 @@ final class Mounter {
             decor.originY = originYFraction ? originY : originY * density;
             decor.originYFraction = originYFraction;
             decor.backfaceHidden = backfaceHidden;
+            decor.hidden = fx.hidden;
+            decor.boxShadows = fx.shadows;
+            decor.boxShadowColors = fx.shadowColors;
+            decor.gradients = fx.gradients;
+            decor.outlineWidth = fx.outlineWidth;
+            decor.outlineColor = fx.outlineColor;
+            decor.outlineStyle = fx.outlineStyle;
+            decor.outlineOffset = fx.outlineOffset;
             decor.applyPivot(v);
         }
+        Effects previous = effects.get(id);
+        if (previous == null || !previous.filters.same(fx.filters) || previous.blend != fx.blend) Effects.apply(v, fx);
+        if (previous == null ? fx.cursor != 0 : previous.cursor != fx.cursor) Effects.cursor(v, fx.cursor);
+        effects.put(id, fx);
+        boolean keyframesChanged = previous == null ? fx.keyframes != 0
+                : previous.keyframes != fx.keyframes || previous.animationDuration != fx.animationDuration;
         // Material shadow: needs an outline (the decor's shape).
         v.setElevation(elevation * density);
         if (elevation > 0 && decor != null && !(v instanceof Box || v instanceof TextBox || v instanceof InputBox)) {
@@ -707,7 +731,175 @@ final class Mounter {
         }
         if (v instanceof ImageBox) ((ImageBox) v).setTint(hasTint ? tint : 0);
         applyDynamic(v, d);
+        if (from != null) transition(v, id, decor, from, d, fx);
+        if (keyframesChanged) keyframes(v, id, fx);
         v.invalidate();
+    }
+
+    /** The effects last applied to each view. */
+    private final SparseArray<Effects> effects = new SparseArray<>();
+    private final SparseArray<ValueAnimator> transitions = new SparseArray<>();
+    private final SparseArray<ValueAnimator> keyframeAnimators = new SparseArray<>();
+    private final SparseArray<Effects.Motion> motions = new SparseArray<>();
+
+    /** What a transition starts from. */
+    private static final class Snapshot {
+        final int fill;
+        final int[] borderColors = new int[4];
+        final float[] radii = new float[4];
+        final float[] borderWidths = new float[4];
+        final float opacity, tx, ty, sx, sy, rotate;
+
+        Snapshot(View v, Decor decor, Dynamic d) {
+            fill = decor != null ? decor.fill : 0;
+            if (decor != null) {
+                System.arraycopy(decor.borderColors, 0, borderColors, 0, 4);
+                System.arraycopy(decor.radii, 0, radii, 0, 4);
+                System.arraycopy(decor.borderWidths, 0, borderWidths, 0, 4);
+            }
+            // Mid-transition values are on the view already.
+            opacity = v.getAlpha();
+            tx = d.tx;
+            ty = d.ty;
+            sx = d.sx;
+            sy = d.sy;
+            rotate = d.rotate;
+        }
+    }
+
+    private static int lerpColor(int a, int b, float t) {
+        int r = 0;
+        for (int shift = 0; shift < 32; shift += 8) {
+            int ca = (a >>> shift) & 0xff, cb = (b >>> shift) & 0xff;
+            r |= Math.round(ca + (cb - ca) * t) << shift;
+        }
+        return r;
+    }
+
+    /** Animates the style change of `v` from `from` to the values just set. */
+    private void transition(View v, int id, Decor decor, Snapshot from, Dynamic to, Effects fx) {
+        ValueAnimator running = transitions.get(id);
+        if (running != null) running.cancel();
+        final int fill = decor != null ? decor.fill : 0;
+        final int[] borders = decor != null ? decor.borderColors.clone() : new int[4];
+        final float[] radii = decor != null ? decor.radii.clone() : new float[4];
+        final float[] widths = decor != null ? decor.borderWidths.clone() : new float[4];
+        final int props = fx.transitionProps;
+        boolean colors = (props & 1) != 0, opacity = (props & 2) != 0, transform = (props & 4) != 0, shape = (props & 16) != 0;
+        ValueAnimator a = ValueAnimator.ofFloat(0, 1);
+        a.setDuration((long) fx.transitionDuration);
+        a.setStartDelay((long) fx.transitionDelay);
+        a.setInterpolator(Effects.interpolator(fx.transitionEasing));
+        Dynamic now = new Dynamic();
+        a.addUpdateListener(animation -> {
+            float t = (float) animation.getAnimatedValue();
+            if (decor != null) {
+                if (colors) {
+                    decor.fill = lerpColor(from.fill, fill, t);
+                    for (int i = 0; i < 4; i++) decor.borderColors[i] = lerpColor(from.borderColors[i], borders[i], t);
+                }
+                if (shape) {
+                    for (int i = 0; i < 4; i++) {
+                        decor.radii[i] = from.radii[i] + (radii[i] - from.radii[i]) * t;
+                        decor.borderWidths[i] = from.borderWidths[i] + (widths[i] - from.borderWidths[i]) * t;
+                    }
+                }
+            }
+            now.opacity = opacity ? from.opacity + (to.opacity - from.opacity) * t : to.opacity;
+            now.tx = transform ? from.tx + (to.tx - from.tx) * t : to.tx;
+            now.ty = transform ? from.ty + (to.ty - from.ty) * t : to.ty;
+            now.sx = transform ? from.sx + (to.sx - from.sx) * t : to.sx;
+            now.sy = transform ? from.sy + (to.sy - from.sy) * t : to.sy;
+            now.rotate = transform ? from.rotate + (to.rotate - from.rotate) * t : to.rotate;
+            now.rotateX = to.rotateX;
+            now.rotateY = to.rotateY;
+            now.perspective = to.perspective;
+            now.background = decor != null ? decor.fill : to.background;
+            applyDynamic(v, now);
+            v.invalidate();
+        });
+        a.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                if (transitions.get(id) == animation) transitions.remove(id);
+            }
+        });
+        transitions.put(id, a);
+        // Start from the old look in this frame.
+        if (decor != null && colors) {
+            decor.fill = from.fill;
+            System.arraycopy(from.borderColors, 0, decor.borderColors, 0, 4);
+        }
+        a.start();
+    }
+
+    /** Starts (or stops) the keyframe animation of `v`. */
+    private void keyframes(View v, int id, Effects fx) {
+        ValueAnimator running = keyframeAnimators.get(id);
+        if (running != null) running.cancel();
+        keyframeAnimators.remove(id);
+        motions.remove(id);
+        if (fx.keyframes == 0) {
+            Dynamic d = statics.get(id);
+            if (d != null) applyDynamic(v, d);
+            return;
+        }
+        Effects.Motion motion = new Effects.Motion();
+        motions.put(id, motion);
+        ValueAnimator a = ValueAnimator.ofFloat(0, 1);
+        a.setDuration((long) fx.animationDuration);
+        a.setStartDelay((long) fx.animationDelay);
+        a.setInterpolator(new android.view.animation.LinearInterpolator());
+        a.setRepeatCount(fx.iterations < 0 ? ValueAnimator.INFINITE : Math.max(0, fx.iterations - 1));
+        int kind = fx.keyframes;
+        float[] easing = fx.animationEasing.clone();
+        a.addUpdateListener(animation -> {
+            Effects.keyframes(kind, (float) animation.getAnimatedValue(), v.getHeight(), easing, motion);
+            Dynamic d = statics.get(id);
+            if (d != null) applyDynamic(v, d);
+        });
+        keyframeAnimators.put(id, a);
+        a.start();
+    }
+
+    // --- Interaction states (`active:`, `hover:`, `focus:`) ---------------
+
+    private final android.util.SparseIntArray trackedStates = new android.util.SparseIntArray();
+    private final android.util.SparseIntArray currentStates = new android.util.SparseIntArray();
+    static final int STATE_PRESSED = 1, STATE_HOVERED = 2, STATE_FOCUSED = 4;
+
+    boolean tracksPress(int id) {
+        return (trackedStates.get(id) & STATE_PRESSED) != 0;
+    }
+
+    private void trackStates(int id, int states) {
+        trackedStates.put(id, states);
+        View v = views.get(id);
+        if (v == null) return;
+        if ((states & STATE_HOVERED) != 0) {
+            v.setOnHoverListener((view, e) -> {
+                int action = e.getActionMasked();
+                if (action == android.view.MotionEvent.ACTION_HOVER_ENTER) reportState(id, STATE_HOVERED, true);
+                else if (action == android.view.MotionEvent.ACTION_HOVER_EXIT) reportState(id, STATE_HOVERED, false);
+                return false;
+            });
+        } else {
+            v.setOnHoverListener(null);
+        }
+        if ((states & STATE_PRESSED) != 0 && !v.isClickable()) {
+            // Presses reach views that report them.
+            v.setClickable(true);
+        }
+    }
+
+    /** An interaction state of `id` changed: tells the core if it reads it. */
+    void reportState(int id, int bit, boolean on) {
+        int states = currentStates.get(id);
+        int next = on ? states | bit : states & ~bit;
+        if (next == states) return;
+        currentStates.put(id, next);
+        int tracked = trackedStates.get(id);
+        if ((tracked & bit) != 0) Native.states(handle(), id, next & tracked);
     }
 
     /**
@@ -746,12 +938,15 @@ final class Mounter {
         // A cell flips back last: its x translation and rotations about the
         // y and z axes turn around.
         float back = mirror == 2 ? -1 : 1;
-        v.setAlpha(d.opacity);
+        Effects.Motion m = motions.get(v instanceof Node ? ((Node) v).nodeId() : -1);
+        float ma = m != null ? m.alpha : 1, ms = m != null ? m.scale : 1;
+        float mr = m != null ? m.rotate : 0, mty = m != null ? m.ty : 0;
+        v.setAlpha(d.opacity * ma);
         v.setTranslationX(back * d.tx * density);
-        v.setTranslationY(d.ty * density);
-        v.setScaleX(mirror != 0 ? -d.sx : d.sx);
-        v.setScaleY(d.sy);
-        v.setRotation(back * d.rotate);
+        v.setTranslationY(d.ty * density + mty);
+        v.setScaleX((mirror != 0 ? -d.sx : d.sx) * ms);
+        v.setScaleY(d.sy * ms);
+        v.setRotation(back * (d.rotate + mr));
         v.setRotationX(d.rotateX);
         v.setRotationY(back * d.rotateY);
         setPerspective(v, d.perspective);
@@ -790,11 +985,12 @@ final class Mounter {
     /** Whether presses on {@code id} show feedback (so the view takes them). */
     boolean hasPressFeedback(int id) {
         Feedback f = feedback.get(id);
-        return f != null && (!Float.isNaN(f.activeOpacity) || f.ripple != null);
+        return tracksPress(id) || f != null && (!Float.isNaN(f.activeOpacity) || f.ripple != null);
     }
 
     /** Shows (or ends) the press feedback of view {@code id}, pressed at ({@code x}, {@code y}). */
     void pressFeedback(View v, int id, boolean pressed, float x, float y) {
+        reportState(id, STATE_PRESSED, pressed);
         Feedback f = feedback.get(id);
         if (f == null) return;
         if (!Float.isNaN(f.activeOpacity)) {

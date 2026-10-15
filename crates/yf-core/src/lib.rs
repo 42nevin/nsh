@@ -9,12 +9,17 @@
 //! on the engine thread, between the JS host and the platform backend.
 
 mod core;
+mod css;
+mod css_named;
+mod effects;
 mod fenwick;
 mod geometry;
+mod grid;
 mod mount;
 mod ops;
 mod props;
 mod style;
+pub mod tailwind;
 mod text;
 mod transform;
 
@@ -22,6 +27,11 @@ pub use yf_anim;
 
 pub use crate::{
     core::{ApplyError, Core, ListBind},
+    effects::{
+        BlendMode, BoxShadow, ColorStop, Cursor, Effects, Filter, Gradient, GradientKind,
+        GradientSize, KeyframeAnimation, Keyframes, Outline, Transition, TransitionProps,
+        blur_radius, compose_color_matrices,
+    },
     geometry::{Rect, Size},
     mount::{
         ActivityProps, ControlSizes, ImageOptions, InputConfig, ModalConfig, MountBatch, MountItem,
@@ -44,9 +54,10 @@ pub use crate::{
         Ripple, ViewProps,
     },
     style::{
-        BorderStyle, Borders, Color, CornerRadii, EllipsizeMode, FontFamily, FontVariant,
-        OriginLen, Shadow, Style, StyleError, StyleValue, TextAlign, TextDecoration, TextShadow,
-        TextStyle, TextTransform, TransformOrigin, ViewStyle,
+        BorderStyle, Borders, Color, CornerRadii, DecorationStyle, EllipsizeMode, FontFamily,
+        FontVariant, OriginLen, PatchValue, Shadow, Style, StyleDecl, StyleError, StyleKey,
+        StylePatch, StyleValue, TextAlign, TextDecoration, TextShadow, TextStyle, TextTransform,
+        TransformOrigin, ViewStyle,
     },
     text::{
         ApproxTextEngine, AttributedText, ResolvedTextStyle, TextEngine, TextLayout, TextLink,

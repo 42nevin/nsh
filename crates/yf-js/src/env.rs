@@ -41,6 +41,9 @@ pub struct Environment {
     pub font_scale: f32,
     /// The user's language is written right to left.
     pub rtl: bool,
+    /// The user asked for less motion (iOS Reduce Motion, Android's
+    /// animator duration scale at 0).
+    pub reduce_motion: bool,
 }
 
 impl Default for Environment {
@@ -53,6 +56,7 @@ impl Default for Environment {
             color_scheme: ColorScheme::Light,
             font_scale: 1.0,
             rtl: false,
+            reduce_motion: false,
         }
     }
 }

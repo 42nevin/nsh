@@ -6,11 +6,13 @@ yf is a React Native–like cross-platform UI framework: app code is written in 
 
 ```
 crates/
-  yf-core/            Platform-independent core: shadow tree, styles (RN semantics), Taffy layout, text merging, list virtualization, mount items
+  yf-core/            Platform-independent core: shadow tree, styles (RN semantics), Taffy layout (flex + grid), text merging, list virtualization,
+                      mount items; CSS values (`css.rs`: colors, lengths, shadows, gradients, filters), effects (`effects.rs`), Tailwind (`tailwind/`)
   yf-anim/            Native animation graph (pure Rust): value / interpolate / math nodes, timing / spring / decay drivers
   yf-js/              QuickJS host: console / timers / op bridge, op buffer decoding, bytecode compilation and loading
   yf-engine/          Engine thread: drives yf-js + yf-core and hands one MountBatch per frame to the platform
   yf-bundler/         Bundler: rolldown + Oxc (TS stripping) + Solid universal JSX compiler + embedded JS packages + source maps;
+                      the `yf:tailwind-theme` module (yf.json `tailwind`) and the unknown-class check (`classes.rs`);
                       development bundles with hot module replacement (`hot.rs`); the TypeScript declarations of `.yf/types` (`types.rs`)
   yf-dev/             Dev tooling: dev server protocol, server (CLI, feature `server`), client (host, feature `client`)
   yf-platform-apple/  UIKit backend (iOS / simulator / Mac Catalyst): native view mounting, CoreText text engine, input, AppView, standalone app;
@@ -173,6 +175,45 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
 - **Controlled inputs**: each native edit carries an edit count; a `value` from JS is applied only if it is based on the latest
   edit, so a slow JS round trip can never overwrite newer typing (React Native's eventCount).
 
+- **Tailwind** (`class` / `classList` on every element; `tailwind/`, `core/classes.rs`): JS only passes the strings. Each distinct
+  class string is parsed once into rules (an LRU of ≤4096 strings) with what they depend on (`deps`: appearance, window width /
+  height, direction, the node's own states, a group's states, sibling position, reduce motion). A node's style is the default,
+  then its matching class rules, then its inline `style` replayed on top (`Op::SetStyle` carries a `StylePatch` besides the
+  merged `Style`), so the inline style always wins. Later utilities win over earlier ones (components append a `class` prop, no
+  `tailwind-merge`); variant rules apply after plain ones in Tailwind's variant order. Variants: `dark:`, `sm:`…`2xl:` / `max-*:` /
+  `min-[..]:`, `portrait:` / `landscape:`, `ios:` / `android:`, `rtl:` / `ltr:`, `motion-safe:` / `motion-reduce:`, `active:` /
+  `hover:` / `focus:` / `focus-within:` / `disabled:` / `enabled:`, `group-*:` (named groups `group/name`), `first:` / `last:` /
+  `odd:` / `even:` / `only:`, `placeholder:`, `!` (important). Interaction states are reported natively only for the bits a node's
+  classes read (`MountItem::TrackStates` → `EngineControl::set_states`); `focus-within` propagates to ancestors in the core.
+  `disabled` (any element) applies `disabled:` and drops the node's press listeners from what is mounted, so it shows no press
+  feedback either. The theme is Tailwind 4's (palette converted from OKLCH to sRGB) extended by `yf.json` `"tailwind"` (`colors`,
+  `spacing`, `breakpoints`, `fontSize`, `radius`, `shadow`, ...; unknown keys are build errors), compiled into the bundle as
+  `yf:tailwind-theme` and pushed as a root prop at startup. `yf build` / `yf dev` warn about unknown static classes
+  (`file:line:col: unknown class '...'`, target `yf::build`); the core logs each unknown class once at run time. Class-only
+  settings that are props in React Native (`line-clamp-*`, `truncate`, `whitespace-nowrap`, `pointer-events-*`, `object-*`,
+  `placeholder:text-*`, `caret-*`) lose to explicit props. Not supported: `peer-*`, pseudo-elements, arbitrary CSS properties;
+  `space-x/y-*` are gaps.
+- **Text style inheritance** (CSS-like): a view's text properties (color, font, size, alignment, ...) pass to the texts and inputs
+  inside it, so `class="text-white"` on a button styles its label. `insetPadding` (runtime only: `SafeAreaView`,
+  `KeyboardAvoidingView`) is added to the resolved padding, so classes and styles keep their own padding.
+- **Effects** (styles and classes; `effects.rs`): `boxShadow` (CSS syntax, several, `inset`; also `shadow-*` / `ring-*`),
+  `experimental_backgroundImage` / `backgroundImage` (linear / radial / conic gradients), `filter` (`brightness`, `contrast`,
+  `grayscale`, `hue-rotate`, `invert`, `saturate`, `sepia`, `opacity`, `blur`, `drop-shadow`; color filters are composed into one
+  matrix), `backdropFilter` (blur), `mixBlendMode`, `outline*`, `visibility`, `cursor`, `transition*` (CSS: property groups,
+  duration, delay, easing) and `animation*` (Tailwind's `spin` / `ping` / `pulse` / `bounce`), `display: grid` with
+  `gridTemplateColumns/Rows`, `gridAutoFlow/Columns/Rows`, `gridColumn/Row(Start/End)`, `justifyItems/Self`; text
+  `textDecorationStyle` (`double` / `dotted` / `dashed` / `wavy`), `textDecorationThickness`, `textUnderlineOffset`, `em`
+  letter spacing and unitless line heights (multiples). Translations by a fraction of the size (`translate-x-1/2`) are resolved by
+  the core against the frame and sent again when the size changes.
+  iOS: shadows are one `CALayer` per shadow with a `shadowPath` (outer shadows masked to outside the box, inset ones to the padding
+  box), gradients `CAGradientLayer`, transitions explicit `CABasicAnimation`s from the presented values, keyframes
+  `CAKeyframeAnimation`s, blend modes `compositingFilter`, `cursor` a `UIPointerInteraction`, backdrop blur a
+  `UIVisualEffectView` (a system material at a fraction: an approximation), text decorations other than solid single lines are
+  drawn by `TextView`. Android: `Decor` draws shadows, gradients and outlines; filters are `RenderEffect`s (API 31+; below, only
+  color filters through a layer paint), blend modes a layer paint (API 29+), transitions / keyframes `ValueAnimator`s.
+  Known limits: iOS has no CSS filters on views (only `opacity`, `brightness` ≤ 1 and `drop-shadow`; images take every color filter
+  and `blur`, applied while decoding); iOS texts draw no gradients or inset shadows; Android has no backdrop blur, and no `blur` /
+  `drop-shadow` before API 31.
 - **View styles**: `backgroundColor`, `borderWidth` / `borderColor` (also per side: `borderTopWidth`, `borderLeftColor`, ...),
   `borderStyle` (`solid` / `dashed` / `dotted`), `borderRadius` + the four `borderTopLeftRadius`-style corners, `overflow`, `opacity`,
   `transform` (translate / scale / rotate / rotateX / rotateY / skew / perspective, applied right to left like CSS; Android has no
@@ -299,7 +340,7 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
    sent. Check item counts with `yf trace`.
 5. **Text**: measurements are cached per constraint (`TextContext.cache`); platforms cache font objects (`FontCache`).
 6. **Changes to hot paths come with before / after `yf trace` timings and item counts.** Current baselines (Apple Silicon):
-   - counter, headless (debug): first frame ~0.5ms (57 ops / 48 mount items), one tap ~0.15ms (12 ops / 8 items).
+   - counter, headless (debug): first frame ~0.5–0.65ms (58 ops / 49 mount items), one tap ~0.15ms (12 ops / 8 items).
    - counter, Catalyst (release): first frame ~1.05–1.15ms (of which ~0.7ms is cold CoreText layout of 10 texts), one tap ~0.12ms.
    - Hot reload: ~120ms from saving a file to the device running the new version (file event latency and ~60ms of development
      bundling included); applying a hot update takes 0.2–0.5ms on the engine thread.
@@ -458,6 +499,13 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
 - **Synthetic clicks on the Simulator / Catalyst windows go to whatever macOS window is on top at that point**: floating windows
   of other apps (e.g. a Slack huddle bar at window level 1001) silently swallow clicks over a band of the app. When a tap does
   nothing, list the windows at the point (`CGWindowListCopyWindowInfo`) before suspecting hit testing.
+- **Tailwind variant order decides between variants**, not their order in the string: `odd:bg-a last:bg-b` gives an odd last row
+  `bg-a` (Tailwind sorts `odd` after `last`), exactly as in CSS.
+- **iOS clamps shared corner radii itself** (`rounded-full` is 9999): Core Animation does not reliably clamp a `cornerRadius`
+  over half the short side, so `decor.rs` clamps it and clamps again when the size changes.
+- **Android, negative letter spacing**: Minikin adds half the spacing on both sides of each glyph and trims the halves at line edges,
+  so a line is wider than its sum of advances; `TextLayouts.Prepared.desired` adds the largest negative spacing back, or text laid
+  out at its natural width wraps (`tracking-tight`).
 - **Not supported / not verifiable here**: `I18nManager.swapLeftAndRightInRTL(false)` (left / right always swap right to left);
   after switching direction at runtime UIKit keeps an existing back button's chevron; Android has no skew transforms (as in React Native); the iOS simulator cannot
   inject edge swipes (interactive back is untested there); Android's stylus handwriting mode (on by default on recent

@@ -130,6 +130,8 @@ final class TextBox extends View implements Node {
 
     private final android.graphics.Paint decorationPaint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
 
+    private final android.graphics.Path decorationPath = new android.graphics.Path();
+
     /** Underlines and strikethroughs, across the lines each run covers. */
     private void drawDecorations(Canvas canvas) {
         CharSequence text = layout.getText();
@@ -141,8 +143,22 @@ final class TextBox extends View implements Node {
         for (TextLayouts.Decoration d : decorations) {
             int start = spanned.getSpanStart(d), end = spanned.getSpanEnd(d);
             decorationPaint.setColor(d.color);
-            float thickness = Math.max(1, d.sizePx / 16);
+            float thickness = d.thicknessPx > 0 ? d.thicknessPx : Math.max(1, d.sizePx / 16);
             decorationPaint.setStrokeWidth(thickness);
+            decorationPaint.setStyle(android.graphics.Paint.Style.STROKE);
+            switch (d.style) {
+                case 2:
+                    decorationPaint.setPathEffect(new android.graphics.DashPathEffect(new float[] {0, thickness * 2}, 0));
+                    decorationPaint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+                    break;
+                case 3:
+                    decorationPaint.setPathEffect(new android.graphics.DashPathEffect(new float[] {thickness * 3, thickness * 2}, 0));
+                    decorationPaint.setStrokeCap(android.graphics.Paint.Cap.BUTT);
+                    break;
+                default:
+                    decorationPaint.setPathEffect(null);
+                    decorationPaint.setStrokeCap(android.graphics.Paint.Cap.BUTT);
+            }
             for (int line = layout.getLineForOffset(start); line < lines; line++) {
                 int lineStart = layout.getLineStart(line), lineEnd = layout.getLineVisibleEnd(line);
                 if (lineStart >= end) break;
@@ -153,14 +169,40 @@ final class TextBox extends View implements Node {
                 if (layout.getParagraphDirection(line) < 0 && b >= lineEnd) x2 = layout.getLineLeft(line);
                 float baseline = layout.getLineBaseline(line);
                 if (d.underline) {
-                    float y = baseline + d.sizePx * 0.11f;
-                    canvas.drawLine(x1, y, x2, y, decorationPaint);
+                    float y = baseline + (Float.isNaN(d.offsetPx) ? d.sizePx * 0.11f : d.offsetPx + thickness / 2);
+                    line(canvas, d.style, x1, x2, y, thickness);
                 }
-                if (d.strike) {
-                    float y = baseline - d.sizePx * 0.27f;
-                    canvas.drawLine(x1, y, x2, y, decorationPaint);
-                }
+                if (d.strike) line(canvas, d.style, x1, x2, baseline - d.sizePx * 0.27f, thickness);
             }
+        }
+    }
+
+    /** One decoration line centered on {@code y}. */
+    private void line(Canvas canvas, int style, float x1, float x2, float y, float thickness) {
+        if (x2 < x1) {
+            float t = x1;
+            x1 = x2;
+            x2 = t;
+        }
+        switch (style) {
+            case 1:
+                canvas.drawLine(x1, y - thickness, x2, y - thickness, decorationPaint);
+                canvas.drawLine(x1, y + thickness, x2, y + thickness, decorationPaint);
+                break;
+            case 4: {
+                float amplitude = thickness * 1.5f, period = Math.max(4, thickness * 4);
+                decorationPath.reset();
+                decorationPath.moveTo(x1, y);
+                int steps = Math.max(2, (int) Math.ceil((x2 - x1) / period * 8));
+                for (int i = 1; i <= steps; i++) {
+                    float t = (x2 - x1) * i / steps;
+                    decorationPath.lineTo(x1 + t, y + amplitude * (float) Math.sin(t / period * Math.PI * 2));
+                }
+                canvas.drawPath(decorationPath, decorationPaint);
+                break;
+            }
+            default:
+                canvas.drawLine(x1, y, x2, y, decorationPaint);
         }
     }
 }
