@@ -373,6 +373,7 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                 });
                 e.bool(config.transparent);
                 e.bool(config.status_bar_translucent);
+                e.bool(config.dismissible);
             }
             MountItem::LayoutAnimation(animation) => {
                 e.int(LAYOUT_ANIMATION);
@@ -797,6 +798,7 @@ fn screen_config(e: &mut Encoded, c: &ScreenConfig) {
     opt_color(e, c.title_color);
     e.bool(c.back_visible);
     e.bool(c.gesture_enabled);
+    e.bool(c.prevent_back);
     e.int(match c.animation {
         ScreenAnimation::Default => 0,
         ScreenAnimation::Fade => 1,

@@ -157,14 +157,33 @@ final class StackBox extends FrameLayout implements Node {
     /** Whether the back button pops a screen of this stack. */
     boolean canPop() {
         ScreenBox top = top();
-        return shown.size() > 1 && top != null && top.gestureEnabled && isShown();
+        return shown.size() > 1 && top != null && !top.preventBack && isShown();
+    }
+
+    /** Whether the top screen keeps the user (`preventBack`): back asks JS to leave. */
+    boolean preventsBack() {
+        ScreenBox top = top();
+        return top != null && top.preventBack && isShown();
+    }
+
+    /** Whether a back gesture may drag the top screen away (`gestureEnabled`). */
+    boolean canSwipe() {
+        ScreenBox top = top();
+        return canPop() && top.gestureEnabled;
+    }
+
+    /** The back button, the toolbar's arrow or a finished back gesture. */
+    void back() {
+        ScreenBox top = top();
+        if (top != null && preventsBack()) mounter.event(top.id, Native.BACK_REQUEST);
+        else pop();
     }
 
     private float backProgress = -1;
 
     /** Predictive back: the gesture started. */
     void backStarted() {
-        if (!canPop() || transition != null) return;
+        if (!canSwipe() || transition != null) return;
         backProgress = 0;
         ScreenBox lower = shown.get(shown.size() - 2);
         lower.setVisibility(VISIBLE);
@@ -226,6 +245,8 @@ final class StackBox extends FrameLayout implements Node {
         final Toolbar toolbar;
         int animation;
         boolean gestureEnabled = true;
+        /** `preventBack`: the back buttons send `onBackRequest` instead of popping. */
+        boolean preventBack;
         private final BackArrow arrow;
 
         ScreenBox(Context context, Mounter mounter, int id) {
@@ -236,7 +257,7 @@ final class StackBox extends FrameLayout implements Node {
             toolbar = new Toolbar(context);
             arrow = new BackArrow(mounter.density);
             toolbar.setNavigationOnClickListener(v -> {
-                if (getParent() instanceof StackBox) ((StackBox) getParent()).pop();
+                if (getParent() instanceof StackBox) ((StackBox) getParent()).back();
             });
             addView(toolbar, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0));
             setBackgroundColor(themeColor(context, android.R.attr.colorBackground, 0xffffffff));
@@ -268,10 +289,11 @@ final class StackBox extends FrameLayout implements Node {
 
         /** Applies `encode.rs` `screen_config`. */
         void configure(Mounter m, String title, boolean shown, boolean transparent, int tint, int background,
-                       int titleColor, boolean backVisible, boolean gesture, int animation, int left, int right,
-                       int titleView, float headerHeight, boolean canGoBack) {
+                       int titleColor, boolean backVisible, boolean gesture, boolean preventBack, int animation,
+                       int left, int right, int titleView, float headerHeight, boolean canGoBack) {
             this.animation = animation;
             this.gestureEnabled = gesture;
+            this.preventBack = preventBack;
             float d = m.density;
             toolbar.setVisibility(shown ? VISIBLE : GONE);
             toolbar.setTitle(titleView >= 0 ? null : title);

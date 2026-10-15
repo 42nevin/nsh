@@ -155,8 +155,8 @@ only has rendering and the types; there is no catch-all module.
 | `Canvas` (runtime) | `<canvas>`: `CanvasView` (drawRect replay) | see **Canvas** below |
 | `List` (runtime) | UIScrollView + recycled cells | see **List** below |
 | `<input>` | UITextField / UITextView in a container | `value` / `defaultValue` / `onChangeText` / `onSubmitEditing` / `onFocus` / `onBlur`, `placeholder`, `secureTextEntry`, `keyboardType`, `returnKeyType`, `autoCapitalize`, `autoCorrect`, `multiline`, `maxLength`, `editable`, `autoFocus`, `selectionColor`, `blurOnSubmit`, `selection` + `onSelectionChange` (UTF-16 `start` / `end`), `onKeyPress` (`key`: the text, `Backspace`, `Enter`), `autoComplete` (autofill; `ios={{ textContentType }}` for iOS's names), `caretHidden`, `onContentSizeChange` (the text's size, for growing inputs); ref `setSelection(start, end)` |
-| `Stack` / `Screen` (runtime) | UINavigationController | `createNavigator(route)`: `push` / `pop` / `popToTop` / `replace` / `reset`; screens keep their state while stacked; native header (`title`, `headerLeft` / `headerRight` / `headerTitle` elements, `headerTransparent`, colors; `ios={{ headerLargeTitle, headerBackTitle }}`), swipe back |
-| `Modal` (runtime) | presented UIViewController | `visible`, `animationType`, `transparent`, `onRequestClose` (controlled), `onShow`, `onDismiss`; `ios={{ presentationStyle, supportedOrientations }}` (`pageSheet` / `formSheet`), `android={{ statusBarTranslucent }}` (otherwise the content starts below the status bar) |
+| `Stack` / `Screen` (runtime) | UINavigationController | `createNavigator(route)`: `push` / `pop` / `popToTop` / `replace` / `reset`; screens keep their state while stacked; native header (`title`, `headerLeft` / `headerRight` / `headerTitle` elements, `headerTransparent`, colors; `ios={{ headerLargeTitle, headerBackTitle }}`), swipe back (`gestureEnabled`: the interactive gesture only); `preventBack` + `onBackRequest` keep the user on a screen (no swipe; the header / Android back buttons send the event instead of popping) |
+| `Modal` (runtime) | presented UIViewController | `visible`, `animationType`, `transparent`, `onRequestClose` (controlled), `onShow`, `onDismiss`; `dismissible` (iOS sheets swipe away, Android back closes natively, then `onRequestClose` + `onDismiss`); `ios={{ presentationStyle, supportedOrientations }}` (`pageSheet` / `formSheet`), `android={{ statusBarTranslucent }}` (otherwise the content starts below the status bar) |
 | `InputAccessoryView` (`nsh/ios`) | `<inputaccessory>`: a NshView set as `inputAccessoryView` | `nativeID`; inputs name it with `ios={{ inputAccessoryViewID }}`. A layout root as wide as the window and as tall as its content; the core resolves the id (`InputConfig::accessory`). Renders nothing on Android |
 | `WebView` | WKWebView (WebKit loaded on first use) | `source` (`uri` / `html` + `baseUrl`), `injectedJavaScript(BeforeContentLoaded)`, `onMessage` (pages call `window.ReactNativeWebView.postMessage`), `onLoad*`, `onNavigationStateChange`; ref: `reload()`, `goBack()`, `goForward()`, `postMessage(data)`, `injectJavaScript(js)` |
 | `Video` | AVPlayerLayer / AVPlayerViewController (AVFoundation loaded on first use) | `source`, `paused`, `muted`, `volume`, `rate`, `repeat`, `resizeMode`, `controls`, `onLoad` / `onProgress` / `onEnd` / `onBuffer` / `onError`; ref: `seek(seconds)` |
@@ -172,6 +172,18 @@ views, classes, canvases and native animations so they look the same on iOS and 
 components that are only compositions of existing primitives in JS (section lists, touchables, drawers, ...). React Native
 is a reference for which capabilities exist, not an API to be compatible with. The runtime keeps components that need core
 or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingView`, `InputAccessoryView`, `Canvas`).
+
+**The main thread never waits for JS.** Some callbacks are questions the system wants answered on the spot (may this
+text change, may the back button pop, may the sheet close, may this gesture begin, may the web view navigate): they are
+answered natively from props mounted beforehand, never by asking JS (blocking the main thread drops frames, can deadlock
+and reorders fast input). Events tell JS afterwards. Existing answers: input `maxLength` (`shouldChangeCharactersIn`,
+`InputFilter`), `blurOnSubmit` (`textFieldShouldReturn`), `gestureEnabled` / `preventBack` (`gestureRecognizerShouldBegin`,
+`navigationBar:shouldPopItem:`, Android `wantsBack()` / `OnBackInvokedCallback` registration), `dismissible`
+(`presentationControllerShouldDismiss`, the dialog's back), `pan` / `pinch` / `hitSlop` / `pointerEvents` /
+`keyboardShouldPersistTaps` (recognizers), capabilities (`decidePolicyForNavigationAction`, `shouldOverrideUrlLoading`),
+`cancelable`. A new capability with such a callback gets a prop (a menu's items, a rule, a flag); what a prop cannot
+express is let through and corrected in the event afterwards (a controlled `value` in `onChangeText`). `BackHandler` is
+of that kind: with a listener the press is taken, and JS exits the app when no listener handles it.
 
 - **Press feedback primitives** (native, no JS round trip): `activeOpacity`; `underlayColor` + `underlayOpacity` (default 0.85)
   on any view — the core shows the underlay as the background and fades the children while the platform reports the view
@@ -513,6 +525,7 @@ For code an app downloads (first-party updates, third-party mini apps): `nsh_pac
 
 - Formatting: `cargo +nightly fmt --all`, configured in `.rustfmt.toml`.
 - Workspace lints: `missing_docs = warn`, `unreachable_pub = deny`, `private_interfaces = deny`. New crates must set `[lints] workspace = true`.
+  They cover nsh's own Rust crates only: not the Java / Swift / TS sources, and never the apps built with nsh.
   - Every public API has a doc comment.
   - Items in private modules are `pub(crate)`, never `pub`.
 - Everything is written in English: code comments, docs, logs and this file. Comments explain why, not what the code says.

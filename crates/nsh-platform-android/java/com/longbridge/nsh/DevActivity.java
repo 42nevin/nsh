@@ -15,6 +15,9 @@ public final class DevActivity extends Activity {
     private NshView view;
     private NshTrust trust;
 
+    /** Created by the system from the manifest. */
+    public DevActivity() {}
+
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);

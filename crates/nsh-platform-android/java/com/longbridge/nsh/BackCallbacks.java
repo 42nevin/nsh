@@ -31,7 +31,7 @@ final class BackCallbacks {
         public void onBackStarted(BackEvent event) {
             // Only a pop follows the finger; modals and JS decide on release.
             stack = mounter.wantsBack() ? mounter.backStack() : null;
-            if (stack != null && !mounter.hasShownModal()) stack.backStarted();
+            if (stack != null && !mounter.hasShownModal() && stack.canSwipe()) stack.backStarted();
             else stack = null;
         }
 

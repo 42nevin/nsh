@@ -37,6 +37,11 @@ import java.nio.charset.StandardCharsets;
 public class NshView extends FrameLayout {
     /** Receives fatal app errors on the UI thread. */
     public interface ErrorListener {
+        /**
+         * Called for each fatal error.
+         *
+         * @param message what went wrong
+         */
         void onError(String message);
     }
 
@@ -62,11 +67,21 @@ public class NshView extends FrameLayout {
     private TextView status;
     private View errorView;
 
+    /**
+     * Creates an empty view; load an app into it.
+     *
+     * @param context the activity
+     */
     public NshView(Context context) {
         this(context, false);
     }
 
-    /** @param trace log per-commit timings */
+    /**
+     * Creates an empty view; load an app into it.
+     *
+     * @param context the activity
+     * @param trace log per-commit timings
+     */
     public NshView(Context context, boolean trace) {
         super(context);
         density = getResources().getDisplayMetrics().density;
@@ -90,6 +105,12 @@ public class NshView extends FrameLayout {
         handle = Native.create(this, density, trace);
     }
 
+    /**
+     * Receives fatal app errors (load failures, uncaught JS exceptions) on the
+     * UI thread. They are always logged.
+     *
+     * @param listener the listener, or null for none
+     */
     public void setErrorListener(ErrorListener listener) {
         errorListener = listener;
     }
@@ -97,8 +118,10 @@ public class NshView extends FrameLayout {
     /**
      * What the apps this view loads are granted at most, as JSON in the
      * form of {@code nsh.json}'s {@code capabilities} ({@code null}: what
-     * each app declares). Applies from the next load; false (and ignored)
-     * when the grant is invalid.
+     * each app declares). Applies from the next load.
+     *
+     * @param capabilities the grant, or null
+     * @return false (and ignored) when the grant is invalid
      */
     public boolean setGrantedCapabilities(String capabilities) {
         return Native.setGranted(handle, capabilities);
@@ -108,6 +131,12 @@ public class NshView extends FrameLayout {
      * The VM limits of the apps this view loads next: heap (MB), stack (KB),
      * the time budget of loading and of every other call into JS (ms), and
      * the node quota. 0 keeps a default.
+     *
+     * @param memoryMb JS heap, in MB
+     * @param stackKb interpreter stack, in KB
+     * @param loadMs time to evaluate the bundle, in ms
+     * @param callMs time of any other call into JS, in ms
+     * @param maxNodes nodes the app may keep
      */
     public void setLimits(int memoryMb, int stackKb, int loadMs, int callMs, int maxNodes) {
         Native.setLimits(handle, memoryMb, stackKb, loadMs, callMs, maxNodes);
@@ -118,6 +147,9 @@ public class NshView extends FrameLayout {
      * `assets/` next to it. Bytecode only loads from the APK's own assets
      * ({@link #loadAssetBundle}) or a signed package ({@link #runPackage}):
      * files can be replaced, and QuickJS does not validate bytecode.
+     *
+     * @param file the bundle
+     * @return false (reported to the error listener) if it cannot be read
      */
     public boolean loadBundleFile(File file) {
         if (file.getName().endsWith(".qbc")) {
@@ -143,7 +175,13 @@ public class NshView extends FrameLayout {
         }
     }
 
-    /** Runs `<dir>/bundle.qbc` from the APK's assets; app assets come from `<dir>/assets/`. */
+    /**
+     * Runs {@code dir/bundle.qbc} from the APK's assets; app assets come
+     * from {@code dir/assets/}.
+     *
+     * @param dir the directory in the APK's assets
+     * @return false (reported to the error listener) if it cannot be read
+     */
     public boolean loadAssetBundle(String dir) {
         try {
             byte[] code = Net.readAll(getContext().getAssets().open(dir + "/bundle.qbc"));
@@ -168,6 +206,8 @@ public class NshView extends FrameLayout {
     /**
      * Runs a verified package ({@link NshTrust#openPackage}), replacing the
      * running app. Takes the package: it cannot run again.
+     *
+     * @param pkg the package
      */
     public void runPackage(NshPackage pkg) {
         Native.runPackage(handle, pkg.take());
@@ -180,7 +220,12 @@ public class NshView extends FrameLayout {
         assetDir = new File(dir);
     }
 
-    /** Development: loads from a `nsh dev` server and reloads on every change. */
+    /**
+     * Development: loads from a `nsh dev` server and reloads on every change.
+     *
+     * @param url the server, {@code ws://host:port/ws}
+     * @return false without development support (the release AAR)
+     */
     public boolean connectDevServer(String url) {
         // ws://host:port/ws -> assets at http://host:port/assets/
         if (url.startsWith("ws://")) {
@@ -346,6 +391,8 @@ public class NshView extends FrameLayout {
      * JS `BackHandler` listeners. Activities on Android 12 and older call it
      * from {@code onBackPressed} and fall back to the default when it
      * returns false; newer versions get the press through a callback.
+     *
+     * @return whether the app handled the press
      */
     public boolean handleBack() {
         if (exiting || handle == 0) return false;

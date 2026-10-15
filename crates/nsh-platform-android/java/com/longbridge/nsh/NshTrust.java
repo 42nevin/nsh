@@ -12,16 +12,23 @@ import java.io.File;
 public final class NshTrust implements AutoCloseable {
     private long handle;
 
-    /** @throws IllegalStateException if the state in {@code stateDir} cannot be read */
+    /**
+     * Opens (or creates) the store in {@code stateDir}.
+     *
+     * @param stateDir where its state persists, e.g. under {@code getFilesDir()}
+     * @throws IllegalStateException if the state cannot be read
+     */
     public NshTrust(File stateDir) {
         handle = Native.trustCreate(stateDir.getAbsolutePath());
         if (handle == 0) throw new IllegalStateException("cannot open the trust store in " + stateDir);
     }
 
     /**
-     * Trusts a root public key (base64, as `nsh keygen` writes it in
-     * `<name>.pub`): packages whose release key it certified load. False for
-     * an invalid key.
+     * Trusts a root public key (base64, as `nsh keygen` writes it in a
+     * {@code .pub} file): packages whose release key it certified load.
+     *
+     * @param publicKey the key
+     * @return false for an invalid key
      */
     public boolean addRoot(String publicKey) {
         return Native.trustAddRoot(handle(), publicKey.trim());
@@ -29,8 +36,10 @@ public final class NshTrust implements AutoCloseable {
 
     /**
      * Applies a revocation list (the JSON `nsh revoke` writes) signed by a
-     * trusted root and newer than the one the store has. False if it is
-     * invalid, untrusted or not newer.
+     * trusted root and newer than the one the store has.
+     *
+     * @param json the list
+     * @return false if it is invalid, untrusted or not newer
      */
     public boolean updateRevocations(String json) {
         return Native.trustUpdateRevocations(handle(), json);
@@ -44,6 +53,8 @@ public final class NshTrust implements AutoCloseable {
      * refused from now on). Slow for large packages: call it off the UI
      * thread, then {@link NshView#runPackage} on it.
      *
+     * @param file the package
+     * @return the verified package
      * @throws NshPackage.RefusedException with the reason
      */
     public NshPackage openPackage(File file) throws NshPackage.RefusedException {

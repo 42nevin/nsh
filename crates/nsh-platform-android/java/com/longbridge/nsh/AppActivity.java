@@ -7,6 +7,9 @@ import android.os.Bundle;
 public final class AppActivity extends Activity {
     private NshView view;
 
+    /** Created by the system from the manifest. */
+    public AppActivity() {}
+
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);

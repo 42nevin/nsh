@@ -23,7 +23,9 @@ public struct NshError: Error, LocalizedError, CustomStringConvertible, Sendable
     /// What went wrong.
     public let message: String
 
+    /// The message.
     public var description: String { message }
+    /// The message.
     public var errorDescription: String? { message }
 }
 
@@ -49,6 +51,7 @@ public struct NshLimits: Sendable, Equatable {
     /// Nodes the app may keep (default 200 000).
     public var maxNodes: UInt32?
 
+    /// Limits; `nil` keeps a default.
     public init(
         memoryMB: UInt32? = nil,
         stackKB: UInt32? = nil,
@@ -85,6 +88,7 @@ public final class NshAppView: UIView {
         attach()
     }
 
+    /// Creates the view from a storyboard or nib.
     public required init?(coder: NSCoder) {
         app = nsh_app_create(.zero, false)
         super.init(coder: coder)

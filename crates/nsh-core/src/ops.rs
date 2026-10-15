@@ -161,6 +161,7 @@ events! {
     ImageInfo = "onImageInfo": "An `Image.getSize` / `Image.prefetch` request finished (root only; payload: `id`, `width` and `height` in pixels, or `error`).",
     TextLayout = "onTextLayout": "A text block was laid out (payload: [`EventPayload::TextLayout`]).",
     ContentSizeChange = "onContentSizeChange": "The size of an input's text changed (payload: `width`, `height`; raised by the core).",
+    BackRequest = "onBackRequest": "The user tried to leave a screen with `preventBack` (back button, header back button).",
 }
 
 /// What an input holds, for the system's autofill and suggestions
@@ -684,8 +685,11 @@ pub enum ScreenProp {
     HeaderBackTitle(Option<Arc<str>>),
     /// `headerBackVisible`.
     HeaderBackVisible(bool),
-    /// `gestureEnabled`: swipe back (iOS) / back button (Android) pops it.
+    /// `gestureEnabled`: the interactive back gesture.
     GestureEnabled(bool),
+    /// `preventBack`: the user cannot leave the screen; back sends
+    /// `onBackRequest`.
+    PreventBack(bool),
     /// `animation`.
     Animation(ScreenAnimation),
 }
@@ -727,6 +731,8 @@ pub enum ModalProp {
     StatusBarTranslucent(bool),
     /// `supportedOrientations` (iOS): [`crate::ModalConfig::PORTRAIT`] bits.
     Orientations(u8),
+    /// `dismissible`: the user can close it natively.
+    Dismissible(bool),
 }
 
 /// An imperative call on a native view (`ref.focus()` and the like).

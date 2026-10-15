@@ -28,7 +28,7 @@ import java.util.List;
  * Text typesetting for the engine thread (crates/nsh-platform-android/src/text.rs).
  * Sizes cross the boundary in dp; layouts are made in px for drawing.
  */
-public final class TextLayouts {
+final class TextLayouts {
     private TextLayouts() {}
 
     /** Where registered font files are written (set by NshView). */

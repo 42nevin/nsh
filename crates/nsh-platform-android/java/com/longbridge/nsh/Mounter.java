@@ -61,7 +61,7 @@ final class Mounter {
     /** A screen's options (`encode.rs` `screen_config`). */
     static final class ScreenOptions {
         String title;
-        boolean shown = true, transparent, backVisible = true, gesture = true;
+        boolean shown = true, transparent, backVisible = true, gesture = true, preventBack;
         int tint, background, titleColor, animation, left = -1, right = -1, titleView = -1;
         float headerHeight;
     }
@@ -351,8 +351,10 @@ final class Mounter {
                     b.getInt(); // presentation: Android modals cover the window
                     boolean transparent = b.getInt() != 0;
                     boolean translucent = b.getInt() != 0;
+                    boolean dismissible = b.getInt() != 0;
                     if (modal != null) {
                         modal.animation = animation;
+                        modal.dismissible = dismissible;
                         modal.transparent = transparent;
                         modal.setStatusBarTranslucent(translucent);
                     }
@@ -1301,6 +1303,7 @@ final class Mounter {
         o.titleColor = b.getInt() != 0 ? b.getInt() : skip(b);
         o.backVisible = b.getInt() != 0;
         o.gesture = b.getInt() != 0;
+        o.preventBack = b.getInt() != 0;
         o.animation = b.getInt();
         o.left = b.getInt();
         o.right = b.getInt();
@@ -1335,7 +1338,7 @@ final class Mounter {
             View stack = views.get(hosts.get(id, -1));
             boolean canGoBack = stack instanceof StackBox && ((StackBox) stack).screens.indexOf(id) > 0;
             ((StackBox.ScreenBox) v).configure(this, o.title, o.shown, o.transparent, o.tint, o.background,
-                    o.titleColor, o.backVisible, o.gesture, o.animation, o.left, o.right, o.titleView,
+                    o.titleColor, o.backVisible, o.gesture, o.preventBack, o.animation, o.left, o.right, o.titleView,
                     o.headerHeight, canGoBack);
             reportScreenInsets(id, o);
         }
@@ -1373,13 +1376,14 @@ final class Mounter {
         insets(id, top, right, bottom, left);
     }
 
-    /** Whether the back button means something to the app now. */
+    /**
+     * Whether the back button means something to the app now. Decided from
+     * what is mounted (modals, stacks, `preventBack`, a `BackHandler`), never
+     * by asking JS: the system asks synchronously.
+     */
     boolean wantsBack() {
         if (!shownModals.isEmpty()) return true;
-        for (StackBox s : stacks) {
-            if (s.canPop()) return true;
-        }
-        return wants(1, Native.BACK_PRESS);
+        return backStack() != null || wants(1, Native.BACK_PRESS);
     }
 
     void updateBack() {
@@ -1390,24 +1394,31 @@ final class Mounter {
         return !shownModals.isEmpty();
     }
 
-    /** The stack the back button pops, if any. */
+    /** The stack the back button acts on (pops, or asks to leave), if any. */
     StackBox backStack() {
         for (int i = stacks.size() - 1; i >= 0; i--) {
-            if (stacks.get(i).canPop()) return stacks.get(i);
+            StackBox s = stacks.get(i);
+            if (s.preventsBack() || s.canPop()) return s;
         }
         return null;
+    }
+
+    /** A modal closed itself (`dismissible`): the back button no longer goes to it. */
+    void modalClosed(ModalHost modal) {
+        shownModals.remove(modal);
+        updateBack();
     }
 
     /** The back button: the newest modal asks to close, else the newest
      * stack pops, else JS hears about it. Returns false if nothing did. */
     boolean handleBack() {
         if (!shownModals.isEmpty()) {
-            event(shownModals.get(shownModals.size() - 1).id, Native.REQUEST_CLOSE);
+            shownModals.get(shownModals.size() - 1).backPressed();
             return true;
         }
         StackBox stack = backStack();
         if (stack != null) {
-            stack.pop();
+            stack.back();
             return true;
         }
         if (wants(1, Native.BACK_PRESS)) {

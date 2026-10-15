@@ -110,8 +110,16 @@ export interface ScreenProps {
   headerRight?: JSX.Element;
   /** Replaces the title. */
   headerTitle?: JSX.Element;
-  /** The user can pop the screen (swipe back, back button). */
+  /** The interactive back gesture (iOS swipe back, Android predictive back
+   * following the finger); the back buttons pop either way (default true). */
   gestureEnabled?: boolean;
+  /** The user cannot leave the screen: no swipe back, and the back buttons
+   * (header, Android back) call `onBackRequest` instead of popping, e.g. to
+   * confirm discarding changes and then `pop()`. Decided natively when the
+   * system asks, so set it before the user acts. */
+  preventBack?: boolean;
+  /** The user tried to leave a screen with `preventBack`. */
+  onBackRequest?: () => void;
   animation?: "default" | "fade" | "none";
   style?: StyleProp<ViewStyle>;
   onDismiss?: () => void;
@@ -173,6 +181,11 @@ export interface ModalProps {
   animationType?: "slide" | "fade" | "none";
   /** The background shows what is behind. */
   transparent?: boolean;
+  /** The user closes it natively (iOS sheet swiped down, Android back
+   * button), then `onRequestClose` and `onDismiss` follow: set `visible` to
+   * false there. Without it (default) those only ask to close and `visible`
+   * decides. */
+  dismissible?: boolean;
   /** The user asked to close (Android back button, iOS sheet swipe): set
    * `visible` to false to close it. */
   onRequestClose?: () => void;

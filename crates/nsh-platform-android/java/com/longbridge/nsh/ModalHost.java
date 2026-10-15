@@ -28,6 +28,8 @@ final class ModalHost {
     private Dialog dialog;
     int animation; // 0 slide, 1 fade, 2 none
     boolean transparent;
+    /** `dismissible`: the back button closes it here, then tells JS. */
+    boolean dismissible;
     /** The content reaches under the status bar (else it starts below). */
     private boolean translucent;
     private boolean closing;
@@ -83,14 +85,14 @@ final class ModalHost {
         dialog.setCancelable(false);
         dialog.setOnKeyListener((d, keyCode, event) -> {
             if (keyCode == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP) {
-                requestClose();
+                backPressed();
                 return true;
             }
             return keyCode == KeyEvent.KEYCODE_BACK;
         });
         if (Build.VERSION.SDK_INT >= 33) {
             dialog.getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::requestClose);
+                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::backPressed);
         }
         dialog.show();
         matchSystemBars(window);
@@ -133,9 +135,18 @@ final class ModalHost {
         }
     }
 
-    /** The back button: the app decides (`visible`). */
-    private void requestClose() {
+    /**
+     * The back button. Answered from `dismissible`, not by asking JS: close
+     * here (then `onRequestClose`, and `onDismiss` when gone), or only ask
+     * (`visible` decides).
+     */
+    void backPressed() {
+        if (closing) return;
         mounter.event(id, Native.REQUEST_CLOSE);
+        if (dismissible) {
+            dismiss();
+            mounter.modalClosed(this);
+        }
     }
 
     void dismiss() {

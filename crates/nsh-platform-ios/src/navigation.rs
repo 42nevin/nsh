@@ -5,6 +5,10 @@
 //! header) and modals at the size reported here; this module only
 //! arranges controllers and reports what the user does natively (popping
 //! with the back button or a swipe, swiping a sheet down).
+//!
+//! UIKit asks some of this synchronously (may the swipe begin, may the back
+//! button pop, may the sheet close): the answers come from props already
+//! mounted (`gestureEnabled`, `preventBack`, `dismissible`), never from JS.
 
 use std::cell::Cell;
 
@@ -23,9 +27,10 @@ use objc2_quartz_core::{CAMediaTiming, CATransition};
 use objc2_ui_kit::{
     NSForegroundColorAttributeName, UIAdaptivePresentationControllerDelegate, UIBarButtonItem,
     UIColor, UIGestureRecognizer, UIGestureRecognizerDelegate, UIInterfaceOrientationMask,
-    UIModalPresentationStyle, UIModalTransitionStyle, UINavigationBarAppearance,
-    UINavigationController, UINavigationControllerDelegate, UINavigationItemLargeTitleDisplayMode,
-    UIPresentationController, UIResponder, UIView, UIViewAutoresizing, UIViewController,
+    UIModalPresentationStyle, UIModalTransitionStyle, UINavigationBar, UINavigationBarAppearance,
+    UINavigationController, UINavigationControllerDelegate, UINavigationItem,
+    UINavigationItemLargeTitleDisplayMode, UIPresentationController, UIResponder, UIView,
+    UIViewAutoresizing, UIViewController,
 };
 
 use crate::{mount::SharedMounter, native_view::NshView};
@@ -113,6 +118,10 @@ pub(crate) struct ModalIvars {
     reported: Cell<Option<(CGSize, EdgeInsets)>>,
     /// `supportedOrientations`; empty keeps the presenter's.
     orientations: Cell<UIInterfaceOrientationMask>,
+    /// `dismissible`: a swipe down closes the sheet natively.
+    pub(crate) dismissible: Cell<bool>,
+    /// The user closed it natively; the app has not hidden it yet.
+    closed: Cell<bool>,
 }
 
 define_class!(
@@ -169,10 +178,24 @@ define_class!(
     }
 
     unsafe impl UIAdaptivePresentationControllerDelegate for ModalController {
-        /// The `visible` prop decides: a swipe down asks to close instead.
+        /// Answered from `dismissible`: close natively (reported when done),
+        /// or let `visible` decide (a swipe down only asks).
         #[unsafe(method(presentationControllerShouldDismiss:))]
         fn should_dismiss(&self, _controller: &UIPresentationController) -> bool {
-            false
+            self.ivars().dismissible.get()
+        }
+
+        /// The user swiped a `dismissible` sheet away.
+        #[unsafe(method(presentationControllerDidDismiss:))]
+        fn did_dismiss(&self, _controller: &UIPresentationController) {
+            let ivars = self.ivars();
+            ivars.closed.set(true);
+            ivars
+                .control
+                .dispatch_event(ivars.id, EventKind::RequestClose, EventPayload::None);
+            ivars
+                .control
+                .dispatch_event(ivars.id, EventKind::Dismiss, EventPayload::None);
         }
 
         #[unsafe(method(presentationControllerDidAttemptToDismiss:))]
@@ -192,6 +215,8 @@ impl ModalController {
             control,
             reported: Cell::new(None),
             orientations: Cell::new(UIInterfaceOrientationMask::empty()),
+            dismissible: Cell::new(false),
+            closed: Cell::new(false),
         });
         // SAFETY: UIViewController's designated initializer.
         unsafe {
@@ -224,6 +249,58 @@ impl ModalController {
         ivars
             .control
             .dispatch_event(ivars.id, EventKind::Insets, insets_payload(insets));
+    }
+}
+
+pub(crate) struct NavIvars {
+    stack: NodeId,
+    mounter: SharedMounter,
+    /// The app's own change of screens is being applied.
+    applying: Cell<bool>,
+}
+
+define_class!(
+    /// A stack's navigation controller: the back button asks it before
+    /// popping (`navigationBar:shouldPopItem:`), answered from `preventBack`.
+    #[unsafe(super(UINavigationController, UIViewController, UIResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = NavIvars]
+    pub(crate) struct NavController;
+
+    unsafe impl NSObjectProtocol for NavController {}
+
+    impl NavController {
+        /// The header's back button: a screen with `preventBack` stays and
+        /// gets `onBackRequest`.
+        #[unsafe(method(navigationBar:shouldPopItem:))]
+        fn should_pop_item(&self, bar: &UINavigationBar, item: &UINavigationItem) -> bool {
+            let ivars = self.ivars();
+            if !ivars.applying.get()
+                && let Ok(m) = ivars.mounter.get(self.mtm()).try_borrow()
+                && let Some(m) = m.as_ref()
+                && let Some(screen) = m.stack_prevents_back(ivars.stack)
+            {
+                m.dispatch(screen, EventKind::BackRequest);
+                false
+            } else {
+                // SAFETY: calling the superclass implementation.
+                unsafe { msg_send![super(self), navigationBar: bar, shouldPopItem: item] }
+            }
+        }
+    }
+);
+
+impl NavController {
+    fn new(mtm: MainThreadMarker, stack: NodeId, mounter: SharedMounter) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(NavIvars {
+            stack,
+            mounter,
+            applying: Cell::new(false),
+        });
+        // SAFETY: UIViewController's designated initializer.
+        unsafe {
+            msg_send![super(this), initWithNibName: Option::<&NSString>::None, bundle: Option::<&NSObject>::None]
+        }
     }
 }
 
@@ -302,7 +379,7 @@ impl StackDelegate {
 pub(crate) struct StackHost {
     /// Placed by the core; hosts the navigation controller's view.
     pub(crate) container: Retained<NshView>,
-    pub(crate) nav: Retained<UINavigationController>,
+    pub(crate) nav: Retained<NavController>,
     _delegate: Retained<StackDelegate>,
     /// The screens, bottom to top, as the app has them.
     pub(crate) screens: Vec<NodeId>,
@@ -318,7 +395,7 @@ pub(crate) struct StackHost {
 impl StackHost {
     pub(crate) fn new(mtm: MainThreadMarker, id: NodeId, mounter: SharedMounter) -> Self {
         let container = NshView::new(mtm);
-        let nav = UINavigationController::new(mtm);
+        let nav = NavController::new(mtm, id, mounter.clone());
         let delegate = StackDelegate::new(mtm, id, mounter);
         // SAFETY: the delegate lives as long as the stack.
         unsafe { nav.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
@@ -399,7 +476,9 @@ impl StackHost {
         }
         let array = NSArray::from_retained_slice(&desired);
         *self.applied.borrow_mut() = screens.iter().map(|(id, _, _)| *id).collect();
+        self.nav.ivars().applying.set(true);
         self.nav.setViewControllers_animated(&array, animated);
+        self.nav.ivars().applying.set(false);
     }
 }
 
@@ -514,9 +593,10 @@ impl ModalHost {
 
     /// Presents the modal over the controller showing `from`.
     pub(crate) fn present(&mut self, from: &UIView) {
-        if self.presented {
+        if self.presented && !self.controller.ivars().closed.get() {
             return;
         }
+        self.controller.ivars().closed.set(false);
         let Some(mut presenter) = controller_of(from) else {
             return log::warn!("cannot present a modal: no view controller shows the app");
         };
@@ -546,6 +626,7 @@ impl ModalHost {
             }
         }
         controller.ivars().orientations.set(mask);
+        controller.ivars().dismissible.set(c.dismissible);
         controller.setModalPresentationStyle(match (c.presentation, c.transparent) {
             (_, true) => UIModalPresentationStyle::OverFullScreen,
             (ModalPresentation::FullScreen, false) => UIModalPresentationStyle::FullScreen,
@@ -591,12 +672,22 @@ impl ModalHost {
         self.presented = true;
     }
 
+    /// Applies `config` (`dismissible` also while presented).
+    pub(crate) fn configure(&mut self, config: ModalConfig) {
+        self.controller.ivars().dismissible.set(config.dismissible);
+        self.config = config;
+    }
+
     /// Dismisses the modal; `done` runs when it is gone.
     pub(crate) fn dismiss(&mut self, done: impl Fn() + 'static) {
         if !self.presented {
             return;
         }
         self.presented = false;
+        // Closed by the user already (and reported).
+        if self.controller.ivars().closed.replace(false) {
+            return;
+        }
         let block = block2::RcBlock::new(done);
         self.controller.dismissViewControllerAnimated_completion(
             self.config.animation != ModalAnimation::None,

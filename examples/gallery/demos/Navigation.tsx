@@ -2,6 +2,7 @@ import { createSignal, For, onCleanup } from "solid-js";
 import { type JSX } from "nsh";
 import { BackHandler } from "nsh/android";
 import { Modal, Screen } from "nsh/navigation";
+import { Alert } from "nsh/system";
 import { SafeAreaView, useSafeAreaInsets } from "nsh/safe-area";
 import { nav } from "../nav";
 import { Button, colors, Section } from "../ui";
@@ -98,7 +99,31 @@ function Locked() {
   return (
     <Screen title="No swipe back" gestureEnabled={false}>
       <Page>
-        <text>Swiping back (iOS) is off on this screen; the back button still works.</text>
+        <text>The back gesture is off on this screen (no swipe on iOS, no predictive animation on Android); the back buttons still work.</text>
+      </Page>
+    </Screen>
+  );
+}
+
+/** `preventBack`: leaving with unsaved text asks first. */
+function Unsaved() {
+  const [text, setText] = createSignal("");
+  const confirm = () =>
+    Alert.alert("Discard your changes?", undefined, [
+      { text: "Keep editing", style: "cancel" },
+      { text: "Discard", style: "destructive", onPress: () => nav.pop() },
+    ]);
+  return (
+    <Screen title="Unsaved changes" preventBack={text().length > 0} onBackRequest={confirm}>
+      <Page>
+        <text>Type something, then go back (header button, swipe, Android back): the screen asks first.</text>
+        <input
+          value={text()}
+          onChangeText={setText}
+          placeholder="A draft"
+          style={{ borderWidth: 1, borderColor: "#d0d7de", borderRadius: 8, padding: 10, fontSize: 16 }}
+        />
+        <text style={{ color: "#57606a" }}>{text().length > 0 ? "preventBack is on" : "Nothing to lose: back pops"}</text>
       </Page>
     </Screen>
   );
@@ -147,7 +172,7 @@ function Deep(props: { depth: number }) {
   );
 }
 
-type Sheet = "fullScreen" | "pageSheet" | "formSheet" | "fade" | "dialog" | null;
+type Sheet = "fullScreen" | "pageSheet" | "formSheet" | "fade" | "dialog" | "dismissible" | null;
 
 export function Navigation() {
   const [sheet, setSheet] = createSignal<Sheet>(null);
@@ -174,6 +199,7 @@ export function Navigation() {
           <Button label="Fade in" onPress={push(Faded)} />
           <Button label="No animation" onPress={push(Instant)} />
           <Button label="No swipe back" onPress={push(Locked)} />
+          <Button label="Unsaved changes (preventBack)" onPress={push(Unsaved)} />
           <Button label="A deep stack" onPress={push(() => <Deep depth={1} />)} />
         </Section>
         <Section title="Modals">
@@ -182,6 +208,7 @@ export function Navigation() {
           <Button label="Form sheet (iOS)" color="#8250df" onPress={() => setSheet("formSheet")} />
           <Button label="Fade" color="#8250df" onPress={() => setSheet("fade")} />
           <Button label="Transparent dialog" color="#8250df" onPress={() => setSheet("dialog")} />
+          <Button label="Dismissible sheet (swipe / back closes)" color="#8250df" onPress={() => setSheet("dismissible")} />
         </Section>
         <Section title="Back button (Android)">
           <view style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
@@ -201,6 +228,13 @@ export function Navigation() {
           <text style={{ fontSize: 24, fontWeight: "700" }}>{sheet()}</text>
           <Insets />
           <text style={{ color: colors.muted }}>Close with the button, the back button (Android) or a swipe down (iOS sheets).</text>
+          <Button label="Close" onPress={close} />
+        </SafeAreaView>
+      </Modal>
+      <Modal visible={sheet() === "dismissible"} dismissible ios={{ presentationStyle: "pageSheet" }} onRequestClose={close}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: colors.surface, padding: 20, gap: 12 }}>
+          <text style={{ fontSize: 24, fontWeight: "700" }}>Dismissible</text>
+          <text style={{ color: colors.muted }}>Swipe it down (iOS) or press back (Android): it closes natively, then tells the app.</text>
           <Button label="Close" onPress={close} />
         </SafeAreaView>
       </Modal>

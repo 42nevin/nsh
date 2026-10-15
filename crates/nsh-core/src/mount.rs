@@ -302,8 +302,13 @@ pub struct ScreenConfig {
     pub back_title: Option<Arc<str>>,
     /// Show the back button.
     pub back_visible: bool,
-    /// The user can pop the screen (swipe back, back button).
+    /// The interactive back gesture (iOS swipe back, Android predictive back
+    /// following the finger) is on; the back button pops either way.
     pub gesture_enabled: bool,
+    /// The user cannot leave the screen (no swipe, the back buttons send
+    /// [`crate::EventKind::BackRequest`] instead of popping): answered by the
+    /// platform when the system asks, without JS.
+    pub prevent_back: bool,
     /// Push / pop transition.
     pub animation: ScreenAnimation,
     /// Leading header item view.
@@ -330,6 +335,7 @@ impl Default for ScreenConfig {
             back_title: None,
             back_visible: true,
             gesture_enabled: true,
+            prevent_back: false,
             animation: ScreenAnimation::Default,
             left: None,
             right: None,
@@ -353,6 +359,10 @@ pub struct ModalConfig {
     /// iOS: the orientations it allows ([`ModalConfig::PORTRAIT`], ...);
     /// 0 keeps the presenter's.
     pub orientations: u8,
+    /// The user can close it natively (iOS sheets swiped down, the Android
+    /// back button), reported as `onRequestClose` and `onDismiss` afterwards;
+    /// otherwise those only send `onRequestClose` and `visible` decides.
+    pub dismissible: bool,
 }
 
 impl ModalConfig {

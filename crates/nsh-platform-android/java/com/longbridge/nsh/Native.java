@@ -55,6 +55,7 @@ final class Native {
     static final int IMAGE_INFO = 43;
     static final int TEXT_LAYOUT = 44;
     static final int CONTENT_SIZE_CHANGE = 45;
+    static final int BACK_REQUEST = 46;
 
     static native long create(NshView view, float density, boolean trace);
 

@@ -1841,6 +1841,7 @@ impl<M: TextEngine> Core<M> {
                         ScreenProp::HeaderBackTitle(v) => c.back_title = v,
                         ScreenProp::HeaderBackVisible(v) => c.back_visible = v,
                         ScreenProp::GestureEnabled(v) => c.gesture_enabled = v,
+                        ScreenProp::PreventBack(v) => c.prevent_back = v,
                         ScreenProp::Animation(v) => c.animation = v,
                     }
                     // Header changes move the content.
@@ -1873,6 +1874,7 @@ impl<M: TextEngine> Core<M> {
                         ModalProp::Transparent(v) => c.transparent = v,
                         ModalProp::StatusBarTranslucent(v) => c.status_bar_translucent = v,
                         ModalProp::Orientations(v) => c.orientations = v,
+                        ModalProp::Dismissible(v) => c.dismissible = v,
                     }
                     flags |= dirty::MODAL;
                 }

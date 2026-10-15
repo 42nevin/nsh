@@ -906,7 +906,7 @@ impl Mounter {
                     ..
                 }) = self.slot_mut(id)
                 {
-                    modal.config = config;
+                    modal.configure(config);
                 }
             }
             MountItem::Anim(op) => {
@@ -2211,6 +2211,31 @@ impl Mounter {
         }
     }
 
+    /// The top screen of stack `id` if it keeps the user (`preventBack`).
+    pub(crate) fn stack_prevents_back(&self, id: NodeId) -> Option<NodeId> {
+        let Some(Slot {
+            native: Native::Stack(stack),
+            ..
+        }) = self.slot(id)
+        else {
+            return None;
+        };
+        let top = *stack
+            .screens
+            .iter()
+            .rev()
+            .find(|s| !stack.popped.contains(s))?;
+        match self.slot(top).map(|s| &s.native) {
+            Some(Native::Screen(screen)) if screen.config.prevent_back => Some(top),
+            _ => None,
+        }
+    }
+
+    /// Sends a payload-less event to the engine.
+    pub(crate) fn dispatch(&self, id: NodeId, kind: EventKind) {
+        self.control.dispatch_event(id, kind, EventPayload::None);
+    }
+
     /// Whether the user may pop the top screen of stack `id`.
     pub(crate) fn stack_can_pop(&self, id: NodeId) -> bool {
         let Some(Slot {
@@ -2226,7 +2251,9 @@ impl Mounter {
             .rev()
             .find(|s| !stack.popped.contains(s))
             .and_then(|&s| match self.slot(s).map(|s| &s.native) {
-                Some(Native::Screen(screen)) => Some(screen.config.gesture_enabled),
+                Some(Native::Screen(screen)) => {
+                    Some(screen.config.gesture_enabled && !screen.config.prevent_back)
+                }
                 _ => None,
             });
         // Never while a push or pop is still animating.

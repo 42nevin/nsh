@@ -766,6 +766,8 @@ fn decode_prop<'js>(
         "gestureEnabled" => {
             Prop::Screen(ScreenProp::GestureEnabled(value.as_bool().unwrap_or(true)))
         }
+        "preventBack" => Prop::Screen(ScreenProp::PreventBack(value.as_bool().unwrap_or(false))),
+        "dismissible" => Prop::Modal(ModalProp::Dismissible(value.as_bool().unwrap_or(false))),
         "animation" => Prop::Screen(ScreenProp::Animation(match string(&value)?.as_str() {
             "fade" => ScreenAnimation::Fade,
             "none" => ScreenAnimation::None,
