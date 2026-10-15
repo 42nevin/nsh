@@ -33,6 +33,8 @@ pub(crate) struct InputIvars {
     insets: Cell<UIEdgeInsets>,
     /// Maximum length in UTF-16 units.
     max_length: Cell<Option<u32>>,
+    /// `caretHidden`.
+    caret_hidden: Cell<bool>,
 }
 
 impl Default for InputIvars {
@@ -45,6 +47,7 @@ impl Default for InputIvars {
                 right: 0.0,
             }),
             max_length: Cell::new(None),
+            caret_hidden: Cell::new(false),
         }
     }
 }
@@ -72,6 +75,15 @@ define_class!(
             inset(bounds, self.ivars().insets.get())
         }
 
+        #[unsafe(method(caretRectForPosition:))]
+        fn caret_rect(&self, position: &objc2::runtime::AnyObject) -> CGRect {
+            if self.ivars().caret_hidden.get() {
+                return CGRect::ZERO;
+            }
+            // SAFETY: calling the superclass implementation.
+            unsafe { msg_send![super(self), caretRectForPosition: position] }
+        }
+
         #[unsafe(method(deleteBackward))]
         fn delete_backward(&self) {
             let empty = self.text().is_none_or(|t| t.length() == 0);
@@ -94,6 +106,15 @@ define_class!(
     pub(crate) struct Area;
 
     impl Area {
+        #[unsafe(method(caretRectForPosition:))]
+        fn caret_rect(&self, position: &objc2::runtime::AnyObject) -> CGRect {
+            if self.ivars().caret_hidden.get() {
+                return CGRect::ZERO;
+            }
+            // SAFETY: calling the superclass implementation.
+            unsafe { msg_send![super(self), caretRectForPosition: position] }
+        }
+
         #[unsafe(method(deleteBackward))]
         fn delete_backward(&self) {
             let empty = self.text().length() == 0;
@@ -360,6 +381,7 @@ impl Input {
                 field.setAttributedPlaceholder(Some(&placeholder(&config, &font)));
                 traits(field.as_ref(), &config);
                 field.ivars().max_length.set(config.max_length);
+                field.ivars().caret_hidden.set(config.caret_hidden);
             }
             Editor::Area { view, placeholder } => {
                 view.setFont(Some(&font));
@@ -382,6 +404,7 @@ impl Input {
                 placeholder.setText(Some(&NSString::from_str(&config.placeholder)));
                 traits(view.as_ref(), &config);
                 view.ivars().max_length.set(config.max_length);
+                view.ivars().caret_hidden.set(config.caret_hidden);
             }
         }
         crate::mount::mirror(self.editor_view(), config.rtl);

@@ -15,6 +15,9 @@ pub enum AnimProp {
     /// The value of entry `n` of the view's `transform` list (translations
     /// in points, rotations and skews in degrees).
     Transform(u8),
+    /// Native value slot `n` of a canvas drawing: the canvas draws again
+    /// with it (a number or a color).
+    CanvasArg(u16),
 }
 
 impl AnimProp {

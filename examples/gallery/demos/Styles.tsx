@@ -204,6 +204,17 @@ export function Styles() {
         <view style={{ width: 120, height: 30, borderRadius: 8, borderWidth: 3, borderColor: "#bf3989", borderStyle: "dotted" }} />
         <Label>Dashed / dotted</Label>
       </view>
+      <view style={{ ...card, gap: 8 }}>
+        <view style={{ flexDirection: "row", gap: 12 }}>
+          <view style={{ width: 64, height: 64, borderRadius: 20, backgroundColor: "#8250df" }} />
+          <view style={{ width: 64, height: 64, borderRadius: 20, borderCurve: "continuous", backgroundColor: "#8250df" }} />
+          <view
+            style={{ width: 64, height: 64, borderRadius: 20, borderCurve: "continuous", borderWidth: 3, borderColor: "#0969da", borderTopLeftRadius: 4 }}
+          />
+          <view style={{ width: 64, height: 30, borderRadius: 15, borderCurve: "continuous", backgroundColor: "#1a7f37" }} />
+        </view>
+        <Label>Circular / continuous corners</Label>
+      </view>
       <view onPress={() => setFront((front() + 1) % 3)} style={{ ...card, backgroundColor: "transparent" }}>
         <For each={["#fd8c73", "#54aeff", "#4ac26b"]}>
           {(color, i) => (

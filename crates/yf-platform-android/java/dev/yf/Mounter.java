@@ -54,6 +54,7 @@ final class Mounter {
     private static final int SCROLL_BEHAVIOR = 25;
     private static final int LAYOUT_DIRECTION = 26;
     private static final int TRACK_STATES = 27;
+    private static final int CANVAS = 28;
     /** The surface lays out right to left: native widgets mirror. */
     boolean rtl;
 
@@ -187,8 +188,10 @@ final class Mounter {
                         linkData[i * 3 + 2] = b.getInt();
                         linkEvents[i] = (b.getInt() & 0xffffffffL) | ((long) b.getInt() << 32);
                     }
+                    boolean selectable = b.getInt() != 0;
                     if (v instanceof TextBox) {
                         TextBox t = (TextBox) v;
+                        t.selectable = selectable;
                         t.setLayout((Layout) layout, x * density, y * density, w * density, h * density);
                         t.setLinks(linkData, linkEvents);
                         if (links > 0 && t.press == null) t.press = new Pressable(t, this, t.id);
@@ -244,6 +247,15 @@ final class Mounter {
                     trackStates(id, states);
                     break;
                 }
+                case CANVAS: {
+                    int id = b.getInt(), words = b.getInt();
+                    int[] code = new int[words];
+                    b.asIntBuffer().get(code);
+                    b.position(b.position() + words * 4);
+                    View v = views.get(id);
+                    if (v instanceof CanvasBox) drawing((CanvasBox) v, code, objects);
+                    break;
+                }
                 case LAYOUT_DIRECTION: {
                     rtl = b.getInt() != 0;
                     host.setLayoutDirection(rtl ? View.LAYOUT_DIRECTION_RTL : View.LAYOUT_DIRECTION_LTR);
@@ -262,9 +274,13 @@ final class Mounter {
                     float top = b.getFloat(), right = b.getFloat(), bottom = b.getFloat(), left = b.getFloat();
                     int taps = b.getInt();
                     boolean oneStep = b.getInt() != 0;
+                    boolean zooms = b.getInt() != 0;
+                    float minZoom = b.getFloat(), maxZoom = b.getFloat();
+                    boolean bouncesZoom = b.getInt() != 0, pinch = b.getInt() != 0, center = b.getInt() != 0;
                     if (v instanceof ScrollBox) {
                         ((ScrollBox) v).setBehavior(paging, interval, offsets, alignment, deceleration, enabled, bounces,
                                 top, right, bottom, left, taps, oneStep);
+                        ((ScrollBox) v).setZoom(zooms, minZoom, maxZoom, bouncesZoom, pinch, center);
                     }
                     break;
                 }
@@ -390,8 +406,20 @@ final class Mounter {
             case 1: v = new TextBox(context, id); break;
             case 2: {
                 ImageBox[] self = new ImageBox[1];
-                self[0] = new ImageBox(context, id, (image, error) -> imageDone(self[0], image, error),
-                        (image, error) -> placeholderDone(self[0], image));
+                self[0] = new ImageBox(context, id, new Images.Callback() {
+                    @Override
+                    public void done(Images.Image image, String error) {
+                        imageDone(self[0], image, error);
+                    }
+
+                    @Override
+                    public void progress(long loaded, long total) {
+                        if (wants(id, Native.PROGRESS)) {
+                            eventMap(id, Native.PROGRESS, new String[] {"loaded", "total"},
+                                    new Object[] {(double) loaded, (double) total});
+                        }
+                    }
+                }, (image, error) -> placeholderDone(self[0], image));
                 v = self[0];
                 break;
             }
@@ -417,6 +445,7 @@ final class Mounter {
             }
             case 12: v = new WebBox(context, this, id); break;
             case 13: v = new VideoBox(context, this, host, id); break;
+            case 14: v = new CanvasBox(context, this, id); break;
             default: v = new Box(context, this, id);
         }
         views.put(id, v);
@@ -427,6 +456,7 @@ final class Mounter {
         if (parent instanceof StackBox.ScreenBox) return ((StackBox.ScreenBox) parent).root;
         if (parent instanceof ScrollBox) return ((ScrollBox) parent).content;
         if (parent instanceof Box) return ((Box) parent).container();
+        if (parent instanceof TextBox) return (TextBox) parent;
         return null;
     }
 
@@ -645,6 +675,7 @@ final class Mounter {
         View v = views.get(id);
         int background = b.getInt();
         float[] radii = {b.getFloat(), b.getFloat(), b.getFloat(), b.getFloat()};
+        boolean continuous = b.getInt() != 0;
         float[] borderWidths = {b.getFloat(), b.getFloat(), b.getFloat(), b.getFloat()};
         int[] borderColors = {b.getInt(), b.getInt(), b.getInt(), b.getInt()};
         int borderStyle = b.getInt();
@@ -685,6 +716,7 @@ final class Mounter {
                 decor.borderColors[i] = borderColors[i];
             }
             decor.borderStyle = borderStyle;
+            decor.continuous = continuous;
             int alpha = Math.round(((shadowColor >>> 24) & 0xff) * Math.max(0, Math.min(1, sOpacity)));
             decor.shadowColor = (alpha << 24) | (shadowColor & 0x00ffffff);
             decor.shadowDx = sdx * density;
@@ -703,6 +735,7 @@ final class Mounter {
             decor.outlineColor = fx.outlineColor;
             decor.outlineStyle = fx.outlineStyle;
             decor.outlineOffset = fx.outlineOffset;
+            decor.setBackdrop(v, fx.backdrop.blur);
             decor.applyPivot(v);
         }
         Effects previous = effects.get(id);
@@ -1137,13 +1170,38 @@ final class Mounter {
     }
 
     /** Applies `[animating, (view, prop, value)*]` from the animator. */
+    /** A canvas's drawing; loads the images it draws. */
+    private void drawing(CanvasBox canvas, int[] code, Object[] objects) {
+        for (String uri : canvas.setDrawing(code, objects)) {
+            if (canvas.images.containsKey(uri)) continue;
+            // At their natural size: the drawing may scale them anyway.
+            Images.Image cached = images.request(uri, 0, 0, (image, error) -> {
+                if (image != null) {
+                    canvas.images.put(uri, image);
+                    canvas.invalidate();
+                } else {
+                    android.util.Log.w("yf", "canvas image failed: " + error);
+                }
+            });
+            if (cached != null) canvas.images.put(uri, cached);
+        }
+    }
+
+    /** Canvas native value slot `n` arrives as property `CANVAS_ARG + n` (`anim.rs`). */
+    private static final int CANVAS_ARG = 1000;
+
     void outputs(float[] out) {
         if (out == null || out.length == 0) return;
         for (int i = 1; i + 2 < out.length; i += 3) {
             View v = views.get(Float.floatToRawIntBits(out[i]));
             if (v == null) continue;
             float value = out[i + 2];
-            switch ((int) out[i + 1]) {
+            int prop = (int) out[i + 1];
+            if (prop >= CANVAS_ARG) {
+                if (v instanceof CanvasBox) ((CanvasBox) v).setSlot(prop - CANVAS_ARG, value);
+                continue;
+            }
+            switch (prop) {
                 case 0: v.setAlpha(Math.max(0, Math.min(1, value))); break;
                 case 1: v.setTranslationX((mirror(v) == 2 ? -1 : 1) * value * density); break;
                 case 2: v.setTranslationY(value * density); break;
@@ -1466,7 +1524,9 @@ final class Mounter {
         boolean blurOnSubmit = b.getInt() != 0;
         String autofill = optString(b, objects);
         boolean inputRtl = b.getInt() != 0;
+        boolean caretHidden = b.getInt() != 0;
         if (!(v instanceof InputBox)) return;
+        ((InputBox) v).edit.setCursorVisible(!caretHidden);
         ((InputBox) v).setAutofill(autofill);
         ((InputBox) v).edit.setLayoutDirection(inputRtl ? View.LAYOUT_DIRECTION_RTL : View.LAYOUT_DIRECTION_LTR);
         String family = familyIndex >= 0 ? (String) objects[familyIndex] : null;
@@ -1560,6 +1620,27 @@ final class Mounter {
             case 16: {
                 int start = b.getInt(), end = b.getInt();
                 if (v instanceof InputBox) ((InputBox) v).select(start, end);
+                break;
+            }
+            case 20: {
+                float scale = b.getFloat();
+                boolean hasCenter = b.getInt() != 0;
+                float x = b.getFloat(), y = b.getFloat();
+                boolean animated = b.getInt() != 0;
+                if (v instanceof ScrollBox) ((ScrollBox) v).zoomTo(scale, hasCenter, x, y, animated);
+                break;
+            }
+            case 19: {
+                int request = b.getInt();
+                String uri = (String) objects[b.getInt()];
+                images.info(uri, (width, height, error) -> {
+                    if (error != null) {
+                        eventMap(1, Native.IMAGE_INFO, new String[] {"id", "error"}, new Object[] {(double) request, error});
+                    } else {
+                        eventMap(1, Native.IMAGE_INFO, new String[] {"id", "width", "height"},
+                                new Object[] {(double) request, (double) width, (double) height});
+                    }
+                });
                 break;
             }
             case 17: {
@@ -1719,6 +1800,10 @@ final class Mounter {
 
     void event(int id, int kind, String text, int count, float x, float y) {
         Native.event(handle(), id, kind, text, count, x, y);
+    }
+
+    void zoom(int id, float scale) {
+        Native.zoom(handle(), id, scale);
     }
 
     void scroll(int id, float x, float y, int applied) {

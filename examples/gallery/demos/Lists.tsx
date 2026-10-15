@@ -1,5 +1,5 @@
 import { createSignal, For, Match, Switch } from "solid-js";
-import { keyboard, KeyboardAvoidingView, List, SectionList, useSafeAreaInsets, type YNode } from "yf";
+import { keyboard, KeyboardAvoidingView, List, useSafeAreaInsets, type YNode } from "yf";
 import { colors } from "../ui";
 
 const tints = ["#fde2e4", "#e2ece9", "#dfe7fd", "#fff1e6", "#e8e8e4", "#cddafd"];
@@ -54,27 +54,44 @@ function Grid() {
 /** Section headers stick to the top until the next one pushes them out. */
 function Contacts() {
   const names = ["Ada", "Alan", "Barbara", "Brian", "Claude", "Dennis", "Donald", "Edsger", "Frances", "Grace", "Guido", "Ken", "Linus", "Margaret", "Niklaus"];
-  const sections = [...new Set(names.map((n) => n[0]))].map((letter) => ({
-    letter,
-    data: names.filter((n) => n[0] === letter),
-  }));
+  // One list of header and name rows; the headers' indices stick.
+  type Row = { header: string } | { name: string; last: boolean };
+  const rows: Row[] = [];
+  const headers: number[] = [];
+  for (const letter of [...new Set(names.map((n) => n[0]))]) {
+    headers.push(rows.length);
+    rows.push({ header: letter });
+    const group = names.filter((n) => n[0] === letter);
+    group.forEach((name, i) => rows.push({ name, last: i === group.length - 1 }));
+  }
   return (
-    <SectionList
-      sections={sections}
-      estimatedItemSize={44}
-      style={{ flex: 1, backgroundColor: colors.surface }}
-      renderSectionHeader={(section) => (
-        <view style={{ backgroundColor: "#eaeef2", paddingHorizontal: 16, paddingVertical: 6 }}>
-          <text style={{ fontWeight: "700", color: colors.muted }}>{section().letter}</text>
-        </view>
+    <List each={rows} stickyHeaderIndices={headers} estimatedItemSize={44} style={{ flex: 1, backgroundColor: colors.surface }}>
+      {(row) => (
+        <Switch>
+          <Match when={"header" in row() && (row() as { header: string })}>
+            {(r) => (
+              <view style={{ backgroundColor: "#eaeef2", paddingHorizontal: 16, paddingVertical: 6 }}>
+                <text style={{ fontWeight: "700", color: colors.muted }}>{r().header}</text>
+              </view>
+            )}
+          </Match>
+          <Match when={"name" in row() && (row() as { name: string; last: boolean })}>
+            {(r) => (
+              <view
+                style={{
+                  paddingHorizontal: 16,
+                  paddingVertical: 12,
+                  borderBottomWidth: r().last ? 0 : 1,
+                  borderBottomColor: "#eaeef2",
+                }}
+              >
+                <text style={{ fontSize: 17 }}>{r().name}</text>
+              </view>
+            )}
+          </Match>
+        </Switch>
       )}
-      renderItem={(name) => (
-        <view style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
-          <text style={{ fontSize: 17 }}>{name()}</text>
-        </view>
-      )}
-      ItemSeparatorComponent={() => <view style={{ height: 1, marginLeft: 16, backgroundColor: "#eaeef2" }} />}
-    />
+    </List>
   );
 }
 

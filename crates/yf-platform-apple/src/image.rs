@@ -1,19 +1,22 @@
-//! Image loading: fetch (NSURLSession or file), downsample-decode with
-//! ImageIO on a background queue at the view's pixel size, cache decoded
-//! images in an `NSCache` (purged under memory pressure), coalesce
-//! concurrent requests and cancel downloads nobody waits for.
+//! Image loading: fetch (NSURLSession, reporting progress, or file) once
+//! per URI, downsample-decode with ImageIO on a background queue at each
+//! requested pixel size, cache decoded images in an `NSCache` (purged under
+//! memory pressure), coalesce concurrent requests and cancel downloads
+//! nobody waits for. `Image.prefetch` / `getSize` keep the bytes they
+//! fetched for the views that show them next.
 
-use std::ptr::NonNull;
-
-use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueGlobalPriority, GlobalQueueIdentifier};
-use objc2::{AnyThread, DefinedClass, define_class, msg_send, rc::Retained};
+use objc2::{
+    AnyThread, DefinedClass, Message, define_class, msg_send, rc::Retained, runtime::ProtocolObject,
+};
 use objc2_core_foundation::{
     CFData, CFDictionary, CFNumber, CFString, CFType, CGFloat, kCFBooleanTrue,
 };
 use objc2_foundation::{
-    NSCache, NSData, NSDataReadingOptions, NSError, NSObject, NSString, NSURL, NSURLResponse,
-    NSURLSession, NSURLSessionDataTask,
+    NSCache, NSData, NSDataReadingOptions, NSError, NSHTTPURLResponse, NSObject, NSObjectProtocol,
+    NSString, NSURL, NSURLResponse, NSURLSession, NSURLSessionDataDelegate, NSURLSessionDataTask,
+    NSURLSessionDelegate, NSURLSessionResponseDisposition, NSURLSessionTask,
+    NSURLSessionTaskDelegate,
 };
 use objc2_image_io::{
     CGImageSource, kCGImageSourceCreateThumbnailFromImageAlways,
@@ -94,9 +97,63 @@ enum Source {
     File(std::path::PathBuf),
 }
 
+/// What the loader tells the mounter, on the main thread.
+pub(crate) enum LoadEvent {
+    /// The image for cache key `key` decoded (or failed).
+    Decoded {
+        key: String,
+        result: Result<DecodedImage, String>,
+    },
+    /// Bytes of `uri` arrived so far, of `total` (0: unknown).
+    Progress {
+        uri: String,
+        loaded: u64,
+        total: u64,
+    },
+    /// The bytes of `uri` arrived (or failed): the loader's own step,
+    /// passed back to [`ImageLoader::bytes_ready`].
+    Bytes {
+        uri: String,
+        result: Result<Retained<NSData>, String>,
+    },
+    /// `Image.getSize` / `Image.prefetch` request `id`: the image's pixel
+    /// size.
+    Info {
+        id: u32,
+        result: Result<(u32, u32), String>,
+    },
+}
+
+// SAFETY: NSData is immutable and thread-safe; the rest is plain data.
+unsafe impl Send for LoadEvent {}
+
+/// Delivers [`LoadEvent`]s; always called on the main thread.
+pub(crate) type Notify = std::sync::Arc<dyn Fn(LoadEvent) + Send + Sync>;
+
+fn on_main(notify: &Notify, event: LoadEvent) {
+    let notify = notify.clone();
+    DispatchQueue::main().exec_async(move || notify(event));
+}
+
+/// A decode waiting for its bytes, or decoding.
 struct Inflight {
-    task: Option<Retained<NSURLSessionDataTask>>,
+    uri: String,
+    decoding: Decoding,
     waiters: Vec<NodeId>,
+}
+
+/// What a download is for.
+enum Want {
+    /// Decode for this cache key.
+    Decode(String),
+    /// Answer an `Image.getSize` / `Image.prefetch` request.
+    Info(u32),
+}
+
+/// One download (or file read) per URI, whatever it is for.
+struct Download {
+    task: Option<Retained<NSURLSessionDataTask>>,
+    wants: Vec<Want>,
 }
 
 /// Result of a request.
@@ -109,20 +166,33 @@ pub(crate) enum Request {
 
 pub(crate) struct ImageLoader {
     cache: Retained<NSCache<NSString, CachedImage>>,
+    /// Encoded images fetched by `Image.prefetch` / `Image.getSize`, until
+    /// a view decodes them (purged under memory pressure).
+    data: Retained<NSCache<NSString, NSData>>,
     inflight: FxHashMap<String, Inflight>,
+    downloads: FxHashMap<String, Download>,
     asset_base: Option<AssetBase>,
+    notify: Notify,
 }
 
 impl ImageLoader {
-    pub(crate) fn new(asset_base: Option<AssetBase>) -> Self {
-        // SAFETY: a fresh cache with NSString keys and CachedImage values.
-        let cache = unsafe { NSCache::new() };
-        // SAFETY: plain setter.
-        unsafe { cache.setTotalCostLimit(CACHE_BYTES) };
+    pub(crate) fn new(asset_base: Option<AssetBase>, notify: Notify) -> Self {
+        // SAFETY: fresh caches with NSString keys and the declared values;
+        // plain setters.
+        let (cache, data) = unsafe {
+            let cache = NSCache::new();
+            cache.setTotalCostLimit(CACHE_BYTES);
+            let data = NSCache::new();
+            data.setTotalCostLimit(DATA_BYTES);
+            (cache, data)
+        };
         Self {
             cache,
+            data,
             inflight: FxHashMap::default(),
+            downloads: FxHashMap::default(),
             asset_base,
+            notify,
         }
     }
 
@@ -144,8 +214,8 @@ impl ImageLoader {
     }
 
     /// Requests `uri` for `view`, decoded to at most `max_pixels` on its
-    /// longer side (0 = natural size). `done` delivers completions to the
-    /// main thread.
+    /// longer side (0 = natural size); completions come as
+    /// [`LoadEvent::Decoded`].
     pub(crate) fn request(
         &mut self,
         view: NodeId,
@@ -153,15 +223,8 @@ impl ImageLoader {
         max_pixels: u32,
         scale: f64,
         look: Look,
-        done: impl Fn(String, Result<DecodedImage, String>) + Clone + Send + 'static,
     ) -> Request {
         let key = Self::key(uri, max_pixels, look);
-        let decoding = Decoding {
-            max_pixels,
-            scale,
-            blur: look.blur as f64 * scale,
-            matrix: look.matrix,
-        };
         // SAFETY: NSString key and CachedImage value, as declared.
         if let Some(cached) = unsafe { self.cache.objectForKey(&NSString::from_str(&key)) } {
             return Request::Ready(cached.ivars().clone());
@@ -172,26 +235,166 @@ impl ImageLoader {
             }
             return Request::Pending;
         }
-        let task = match self.resolve(uri) {
-            Some(Source::Url(url)) => Some(fetch_url(&url, key.clone(), decoding, done)),
-            Some(Source::File(path)) => {
-                fetch_file(path, key.clone(), decoding, done);
-                None
-            }
-            None => {
-                let message = format!("unsupported image source `{uri}`");
-                DispatchQueue::main().exec_async(move || done(key, Err(message)));
-                return Request::Pending;
-            }
+        let decoding = Decoding {
+            max_pixels,
+            scale,
+            blur: look.blur as f64 * scale,
+            matrix: look.matrix,
         };
         self.inflight.insert(
-            key,
+            key.clone(),
             Inflight {
-                task,
+                uri: uri.to_owned(),
+                decoding,
                 waiters: vec![view],
             },
         );
+        self.fetch(uri, Want::Decode(key));
         Request::Pending
+    }
+
+    /// `Image.getSize` (and `Image.prefetch`): the pixel size of `uri`,
+    /// keeping its bytes for the views that show it next.
+    pub(crate) fn info(&mut self, id: u32, uri: &str) {
+        self.fetch(uri, Want::Info(id));
+    }
+
+    /// The views waiting for `uri`.
+    pub(crate) fn waiting(&self, uri: &str) -> Vec<NodeId> {
+        self.inflight
+            .values()
+            .filter(|i| i.uri == uri)
+            .flat_map(|i| i.waiters.iter().copied())
+            .collect()
+    }
+
+    /// Gets the bytes of `uri` for `want`: from the data cache, a running
+    /// download, or a new one.
+    fn fetch(&mut self, uri: &str, want: Want) {
+        // SAFETY: NSString key and NSData value, as declared.
+        if let Some(data) = unsafe { self.data.objectForKey(&NSString::from_str(uri)) } {
+            self.serve(uri, &data, want);
+            return;
+        }
+        if let Some(download) = self.downloads.get_mut(uri) {
+            download.wants.push(want);
+            return;
+        }
+        let notify = self.notify.clone();
+        let task = match self.resolve(uri) {
+            Some(Source::Url(url)) => Some(crate::image::download(&url, uri.to_owned(), notify)),
+            Some(Source::File(path)) => {
+                let uri = uri.to_owned();
+                DispatchQueue::global_queue(GlobalQueueIdentifier::Priority(
+                    DispatchQueueGlobalPriority::Default,
+                ))
+                .exec_async(move || {
+                    let result = std::fs::read(&path)
+                        .map(|bytes| NSData::with_bytes(&bytes))
+                        .map_err(|e| format!("{}: {e}", path.display()));
+                    on_main(&notify, LoadEvent::Bytes { uri, result });
+                });
+                None
+            }
+            None => {
+                let result = Err(format!("unsupported image source `{uri}`"));
+                on_main(
+                    &notify,
+                    LoadEvent::Bytes {
+                        uri: uri.to_owned(),
+                        result,
+                    },
+                );
+                None
+            }
+        };
+        self.downloads.insert(
+            uri.to_owned(),
+            Download {
+                task,
+                wants: vec![want],
+            },
+        );
+    }
+
+    /// The bytes of a download arrived (main thread).
+    pub(crate) fn bytes_ready(&mut self, uri: &str, result: Result<Retained<NSData>, String>) {
+        let Some(download) = self.downloads.remove(uri) else {
+            return;
+        };
+        match result {
+            Ok(data) => {
+                if download.wants.iter().any(|w| matches!(w, Want::Info(_))) {
+                    // Kept for the views that show it next.
+                    // SAFETY: NSString key and NSData value, as declared.
+                    unsafe {
+                        self.data
+                            .setObject_forKey_cost(&data, &NSString::from_str(uri), data.len())
+                    };
+                }
+                for want in download.wants {
+                    self.serve(uri, &data, want);
+                }
+            }
+            Err(message) => {
+                for want in download.wants {
+                    let event = match want {
+                        Want::Decode(key) => LoadEvent::Decoded {
+                            key,
+                            result: Err(message.clone()),
+                        },
+                        Want::Info(id) => LoadEvent::Info {
+                            id,
+                            result: Err(message.clone()),
+                        },
+                    };
+                    // The mounter is busy calling us: answer on the next turn.
+                    on_main(&self.notify, event);
+                }
+            }
+        }
+    }
+
+    /// Decodes or measures `data` for `want`.
+    fn serve(&self, uri: &str, data: &NSData, want: Want) {
+        match want {
+            Want::Decode(key) => {
+                let Some(inflight) = self.inflight.get(&key) else {
+                    return;
+                };
+                let decoding = inflight.decoding;
+                let data = data.retain();
+                let notify = self.notify.clone();
+                let what = uri.to_owned();
+                // SAFETY: NSData is immutable and thread-safe.
+                let data = unsafe { Shared::new(data) };
+                DispatchQueue::global_queue(GlobalQueueIdentifier::Priority(
+                    DispatchQueueGlobalPriority::Default,
+                ))
+                .exec_async(move || {
+                    let data = data.get();
+                    // SAFETY: NSData is toll-free bridged with CFData.
+                    let cf = unsafe { &*(Retained::as_ptr(data) as *const CFData) };
+                    let result =
+                        decode(cf, decoding).ok_or_else(|| format!("cannot decode {what}"));
+                    on_main(&notify, LoadEvent::Decoded { key, result });
+                });
+            }
+            Want::Info(id) => {
+                // SAFETY: NSData is toll-free bridged with CFData; only the
+                // header is read.
+                let size = unsafe {
+                    let cf = &*(data as *const NSData as *const CFData);
+                    CGImageSource::with_data(cf, None).map(|source| source_size(&source))
+                };
+                let result = match size {
+                    Some((w, h)) if w > 0 && h > 0 => Ok((w, h)),
+                    _ => Err(format!("cannot read the size of {uri}")),
+                };
+                // The mounter is busy calling us: answer on the next turn.
+                on_main(&self.notify, LoadEvent::Info { id, result });
+            }
+        }
     }
 
     /// `view` no longer wants `key`; cancels the download if nobody does.
@@ -200,11 +403,22 @@ impl ImageLoader {
             return;
         };
         inflight.waiters.retain(|&v| v != view);
-        if inflight.waiters.is_empty() {
-            if let Some(task) = &inflight.task {
+        if !inflight.waiters.is_empty() {
+            return;
+        }
+        let uri = inflight.uri.clone();
+        self.inflight.remove(key);
+        let Some(download) = self.downloads.get_mut(&uri) else {
+            return;
+        };
+        download
+            .wants
+            .retain(|w| !matches!(w, Want::Decode(k) if k == key));
+        if download.wants.is_empty() {
+            if let Some(task) = &download.task {
                 task.cancel();
             }
-            self.inflight.remove(key);
+            self.downloads.remove(&uri);
         }
     }
 
@@ -214,11 +428,9 @@ impl ImageLoader {
         key: &str,
         result: &Result<DecodedImage, String>,
     ) -> Vec<NodeId> {
-        let waiters = self
-            .inflight
-            .remove(key)
-            .map(|i| i.waiters)
-            .unwrap_or_default();
+        let Some(inflight) = self.inflight.remove(key) else {
+            return Vec::new();
+        };
         if let Ok(decoded) = result {
             let image = &decoded.image;
             // SAFETY: plain getters on a valid image.
@@ -242,8 +454,14 @@ impl ImageLoader {
                     cost,
                 )
             };
+            // Shown now: the encoded bytes are not needed any more.
+            // SAFETY: an NSString key, as declared.
+            unsafe {
+                self.data
+                    .removeObjectForKey(&NSString::from_str(&inflight.uri))
+            };
         }
-        waiters
+        inflight.waiters
     }
 
     fn resolve(&self, uri: &str) -> Option<Source> {
@@ -258,6 +476,25 @@ impl ImageLoader {
         }
         let path = uri.strip_prefix("file://").unwrap_or(uri);
         path.starts_with('/').then(|| Source::File(path.into()))
+    }
+}
+
+/// An object moved to another thread.
+struct Shared<T>(T);
+
+// SAFETY: only constructed (unsafely) for thread-safe objects.
+unsafe impl<T> Send for Shared<T> {}
+
+impl<T> Shared<T> {
+    /// # Safety
+    ///
+    /// `T` must be safe to use from any thread.
+    unsafe fn new(value: T) -> Self {
+        Self(value)
+    }
+
+    fn get(&self) -> &T {
+        &self.0
     }
 }
 
@@ -283,56 +520,124 @@ struct Decoding {
     matrix: Option<[f32; 20]>,
 }
 
-fn fetch_url(
-    url: &NSURL,
-    key: String,
-    decoding: Decoding,
-    done: impl Fn(String, Result<DecodedImage, String>) + Clone + Send + 'static,
-) -> Retained<NSURLSessionDataTask> {
-    let handler = RcBlock::new(
-        move |data: *mut NSData, _response: *mut NSURLResponse, error: *mut NSError| {
-            // Runs on the session's background queue: decode here.
-            let result = match (NonNull::new(data), NonNull::new(error)) {
-                (Some(data), _) => {
-                    // SAFETY: NSData is toll-free bridged with CFData; the block
-                    // argument is valid for the duration of the call.
-                    let data = unsafe { &*data.as_ptr().cast::<CFData>() };
-                    decode(data, decoding).ok_or_else(|| "cannot decode image".to_owned())
-                }
-                // SAFETY: a valid NSError for the duration of the call.
-                (None, Some(error)) => {
-                    Err(unsafe { error.as_ref() }.localizedDescription().to_string())
-                }
-                (None, None) => Err("empty response".to_owned()),
-            };
-            let (key, done) = (key.clone(), done.clone());
-            DispatchQueue::main().exec_async(move || done(key, result));
-        },
-    );
-    let session = NSURLSession::sharedSession();
-    // SAFETY: the handler only captures `Send` data.
-    let task = unsafe { session.dataTaskWithURL_completionHandler(url, &handler) };
-    task.resume();
-    task
+/// Bytes of a download kept at most for `Image.prefetch` / `getSize`.
+const DATA_BYTES: usize = 32 << 20;
+
+/// Progress reports at most this often (a download reports its end too).
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+struct DownloadIvars {
+    uri: String,
+    notify: Notify,
+    data: std::sync::Mutex<DownloadState>,
 }
 
-fn fetch_file(
-    path: std::path::PathBuf,
-    key: String,
-    decoding: Decoding,
-    done: impl Fn(String, Result<DecodedImage, String>) + Send + 'static,
-) {
-    let queue = DispatchQueue::global_queue(GlobalQueueIdentifier::Priority(
-        DispatchQueueGlobalPriority::Default,
-    ));
-    queue.exec_async(move || {
-        let result = match std::fs::read(&path) {
-            Ok(bytes) => decode(&CFData::from_bytes(&bytes), decoding)
-                .ok_or_else(|| format!("cannot decode {}", path.display())),
-            Err(err) => Err(format!("{}: {err}", path.display())),
-        };
-        DispatchQueue::main().exec_async(move || done(key, result));
+#[derive(Default)]
+struct DownloadState {
+    bytes: Vec<u8>,
+    total: u64,
+    status: isize,
+    reported: Option<std::time::Instant>,
+}
+
+define_class!(
+    /// A download's delegate: collects the bytes and reports progress.
+    #[unsafe(super(NSObject))]
+    #[name = "YFImageDownload"]
+    #[ivars = DownloadIvars]
+    struct ImageDownload;
+
+    unsafe impl NSObjectProtocol for ImageDownload {}
+
+    unsafe impl NSURLSessionDelegate for ImageDownload {}
+
+    unsafe impl NSURLSessionTaskDelegate for ImageDownload {
+        #[unsafe(method(URLSession:task:didCompleteWithError:))]
+        fn did_complete(
+            &self,
+            _session: &NSURLSession,
+            _task: &NSURLSessionTask,
+            error: Option<&NSError>,
+        ) {
+            let ivars = self.ivars();
+            let state = std::mem::take(&mut *ivars.data.lock().expect("download"));
+            let result = match error {
+                Some(e) => Err(e.localizedDescription().to_string()),
+                None if state.status >= 400 => Err(format!("HTTP {}", state.status)),
+                None => Ok(NSData::with_bytes(&state.bytes)),
+            };
+            on_main(
+                &ivars.notify,
+                LoadEvent::Bytes {
+                    uri: ivars.uri.clone(),
+                    result,
+                },
+            );
+        }
+    }
+
+    unsafe impl NSURLSessionDataDelegate for ImageDownload {
+        #[unsafe(method(URLSession:dataTask:didReceiveResponse:completionHandler:))]
+        fn did_receive_response(
+            &self,
+            _session: &NSURLSession,
+            _task: &NSURLSessionDataTask,
+            response: &NSURLResponse,
+            completion: &block2::DynBlock<dyn Fn(NSURLSessionResponseDisposition)>,
+        ) {
+            let mut state = self.ivars().data.lock().expect("download");
+            state.total = response.expectedContentLength().max(0) as u64;
+            if let Some(http) = response.downcast_ref::<NSHTTPURLResponse>() {
+                state.status = http.statusCode();
+            }
+            drop(state);
+            completion.call((NSURLSessionResponseDisposition::Allow,));
+        }
+
+        #[unsafe(method(URLSession:dataTask:didReceiveData:))]
+        fn did_receive_data(
+            &self,
+            _session: &NSURLSession,
+            _task: &NSURLSessionDataTask,
+            data: &NSData,
+        ) {
+            let ivars = self.ivars();
+            let mut state = ivars.data.lock().expect("download");
+            state.bytes.extend_from_slice(&data.to_vec());
+            let now = std::time::Instant::now();
+            let due = state.reported.is_none_or(|t| now - t >= PROGRESS_INTERVAL);
+            let done = state.total > 0 && state.bytes.len() as u64 >= state.total;
+            if due || done {
+                state.reported = Some(now);
+                let (loaded, total) = (state.bytes.len() as u64, state.total);
+                drop(state);
+                on_main(
+                    &ivars.notify,
+                    LoadEvent::Progress {
+                        uri: ivars.uri.clone(),
+                        loaded,
+                        total,
+                    },
+                );
+            }
+        }
+    }
+);
+
+/// Downloads `url`, reporting progress and then [`LoadEvent::Bytes`].
+fn download(url: &NSURL, uri: String, notify: Notify) -> Retained<NSURLSessionDataTask> {
+    let delegate = ImageDownload::alloc().set_ivars(DownloadIvars {
+        uri,
+        notify,
+        data: std::sync::Mutex::new(DownloadState::default()),
     });
+    // SAFETY: NSObject's designated initializer.
+    let delegate: Retained<ImageDownload> = unsafe { msg_send![super(delegate), init] };
+    let task = NSURLSession::sharedSession().dataTaskWithURL(url);
+    // The task keeps its delegate until it completes.
+    task.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    task.resume();
+    task
 }
 
 /// Frames of an animated image decoded at most (longer ones play the

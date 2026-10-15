@@ -4,6 +4,8 @@ import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.Rect;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
+import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
@@ -11,6 +13,7 @@ import android.view.ViewParent;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
+import android.widget.OverScroller;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 
@@ -99,8 +102,15 @@ final class ScrollBox extends FrameLayout implements Node {
         if (scroller != null) {
             scroller.removeView(content);
             removeView(scroller);
+            if (scroller instanceof ZScroll) {
+                content.setScaleX(1);
+                content.setScaleY(1);
+                content.setTranslationX(0);
+                content.setTranslationY(0);
+                mounter.zoom(id, 1);
+            }
         }
-        scroller = horizontal ? new HScroll(getContext()) : new VScroll(getContext());
+        scroller = zooms ? new ZScroll(getContext()) : horizontal ? new HScroll(getContext()) : new VScroll(getContext());
         scroller.setOverScrollMode(bounces ? OVER_SCROLL_IF_CONTENT_SCROLLS : OVER_SCROLL_NEVER);
         scroller.setPadding(insetLeft, insetTop, insetRight, insetBottom + keyboardPadding);
         scroller.setClipToPadding(false);
@@ -146,6 +156,11 @@ final class ScrollBox extends FrameLayout implements Node {
     void setContentSize(int width, int height) {
         content.contentWidth = width;
         content.contentHeight = height;
+        if (scroller instanceof ZScroll) {
+            // Exactly the core's size: the zoom scales it.
+            ((ZScroll) scroller).placeContent();
+            return;
+        }
         // Sized right away: scrolling in the same batch (anchoring, a
         // jump to an item) is clamped to the content's current size.
         int w = Math.max(width, scroller.getWidth()), h = Math.max(height, scroller.getHeight());
@@ -243,6 +258,7 @@ final class ScrollBox extends FrameLayout implements Node {
 
     /** Glides to the snap point for a release at {@code velocity} (px/s). */
     private void snap(int velocity) {
+        if (scroller instanceof ZScroll) return;
         float d = mounter.density;
         boolean h = horizontal;
         float offset = (h ? scroller.getScrollX() : scroller.getScrollY()) / d;
@@ -424,7 +440,9 @@ final class ScrollBox extends FrameLayout implements Node {
 
     void scrollToPx(int x, int y, boolean animated) {
         applied++;
-        if (scroller instanceof ScrollView) {
+        if (scroller instanceof ZScroll) {
+            ((ZScroll) scroller).scrollToPx(x, y, animated);
+        } else if (scroller instanceof ScrollView) {
             if (animated) ((ScrollView) scroller).smoothScrollTo(x, y);
             else scroller.scrollTo(x, y);
         } else {
@@ -447,10 +465,381 @@ final class ScrollBox extends FrameLayout implements Node {
         mounter.event(id, Native.SCROLL_END, null, 0, scroller.getScrollX() / d, scroller.getScrollY() / d);
     }
 
+    // --- Zoom ------------------------------------------------------------
+
+    /** `ScrollBehavior` zoom settings. */
+    private boolean zooms, bouncesZoom = true, pinch = true, centerContent;
+    private float minZoom = 1, maxZoom = 1;
+
+    void setZoom(boolean zooms, float min, float max, boolean bouncesZoom, boolean pinch, boolean center) {
+        minZoom = min;
+        maxZoom = max;
+        this.bouncesZoom = bouncesZoom;
+        this.pinch = pinch;
+        centerContent = center;
+        if (zooms != this.zooms) {
+            this.zooms = zooms;
+            build();
+        } else if (scroller instanceof ZScroll) {
+            ZScroll z = (ZScroll) scroller;
+            z.setScale(Math.max(minZoom, Math.min(maxZoom, z.scale)), z.getWidth() / 2f, z.getHeight() / 2f);
+        }
+    }
+
+    /** `zoomTo` (content point in dp). */
+    void zoomTo(float scale, boolean hasCenter, float x, float y, boolean animated) {
+        if (!(scroller instanceof ZScroll)) return;
+        float d = mounter.density;
+        ((ZScroll) scroller).zoomTo(scale, hasCenter, x * d, y * d, animated);
+    }
+
+    /**
+     * A zoomable scroll view (UIScrollView's zooming, which Android lacks):
+     * the content is scaled around its top left corner and scrolled both
+     * ways by this view's own scroll offset. Pinches zoom around their focal
+     * point, drags (any number of fingers) pan and fling, and both bounce
+     * past the limits when allowed.
+     */
+    private final class ZScroll extends FrameLayout {
+        float scale = 1;
+        /** The pinch's scale without the rubber band beyond the limits. */
+        private float rawScale = 1;
+        private final ScaleGestureDetector detector;
+        private final OverScroller glide;
+        private VelocityTracker velocity;
+        private final int slop, minFling, maxFling;
+        private float downX, downY, lastX, lastY;
+        private boolean panning;
+        private android.animation.ValueAnimator zoomAnimation;
+
+        ZScroll(Context context) {
+            super(context);
+            ViewConfiguration c = ViewConfiguration.get(context);
+            slop = c.getScaledTouchSlop();
+            minFling = c.getScaledMinimumFlingVelocity();
+            maxFling = c.getScaledMaximumFlingVelocity();
+            glide = new OverScroller(context);
+            detector = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                @Override
+                public boolean onScaleBegin(ScaleGestureDetector d) {
+                    if (!pinch) return false;
+                    stop();
+                    rawScale = scale;
+                    startPan();
+                    return true;
+                }
+
+                @Override
+                public boolean onScale(ScaleGestureDetector d) {
+                    rawScale *= d.getScaleFactor();
+                    setScale(rubber(rawScale), d.getFocusX(), d.getFocusY());
+                    return true;
+                }
+            });
+            detector.setQuickScaleEnabled(false);
+        }
+
+        /** Beyond the limits a pinch meets growing resistance (or none goes there). */
+        private float rubber(float s) {
+            if (s > maxZoom) return bouncesZoom ? maxZoom * (float) Math.pow(s / maxZoom, 0.35) : maxZoom;
+            if (s < minZoom) return bouncesZoom ? minZoom * (float) Math.pow(s / minZoom, 0.35) : minZoom;
+            return s;
+        }
+
+        private float contentWidth() {
+            return content.contentWidth * scale;
+        }
+
+        private float contentHeight() {
+            return content.contentHeight * scale;
+        }
+
+        /** `centerContent`: where content narrower than the viewport starts. */
+        private float offsetX(float s) {
+            float free = getWidth() - getPaddingLeft() - getPaddingRight() - content.contentWidth * s;
+            return centerContent ? Math.max(0, free / 2) : 0;
+        }
+
+        private float offsetY(float s) {
+            float free = getHeight() - getPaddingTop() - getPaddingBottom() - content.contentHeight * s;
+            return centerContent ? Math.max(0, free / 2) : 0;
+        }
+
+        private int maxX() {
+            return (int) Math.max(0, getPaddingLeft() + contentWidth() + getPaddingRight() - getWidth());
+        }
+
+        private int maxY() {
+            return (int) Math.max(0, getPaddingTop() + contentHeight() + getPaddingBottom() - getHeight());
+        }
+
+        @Override
+        protected void onMeasure(int widthSpec, int heightSpec) {
+            setMeasuredDimension(MeasureSpec.getSize(widthSpec), MeasureSpec.getSize(heightSpec));
+            measureContent();
+        }
+
+        private void measureContent() {
+            content.measure(MeasureSpec.makeMeasureSpec(content.contentWidth, MeasureSpec.EXACTLY),
+                    MeasureSpec.makeMeasureSpec(content.contentHeight, MeasureSpec.EXACTLY));
+        }
+
+        @Override
+        protected void onLayout(boolean changed, int l, int t, int r, int b) {
+            layoutContent();
+        }
+
+        private void layoutContent() {
+            int x = getPaddingLeft(), y = getPaddingTop();
+            content.layout(x, y, x + content.contentWidth, y + content.contentHeight);
+            apply();
+        }
+
+        /** The core's content size changed. */
+        void placeContent() {
+            measureContent();
+            layoutContent();
+            scrollTo(clamp(getScrollX(), maxX()), clamp(getScrollY(), maxY()));
+        }
+
+        private void apply() {
+            // Around the top left (a Box resets its pivot when resized).
+            content.setPivotX(0);
+            content.setPivotY(0);
+            content.setScaleX(scale);
+            content.setScaleY(scale);
+            content.setTranslationX(offsetX(scale));
+            content.setTranslationY(offsetY(scale));
+        }
+
+        /** Zooms to {@code s} keeping the content under ({@code fx}, {@code fy}) (view px) in place. */
+        void setScale(float s, float fx, float fy) {
+            float px = (getScrollX() + fx - getPaddingLeft() - offsetX(scale)) / scale;
+            float py = (getScrollY() + fy - getPaddingTop() - offsetY(scale)) / scale;
+            place(s, px, py, fx, fy);
+        }
+
+        /** Zooms to {@code s} with content point ({@code px}, {@code py}) (unzoomed px) at ({@code fx}, {@code fy}). */
+        private void place(float s, float px, float py, float fx, float fy) {
+            boolean changed = s != scale;
+            scale = s;
+            apply();
+            int x = Math.round(px * s + getPaddingLeft() + offsetX(s) - fx);
+            int y = Math.round(py * s + getPaddingTop() + offsetY(s) - fy);
+            int sx = getScrollX(), sy = getScrollY();
+            scrollTo(clamp(x, maxX()), clamp(y, maxY()));
+            if (changed) {
+                mounter.zoom(id, s);
+                // The new scale goes out with an offset report.
+                if (sx == getScrollX() && sy == getScrollY()) {
+                    float d = mounter.density;
+                    mounter.scroll(id, getScrollX() / d, getScrollY() / d, applied);
+                }
+            }
+        }
+
+        private int clamp(int v, int max) {
+            return Math.max(0, Math.min(max, v));
+        }
+
+        void zoomTo(float target, boolean hasCenter, float x, float y, boolean animated) {
+            stop();
+            float to = Math.max(minZoom, Math.min(maxZoom, target));
+            float w = getWidth() / 2f, h = getHeight() / 2f;
+            float fromX = (getScrollX() + w - getPaddingLeft() - offsetX(scale)) / scale;
+            float fromY = (getScrollY() + h - getPaddingTop() - offsetY(scale)) / scale;
+            float toX = hasCenter ? x : fromX, toY = hasCenter ? y : fromY;
+            if (!animated) {
+                place(to, toX, toY, w, h);
+                return;
+            }
+            float from = scale;
+            zoomAnimation = android.animation.ValueAnimator.ofFloat(0, 1);
+            zoomAnimation.setDuration(300);
+            zoomAnimation.setInterpolator(new android.view.animation.DecelerateInterpolator(1.5f));
+            zoomAnimation.addUpdateListener(a -> {
+                float t = (float) a.getAnimatedValue();
+                place(from + (to - from) * t, fromX + (toX - fromX) * t, fromY + (toY - fromY) * t, w, h);
+            });
+            zoomAnimation.start();
+        }
+
+        void scrollToPx(int x, int y, boolean animated) {
+            stop();
+            int tx = clamp(x, maxX()), ty = clamp(y, maxY());
+            if (animated) {
+                glide.startScroll(getScrollX(), getScrollY(), tx - getScrollX(), ty - getScrollY(), 300);
+                postInvalidateOnAnimation();
+            } else {
+                scrollTo(tx, ty);
+            }
+        }
+
+        private void stop() {
+            if (!glide.isFinished()) glide.forceFinished(true);
+            if (zoomAnimation != null) {
+                zoomAnimation.cancel();
+                zoomAnimation = null;
+            }
+        }
+
+        /** The focal point of the fingers down (without one lifting now). */
+        private float focus(MotionEvent e, boolean x) {
+            int skip = e.getActionMasked() == MotionEvent.ACTION_POINTER_UP ? e.getActionIndex() : -1;
+            float sum = 0;
+            int n = 0;
+            for (int i = 0; i < e.getPointerCount(); i++) {
+                if (i == skip) continue;
+                sum += x ? e.getX(i) : e.getY(i);
+                n++;
+            }
+            return n > 0 ? sum / n : 0;
+        }
+
+        private void startPan() {
+            panning = true;
+            getParent().requestDisallowInterceptTouchEvent(true);
+        }
+
+        /** Follows the fingers; true once this view took the gesture. */
+        private boolean track(MotionEvent e) {
+            if (velocity == null) velocity = VelocityTracker.obtain();
+            velocity.addMovement(e);
+            detector.onTouchEvent(e);
+            float fx = focus(e, true), fy = focus(e, false);
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    // A touch catches a glide.
+                    boolean gliding = !glide.isFinished();
+                    stop();
+                    panning = gliding;
+                    downX = lastX = fx;
+                    downY = lastY = fy;
+                    break;
+                case MotionEvent.ACTION_POINTER_DOWN:
+                case MotionEvent.ACTION_POINTER_UP:
+                    lastX = fx;
+                    lastY = fy;
+                    if (pinch && e.getPointerCount() > 1) startPan();
+                    break;
+                case MotionEvent.ACTION_MOVE: {
+                    if (!panning) {
+                        float dx = fx - downX, dy = fy - downY;
+                        boolean along = (Math.abs(dx) > slop && (maxX() > 0 || bounces))
+                                || (Math.abs(dy) > slop && (maxY() > 0 || bounces));
+                        if (along && (maxX() > 0 || maxY() > 0 || scale != 1)) {
+                            startPan();
+                            lastX = fx;
+                            lastY = fy;
+                        }
+                    }
+                    if (panning) {
+                        panBy(lastX - fx, lastY - fy);
+                        lastX = fx;
+                        lastY = fy;
+                    }
+                    break;
+                }
+                default:
+                    break;
+            }
+            return panning;
+        }
+
+        /** Scrolls by a finger's move, resisting past the edges (or stopping there). */
+        private void panBy(float dx, float dy) {
+            int x = getScrollX(), y = getScrollY();
+            scrollTo(x + Math.round(resist(x, dx, maxX())), y + Math.round(resist(y, dy, maxY())));
+        }
+
+        private float resist(int at, float d, int max) {
+            float next = at + d;
+            if (next >= 0 && next <= max) return d;
+            if (!bounces) return Math.max(0, Math.min(max, next)) - at;
+            return d / 2;
+        }
+
+        /** The fingers lifted: settle the zoom, then bounce back or glide. */
+        private void release() {
+            panning = false;
+            float vx = 0, vy = 0;
+            if (velocity != null) {
+                velocity.computeCurrentVelocity(1000, maxFling);
+                vx = velocity.getXVelocity();
+                vy = velocity.getYVelocity();
+                velocity.recycle();
+                velocity = null;
+            }
+            if (scale > maxZoom || scale < minZoom) {
+                zoomBack();
+                return;
+            }
+            int x = getScrollX(), y = getScrollY(), mx = maxX(), my = maxY();
+            if (x < 0 || y < 0 || x > mx || y > my) {
+                glide.springBack(x, y, 0, mx, 0, my);
+                postInvalidateOnAnimation();
+            } else if (Math.hypot(vx, vy) > minFling) {
+                int over = bounces ? Math.round(48 * mounter.density) : 0;
+                glide.fling(x, y, Math.round(-vx), Math.round(-vy), 0, mx, 0, my, over, over);
+                flung = true;
+                postInvalidateOnAnimation();
+            }
+        }
+
+        /** A pinch ended beyond the limits: back to the nearest one. */
+        private void zoomBack() {
+            float to = Math.max(minZoom, Math.min(maxZoom, scale));
+            float from = scale, fx = lastX, fy = lastY;
+            float px = (getScrollX() + fx - getPaddingLeft() - offsetX(scale)) / scale;
+            float py = (getScrollY() + fy - getPaddingTop() - offsetY(scale)) / scale;
+            zoomAnimation = android.animation.ValueAnimator.ofFloat(0, 1);
+            zoomAnimation.setDuration(250);
+            zoomAnimation.setInterpolator(new android.view.animation.DecelerateInterpolator());
+            zoomAnimation.addUpdateListener(a -> {
+                float t = (float) a.getAnimatedValue();
+                place(from + (to - from) * t, px, py, fx, fy);
+            });
+            zoomAnimation.start();
+        }
+
+        @Override
+        public void computeScroll() {
+            if (glide.computeScrollOffset()) {
+                scrollTo(glide.getCurrX(), glide.getCurrY());
+                postInvalidateOnAnimation();
+            }
+        }
+
+        @Override
+        public boolean onInterceptTouchEvent(MotionEvent e) {
+            if (!enabled || jsBlocked) return false;
+            return track(e);
+        }
+
+        @SuppressLint("ClickableViewAccessibility")
+        @Override
+        public boolean onTouchEvent(MotionEvent e) {
+            if (!enabled || jsBlocked) return false;
+            boolean up = beforeTouch(e);
+            int action = e.getActionMasked();
+            // A down that reaches here was seen by the interception already.
+            if (action != MotionEvent.ACTION_DOWN) track(e);
+            if (up) {
+                if (action == MotionEvent.ACTION_UP) release();
+                else {
+                    panning = false;
+                    if (scale > maxZoom || scale < minZoom) zoomBack();
+                }
+                released();
+            }
+            return true;
+        }
+    }
+
     // --- Pull to refresh -------------------------------------------------
 
     private boolean canPull() {
-        return !horizontal && (events & (1L << Native.REFRESH)) != 0 && scroller.getScrollY() == 0;
+        return !horizontal && !zooms && (events & (1L << Native.REFRESH)) != 0 && scroller.getScrollY() == 0;
     }
 
     @Override

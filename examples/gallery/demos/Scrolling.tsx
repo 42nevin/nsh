@@ -1,5 +1,5 @@
 import { createSignal, For, Index } from "solid-js";
-import { List, windowSize, type ScrollEvent } from "yf";
+import { List, windowSize, type ScrollEvent, type YNode } from "yf";
 import { Button, colors, Section, Toggle as Switch } from "../ui";
 
 const palette = ["#0969da", "#8250df", "#bf3989", "#cf222e", "#bc4c00", "#1a7f37", "#0a3069"];
@@ -163,6 +163,61 @@ function Events() {
   );
 }
 
+/** Pinch to zoom (natively); tap a tile to zoom in on it. */
+function Zoom() {
+  let scroll: YNode | undefined;
+  const [scale, setScale] = createSignal(1);
+  const [bounces, setBounces] = createSignal(true);
+  const tiles = Array.from({ length: 24 }, (_, i) => i);
+  return (
+    <view style={{ gap: 10 }}>
+      <scroll
+        ref={scroll}
+        style={{ height: 240, borderRadius: 10, backgroundColor: "#0d1117" }}
+        minimumZoomScale={0.5}
+        maximumZoomScale={5}
+        bouncesZoom={bounces()}
+        centerContent
+        scrollEventThrottle={50}
+        onScroll={(e) => setScale(e.zoomScale)}
+      >
+        <view style={{ flexDirection: "row", flexWrap: "wrap", padding: 6, gap: 6 }}>
+          <For each={tiles}>
+            {(i) => (
+              <view
+                style={{
+                  width: 74,
+                  height: 50,
+                  borderRadius: 8,
+                  borderCurve: "continuous",
+                  backgroundColor: palette[i % palette.length],
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+                onPress={() => {
+                  // The tile's middle, in the content's (unzoomed) points.
+                  const x = 6 + (i % 4) * 80 + 37;
+                  const y = 6 + Math.floor(i / 4) * 56 + 25;
+                  scroll?.zoomTo({ scale: scale() < 2.5 ? 3 : 1, x, y });
+                }}
+              >
+                <text style={{ color: "#ffffff", fontSize: 11 }}>Tile {i + 1}</text>
+              </view>
+            )}
+          </For>
+        </view>
+      </scroll>
+      <text style={{ fontVariant: ["tabular-nums"] }}>Zoom {scale().toFixed(2)}×</text>
+      <view style={{ flexDirection: "row", gap: 8 }}>
+        <Button label="1×" onPress={() => scroll?.zoomTo({ scale: 1 })} />
+        <Button label="2×" onPress={() => scroll?.zoomTo({ scale: 2 })} />
+        <Button label="0.5×" onPress={() => scroll?.zoomTo({ scale: 0.5 })} />
+      </view>
+      <Toggle label="Bounces past the limits" value={bounces()} onChange={setBounces} />
+    </view>
+  );
+}
+
 type Post = { id: number; label: string };
 
 /** New items arrive at the top; the rows on screen stay where they are. */
@@ -199,6 +254,9 @@ export function Scrolling() {
         </Section>
         <Section title="Snapping (snapToInterval)">
           <Cards />
+        </Section>
+        <Section title="Zoom (pinch, tap a tile)">
+          <Zoom />
         </Section>
         <Section title="Events and behavior">
           <Events />

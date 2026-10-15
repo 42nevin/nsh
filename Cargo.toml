@@ -136,6 +136,8 @@ objc2-ui-kit = { version = "0.3.2", default-features = false, features = [
   "UILabel",
   "UILayoutGuide",
   "UILongPressGestureRecognizer",
+  "UIMenuController",
+  "UIPasteboard",
   "UIPanGestureRecognizer",
   "UIRefreshControl",
   "UIResponder",
@@ -188,6 +190,7 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
   "CGColor",
   "CGColorSpace",
   "CGContext",
+  "CGGradient",
   "CGImage",
   "CGPath",
 ] }
@@ -203,6 +206,7 @@ objc2-core-text = { version = "0.3.2", default-features = false, features = [
   "CTLine",
   "CTParagraphStyle",
   "CTRun",
+  "CTRunDelegate",
   "CTStringAttributes",
   "CTTypesetter",
 ] }

@@ -12,9 +12,9 @@ use objc2_core_foundation::{CFRetained, CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage, CGMutablePath};
 use objc2_foundation::{NSArray, NSNumber};
 use objc2_quartz_core::{
-    CACornerMask, CALayer, CAMediaTiming, CAShapeLayer, CATransaction, kCAFillRuleEvenOdd,
-    kCAGravityCenter, kCAGravityResize, kCAGravityResizeAspect, kCAGravityResizeAspectFill,
-    kCALineCapRound,
+    CACornerMask, CALayer, CAMediaTiming, CAShapeLayer, CATransaction, kCACornerCurveCircular,
+    kCACornerCurveContinuous, kCAFillRuleEvenOdd, kCAGravityCenter, kCAGravityResize,
+    kCAGravityResizeAspect, kCAGravityResizeAspectFill, kCALineCapRound,
 };
 use objc2_ui_kit::{UIColor, UIImage, UIView};
 use yf_core::{BorderStyle, Borders, Color, CornerRadii, ResizeMode, ViewStyle};
@@ -302,9 +302,12 @@ impl Decor {
 
         // Text draws into the layer's own contents, below every sublayer: it
         // cannot have a fill layer, so its odd corners clip it instead.
-        let fill = shared.is_none() && kind != Kind::Text;
         let border_behind = kind == Kind::View && !style.overflow_hidden;
         let stroke = border && (shared.is_none() || border_behind || dashed);
+        // Core Animation's continuous corners differ slightly from the
+        // shared outline (`yf_core::shape`): a stroke drawn along the latter
+        // gets its background from the same outline, so none shows outside.
+        let fill = (shared.is_none() || (raw.continuous && stroke)) && kind != Kind::Text;
         let mask = shared.is_none() && (style.overflow_hidden || kind == Kind::Text) && !content;
 
         self.sized = kind == Kind::Image
@@ -328,8 +331,7 @@ impl Decor {
         if shared.is_some_and(|r| r > 0.0 && (w == 0.0 || r >= half)) {
             self.sized = true;
         }
-        layer.setCornerRadius(r);
-        layer.setMaskedCorners(corners);
+        set_corners(&layer, r, corners, raw.continuous);
 
         // Background.
         match (fill, &self.fill) {
@@ -424,8 +426,7 @@ impl Decor {
                 layer.setBorderWidth(0.0);
                 c.setFrame(local);
                 let cl = c.layer();
-                cl.setCornerRadius(r);
-                cl.setMaskedCorners(corners);
+                set_corners(&cl, r, corners, raw.continuous);
                 match shared {
                     Some(_) => {
                         cl.setMasksToBounds(true);
@@ -469,8 +470,7 @@ impl Decor {
         self.set_tint(style.tint_color.filter(|_| kind == Kind::Image), local);
         if let Some(image) = &self.image {
             image.setFrame(local);
-            image.setCornerRadius(r);
-            image.setMaskedCorners(corners);
+            set_corners(image, r, corners, raw.continuous);
             if shared.is_some() {
                 // SAFETY: clearing the mask.
                 unsafe { image.setMask(None) };
@@ -637,7 +637,7 @@ fn shape_mask(
 
 /// The corners a shared radius applies to (UIKit layers are y-down: min Y is
 /// the top).
-fn corner_mask(radii: &CornerRadii) -> CACornerMask {
+pub(crate) fn corner_mask(radii: &CornerRadii) -> CACornerMask {
     let all = [
         (radii.top_left, CACornerMask::LayerMinXMinYCorner),
         (radii.top_right, CACornerMask::LayerMaxXMinYCorner),
@@ -671,95 +671,84 @@ pub(crate) fn inset(rect: CGRect, d: CGFloat) -> CGRect {
 fn ring_path(rect: CGRect, radii: CornerRadii, widths: [CGFloat; 4]) -> CFRetained<CGMutablePath> {
     let path = rounded(rect, radii);
     let [top, right, bottom, left] = widths;
-    let (x0, y0) = (rect.origin.x + left, rect.origin.y + top);
-    let (x1, y1) = (
-        rect.origin.x + rect.size.width - right,
-        rect.origin.y + rect.size.height - bottom,
+    let inner = CGRect::new(
+        CGPoint::new(rect.origin.x + left, rect.origin.y + top),
+        CGSize::new(
+            rect.size.width - left - right,
+            rect.size.height - top - bottom,
+        ),
     );
-    if x1 <= x0 || y1 <= y0 {
+    if inner.size.width <= 0.0 || inner.size.height <= 0.0 {
         return path;
     }
     let [tl, tr, br, bl] = radii.to_array().map(|r| r as CGFloat);
     // (horizontal, vertical) radii of each inner corner.
     let corner = |r: CGFloat, h: CGFloat, v: CGFloat| ((r - h).max(0.0), (r - v).max(0.0));
-    let (tlx, tly) = corner(tl, left, top);
-    let (trx, try_) = corner(tr, right, top);
-    let (brx, bry) = corner(br, right, bottom);
-    let (blx, bly) = corner(bl, left, bottom);
-    // Cubic approximation of a quarter ellipse.
-    const K: CGFloat = 0.552_284_75;
-    let p = Some(&*path);
-    let m = std::ptr::null();
-    // SAFETY: a valid mutable path and a null transform.
-    unsafe {
-        CGMutablePath::move_to_point(p, m, x0 + tlx, y0);
-        CGMutablePath::add_line_to_point(p, m, x1 - trx, y0);
-        CGMutablePath::add_curve_to_point(
-            p,
-            m,
-            x1 - trx + trx * K,
-            y0,
-            x1,
-            y0 + try_ - try_ * K,
-            x1,
-            y0 + try_,
-        );
-        CGMutablePath::add_line_to_point(p, m, x1, y1 - bry);
-        CGMutablePath::add_curve_to_point(
-            p,
-            m,
-            x1,
-            y1 - bry + bry * K,
-            x1 - brx + brx * K,
-            y1,
-            x1 - brx,
-            y1,
-        );
-        CGMutablePath::add_line_to_point(p, m, x0 + blx, y1);
-        CGMutablePath::add_curve_to_point(
-            p,
-            m,
-            x0 + blx - blx * K,
-            y1,
-            x0,
-            y1 - bly + bly * K,
-            x0,
-            y1 - bly,
-        );
-        CGMutablePath::add_line_to_point(p, m, x0, y0 + tly);
-        CGMutablePath::add_curve_to_point(
-            p,
-            m,
-            x0,
-            y0 + tly - tly * K,
-            x0 + tlx - tlx * K,
-            y0,
-            x0 + tlx,
-            y0,
-        );
-        CGMutablePath::close_subpath(p);
-    }
+    let corners = [
+        corner(tl, left, top),
+        corner(tr, right, top),
+        corner(br, right, bottom),
+        corner(bl, left, bottom),
+    ];
+    add_outline(&path, inner, corners, radii.continuous, false);
     path
 }
 
-/// A rectangle with circular corners of the given radii.
+/// A rectangle with the corners `radii` (circular or continuous).
 pub(crate) fn rounded(rect: CGRect, radii: CornerRadii) -> CFRetained<CGMutablePath> {
-    let (x0, y0) = (rect.origin.x, rect.origin.y);
-    let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
-    let [tl, tr, br, bl] = radii.to_array().map(|r| r as CGFloat);
     let path = CGMutablePath::new();
-    let p = Some(&*path);
-    let m = std::ptr::null();
-    // SAFETY: a valid mutable path and a null transform.
-    unsafe {
-        CGMutablePath::move_to_point(p, m, x0 + tl, y0);
-        CGMutablePath::add_arc_to_point(p, m, x1, y0, x1, y0 + tr, tr);
-        CGMutablePath::add_arc_to_point(p, m, x1, y1, x1 - br, y1, br);
-        CGMutablePath::add_arc_to_point(p, m, x0, y1, x0, y1 - bl, bl);
-        CGMutablePath::add_arc_to_point(p, m, x0, y0, x0 + tl, y0, tl);
-        CGMutablePath::close_subpath(p);
-    }
+    add_rounded(&path, rect, radii, false);
     path
+}
+
+/// Adds a rectangle with the corners `radii` to `path`, counterclockwise
+/// with `reverse` (a hole under the non-zero rule).
+pub(crate) fn add_rounded(path: &CGMutablePath, rect: CGRect, radii: CornerRadii, reverse: bool) {
+    let corners = radii.to_array().map(|r| (r as CGFloat, r as CGFloat));
+    add_outline(path, rect, corners, radii.continuous, reverse);
+}
+
+/// Adds `yf_core::shape::rounded_rect` to `path`.
+fn add_outline(
+    path: &CGMutablePath,
+    rect: CGRect,
+    corners: [(CGFloat, CGFloat); 4],
+    continuous: bool,
+    reverse: bool,
+) {
+    use yf_core::shape::Segment;
+    let (x0, y0) = (rect.origin.x, rect.origin.y);
+    let bounds = (x0, y0, x0 + rect.size.width, y0 + rect.size.height);
+    let p = Some(path);
+    let m = std::ptr::null();
+    yf_core::shape::rounded_rect(bounds, corners, continuous, reverse, &mut |s| {
+        // SAFETY: a valid mutable path and a null transform.
+        unsafe {
+            match s {
+                Segment::Move(x, y) => CGMutablePath::move_to_point(p, m, x, y),
+                Segment::Line(x, y) => CGMutablePath::add_line_to_point(p, m, x, y),
+                Segment::Cubic([a, b, c, d, x, y]) => {
+                    CGMutablePath::add_curve_to_point(p, m, a, b, c, d, x, y)
+                }
+                Segment::Close => CGMutablePath::close_subpath(p),
+            }
+        }
+    });
+}
+
+/// Sets the corners of a layer that draws them itself: `r` on `corners`,
+/// circular or continuous.
+pub(crate) fn set_corners(layer: &CALayer, r: CGFloat, corners: CACornerMask, continuous: bool) {
+    layer.setCornerRadius(r);
+    layer.setMaskedCorners(corners);
+    // SAFETY: immutable Core Animation constants.
+    layer.setCornerCurve(unsafe {
+        if continuous {
+            kCACornerCurveContinuous
+        } else {
+            kCACornerCurveCircular
+        }
+    });
 }
 
 fn ui_color(color: Color) -> Option<Retained<UIColor>> {

@@ -178,6 +178,7 @@ impl std::fmt::Debug for EngineConfig {
 enum Message {
     Event(NodeId, EventKind, EventPayload),
     Scroll(NodeId, f32, f32, u32),
+    Zoom(NodeId, f32),
     AnimationsFinished(Vec<yf_anim::Finished>),
     Resize(Size),
     Environment(Environment),
@@ -226,6 +227,12 @@ impl EngineControl {
     /// engine frame.
     pub fn scroll(&self, id: NodeId, x: f32, y: f32, applied: u32) {
         let _ = self.tx.send(Message::Scroll(id, x, y, applied));
+    }
+
+    /// Reports the zoom scale of a zoomable scroll view (before the offset
+    /// the zoom changed); `onScroll` carries it.
+    pub fn zoom(&self, id: NodeId, scale: f32) {
+        let _ = self.tx.send(Message::Zoom(id, scale));
     }
 
     /// Reports native animations that finished or were interrupted.
@@ -331,7 +338,7 @@ fn raise_thread_priority() {
     }
 }
 
-fn run<M: TextEngine, S: MountSink>(
+fn run<M: TextEngine + 'static, S: MountSink>(
     config: EngineConfig,
     text_engine: M,
     sink: S,
@@ -366,6 +373,12 @@ fn run<M: TextEngine, S: MountSink>(
     let uncaught = report.clone();
     host.set_error_handler(Box::new(move |err| {
         uncaught("uncaught exception", &err.message)
+    }));
+    // Shared with canvas `measureText`, which measures on this thread.
+    let text_engine = Rc::new(text_engine);
+    let measurer = text_engine.clone();
+    host.set_text_measurer(Box::new(move |font, text| {
+        yf_core::canvas::measure_line(&*measurer, font, text)
     }));
     let mut core = Core::new(text_engine, config.viewport);
     core.set_font_scale(config.environment.font_scale);
@@ -486,6 +499,8 @@ struct ScrollEvent {
     y: f32,
     content: Size,
     viewport: Size,
+    /// The zoom scale.
+    zoom: f32,
     throttle: Duration,
     last: Option<Instant>,
     /// An offset not reported yet.
@@ -594,6 +609,7 @@ impl<M: TextEngine> State<M> {
                     ("contentHeight", n(e.content.height)),
                     ("width", n(e.viewport.width)),
                     ("height", n(e.viewport.height)),
+                    ("zoomScale", n(e.zoom)),
                 ]),
             );
         }
@@ -732,21 +748,24 @@ fn handle<M: TextEngine>(host: &Host, state: &mut State<M>, message: Message) ->
         }
         Message::Scroll(id, x, y, applied) => {
             state.core.set_scroll_offset(id, x, y, applied);
-            if let Some((throttle_ms, content, viewport)) = state.core.scroll_listener(id) {
+            if let Some((throttle_ms, content, viewport, zoom)) = state.core.scroll_listener(id) {
                 let event = state.scroll_events.entry(id).or_insert(ScrollEvent {
                     x,
                     y,
                     content,
                     viewport,
+                    zoom,
                     throttle: Duration::from_secs_f32(throttle_ms / 1000.0),
                     last: None,
                     pending: true,
                 });
-                (event.x, event.y, event.content, event.viewport) = (x, y, content, viewport);
+                (event.x, event.y, event.content, event.viewport, event.zoom) =
+                    (x, y, content, viewport, zoom);
                 event.throttle = Duration::from_secs_f32(throttle_ms / 1000.0);
                 event.pending = true;
             }
         }
+        Message::Zoom(id, scale) => state.core.set_zoom(id, scale),
         Message::AnimationsFinished(finished) => host.animations_finished(&finished),
         Message::Resize(size) => state.core.set_viewport(size),
         Message::Environment(env) => {

@@ -1,6 +1,7 @@
 import { For } from "solid-js";
 import { render, root, Screen, Stack } from "yf";
 import { Animations } from "./demos/Animations";
+import { CanvasDemo } from "./demos/CanvasDemo";
 import { Components } from "./demos/Components";
 import { Form } from "./demos/Form";
 import { Gestures } from "./demos/Gestures";
@@ -21,17 +22,18 @@ import { colors } from "./ui";
 const demos: DemoEntry[] = [
   { name: "Photos", detail: "A long recycled list: images, pull to refresh, paging", screen: Photos },
   { name: "Lists", detail: "Columns, sticky sections, a chat, horizontal lists", screen: Lists },
-  { name: "Scrolling", detail: "Paging, snapping, scroll events, prepending, keyboard taps", screen: Scrolling },
+  { name: "Scrolling", detail: "Paging, snapping, zoom, scroll events, prepending, keyboard taps", screen: Scrolling },
   { name: "Navigation", detail: "Header options, modals, the back button, safe areas", screen: Navigation },
   { name: "Form", detail: "Inputs, keyboard types, the keyboard over the content", screen: Form },
-  { name: "Components", detail: "Touchables, sheet, layout animation, ImageBackground, drawer, input accessory, Platform", screen: Components },
+  { name: "Components", detail: "Press feedback, sheet, layout animation, input accessory, keyboard, modal options, Platform", screen: Components },
   { name: "Gestures", detail: "Pinch, rotate, press states, hit slop, pointer events", screen: Gestures },
   { name: "Physics", detail: "Drags and springs on the UI thread", screen: Physics },
   { name: "Animations", detail: "Easing, sequence / parallel / stagger / loop, springs, interpolation, diffClamp", screen: Animations },
   { name: "Images", detail: "Resize modes, tint, GIF / WebP, placeholders, blur, fade, events", screen: Images },
+  { name: "Canvas", detail: "2D context: paths, gradients, text, images, native animation", screen: CanvasDemo },
   { name: "Tailwind", detail: "class=\"…\" resolved natively: variants, grid, shadows, gradients, motion", screen: Tailwind },
-  { name: "Styles", detail: "Corners, borders, shadows, clipping, 3D transforms", screen: Styles },
-  { name: "Text", detail: "Fonts, spans, decorations, truncation, shadows", screen: TextDemo },
+  { name: "Styles", detail: "Corners (also continuous), borders, shadows, clipping, 3D transforms", screen: Styles },
+  { name: "Text", detail: "Fonts, spans, inline views and images, decorations, truncation, shadows", screen: TextDemo },
   { name: "Web and video", detail: "WKWebView / WebView, AVPlayer / MediaPlayer", screen: Media },
   { name: "System", detail: "Status bar, alerts, action sheets, environment, timers, fetch", screen: System },
 ];

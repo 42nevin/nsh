@@ -12,12 +12,13 @@ use objc2_core_graphics::{CGColor, CGPath};
 use objc2_core_text::{
     CTFont, CTFontDescriptor, CTFontManagerRegisterFontsForURL, CTFontManagerScope,
     CTFontSymbolicTraits, CTFrame, CTFramesetter, CTLine, CTLineTruncationType, CTParagraphStyle,
-    CTParagraphStyleSetting, CTParagraphStyleSpecifier, CTTextAlignment, CTTypesetter,
-    CTWritingDirection, kCTFontAttributeName, kCTFontFamilyNameAttribute,
-    kCTFontFeatureSettingsAttribute, kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue,
-    kCTFontTraitsAttribute, kCTFontWeightTrait, kCTForegroundColorAttributeName,
-    kCTKernAttributeName, kCTParagraphStyleAttributeName, kCTUnderlineColorAttributeName,
-    kCTUnderlineStyleAttributeName,
+    CTParagraphStyleSetting, CTParagraphStyleSpecifier, CTRun, CTRunDelegate,
+    CTRunDelegateCallbacks, CTTextAlignment, CTTypesetter, CTWritingDirection,
+    kCTFontAttributeName, kCTFontFamilyNameAttribute, kCTFontFeatureSettingsAttribute,
+    kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue, kCTFontTraitsAttribute,
+    kCTFontWeightTrait, kCTForegroundColorAttributeName, kCTKernAttributeName,
+    kCTParagraphStyleAttributeName, kCTRunDelegateAttributeName, kCTRunDelegateCurrentVersion,
+    kCTUnderlineColorAttributeName, kCTUnderlineStyleAttributeName,
 };
 use objc2_ui_kit::{
     UIFont, UIFontWeight, UIFontWeightBlack, UIFontWeightBold, UIFontWeightHeavy,
@@ -98,7 +99,7 @@ impl FontCache {
     }
 }
 
-fn make_font(style: &ResolvedTextStyle) -> CFRetained<CTFont> {
+pub(crate) fn make_font(style: &ResolvedTextStyle) -> CFRetained<CTFont> {
     let size = style.font_size as CGFloat;
     let font = style
         .font_family
@@ -254,6 +255,25 @@ pub(crate) fn cg_color(color: Color) -> CFRetained<CGColor> {
     CGColor::new_srgb(r, g, b, a)
 }
 
+/// The font of the first run of `line`.
+fn line_font(line: &CTLine) -> Option<CFRetained<CTFont>> {
+    // SAFETY: the line's own run array (of CTRuns) and attribute
+    // dictionary, whose font value is a CTFont.
+    unsafe {
+        let runs = line.glyph_runs();
+        if runs.count() == 0 {
+            return None;
+        }
+        let run = &*runs.value_at_index(0).cast::<objc2_core_text::CTRun>();
+        let attributes = run.attributes();
+        let attributes: &objc2_core_foundation::CFDictionary<CFString, CFType> =
+            attributes.cast_unchecked();
+        attributes
+            .get(kCTFontAttributeName)
+            .and_then(|f| f.downcast::<CTFont>().ok())
+    }
+}
+
 /// Typesetting state of one text content.
 pub struct Prepared {
     framesetter: CFRetained<CTFramesetter>,
@@ -263,6 +283,8 @@ pub struct Prepared {
     max_lines: u32,
     ellipsize: EllipsizeMode,
     align: TextAlign,
+    /// Attachments: placeholder offset (UTF-16) and height.
+    attachments: Vec<(CFIndex, CGFloat)>,
 }
 
 /// A finished line and its origin (CoreText's y-up space, from the bottom of
@@ -270,13 +292,19 @@ pub struct Prepared {
 pub(crate) struct LaidLine {
     pub(crate) line: CFRetained<CTLine>,
     pub(crate) origin: CGPoint,
+    /// Its characters in the text (before any ellipsis).
+    pub(crate) range: CFRange,
 }
 
 /// Finished lines, drawn by [`crate::text_view::TextView`].
 pub(crate) struct CoreTextLayout {
     pub(crate) lines: Vec<LaidLine>,
+    /// The box's height (lines are placed y up from its bottom).
+    pub(crate) height: CGFloat,
     /// Some run carries a strikethrough.
     pub(crate) strikethrough: bool,
+    /// Top left of each attachment's placeholder (y down), if shown.
+    attachments: Vec<Option<(f32, f32)>>,
 }
 
 // SAFETY: lines are immutable once created, and CoreText objects are
@@ -392,9 +420,116 @@ impl CoreTextEngine {
                 set(range, strikethrough_key(), decoration.as_ref());
             }
         }
+        // Attachments: their placeholders take the attachment's size (on the
+        // baseline) and draw nothing.
+        let clear = cg_color(Color::TRANSPARENT);
+        for a in &text.attachments {
+            let range = CFRange {
+                location: a.index as CFIndex,
+                length: 1,
+            };
+            if let Some(delegate) = run_delegate(a.width as CGFloat, a.height as CGFloat) {
+                set(
+                    range,
+                    unsafe { kCTRunDelegateAttributeName },
+                    delegate.as_ref(),
+                );
+            }
+            set(
+                range,
+                unsafe { kCTForegroundColorAttributeName },
+                clear.as_ref(),
+            );
+        }
         CFMutableAttributedString::end_editing(s);
         string
     }
+}
+
+/// A run delegate reserving `width` x `height` above the baseline.
+fn run_delegate(width: CGFloat, height: CGFloat) -> Option<CFRetained<CTRunDelegate>> {
+    type Size = [CGFloat; 2];
+    unsafe extern "C-unwind" fn dealloc(refcon: NonNull<c_void>) {
+        // SAFETY: the box created below, freed once by CoreText.
+        drop(unsafe { Box::from_raw(refcon.as_ptr().cast::<Size>()) });
+    }
+    unsafe extern "C-unwind" fn get_ascent(refcon: NonNull<c_void>) -> CGFloat {
+        // SAFETY: the live box created below.
+        unsafe { (*refcon.as_ptr().cast::<Size>())[1] }
+    }
+    unsafe extern "C-unwind" fn get_descent(_: NonNull<c_void>) -> CGFloat {
+        0.0
+    }
+    unsafe extern "C-unwind" fn get_width(refcon: NonNull<c_void>) -> CGFloat {
+        // SAFETY: as above.
+        unsafe { (*refcon.as_ptr().cast::<Size>())[0] }
+    }
+    static CALLBACKS: CTRunDelegateCallbacks = CTRunDelegateCallbacks {
+        version: kCTRunDelegateCurrentVersion as CFIndex,
+        dealloc: Some(dealloc),
+        getAscent: Some(get_ascent),
+        getDescent: Some(get_descent),
+        getWidth: Some(get_width),
+    };
+    let refcon = Box::into_raw(Box::new([width, height]));
+    // SAFETY: static callbacks; the delegate owns `refcon` (freed by
+    // `dealloc`).
+    let delegate = unsafe { CTRunDelegate::new(NonNull::from(&CALLBACKS), refcon.cast()) };
+    if delegate.is_none() {
+        // SAFETY: not handed over.
+        drop(unsafe { Box::from_raw(refcon) });
+    }
+    delegate
+}
+
+/// Where the lines put the placeholders at `attachments` (offset, height):
+/// the top left of each (y down in a box `height` tall), if shown.
+fn attachment_points(
+    lines: &[LaidLine],
+    attachments: &[(CFIndex, CGFloat)],
+    height: CGFloat,
+) -> Vec<Option<(f32, f32)>> {
+    let mut points = vec![None; attachments.len()];
+    for l in lines {
+        // SAFETY: the line's own run array (of CTRuns).
+        let runs = unsafe { l.line.glyph_runs() };
+        for r in 0..runs.count() {
+            // SAFETY: an index within the array.
+            let run = unsafe { &*runs.value_at_index(r).cast::<CTRun>() };
+            // SAFETY: a valid run.
+            let range = unsafe { run.string_range() };
+            // Only placeholder runs: an ellipsis token claims the range it
+            // cut.
+            // SAFETY: a valid run; an immutable CoreText key.
+            let placeholder = unsafe {
+                let key: *const CFString = kCTRunDelegateAttributeName;
+                run.attributes().contains_ptr_key(key.cast())
+            };
+            if !placeholder {
+                continue;
+            }
+            for (i, &(at, h)) in attachments.iter().enumerate() {
+                if points[i].is_some() || at < range.location || at >= range.location + range.length
+                {
+                    continue;
+                }
+                // A delegate run holds its one placeholder glyph.
+                let mut p = CGPoint::new(0.0, 0.0);
+                // SAFETY: one position into a one-point buffer.
+                unsafe {
+                    run.positions(
+                        CFRange {
+                            location: 0,
+                            length: 1,
+                        },
+                        NonNull::from(&mut p),
+                    )
+                };
+                points[i] = Some(((l.origin.x + p.x) as f32, (height - l.origin.y - h) as f32));
+            }
+        }
+    }
+    points
 }
 
 fn paragraph_style(text: &AttributedText) -> CFRetained<CTParagraphStyle> {
@@ -480,8 +615,13 @@ impl Prepared {
             EllipsizeMode::Middle => CTLineTruncationType::Middle,
             EllipsizeMode::Clip => return None,
         };
-        // SAFETY: ranges lie within the string; the token copies the
-        // attributes of the last visible character.
+        // The token copies the attributes of the last character that is
+        // not an attachment (a placeholder's would make it invisible).
+        let mut last = (self.length - 1).max(start);
+        while last > start && self.attachments.iter().any(|&(at, _)| at == last) {
+            last -= 1;
+        }
+        // SAFETY: ranges lie within the string.
         unsafe {
             let rest = self.typesetter().line(CFRange {
                 location: start,
@@ -495,11 +635,7 @@ impl Prepared {
                 Some(&CFString::from_static_str("\u{2026}")),
             );
             let source: &CFAttributedString = &self.string;
-            let attributes = CFAttributedString::attributes(
-                source,
-                (self.length - 1).max(start),
-                std::ptr::null_mut(),
-            );
+            let attributes = CFAttributedString::attributes(source, last, std::ptr::null_mut());
             if let Some(attributes) = attributes {
                 CFMutableAttributedString::set_attributes(
                     Some(&token_string),
@@ -540,6 +676,11 @@ impl TextEngine for CoreTextEngine {
             max_lines: text.max_lines,
             ellipsize: text.ellipsize,
             align: text.align,
+            attachments: text
+                .attachments
+                .iter()
+                .map(|a| (a.index as CFIndex, a.height as CGFloat))
+                .collect(),
         }
     }
 
@@ -585,9 +726,12 @@ impl TextEngine for CoreTextEngine {
             (0..count)
                 .map(|i| {
                     let line = array.value_at_index(i).cast::<CTLine>();
+                    let line = CFRetained::retain(NonNull::new(line.cast_mut()).expect("line"));
+                    let range = line.string_range();
                     LaidLine {
-                        line: CFRetained::retain(NonNull::new(line.cast_mut()).expect("line")),
+                        line,
                         origin: origins[i as usize],
+                        range,
                     }
                 })
                 .collect::<Vec<_>>()
@@ -609,10 +753,59 @@ impl TextEngine for CoreTextEngine {
                 last.line = truncated;
             }
         }
+        let attachments = if prepared.attachments.is_empty() {
+            Vec::new()
+        } else {
+            attachment_points(&lines, &prepared.attachments, height)
+        };
         TextLayout(std::sync::Arc::new(CoreTextLayout {
             strikethrough: has_strikethrough(prepared),
             lines,
+            height,
+            attachments,
         }))
+    }
+
+    fn attachments(&self, layout: &TextLayout) -> Vec<Option<(f32, f32)>> {
+        layout
+            .downcast::<CoreTextLayout>()
+            .map_or_else(Vec::new, |l| l.attachments.clone())
+    }
+
+    fn lines(&self, layout: &TextLayout) -> Vec<yf_core::TextLine> {
+        let Some(layout) = layout.downcast::<CoreTextLayout>() else {
+            return Vec::new();
+        };
+        layout
+            .lines
+            .iter()
+            .map(|l| {
+                let (mut ascent, mut descent, mut leading) = (0.0, 0.0, 0.0);
+                // SAFETY: a valid line and out pointers.
+                let width = unsafe {
+                    l.line
+                        .typographic_bounds(&mut ascent, &mut descent, &mut leading)
+                };
+                let (cap, x_height) =
+                    line_font(&l.line).map_or((ascent * 0.7, ascent * 0.5), |f| {
+                        // SAFETY: a valid font.
+                        unsafe { (f.cap_height(), f.x_height()) }
+                    });
+                yf_core::TextLine {
+                    text: String::new(),
+                    start: l.range.location as u32,
+                    end: (l.range.location + l.range.length) as u32,
+                    x: l.origin.x as f32,
+                    y: (layout.height - l.origin.y - ascent) as f32,
+                    width: width as f32,
+                    height: (ascent + descent + leading) as f32,
+                    ascender: ascent as f32,
+                    descender: descent as f32,
+                    cap_height: cap as f32,
+                    x_height: x_height as f32,
+                }
+            })
+            .collect()
     }
 
     fn register_font(&self, data: &[u8]) -> Result<(), String> {

@@ -36,7 +36,13 @@ pub(crate) struct Shared {
     /// `requestAnimationFrame` callbacks waiting for the next frame.
     frames: RefCell<Vec<(u32, Persistent<Function<'static>>)>>,
     next_frame_id: std::cell::Cell<u32>,
+    /// Measures one line of text for `measureText` (the engine's text
+    /// engine).
+    measurer: RefCell<Option<TextMeasurer>>,
 }
+
+/// Measures the width of one line of `text` in `font`, in points.
+pub type TextMeasurer = Box<dyn Fn(&yf_core::canvas::CanvasFont, &str) -> f32>;
 
 /// One QuickJS runtime + context with the yf host APIs installed.
 pub struct Host {
@@ -70,6 +76,11 @@ impl Host {
         self.rt.set_interrupt_handler(Some(Box::new(move || {
             stop.load(std::sync::atomic::Ordering::Relaxed)
         })));
+    }
+
+    /// Sets what canvas `measureText` measures with.
+    pub fn set_text_measurer(&mut self, measurer: TextMeasurer) {
+        *self.shared.measurer.borrow_mut() = Some(measurer);
     }
 
     /// Sets the handler for uncaught exceptions (in event handlers, timers and
@@ -405,6 +416,23 @@ fn payload_object<'js>(ctx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resu
                 obj.set(*key, payload_value(ctx, value)?)?;
             }
         }
+        EventPayload::TextLayout(lines) => {
+            let list = rquickjs::Array::new(ctx.clone())?;
+            for (i, l) in lines.iter().enumerate() {
+                let line = rquickjs::Object::new(ctx.clone())?;
+                line.set("text", l.text.as_str())?;
+                line.set("x", l.x)?;
+                line.set("y", l.y)?;
+                line.set("width", l.width)?;
+                line.set("height", l.height)?;
+                line.set("ascender", l.ascender)?;
+                line.set("descender", l.descender)?;
+                line.set("capHeight", l.cap_height)?;
+                line.set("xHeight", l.x_height)?;
+                list.set(i, line)?;
+            }
+            obj.set("lines", list)?;
+        }
         EventPayload::Layout {
             x,
             y,
@@ -507,6 +535,20 @@ fn install(ctx: &Ctx<'_>, shared: &Rc<Shared>) -> rquickjs::Result<()> {
         Function::new(ctx.clone(), move |buf: Array<'_>| -> rquickjs::Result<()> {
             let mut ops = s.ops.borrow_mut();
             protocol::decode(buf.ctx(), &buf, &mut ops, &mut s.warnings.borrow_mut())
+        })?,
+    )?;
+
+    // Canvas `measureText`: the width of one line, measured by the text
+    // engine (0 without one, e.g. in tests).
+    let s = shared.clone();
+    globals.set(
+        "__yf_measure_text",
+        Function::new(ctx.clone(), move |font: String, text: String| -> f64 {
+            let font = yf_core::canvas::CanvasFont::parse(&font).unwrap_or_default();
+            s.measurer
+                .borrow()
+                .as_ref()
+                .map_or(0.0, |m| m(&font, &text) as f64)
         })?,
     )?;
 

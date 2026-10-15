@@ -122,6 +122,11 @@ impl TextEngine for AndroidTextEngine {
         };
         let density = self.density;
         let shadow = text.shadow;
+        let attachments: Vec<f32> = text
+            .attachments
+            .iter()
+            .flat_map(|a| [a.index as f32, a.width, a.height])
+            .collect();
         Prepared(with_env(|env| {
             let j = java();
             let string = env.new_string(&text.text)?;
@@ -135,6 +140,8 @@ impl TextEngine for AndroidTextEngine {
                 let name = env.new_string(&**name)?;
                 env.set_object_array_element(&family_array, i as i32, name)?;
             }
+            let attachment_array = env.new_float_array(attachments.len() as i32)?;
+            env.set_float_array_region(&attachment_array, 0, &attachments)?;
             let args = [
                 JValue::Object(&string).as_jni(),
                 JValue::Object(&int_array).as_jni(),
@@ -149,6 +156,7 @@ impl TextEngine for AndroidTextEngine {
                 JValue::Float(shadow.map_or(0.0, |s| s.offset_x)).as_jni(),
                 JValue::Float(shadow.map_or(0.0, |s| s.offset_y)).as_jni(),
                 JValue::Float(shadow.map_or(0.0, |s| s.radius)).as_jni(),
+                JValue::Object(&attachment_array).as_jni(),
             ];
             // SAFETY: the method id and argument types match the signature
             // checked in `java::init`.
@@ -218,6 +226,86 @@ impl TextEngine for AndroidTextEngine {
             Some(layout) => TextLayout(Arc::new(AndroidLayout(layout))),
             None => TextLayout(Arc::new(())),
         }
+    }
+
+    fn lines(&self, layout: &TextLayout) -> Vec<yf_core::TextLine> {
+        let Some(AndroidLayout(obj)) = layout.downcast::<AndroidLayout>() else {
+            return Vec::new();
+        };
+        let floats = with_env(|env| {
+            let j = java();
+            let args: [jvalue; 2] = [
+                JValue::Object(obj.as_obj()).as_jni(),
+                JValue::Float(self.density).as_jni(),
+            ];
+            // SAFETY: matches the signature checked in `java::init`.
+            let array = unsafe {
+                env.call_static_method_unchecked(
+                    <&jni::objects::JClass<'_>>::from(j.text.as_obj()),
+                    j.text_lines,
+                    ReturnType::Array,
+                    &args,
+                )
+            }?
+            .l()?;
+            let array = jni::objects::JFloatArray::from(array);
+            let len = env.get_array_length(&array)? as usize;
+            let mut out = vec![0f32; len];
+            env.get_float_array_region(&array, 0, &mut out)?;
+            Ok(out)
+        });
+        floats
+            .as_chunks::<10>()
+            .0
+            .iter()
+            .map(|v| yf_core::TextLine {
+                text: String::new(),
+                start: v[0] as u32,
+                end: v[1] as u32,
+                x: v[2],
+                y: v[3],
+                width: v[4],
+                height: v[5],
+                ascender: v[6],
+                descender: v[7],
+                cap_height: v[8],
+                x_height: v[9],
+            })
+            .collect()
+    }
+
+    fn attachments(&self, layout: &TextLayout) -> Vec<Option<(f32, f32)>> {
+        let Some(AndroidLayout(obj)) = layout.downcast::<AndroidLayout>() else {
+            return Vec::new();
+        };
+        let floats = with_env(|env| {
+            let j = java();
+            let args: [jvalue; 2] = [
+                JValue::Object(obj.as_obj()).as_jni(),
+                JValue::Float(self.density).as_jni(),
+            ];
+            // SAFETY: matches the signature checked in `java::init`.
+            let array = unsafe {
+                env.call_static_method_unchecked(
+                    <&jni::objects::JClass<'_>>::from(j.text.as_obj()),
+                    j.text_attachments,
+                    ReturnType::Array,
+                    &args,
+                )
+            }?
+            .l()?;
+            let array = jni::objects::JFloatArray::from(array);
+            let len = env.get_array_length(&array)? as usize;
+            let mut out = vec![0f32; len];
+            env.get_float_array_region(&array, 0, &mut out)?;
+            Ok(out)
+        });
+        floats
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[x, y]| (!x.is_nan()).then_some((x, y)))
+            .collect()
     }
 
     fn register_font(&self, data: &[u8]) -> Result<(), String> {

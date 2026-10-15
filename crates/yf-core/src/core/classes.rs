@@ -127,7 +127,7 @@ impl<M: TextEngine> Core<M> {
     }
 
     /// The view style of `key` as platforms take it: fractional
-    /// translations resolved, an underlay shown (`TouchableHighlight`).
+    /// translations resolved, an underlay shown while pressed.
     pub(super) fn mounted_view_style(&self, key: Key) -> Box<ViewStyle> {
         let node = &self.nodes[key as usize];
         let mut style = node.mounted_view_style();
@@ -397,6 +397,7 @@ impl<M: TextEngine> Core<M> {
             return;
         }
         let paragraph = old.number_of_lines != props.number_of_lines
+            || old.selectable != props.selectable
             || old.ellipsize != props.ellipsize
             || old.no_wrap != props.no_wrap;
         let view_props = old.pointer_events != props.pointer_events;

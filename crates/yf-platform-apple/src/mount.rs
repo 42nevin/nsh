@@ -57,6 +57,7 @@ enum Native {
     HeaderItem(Retained<YFView>),
     /// Shown over the keyboard by the inputs naming it; UIKit places it.
     InputAccessory(Retained<YFView>),
+    Canvas(Retained<crate::canvas::CanvasView>),
     Web(Box<WebHost>),
     Video(Box<VideoHost>),
 }
@@ -75,6 +76,7 @@ impl Native {
             Native::Screen(s) => &s.view,
             Native::Modal(m) => &m.view,
             Native::HeaderItem(v) | Native::InputAccessory(v) => v,
+            Native::Canvas(v) => v,
             Native::Web(w) => &w.view,
             Native::Video(v) => &v.view,
         }
@@ -88,6 +90,7 @@ impl Native {
             | Native::Image(v)
             | Native::HeaderItem(v)
             | Native::InputAccessory(v) => Some(v),
+            Native::Canvas(v) => Some(v),
             Native::Text(t) => Some(t),
             Native::Stack(s) => Some(&s.container),
             Native::Screen(s) => Some(&s.view),
@@ -108,6 +111,7 @@ impl Native {
             | Native::Modal(_)
             | Native::HeaderItem(_)
             | Native::InputAccessory(_)
+            | Native::Canvas(_)
             | Native::Web(_)
             | Native::Video(_) => decor::Kind::View,
             Native::Text(_) => decor::Kind::Text,
@@ -268,6 +272,21 @@ struct Slot {
 }
 
 impl Slot {
+    /// The zoom view of a zoomable scroll view, which holds its children.
+    fn zoom_view(&self) -> Option<Retained<UIView>> {
+        match &self.native {
+            Native::Scroll(scroll) if self.behavior.as_ref().is_some_and(|b| b.zooms()) => {
+                crate::zoom::zoom_view(scroll)
+            }
+            _ => None,
+        }
+    }
+
+    /// `centerContent`.
+    fn centers(&self) -> bool {
+        self.behavior.as_ref().is_some_and(|b| b.center_content)
+    }
+
     fn new(native: Native) -> Self {
         Self {
             decor: match native {
@@ -377,7 +396,15 @@ impl Mounter {
             pending_images: Vec::new(),
             animator: Animator::new(&target),
             target,
-            images: ImageLoader::new(asset_base.clone()),
+            images: ImageLoader::new(asset_base.clone(), {
+                let shared = shared.clone();
+                std::sync::Arc::new(move |event| {
+                    let mtm = MainThreadMarker::new().expect("main queue");
+                    if let Some(m) = shared.get(mtm).borrow_mut().as_mut() {
+                        m.load_event(event);
+                    }
+                })
+            }),
             control,
             shared,
             mac_idiom: UIDevice::currentDevice(mtm).userInterfaceIdiom()
@@ -455,6 +482,7 @@ impl Mounter {
                     }
                     ViewKind::HeaderItem => Native::HeaderItem(YFView::new(self.mtm)),
                     ViewKind::InputAccessory => Native::InputAccessory(YFView::new(self.mtm)),
+                    ViewKind::Canvas => Native::Canvas(crate::canvas::CanvasView::new(self.mtm)),
                     ViewKind::WebView => {
                         Native::Web(Box::new(WebHost::new(self.mtm, id, self.control.clone())))
                     }
@@ -517,7 +545,11 @@ impl Mounter {
                     apply_dynamic(c, &self.animator);
                 }
                 if let (Some(p), Some(c)) = (self.slot(parent), self.slot(child)) {
-                    let (p, c) = (p.decor.container(p.native.view()), c.native.view());
+                    let zoom = p.zoom_view();
+                    let p = zoom
+                        .as_deref()
+                        .unwrap_or(p.decor.container(p.native.view()));
+                    let c = c.native.view();
                     match before.and_then(|b| self.slot(b)) {
                         Some(b) => p.insertSubview_belowSubview(c, b.native.view()),
                         None => p.addSubview(c),
@@ -727,13 +759,18 @@ impl Mounter {
                 }
             }
             MountItem::ScrollContent { id, size } => {
-                if let Some(Slot {
-                    native: Native::Scroll(scroll),
-                    ..
-                }) = self.slot(id)
+                if let Some(
+                    s @ Slot {
+                        native: Native::Scroll(scroll),
+                        ..
+                    },
+                ) = self.slot(id)
                 {
-                    scroll
-                        .setContentSize(CGSize::new(size.width as CGFloat, size.height as CGFloat));
+                    let size = CGSize::new(size.width as CGFloat, size.height as CGFloat);
+                    match s.zoom_view() {
+                        Some(zoom) => crate::zoom::layout(scroll, &zoom, size, s.centers()),
+                        None => scroll.setContentSize(size),
+                    }
                 }
             }
             MountItem::ScrollBy { id, dx, dy } => {
@@ -763,6 +800,7 @@ impl Mounter {
                 }
             }
             MountItem::ScrollBehavior { id, behavior } => {
+                let mtm = self.mtm;
                 if let Some(s) = self.slot_mut(id)
                     && let Native::Scroll(scroll) = &s.native
                 {
@@ -796,10 +834,23 @@ impl Mounter {
                     inset.bottom += new.bottom - old.bottom;
                     inset.right += new.right - old.right;
                     scroll.setContentInset(inset);
+                    // Zooming (UIKit asks the delegate for the zoom view).
+                    scroll.setMinimumZoomScale(b.min_zoom as CGFloat);
+                    scroll.setMaximumZoomScale(b.max_zoom.max(b.min_zoom) as CGFloat);
+                    scroll.setBouncesZoom(b.bounces_zoom);
+                    let zoom = crate::zoom::set_zoomable(scroll, b.zooms(), mtm);
+                    if let Some(pinch) = scroll.pinchGestureRecognizer() {
+                        pinch.setEnabled(b.pinch);
+                    }
+                    let center = b.center_content;
                     s.behavior = Some(behavior);
+                    if let Some(zoom) = zoom {
+                        crate::zoom::layout(scroll, &zoom, zoom.bounds().size, center);
+                    }
                 }
             }
             MountItem::Refreshing { id, refreshing } => self.set_refreshing(id, refreshing),
+            MountItem::Canvas { id, drawing } => self.set_drawing(id, drawing),
             MountItem::AnimBindings { id, bindings } => {
                 if let Some(s) = self.slot_mut(id) {
                     // Properties no longer animated fall back to the static style.
@@ -810,7 +861,10 @@ impl Mounter {
                     self.decorate(id);
                     if bound {
                         self.animated.push(id);
-                    } else if let Some(s) = self.slot(id) {
+                    }
+                    // Bound values apply now too (a canvas reads them when
+                    // it draws next).
+                    if let Some(s) = self.slot(id) {
                         apply_dynamic(s, &self.animator);
                     }
                     return true;
@@ -929,6 +983,18 @@ impl Mounter {
                 self.target.scroll_applied(id);
                 scroll.setContentOffset_animated(offset, animated);
             }
+            (
+                Command::ZoomTo {
+                    scale,
+                    center,
+                    animated,
+                },
+                Native::Scroll(scroll),
+            ) => {
+                if crate::zoom::zoom_view(scroll).is_some() {
+                    crate::zoom::zoom_to(scroll, scale, center, animated);
+                }
+            }
             (Command::StatusBar(config), native) if id == yf_core::ROOT_ID => {
                 crate::system::set_status_bar(config, native.view());
             }
@@ -943,6 +1009,7 @@ impl Mounter {
             // Toasts are Android only.
             (Command::Toast { .. }, _) => {}
             (Command::Announce(text), _) => crate::system::announce(&text),
+            (Command::ImageInfo { id, uri }, _) => self.images.info(id, &uri),
             (Command::AccessibilityFocus, native) => {
                 crate::system::accessibility_focus(native.view())
             }
@@ -1560,18 +1627,8 @@ impl Mounter {
                 s.image.as_ref().map(|s| s.uri.clone()),
                 s.image_options.placeholder.as_ref().map(|s| s.uri.clone()),
             );
-            let shared = self.shared.clone();
-            let done = move |key: String, result: Result<DecodedImage, String>| {
-                let mtm = MainThreadMarker::new().expect("main queue");
-                if let Some(m) = shared.get(mtm).borrow_mut().as_mut() {
-                    m.image_loaded(&key, result);
-                }
-            };
             if let Some(uri) = source {
-                match self
-                    .images
-                    .request(id, &uri, max_pixels, scale, look, done.clone())
-                {
+                match self.images.request(id, &uri, max_pixels, scale, look) {
                     Request::Ready(decoded) => {
                         if let Some(s) = self.slot_mut(id) {
                             s.decor.set_image(Some(&decoded.image), 0.0);
@@ -1597,10 +1654,7 @@ impl Mounter {
             let shown = self.slot(id).is_some_and(|s| s.image_shown);
             if let Some(uri) = placeholder.filter(|_| !shown) {
                 let plain = crate::image::Look::default();
-                match self
-                    .images
-                    .request(id, &uri, max_pixels, scale, plain, done)
-                {
+                match self.images.request(id, &uri, max_pixels, scale, plain) {
                     Request::Ready(decoded) => {
                         if let Some(s) = self.slot_mut(id) {
                             s.decor.set_image(Some(&decoded.image), 0.0);
@@ -1616,8 +1670,89 @@ impl Mounter {
         }
     }
 
+    /// What canvas `id` draws; loads the images it draws.
+    fn set_drawing(&mut self, id: NodeId, drawing: Arc<yf_core::canvas::Drawing>) {
+        let Some(Slot {
+            native: Native::Canvas(view),
+            ..
+        }) = self.slot(id)
+        else {
+            return;
+        };
+        let view = view.clone();
+        view.set_drawing(drawing.clone());
+        let scale = view.contentScaleFactor();
+        for image in drawing.images() {
+            if view.has_image(&image.uri) {
+                continue;
+            }
+            // At their natural size: the drawing may scale them anyway.
+            match self
+                .images
+                .request(id, &image.uri, 0, scale, crate::image::Look::default())
+            {
+                Request::Ready(decoded) => view.set_image(image.uri.clone(), decoded.image),
+                Request::Pending => {}
+            }
+        }
+    }
+
+    /// What the image loader reports.
+    pub(crate) fn load_event(&mut self, event: crate::image::LoadEvent) {
+        use crate::image::LoadEvent;
+        match event {
+            LoadEvent::Decoded { key, result } => self.image_loaded(&key, result),
+            LoadEvent::Bytes { uri, result } => self.images.bytes_ready(&uri, result),
+            LoadEvent::Progress { uri, loaded, total } => {
+                for id in self.images.waiting(&uri) {
+                    let Some(s) = self.slot(id) else { continue };
+                    if s.image.as_ref().is_some_and(|i| *i.uri == *uri)
+                        && s.events.contains(EventKind::Progress)
+                    {
+                        self.control.dispatch_event(
+                            id,
+                            EventKind::Progress,
+                            EventPayload::Map(vec![
+                                ("loaded", PayloadValue::Number(loaded as f64)),
+                                ("total", PayloadValue::Number(total as f64)),
+                            ]),
+                        );
+                    }
+                }
+            }
+            LoadEvent::Info { id, result } => {
+                let mut fields = vec![("id", PayloadValue::Number(id as f64))];
+                match result {
+                    Ok((w, h)) => {
+                        fields.push(("width", PayloadValue::Number(w as f64)));
+                        fields.push(("height", PayloadValue::Number(h as f64)));
+                    }
+                    Err(message) => fields.push(("error", PayloadValue::Str(message))),
+                }
+                self.control.dispatch_event(
+                    yf_core::ROOT_ID,
+                    EventKind::ImageInfo,
+                    EventPayload::Map(fields),
+                );
+            }
+        }
+    }
+
     pub(crate) fn image_loaded(&mut self, key: &str, result: Result<DecodedImage, String>) {
         for id in self.images.finish(key, &result) {
+            if let Some(Slot {
+                native: Native::Canvas(view),
+                ..
+            }) = self.slot(id)
+            {
+                // Canvas images are requested at their natural size.
+                match (&result, key.strip_prefix("0@")) {
+                    (Ok(decoded), Some(uri)) => view.set_image(uri.into(), decoded.image.clone()),
+                    (Err(message), _) => log::warn!("canvas image failed: {message}"),
+                    _ => {}
+                }
+                continue;
+            }
             let Some(s) = self.slot_mut(id) else { continue };
             if s.placeholder_key.as_deref() == Some(key) {
                 s.placeholder_key = None;
@@ -2481,6 +2616,21 @@ impl Mounter {
     }
 
     /// A scroll view moved: feeds its scroll value in the same frame.
+    /// Scroll view `id` zoomed: centers its content again (`centerContent`).
+    pub(crate) fn zoomed(&mut self, id: NodeId) {
+        if let Some(
+            s @ Slot {
+                native: Native::Scroll(scroll),
+                ..
+            },
+        ) = self.slot(id)
+            && s.centers()
+            && let Some(zoom) = s.zoom_view()
+        {
+            crate::zoom::layout(scroll, &zoom, zoom.bounds().size, true);
+        }
+    }
+
     pub(crate) fn scrolled(&mut self, id: NodeId, offset: CGPoint) {
         self.pin_sticky(id);
         let Some(s) = self.slot(id) else { return };
@@ -2699,6 +2849,13 @@ fn scaled_transform(t: &CATransform3D, f: CGFloat) -> CATransform3D {
 /// Opacity, background color and transform: static values overridden by
 /// animated bindings.
 fn apply_dynamic(slot: &Slot, animator: &Animator) {
+    if let Native::Canvas(canvas) = &slot.native {
+        for &(prop, node) in &slot.bindings {
+            if let AnimProp::CanvasArg(k) = prop {
+                canvas.set_value(k, animator.eval(node));
+            }
+        }
+    }
     let view = slot.native.view();
     let mut background = slot.style.background_color;
     for &(prop, node) in &slot.bindings {

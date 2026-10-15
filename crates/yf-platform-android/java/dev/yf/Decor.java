@@ -22,6 +22,8 @@ final class Decor extends Drawable {
     int fill;
     /** Top left, top right, bottom right, bottom left. */
     final float[] radii = new float[4];
+    /** `borderCurve: "continuous"`. */
+    boolean continuous;
     /** Top, right, bottom, left (px). */
     final float[] borderWidths = new float[4];
     /** Top, right, bottom, left. */
@@ -44,8 +46,9 @@ final class Decor extends Drawable {
         return Color.alpha(shadowColor) > 0 && Color.alpha(fill) > 0;
     }
 
+    /** One circular radius: the outline is a plain round rect. */
     boolean uniformRadius() {
-        return radii[0] == radii[1] && radii[1] == radii[2] && radii[2] == radii[3];
+        return !continuous && radii[0] == radii[1] && radii[1] == radii[2] && radii[2] == radii[3];
     }
 
     boolean rounded() {
@@ -61,8 +64,93 @@ final class Decor extends Drawable {
             corners[i * 2 + 1] = r;
         }
         out.reset();
-        out.addRoundRect(rect, corners, Path.Direction.CW);
+        roundedRect(out, rect, corners, continuous);
         return out;
+    }
+
+    /** Corner smoothing of continuous corners (`yf_core::shape::SMOOTHING`). */
+    private static final double SMOOTHING = 0.6;
+
+    /**
+     * Adds `rect` with `corners` (horizontal and vertical radius per corner,
+     * clockwise from the top left, fitted), clockwise: a port of
+     * `yf_core::shape::rounded_rect`, so both platforms draw the same
+     * corners.
+     */
+    static void roundedRect(Path out, RectF rect, float[] corners, boolean continuous) {
+        if (!continuous) {
+            out.addRoundRect(rect, corners, Path.Direction.CW);
+            return;
+        }
+        double x0 = rect.left, y0 = rect.top, x1 = rect.right, y1 = rect.bottom;
+        double w = x1 - x0, h = y1 - y0;
+        double tlx = corners[0], tly = corners[1], trx = corners[2], tryy = corners[3];
+        double brx = corners[4], bry = corners[5], blx = corners[6], bly = corners[7];
+        // Per corner: its point, the directions it is entered / left along,
+        // its radius along each and how far it may reach along each.
+        double[][] specs = {
+            {x1, y0, 1, 0, 0, 1, trx, tryy, share(w, trx, tlx), share(h, tryy, bry)},
+            {x1, y1, 0, 1, -1, 0, bry, brx, share(h, bry, tryy), share(w, brx, blx)},
+            {x0, y1, -1, 0, 0, -1, blx, bly, share(w, blx, brx), share(h, bly, tly)},
+            {x0, y0, 0, -1, 1, 0, tly, tlx, share(h, tly, bly), share(w, tlx, trx)},
+        };
+        double[] pt = new double[2];
+        for (int i = 0; i < 4; i++) {
+            double[] s = specs[i];
+            double r = Math.max(s[6], s[7]);
+            if (r <= 0) {
+                if (i == 0) out.moveTo((float) s[0], (float) s[1]);
+                else out.lineTo((float) s[0], (float) s[1]);
+                continue;
+            }
+            double su = s[6] / r, sv = s[7] / r;
+            double budget = Math.max(r, Math.min(s[8] / su, s[9] / sv));
+            double smoothing = Math.max(0, Math.min(SMOOTHING, budget / r - 1));
+            double p = Math.min((1 + smoothing) * r, budget);
+            double arc = Math.PI / 2 * (1 - smoothing);
+            double arcLen = Math.sin(arc / 2) * r * Math.sqrt(2);
+            double alpha = (Math.PI / 2 - arc) / 2;
+            double p3p4 = r * Math.tan(alpha / 2);
+            double beta = Math.PI / 4 * smoothing;
+            double c = p3p4 * Math.cos(beta), d = c * Math.tan(beta);
+            double b = Math.max(0, (p - arcLen - c - d) / 3), a = 2 * b;
+            map(s, su, sv, -p, 0, pt);
+            if (i == 0) out.moveTo((float) pt[0], (float) pt[1]);
+            else out.lineTo((float) pt[0], (float) pt[1]);
+            boolean transitions = a + b + c > 1e-9 * r;
+            if (transitions) cubic(out, s, su, sv, -p + a, 0, -p + a + b, 0, -p + a + b + c, d);
+            double start = -Math.PI / 4 - arc / 2, end = -Math.PI / 4 + arc / 2;
+            double k = 4.0 / 3.0 * Math.tan(arc / 4) * r;
+            double p0x = -r + r * Math.cos(start), p0y = r + r * Math.sin(start);
+            double p3x = -r + r * Math.cos(end), p3y = r + r * Math.sin(end);
+            cubic(out, s, su, sv,
+                    p0x - k * Math.sin(start), p0y + k * Math.cos(start),
+                    p3x + k * Math.sin(end), p3y - k * Math.cos(end),
+                    p3x, p3y);
+            if (transitions) cubic(out, s, su, sv, 0, p - a - b, 0, p - a, 0, p);
+        }
+        out.close();
+    }
+
+    private static double share(double len, double r, double other) {
+        return r + other > 0 ? len * r / (r + other) : 0;
+    }
+
+    /** Corner frame (along u, along v from the corner) to the plane. */
+    private static void map(double[] s, double su, double sv, double a, double b, double[] out) {
+        out[0] = s[0] + s[2] * a * su + s[4] * b * sv;
+        out[1] = s[1] + s[3] * a * su + s[5] * b * sv;
+    }
+
+    private static void cubic(Path out, double[] s, double su, double sv,
+            double a1, double b1, double a2, double b2, double a3, double b3) {
+        double[] p = new double[2];
+        map(s, su, sv, a1, b1, p);
+        float x1 = (float) p[0], y1 = (float) p[1];
+        map(s, su, sv, a2, b2, p);
+        float x2 = (float) p[0], y2 = (float) p[1];
+        map(s, su, sv, a3, b3, p);
+        out.cubicTo(x1, y1, x2, y2, (float) p[0], (float) p[1]);
     }
 
     private final float[] fitted = new float[4];
@@ -107,6 +195,24 @@ final class Decor extends Drawable {
         float[] positions;
     }
 
+    /** `backdrop-filter: blur()` (API 31+), drawn under the background. */
+    Backdrop backdrop;
+
+    /** Blurs what is behind `view` by `px` (0: no longer). */
+    void setBackdrop(android.view.View view, float px) {
+        if (android.os.Build.VERSION.SDK_INT < 31) return;
+        if (px <= 0) {
+            if (backdrop != null) {
+                backdrop.release();
+                backdrop = null;
+                invalidateSelf();
+            }
+            return;
+        }
+        if (backdrop == null) backdrop = new Backdrop(view);
+        backdrop.setBlur(px);
+    }
+
     /** Distance shadow casters are moved away to draw only their shadows. */
     private static final float AWAY = 1 << 14;
     private final Path shadowPath = new Path();
@@ -115,6 +221,12 @@ final class Decor extends Drawable {
     public void draw(Canvas canvas) {
         Rect b = getBounds();
         drawOuterShadows(canvas, b);
+        if (backdrop != null) {
+            canvas.save();
+            canvas.clipPath(shape(b, 0, path));
+            backdrop.draw(canvas);
+            canvas.restore();
+        }
         if (Color.alpha(fill) > 0) {
             paint.setStyle(Paint.Style.FILL);
             paint.setColor(fill);
@@ -206,7 +318,7 @@ final class Decor extends Drawable {
             corners[i * 2] = r;
             corners[i * 2 + 1] = r;
         }
-        out.addRoundRect(rect, corners, Path.Direction.CW);
+        roundedRect(out, rect, corners, continuous);
     }
 
     private final android.graphics.Matrix gradientMatrix = new android.graphics.Matrix();
@@ -373,7 +485,7 @@ final class Decor extends Drawable {
         }
         rect.set(b.left + l, b.top + t, b.right - r, b.bottom - bo);
         inner.reset();
-        if (rect.width() > 0 && rect.height() > 0) inner.addRoundRect(rect, innerRadii, Path.Direction.CW);
+        if (rect.width() > 0 && rect.height() > 0) roundedRect(inner, rect, innerRadii, continuous);
         path.setFillType(Path.FillType.EVEN_ODD);
         path.addPath(inner);
     }
@@ -421,7 +533,8 @@ final class Decor extends Drawable {
                 } else if (Build.VERSION.SDK_INT >= 30) {
                     outline.setPath(shape(r, 0, new Path()));
                 } else {
-                    outline.setRect(r);
+                    // Rounded rectangles are convex.
+                    outline.setConvexPath(shape(r, 0, new Path()));
                 }
             }
         });

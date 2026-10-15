@@ -42,6 +42,8 @@ pub enum ViewKind {
     /// A bar over the keyboard ([`InputConfig::accessory`]); its frame's
     /// size is its own, the platform places it.
     InputAccessory,
+    /// A canvas ([`MountItem::Canvas`]).
+    Canvas,
     /// A web view.
     WebView,
     /// A video player.
@@ -152,6 +154,17 @@ pub struct ScrollBehavior {
     pub keyboard_taps: KeyboardTaps,
     /// A fling moves one snap point at most (`disableIntervalMomentum`).
     pub one_step: bool,
+    /// `minimumZoomScale`.
+    pub min_zoom: f32,
+    /// `maximumZoomScale`: pinching zooms the content when above
+    /// `min_zoom` (`<scroll>` only, not lists).
+    pub max_zoom: f32,
+    /// `bouncesZoom`: pinching may go past the limits and springs back.
+    pub bounces_zoom: bool,
+    /// `pinchGestureEnabled`: the user can pinch to zoom.
+    pub pinch: bool,
+    /// `centerContent`: content smaller than the viewport is centered.
+    pub center_content: bool,
 }
 
 impl Default for ScrollBehavior {
@@ -167,11 +180,21 @@ impl Default for ScrollBehavior {
             content_inset: EdgeInsets::default(),
             keyboard_taps: KeyboardTaps::Never,
             one_step: false,
+            min_zoom: 1.0,
+            max_zoom: 1.0,
+            bounces_zoom: true,
+            pinch: true,
+            center_content: false,
         }
     }
 }
 
 impl ScrollBehavior {
+    /// Whether the content zooms (scrolling both ways while zoomed in).
+    pub fn zooms(&self) -> bool {
+        self.max_zoom > self.min_zoom
+    }
+
     /// Whether flings end at snap points.
     pub fn snaps(&self) -> bool {
         self.snap_interval > 0.0 || !self.snap_offsets.is_empty()
@@ -381,6 +404,8 @@ pub struct InputConfig {
     pub auto_fill: crate::ops::AutoFill,
     /// The text runs right to left.
     pub rtl: bool,
+    /// `caretHidden`.
+    pub caret_hidden: bool,
     /// `inputAccessoryViewID` as set.
     pub accessory_id: Option<Box<str>>,
     /// The input accessory it names, if one is mounted.
@@ -407,6 +432,7 @@ impl Default for InputConfig {
             selection_color: None,
             auto_fill: crate::ops::AutoFill::Default,
             rtl: false,
+            caret_hidden: false,
             accessory_id: None,
             accessory: None,
         }
@@ -573,6 +599,14 @@ pub enum MountItem {
         id: NodeId,
         /// Spinner state.
         refreshing: bool,
+    },
+    /// What a canvas draws; its native values come as
+    /// [`yf_anim::AnimProp::CanvasArg`] bindings.
+    Canvas {
+        /// The canvas.
+        id: NodeId,
+        /// The drawing.
+        drawing: Arc<crate::canvas::Drawing>,
     },
     /// Bind visual properties to native animation nodes.
     AnimBindings {

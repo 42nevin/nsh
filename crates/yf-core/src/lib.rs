@@ -8,6 +8,7 @@
 //! Everything here is single-threaded and allocation-conscious: the core runs
 //! on the engine thread, between the JS host and the platform backend.
 
+pub mod canvas;
 mod core;
 mod css;
 mod css_named;
@@ -18,6 +19,7 @@ mod grid;
 mod mount;
 mod ops;
 mod props;
+pub mod shape;
 mod style;
 pub mod tailwind;
 mod text;
@@ -59,8 +61,8 @@ pub use crate::{
         TransformOrigin, ViewStyle,
     },
     text::{
-        ApproxTextEngine, AttributedText, ResolvedTextStyle, TextEngine, TextLayout, TextLink,
-        TextSpan,
+        ATTACHMENT_CHAR, ApproxTextEngine, AttributedText, ResolvedTextStyle, TextAttachment,
+        TextEngine, TextLayout, TextLine, TextLink, TextSpan,
     },
     transform::{Decomposed, MAX_TRANSFORMS, Matrix, Transform, TransformKind, TransformOp},
 };

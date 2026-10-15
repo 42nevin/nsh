@@ -158,6 +158,11 @@ export function Form() {
             />
             <text style={{ fontSize: 12, color: colors.muted, textAlign: "right" }}>{`${notes().length}/280`}</text>
           </view>
+          <AutoGrow />
+          <view style={{ gap: 4 }}>
+            <text style={{ fontSize: 13, color: colors.muted }}>caretHidden</text>
+            <input style={field} caretHidden defaultValue="No caret here" />
+          </view>
         </Section>
 
         <view style={{ gap: 10 }}>
@@ -191,6 +196,26 @@ export function Form() {
 }
 
 /** An input pinned to the bottom (outside any scroll view): it rides on the keyboard. */
+/** A multiline input that grows with its text (onContentSizeChange), up to 5 lines. */
+function AutoGrow() {
+  const [height, setHeight] = createSignal(0);
+  const [size, setSize] = createSignal("");
+  return (
+    <view style={{ gap: 4 }}>
+      <text style={{ fontSize: 13, color: colors.muted }}>Grows with its text (onContentSizeChange): {size()}</text>
+      <input
+        multiline
+        placeholder="Type several lines"
+        onContentSizeChange={(e) => {
+          setSize(`${Math.round(e.width)}×${Math.round(e.height)}`);
+          setHeight(Math.min(e.height, 110));
+        }}
+        style={{ ...field, height: Math.max(height(), 20) + 20 }}
+      />
+    </view>
+  );
+}
+
 function MessageBar() {
   const insets = useSafeAreaInsets();
   const [messages, setMessages] = createSignal<string[]>([]);

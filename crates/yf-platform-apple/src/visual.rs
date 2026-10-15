@@ -282,7 +282,12 @@ impl Visual {
             g.setFrame(local);
             match shared {
                 Some(r) => {
-                    g.setCornerRadius(r as CGFloat);
+                    crate::decor::set_corners(
+                        g,
+                        r as CGFloat,
+                        crate::decor::corner_mask(&radii),
+                        radii.continuous,
+                    );
                     g.setMasksToBounds(true);
                     // SAFETY: clearing the mask.
                     unsafe { g.setMask(None) };
@@ -434,7 +439,12 @@ impl Visual {
             let layer = b.view.layer();
             match radii.shared() {
                 Some(r) => {
-                    layer.setCornerRadius(r as CGFloat);
+                    crate::decor::set_corners(
+                        &layer,
+                        r as CGFloat,
+                        crate::decor::corner_mask(&radii),
+                        radii.continuous,
+                    );
                     b.view.setClipsToBounds(true);
                 }
                 None => {
@@ -510,26 +520,14 @@ fn grown(radii: CornerRadii, d: f32) -> CornerRadii {
         top_right: g(radii.top_right),
         bottom_right: g(radii.bottom_right),
         bottom_left: g(radii.bottom_left),
+        ..radii
     }
 }
 
 /// Adds a rounded rectangle to `path` counterclockwise (a hole under the
 /// non-zero rule of shadow paths).
 fn add_reversed(path: &CFRetained<CGMutablePath>, rect: CGRect, radii: CornerRadii) {
-    let (x0, y0) = (rect.origin.x, rect.origin.y);
-    let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
-    let [tl, tr, br, bl] = radii.to_array().map(|r| r as CGFloat);
-    let p = Some(&**path);
-    let m = std::ptr::null();
-    // SAFETY: a valid mutable path and a null transform.
-    unsafe {
-        CGMutablePath::move_to_point(p, m, x0 + tl, y0);
-        CGMutablePath::add_arc_to_point(p, m, x0, y0, x0, y0 + tl, tl);
-        CGMutablePath::add_arc_to_point(p, m, x0, y1, x0 + bl, y1, bl);
-        CGMutablePath::add_arc_to_point(p, m, x1, y1, x1, y1 - br, br);
-        CGMutablePath::add_arc_to_point(p, m, x1, y0, x1 - tr, y0, tr);
-        CGMutablePath::close_subpath(p);
-    }
+    crate::decor::add_rounded(path, rect, radii, true);
 }
 
 /// Configures `g` to draw `gradient` over a `size` box.

@@ -50,6 +50,7 @@ const STICKY_CELLS: i32 = 24;
 const SCROLL_BEHAVIOR: i32 = 25;
 const LAYOUT_DIRECTION: i32 = 26;
 const TRACK_STATES: i32 = 27;
+const CANVAS: i32 = 28;
 
 /// An entry of the object table.
 pub(crate) enum Obj {
@@ -122,6 +123,7 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     // The runtime renders no input accessories on Android
                     // (as React Native).
                     ViewKind::InputAccessory => 0,
+                    ViewKind::Canvas => 14,
                 });
             }
             MountItem::Insert {
@@ -183,6 +185,7 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     e.int(l.events.bits() as u32 as i32);
                     e.int((l.events.bits() >> 32) as u32 as i32);
                 }
+                e.bool(text.selectable);
             }
             MountItem::Events { id, events } => {
                 e.int(EVENTS);
@@ -261,6 +264,11 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                 e.int(LAYOUT_DIRECTION);
                 e.bool(rtl);
             }
+            MountItem::Canvas { id, drawing } => {
+                e.int(CANVAS);
+                e.int(id as i32);
+                canvas(&mut e, &drawing);
+            }
             MountItem::TrackStates { id, states } => {
                 e.int(TRACK_STATES);
                 e.int(id as i32);
@@ -295,6 +303,12 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     KeyboardTaps::Handled => 2,
                 });
                 e.bool(b.one_step);
+                e.bool(b.zooms());
+                e.float(b.min_zoom);
+                e.float(b.max_zoom.max(b.min_zoom));
+                e.bool(b.bounces_zoom);
+                e.bool(b.pinch);
+                e.bool(b.center_content);
             }
             MountItem::ScrollBy { id, dx, dy } => {
                 e.int(SCROLL_BY);
@@ -462,6 +476,24 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                         e.string(text);
                     }
                     Command::AccessibilityFocus => e.int(18),
+                    Command::ImageInfo { id, uri } => {
+                        e.int(19);
+                        e.int(id as i32);
+                        e.string(uri);
+                    }
+                    Command::ZoomTo {
+                        scale,
+                        center,
+                        animated,
+                    } => {
+                        e.int(20);
+                        e.float(scale);
+                        e.bool(center.is_some());
+                        let (x, y) = center.unwrap_or_default();
+                        e.float(x);
+                        e.float(y);
+                        e.bool(animated);
+                    }
                     // Turned into a mount item / `ScrollTo` by the core.
                     Command::LayoutAnimation(_)
                     | Command::ScrollToIndex { .. }
@@ -487,6 +519,7 @@ fn view_style(e: &mut Encoded, s: &ViewStyle) {
     for r in radii.to_array() {
         e.float(r);
     }
+    e.bool(radii.continuous);
     let b = &s.borders;
     for w in b.widths {
         e.float(w);
@@ -991,4 +1024,302 @@ fn input(e: &mut Encoded, c: &InputConfig) {
         AutoFill::Birthdate => Some("birthDateFull"),
     });
     e.bool(c.rtl);
+    e.bool(c.caret_hidden);
+}
+
+// --- Canvas drawings (`CanvasBox.java`) -------------------------------------
+//
+// A word count, then the operations as 32-bit words: operation codes as in
+// `js/runtime/index.ts` (`CV_*`), numbers as float bits, native value
+// slots as `SLOT_BITS | slot` (a NaN no arithmetic produces), strings as
+// object indices.
+
+/// Marks a word as native value slot `word & 0xfffff`.
+const SLOT_BITS: u32 = 0x7fa0_0000;
+
+impl Encoded {
+    fn num(&mut self, n: yf_core::canvas::Num) {
+        match n {
+            yf_core::canvas::Num::Const(v) => self.float(v),
+            yf_core::canvas::Num::Slot(s) => self.int((SLOT_BITS | s as u32) as i32),
+        }
+    }
+
+    fn nums(&mut self, ns: &[yf_core::canvas::Num]) {
+        for &n in ns {
+            self.num(n);
+        }
+    }
+}
+
+fn canvas(e: &mut Encoded, d: &yf_core::canvas::Drawing) {
+    use yf_core::canvas::CanvasOp as Op;
+    let at = e.bytes.len();
+    e.int(0);
+    for op in &d.ops {
+        match op {
+            Op::Save => e.int(0),
+            Op::Restore => e.int(1),
+            Op::Translate(x, y) => {
+                e.int(2);
+                e.nums(&[*x, *y]);
+            }
+            Op::Scale(x, y) => {
+                e.int(3);
+                e.nums(&[*x, *y]);
+            }
+            Op::Rotate(a) => {
+                e.int(4);
+                e.num(*a);
+            }
+            Op::Transform(m) => {
+                e.int(5);
+                e.nums(m);
+            }
+            Op::SetTransform(m) => {
+                e.int(6);
+                e.nums(m);
+            }
+            Op::BeginPath => e.int(7),
+            Op::Path(p) => path_op(e, p),
+            Op::Fill(p, rule) => {
+                e.int(18);
+                e.int(*rule as i32);
+                path(e, p.as_deref());
+            }
+            Op::Stroke(p) => {
+                e.int(19);
+                path(e, p.as_deref());
+            }
+            Op::Clip(p, rule) => {
+                e.int(20);
+                e.int(*rule as i32);
+                path(e, p.as_deref());
+            }
+            Op::FillRect(r) => {
+                e.int(21);
+                e.nums(r);
+            }
+            Op::StrokeRect(r) => {
+                e.int(22);
+                e.nums(r);
+            }
+            Op::ClearRect(r) => {
+                e.int(23);
+                e.nums(r);
+            }
+            Op::FillStyle(p) => {
+                e.int(24);
+                paint(e, p);
+            }
+            Op::StrokeStyle(p) => {
+                e.int(25);
+                paint(e, p);
+            }
+            Op::LineWidth(w) => {
+                e.int(26);
+                e.num(*w);
+            }
+            Op::LineCap(c) => {
+                e.int(27);
+                e.int(*c as i32);
+            }
+            Op::LineJoin(j) => {
+                e.int(28);
+                e.int(*j as i32);
+            }
+            Op::MiterLimit(m) => {
+                e.int(29);
+                e.float(*m);
+            }
+            Op::LineDash(d) => {
+                e.int(30);
+                e.int(d.len() as i32);
+                for &v in d.iter() {
+                    e.float(v);
+                }
+            }
+            Op::LineDashOffset(o) => {
+                e.int(31);
+                e.num(*o);
+            }
+            Op::GlobalAlpha(a) => {
+                e.int(32);
+                e.num(*a);
+            }
+            Op::Composite(c) => {
+                e.int(33);
+                e.int(*c as i32);
+            }
+            Op::ShadowColor(c) => {
+                e.int(34);
+                e.int(argb(*c));
+            }
+            Op::ShadowBlur(b) => {
+                e.int(35);
+                e.float(*b);
+            }
+            Op::ShadowOffset(x, y) => {
+                e.int(36);
+                e.float(*x);
+                e.float(*y);
+            }
+            Op::Font(f) => {
+                e.int(37);
+                e.float(f.size);
+                e.int(f.weight as i32);
+                e.bool(f.italic);
+                e.opt_string(f.family.as_deref());
+            }
+            Op::TextAlign(a) => {
+                e.int(38);
+                e.int(*a as i32);
+            }
+            Op::TextBaseline(b) => {
+                e.int(39);
+                e.int(*b as i32);
+            }
+            Op::FillText {
+                text,
+                x,
+                y,
+                max_width,
+            }
+            | Op::StrokeText {
+                text,
+                x,
+                y,
+                max_width,
+            } => {
+                e.int(if matches!(op, Op::FillText { .. }) {
+                    40
+                } else {
+                    41
+                });
+                e.string(text.to_string());
+                e.nums(&[*x, *y]);
+                e.float(max_width.unwrap_or(f32::NAN));
+            }
+            Op::DrawImage {
+                image,
+                source,
+                dest,
+            } => {
+                e.int(42);
+                e.string(image.uri.to_string());
+                e.bool(source.is_some());
+                for v in source.unwrap_or([0.0; 4]) {
+                    e.float(v);
+                }
+                e.nums(dest);
+            }
+        }
+    }
+    let words = ((e.bytes.len() - at - 4) / 4) as i32;
+    e.bytes[at..at + 4].copy_from_slice(&words.to_le_bytes());
+}
+
+fn path_op(e: &mut Encoded, p: &yf_core::canvas::PathOp) {
+    use yf_core::canvas::PathOp as P;
+    match p {
+        P::MoveTo(x, y) => {
+            e.int(8);
+            e.nums(&[*x, *y]);
+        }
+        P::LineTo(x, y) => {
+            e.int(9);
+            e.nums(&[*x, *y]);
+        }
+        P::QuadTo(v) => {
+            e.int(10);
+            e.nums(v);
+        }
+        P::CubicTo(v) => {
+            e.int(11);
+            e.nums(v);
+        }
+        P::Arc {
+            x,
+            y,
+            radius,
+            start,
+            end,
+            ccw,
+        } => {
+            e.int(12);
+            e.nums(&[*x, *y, *radius, *start, *end]);
+            e.bool(*ccw);
+        }
+        P::ArcTo(v) => {
+            e.int(13);
+            e.nums(v);
+        }
+        P::Ellipse {
+            geometry,
+            start,
+            end,
+            ccw,
+        } => {
+            e.int(14);
+            e.nums(geometry);
+            e.nums(&[*start, *end]);
+            e.bool(*ccw);
+        }
+        P::Rect(v) => {
+            e.int(15);
+            e.nums(v);
+        }
+        P::RoundRect(rect, radii) => {
+            e.int(16);
+            e.nums(rect);
+            e.nums(radii);
+        }
+        P::Close => e.int(17),
+    }
+}
+
+/// A path: its operation count (-1: the current path), then them.
+fn path(e: &mut Encoded, ops: Option<&[yf_core::canvas::PathOp]>) {
+    match ops {
+        None => e.int(-1),
+        Some(ops) => {
+            e.int(ops.len() as i32);
+            for op in ops {
+                path_op(e, op);
+            }
+        }
+    }
+}
+
+/// 0 color, 1 native value slot, 2 gradient (shape 0 linear / 1 radial /
+/// 2 conic, its numbers, stop count, then offset and color pairs).
+fn paint(e: &mut Encoded, p: &yf_core::canvas::Paint) {
+    use yf_core::canvas::{GradientShape, Paint};
+    match p {
+        Paint::Color(c) => {
+            e.int(0);
+            e.int(argb(*c));
+        }
+        Paint::Slot(s) => {
+            e.int(1);
+            e.int(*s as i32);
+        }
+        Paint::Gradient(g) => {
+            e.int(2);
+            let (kind, values): (i32, &[f32]) = match &g.shape {
+                GradientShape::Linear(v) => (0, v),
+                GradientShape::Radial(v) => (1, v),
+                GradientShape::Conic(v) => (2, v),
+            };
+            e.int(kind);
+            for &v in values {
+                e.float(v);
+            }
+            e.int(g.stops.len() as i32);
+            for (offset, color) in &g.stops {
+                e.float(*offset);
+                e.int(argb(*color));
+            }
+        }
+    }
 }

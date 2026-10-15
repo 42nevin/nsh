@@ -16,6 +16,7 @@
 mod anim;
 mod app;
 mod blur;
+mod canvas;
 mod decor;
 #[cfg(feature = "dev")]
 pub mod dev;
@@ -37,6 +38,7 @@ mod video;
 mod view;
 mod visual;
 mod web;
+mod zoom;
 
 pub use yf_engine::Bundle;
 

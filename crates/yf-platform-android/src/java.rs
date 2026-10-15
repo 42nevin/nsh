@@ -19,6 +19,8 @@ pub(crate) struct Java {
     pub(crate) text_prepare: JStaticMethodID,
     pub(crate) text_measure: JStaticMethodID,
     pub(crate) text_layout: JStaticMethodID,
+    pub(crate) text_lines: JStaticMethodID,
+    pub(crate) text_attachments: JStaticMethodID,
     pub(crate) text_register_font: JStaticMethodID,
     /// `dev.yf.Net`: HTTP (any thread).
     pub(crate) net: GlobalRef,
@@ -58,13 +60,19 @@ pub(crate) fn init(vm: JavaVM) -> jni::errors::Result<()> {
         text_prepare: env.get_static_method_id(
             text_class,
             "prepare",
-            "(Ljava/lang/String;[I[F[Ljava/lang/String;IIIFIFFF)Ljava/lang/Object;",
+            "(Ljava/lang/String;[I[F[Ljava/lang/String;IIIFIFFF[F)Ljava/lang/Object;",
         )?,
         text_measure: env.get_static_method_id(text_class, "measure", "(Ljava/lang/Object;F)J")?,
         text_layout: env.get_static_method_id(
             text_class,
             "layout",
             "(Ljava/lang/Object;FF)Ljava/lang/Object;",
+        )?,
+        text_lines: env.get_static_method_id(text_class, "lines", "(Ljava/lang/Object;F)[F")?,
+        text_attachments: env.get_static_method_id(
+            text_class,
+            "attachments",
+            "(Ljava/lang/Object;F)[F",
         )?,
         text_register_font: env.get_static_method_id(
             text_class,

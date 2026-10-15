@@ -37,9 +37,8 @@ import type {
   StyleProp,
   TouchPoint,
   ColorValue,
-  ImageProps,
-  ImageStyle,
-  TextStyle,
+  ImageAsset,
+  LayoutEvent,
   ViewProps,
   ViewStyle,
 } from "./types";
@@ -55,6 +54,7 @@ const OP_REMOVE = 5; // parent, child
 const OP_RELEASE = 6; // id
 const OP_ANIM = 7; // sub-op, node, args...
 const OP_COMMAND = 8; // id, name, argument
+const OP_DRAW = 9; // id, [canvas operations (CV_*)]
 
 // Sub-ops of OP_ANIM.
 const ANIM_VALUE = 0; // node, value
@@ -115,6 +115,16 @@ export class YNode {
   /** Scrolls a `<scroll>` or `List` to an offset. */
   scrollTo(options: { x?: number; y?: number; animated?: boolean }): void {
     command(this.id, "scrollTo", options);
+  }
+
+  /**
+   * A zoomable `<scroll>` (`maximumZoomScale` above `minimumZoomScale`):
+   * zooms to `scale` (clamped to the limits), with the content point
+   * (`x`, `y`) (unzoomed points) in the middle of the viewport, or around
+   * the middle. E.g. double tap to zoom in on the tapped point.
+   */
+  zoomTo(options: { scale: number; x?: number; y?: number; animated?: boolean }): void {
+    command(this.id, "zoomTo", options);
   }
 
   /** `List`: scrolls to a content offset along the list's axis. */
@@ -376,6 +386,47 @@ function onDialog(e: { id: number; index: number }) {
   if (dialogs.size === 0) setProp(root, "onDialog", undefined);
   answer?.(e.index);
 }
+
+// --- Image information ----------------------------------------------------------
+
+let nextImageInfo = 1;
+const imageInfos = new Map<number, (e: { width?: number; height?: number; error?: string }) => void>();
+
+function onImageInfo(e: { id: number; width?: number; height?: number; error?: string }) {
+  const done = imageInfos.get(e.id);
+  imageInfos.delete(e.id);
+  if (imageInfos.size === 0) setProp(root, "onImageInfo", undefined);
+  done?.(e);
+}
+
+function imageInfo(uri: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const id = nextImageInfo++;
+    if (imageInfos.size === 0) setProp(root, "onImageInfo", onImageInfo);
+    imageInfos.set(id, (e) => {
+      if (e.error !== undefined || e.width === undefined || e.height === undefined) reject(new Error(e.error ?? "no size"));
+      else resolve({ width: e.width, height: e.height });
+    });
+    command(1, "imageInfo", { id, uri });
+  });
+}
+
+export interface ImageModule {
+  /** The image's size in pixels; its bytes stay loaded for the views that show it next. */
+  getSize(source: string | { uri: string }): Promise<{ width: number; height: number }>;
+  /** Loads the image ahead of showing it: true once its bytes are in memory. */
+  prefetch(source: string | { uri: string }): Promise<boolean>;
+}
+
+/** Image information and loading ahead. */
+export const Image: ImageModule = {
+  getSize: (source) => imageInfo(typeof source === "string" ? source : source.uri),
+  prefetch: (source) =>
+    imageInfo(typeof source === "string" ? source : source.uri).then(
+      () => true,
+      () => false,
+    ),
+};
 
 /** Native alerts (UIAlertController / AlertDialog). */
 export const Alert = {
@@ -1227,226 +1278,6 @@ export const I18nManager = {
   },
 };
 
-// --- StyleSheet -------------------------------------------------------------
-
-type AnyStyle = ViewStyle | TextStyle | ImageStyle;
-
-export interface AbsoluteFillStyle {
-  readonly position: "absolute";
-  readonly left: 0;
-  readonly right: 0;
-  readonly top: 0;
-  readonly bottom: 0;
-}
-
-const absoluteFill: AbsoluteFillStyle = Object.freeze({ position: "absolute", left: 0, right: 0, top: 0, bottom: 0 } as const);
-
-function flattenInto(out: Record<string, unknown>, style: unknown) {
-  if (!style) return;
-  if (Array.isArray(style)) {
-    for (const s of style) flattenInto(out, s);
-    return;
-  }
-  Object.assign(out, style);
-}
-
-export interface StyleSheetStatic {
-  readonly hairlineWidth: number;
-  readonly absoluteFill: AbsoluteFillStyle;
-  readonly absoluteFillObject: AbsoluteFillStyle;
-  create<T extends Record<string, AnyStyle>>(styles: T): T;
-  flatten<T extends AnyStyle>(style: StyleProp<T> | readonly StyleProp<T>[]): T;
-  compose<T extends AnyStyle>(a: StyleProp<T>, b: StyleProp<T>): StyleProp<T>;
-}
-
-/** React Native's `StyleSheet`. Styles are plain objects (decoded in Rust,
- * arrays merged there too): `create` only types them. */
-export const StyleSheet: StyleSheetStatic = {
-  /** The thinnest line the screen draws: one device pixel, at least 0.4pt
-   * rounded to whole pixels (React Native's value). */
-  hairlineWidth: ((): number => {
-    const ratio = initialEnvironment.pixelRatio || 1;
-    const width = Math.round(0.4 * ratio) / ratio;
-    return width === 0 ? 1 / ratio : width;
-  })(),
-  /** Fills the parent: `position: "absolute"` with all edges 0. */
-  absoluteFill,
-  absoluteFillObject: absoluteFill,
-  create<T extends Record<string, AnyStyle>>(styles: T): T {
-    return styles;
-  },
-  /** One object from a style or a (nested) array of styles; later entries win. */
-  flatten<T extends AnyStyle>(style: StyleProp<T> | readonly StyleProp<T>[]): T {
-    const out: Record<string, unknown> = {};
-    flattenInto(out, style);
-    return out as T;
-  },
-  /** `a` and `b` as one style prop (`b` wins). */
-  compose<T extends AnyStyle>(a: StyleProp<T>, b: StyleProp<T>): StyleProp<T> {
-    return a && b ? ([a, b] as unknown as StyleProp<T>) : a || b;
-  },
-};
-
-// --- Pressable --------------------------------------------------------------
-
-export interface PressableState {
-  pressed: boolean;
-}
-
-export interface PressableProps extends Omit<ViewProps, "style" | "children"> {
-  style?: StyleProp<ViewStyle> | ((state: PressableState) => StyleProp<ViewStyle>);
-  children?: JSX.Element | ((state: PressableState) => JSX.Element);
-}
-
-/**
- * A view that tracks whether it is pressed: `style` and `children` may be
- * functions of `{ pressed }`. For plain opacity feedback without JS, use
- * `<view onPress activeOpacity={0.5}>`.
- */
-export function Pressable(props: PressableProps): YNode {
-  const [pressed, setPressed] = createSignal(false);
-  const [local, others] = splitProps(props, ["style", "children", "onPressIn", "onPressOut"]);
-  const node = createElement("view");
-  spread(
-    node,
-    mergeSolidProps(others, {
-      get style() {
-        const s = local.style;
-        return typeof s === "function" ? s({ pressed: pressed() }) : s;
-      },
-      onPressIn() {
-        setPressed(true);
-        local.onPressIn?.();
-      },
-      onPressOut() {
-        setPressed(false);
-        local.onPressOut?.();
-      },
-    }),
-    true,
-  );
-  insert(node, () => {
-    const c = local.children;
-    return typeof c === "function" && c.length === 1 ? c({ pressed: pressed() }) : c;
-  });
-  return node;
-}
-
-// --- Touchables --------------------------------------------------------------
-
-/** A view whose opacity drops to `activeOpacity` (0.2) while pressed,
- * natively (React Native's `TouchableOpacity`). */
-export function TouchableOpacity(props: ViewProps): YNode {
-  const node = createElement("view");
-  spread(node, mergeSolidProps({ activeOpacity: 0.2, accessible: true }, props), false);
-  return node;
-}
-
-export interface TouchableHighlightProps extends Omit<ViewProps, "underlayOpacity"> {
-  /** The background while pressed (default black). */
-  underlayColor?: ColorValue;
-  /** The children's opacity while pressed (default 0.85). */
-  activeOpacity?: number;
-  onShowUnderlay?: () => void;
-  onHideUnderlay?: () => void;
-}
-
-/** A view whose background becomes `underlayColor` and whose children fade
- * to `activeOpacity` while pressed, natively (React Native's
- * `TouchableHighlight`). Give it a background of its own, or nothing shows
- * the underlay's edge. */
-export function TouchableHighlight(props: TouchableHighlightProps): YNode {
-  const [local, others] = splitProps(props, ["activeOpacity", "onShowUnderlay", "onHideUnderlay", "onPressIn", "onPressOut"]);
-  const node = createElement("view");
-  spread(
-    node,
-    mergeSolidProps({ underlayColor: "black", accessible: true }, others, {
-      get underlayOpacity() {
-        return local.activeOpacity;
-      },
-      // Only listen when someone does: presses stay native otherwise.
-      get onPressIn() {
-        return local.onShowUnderlay || local.onPressIn
-          ? () => {
-              local.onShowUnderlay?.();
-              local.onPressIn?.();
-            }
-          : undefined;
-      },
-      get onPressOut() {
-        return local.onHideUnderlay || local.onPressOut
-          ? () => {
-              local.onHideUnderlay?.();
-              local.onPressOut?.();
-            }
-          : undefined;
-      },
-    }),
-    false,
-  );
-  return node;
-}
-
-export interface TouchableWithoutFeedbackProps extends Omit<ViewProps, "children"> {
-  /** One element, which gets the props. */
-  children?: JSX.Element;
-}
-
-/** Puts its props (`onPress`, accessibility, ...) on its only child, with
- * no view and no feedback of its own (React Native's
- * `TouchableWithoutFeedback`). */
-export function TouchableWithoutFeedback(props: TouchableWithoutFeedbackProps): JSX.Element {
-  const [local, others] = splitProps(props, ["children"]);
-  const child = resolveChildren(() => local.children);
-  createRenderEffect(() => {
-    const c = child();
-    const node = Array.isArray(c) ? c[0] : c;
-    if (node instanceof YNode && !node.isText) spread(node, mergeSolidProps({ accessible: true }, others), true);
-  });
-  return child as unknown as JSX.Element;
-}
-
-export interface ImageBackgroundProps extends Omit<ImageProps, "style"> {
-  /** The view's style (the image fills it). */
-  style?: StyleProp<ViewStyle>;
-  /** The image's style, over the fill. */
-  imageStyle?: StyleProp<ImageStyle>;
-  children?: JSX.Element;
-}
-
-/** A view with an image filling its background (React Native's
- * `ImageBackground`): the image gets every prop but `style`, `class` and
- * `children`. */
-export function ImageBackground(props: ImageBackgroundProps): YNode {
-  const [local, image] = splitProps(props, ["style", "class", "imageStyle", "children"]);
-  const node = createElement("view");
-  spread(
-    node,
-    {
-      get style() {
-        return local.style;
-      },
-      get class() {
-        return local.class;
-      },
-    },
-    true,
-  );
-  const img = createElement("image");
-  spread(
-    img,
-    mergeSolidProps(image, {
-      get style() {
-        return [absoluteFill, local.imageStyle];
-      },
-    }),
-    true,
-  );
-  insertNode(node, img);
-  insert(node, () => local.children, null);
-  return node;
-}
-
 // --- Safe areas -------------------------------------------------------------
 
 /** The insets of the nearest screen or modal (the surface's safe area outside
@@ -1723,6 +1554,509 @@ export function Screen(props: ScreenProps): YNode {
   return node;
 }
 
+// --- Canvas ---------------------------------------------------------------------
+
+// Canvas operations: `crates/yf-js/src/canvas.rs`.
+const CV_SAVE = 0;
+const CV_RESTORE = 1;
+const CV_TRANSLATE = 2;
+const CV_SCALE = 3;
+const CV_ROTATE = 4;
+const CV_TRANSFORM = 5;
+const CV_SET_TRANSFORM = 6;
+const CV_BEGIN_PATH = 7;
+const CV_MOVE_TO = 8;
+const CV_LINE_TO = 9;
+const CV_QUAD_TO = 10;
+const CV_CUBIC_TO = 11;
+const CV_ARC = 12;
+const CV_ARC_TO = 13;
+const CV_ELLIPSE = 14;
+const CV_RECT = 15;
+const CV_ROUND_RECT = 16;
+const CV_CLOSE = 17;
+const CV_FILL = 18;
+const CV_STROKE = 19;
+const CV_CLIP = 20;
+const CV_FILL_RECT = 21;
+const CV_STROKE_RECT = 22;
+const CV_CLEAR_RECT = 23;
+const CV_FILL_STYLE = 24;
+const CV_STROKE_STYLE = 25;
+const CV_LINE_WIDTH = 26;
+const CV_LINE_CAP = 27;
+const CV_LINE_JOIN = 28;
+const CV_MITER_LIMIT = 29;
+const CV_LINE_DASH = 30;
+const CV_LINE_DASH_OFFSET = 31;
+const CV_GLOBAL_ALPHA = 32;
+const CV_COMPOSITE = 33;
+const CV_SHADOW_COLOR = 34;
+const CV_SHADOW_BLUR = 35;
+const CV_SHADOW_OFFSET = 36;
+const CV_FONT = 37;
+const CV_TEXT_ALIGN = 38;
+const CV_TEXT_BASELINE = 39;
+const CV_FILL_TEXT = 40;
+const CV_STROKE_TEXT = 41;
+const CV_DRAW_IMAGE = 42;
+const CV_SVG_PATH = 50;
+
+declare function __yf_measure_text(font: string, text: string): number;
+
+/** A number in a drawing: a constant, or a native value the canvas reads
+ * while it draws (its animations redraw natively, without JS). */
+export type CanvasNumber = number | NativeNode;
+
+/** A color, a gradient, or a native value interpolating colors. */
+export type CanvasPaint = string | CanvasGradient | NativeNode;
+
+/** Path building, shared by the context (its current path) and `Path2D`. */
+export abstract class CanvasPath {
+  /** Where the operations go. */
+  protected abstract out: unknown[];
+
+  moveTo(x: CanvasNumber, y: CanvasNumber): void {
+    this.out.push(CV_MOVE_TO, x, y);
+  }
+  lineTo(x: CanvasNumber, y: CanvasNumber): void {
+    this.out.push(CV_LINE_TO, x, y);
+  }
+  quadraticCurveTo(cpx: CanvasNumber, cpy: CanvasNumber, x: CanvasNumber, y: CanvasNumber): void {
+    this.out.push(CV_QUAD_TO, cpx, cpy, x, y);
+  }
+  bezierCurveTo(
+    cp1x: CanvasNumber,
+    cp1y: CanvasNumber,
+    cp2x: CanvasNumber,
+    cp2y: CanvasNumber,
+    x: CanvasNumber,
+    y: CanvasNumber,
+  ): void {
+    this.out.push(CV_CUBIC_TO, cp1x, cp1y, cp2x, cp2y, x, y);
+  }
+  /** Angles in radians, clockwise from the x axis. */
+  arc(
+    x: CanvasNumber,
+    y: CanvasNumber,
+    radius: CanvasNumber,
+    startAngle: CanvasNumber,
+    endAngle: CanvasNumber,
+    counterclockwise = false,
+  ): void {
+    this.out.push(CV_ARC, x, y, radius, startAngle, endAngle, counterclockwise);
+  }
+  arcTo(x1: CanvasNumber, y1: CanvasNumber, x2: CanvasNumber, y2: CanvasNumber, radius: CanvasNumber): void {
+    this.out.push(CV_ARC_TO, x1, y1, x2, y2, radius);
+  }
+  ellipse(
+    x: CanvasNumber,
+    y: CanvasNumber,
+    radiusX: CanvasNumber,
+    radiusY: CanvasNumber,
+    rotation: CanvasNumber,
+    startAngle: CanvasNumber,
+    endAngle: CanvasNumber,
+    counterclockwise = false,
+  ): void {
+    this.out.push(CV_ELLIPSE, x, y, radiusX, radiusY, rotation, startAngle, endAngle, counterclockwise);
+  }
+  rect(x: CanvasNumber, y: CanvasNumber, w: CanvasNumber, h: CanvasNumber): void {
+    this.out.push(CV_RECT, x, y, w, h);
+  }
+  /** `radii`: one radius, or 2–4 as in CSS `border-radius` (top-left first). */
+  roundRect(
+    x: CanvasNumber,
+    y: CanvasNumber,
+    w: CanvasNumber,
+    h: CanvasNumber,
+    radii: CanvasNumber | CanvasNumber[] = 0,
+  ): void {
+    const r = Array.isArray(radii) ? radii : [radii];
+    const [tl, tr, br, bl] =
+      r.length >= 4 ? r : r.length === 3 ? [r[0], r[1], r[2], r[1]] : r.length === 2 ? [r[0], r[1], r[0], r[1]] : [r[0] ?? 0, r[0] ?? 0, r[0] ?? 0, r[0] ?? 0];
+    this.out.push(CV_ROUND_RECT, x, y, w, h, tl, tr, br, bl);
+  }
+  closePath(): void {
+    this.out.push(CV_CLOSE);
+  }
+}
+
+/** A path to fill, stroke or clip; `new Path2D("M0 0 L10 10")` takes SVG
+ * path data (parsed natively). */
+export class Path2D extends CanvasPath {
+  /** The recorded operations. */
+  readonly ops: unknown[] = [];
+  protected get out(): unknown[] {
+    return this.ops;
+  }
+
+  constructor(path?: Path2D | string) {
+    super();
+    if (typeof path === "string") this.ops.push(CV_SVG_PATH, path);
+    else if (path) this.ops.push(...path.ops);
+  }
+
+  /** Appends `path`'s subpaths. */
+  addPath(path: Path2D): void {
+    this.ops.push(...path.ops);
+  }
+}
+
+/** A gradient from `createLinearGradient` / `createRadialGradient` /
+ * `createConicGradient`. */
+export class CanvasGradient {
+  /** `[kind, ...geometry, stops]`: what the drawing carries. */
+  readonly spec: unknown[];
+  private readonly stops: unknown[] = [];
+
+  constructor(kind: number, geometry: number[]) {
+    this.spec = [kind, ...geometry, this.stops];
+  }
+
+  /** `offset` 0..1; any CSS color. */
+  addColorStop(offset: number, color: string): void {
+    this.stops.push(offset, color);
+  }
+}
+
+export interface TextMetrics {
+  /** The advance width in points. */
+  width: number;
+}
+
+interface CanvasState {
+  fillStyle: CanvasPaint;
+  strokeStyle: CanvasPaint;
+  lineWidth: CanvasNumber;
+  lineCap: "butt" | "round" | "square";
+  lineJoin: "miter" | "round" | "bevel";
+  miterLimit: number;
+  lineDash: number[];
+  lineDashOffset: CanvasNumber;
+  globalAlpha: CanvasNumber;
+  globalCompositeOperation: string;
+  shadowColor: string;
+  shadowBlur: number;
+  shadowOffsetX: number;
+  shadowOffsetY: number;
+  font: string;
+  textAlign: "start" | "end" | "left" | "right" | "center";
+  textBaseline: "top" | "hanging" | "middle" | "alphabetic" | "ideographic" | "bottom";
+}
+
+const initialCanvasState: CanvasState = {
+  fillStyle: "#000",
+  strokeStyle: "#000",
+  lineWidth: 1,
+  lineCap: "butt",
+  lineJoin: "miter",
+  miterLimit: 10,
+  lineDash: [],
+  lineDashOffset: 0,
+  globalAlpha: 1,
+  globalCompositeOperation: "source-over",
+  shadowColor: "rgba(0,0,0,0)",
+  shadowBlur: 0,
+  shadowOffsetX: 0,
+  shadowOffsetY: 0,
+  font: "10px sans-serif",
+  textAlign: "start",
+  textBaseline: "alphabetic",
+};
+
+const paintValue = (p: CanvasPaint): unknown => (p instanceof CanvasGradient ? p.spec : p);
+
+/**
+ * The 2D context `<Canvas draw>` gets (an HTML Canvas 2D subset). Calls only
+ * record operations; the platform draws them after `draw` returns (and again
+ * whenever a native value they read changes). Coordinates are in points,
+ * the origin at the canvas's top left.
+ */
+export class CanvasRenderingContext2D extends CanvasPath {
+  protected out: unknown[];
+  /** The canvas's size in points. */
+  readonly canvas: { readonly width: number; readonly height: number };
+  private s: CanvasState = { ...initialCanvasState };
+  private stack: CanvasState[] = [];
+
+  constructor(out: unknown[], size: { width: number; height: number }) {
+    super();
+    this.out = out;
+    this.canvas = size;
+  }
+
+  /** Ends recording: later calls (e.g. from a timer) are ignored. */
+  close(): void {
+    this.out = [];
+  }
+
+  private set<K extends keyof CanvasState>(key: K, value: CanvasState[K], op: number, encoded: unknown): void {
+    this.s[key] = value;
+    this.out.push(op, encoded);
+  }
+
+  get fillStyle(): CanvasPaint {
+    return this.s.fillStyle;
+  }
+  set fillStyle(v: CanvasPaint) {
+    this.set("fillStyle", v, CV_FILL_STYLE, paintValue(v));
+  }
+  get strokeStyle(): CanvasPaint {
+    return this.s.strokeStyle;
+  }
+  set strokeStyle(v: CanvasPaint) {
+    this.set("strokeStyle", v, CV_STROKE_STYLE, paintValue(v));
+  }
+  get lineWidth(): CanvasNumber {
+    return this.s.lineWidth;
+  }
+  set lineWidth(v: CanvasNumber) {
+    this.set("lineWidth", v, CV_LINE_WIDTH, v);
+  }
+  get lineCap(): CanvasState["lineCap"] {
+    return this.s.lineCap;
+  }
+  set lineCap(v: CanvasState["lineCap"]) {
+    this.set("lineCap", v, CV_LINE_CAP, v);
+  }
+  get lineJoin(): CanvasState["lineJoin"] {
+    return this.s.lineJoin;
+  }
+  set lineJoin(v: CanvasState["lineJoin"]) {
+    this.set("lineJoin", v, CV_LINE_JOIN, v);
+  }
+  get miterLimit(): number {
+    return this.s.miterLimit;
+  }
+  set miterLimit(v: number) {
+    this.set("miterLimit", v, CV_MITER_LIMIT, v);
+  }
+  get lineDashOffset(): CanvasNumber {
+    return this.s.lineDashOffset;
+  }
+  set lineDashOffset(v: CanvasNumber) {
+    this.set("lineDashOffset", v, CV_LINE_DASH_OFFSET, v);
+  }
+  get globalAlpha(): CanvasNumber {
+    return this.s.globalAlpha;
+  }
+  set globalAlpha(v: CanvasNumber) {
+    this.set("globalAlpha", v, CV_GLOBAL_ALPHA, v);
+  }
+  get globalCompositeOperation(): string {
+    return this.s.globalCompositeOperation;
+  }
+  set globalCompositeOperation(v: string) {
+    this.set("globalCompositeOperation", v, CV_COMPOSITE, v);
+  }
+  get shadowColor(): string {
+    return this.s.shadowColor;
+  }
+  set shadowColor(v: string) {
+    this.set("shadowColor", v, CV_SHADOW_COLOR, v);
+  }
+  get shadowBlur(): number {
+    return this.s.shadowBlur;
+  }
+  set shadowBlur(v: number) {
+    this.set("shadowBlur", v, CV_SHADOW_BLUR, v);
+  }
+  get shadowOffsetX(): number {
+    return this.s.shadowOffsetX;
+  }
+  set shadowOffsetX(v: number) {
+    this.s.shadowOffsetX = v;
+    this.out.push(CV_SHADOW_OFFSET, v, this.s.shadowOffsetY);
+  }
+  get shadowOffsetY(): number {
+    return this.s.shadowOffsetY;
+  }
+  set shadowOffsetY(v: number) {
+    this.s.shadowOffsetY = v;
+    this.out.push(CV_SHADOW_OFFSET, this.s.shadowOffsetX, v);
+  }
+  /** CSS `font` shorthand, e.g. `"600 14px Inter"` (sizes in px, pt or rem). */
+  get font(): string {
+    return this.s.font;
+  }
+  set font(v: string) {
+    this.set("font", v, CV_FONT, v);
+  }
+  get textAlign(): CanvasState["textAlign"] {
+    return this.s.textAlign;
+  }
+  set textAlign(v: CanvasState["textAlign"]) {
+    this.set("textAlign", v, CV_TEXT_ALIGN, v);
+  }
+  get textBaseline(): CanvasState["textBaseline"] {
+    return this.s.textBaseline;
+  }
+  set textBaseline(v: CanvasState["textBaseline"]) {
+    this.set("textBaseline", v, CV_TEXT_BASELINE, v);
+  }
+
+  save(): void {
+    this.stack.push({ ...this.s });
+    this.out.push(CV_SAVE);
+  }
+  restore(): void {
+    const s = this.stack.pop();
+    if (!s) return;
+    this.s = s;
+    this.out.push(CV_RESTORE);
+  }
+  translate(x: CanvasNumber, y: CanvasNumber): void {
+    this.out.push(CV_TRANSLATE, x, y);
+  }
+  scale(x: CanvasNumber, y: CanvasNumber): void {
+    this.out.push(CV_SCALE, x, y);
+  }
+  /** Radians, clockwise. */
+  rotate(angle: CanvasNumber): void {
+    this.out.push(CV_ROTATE, angle);
+  }
+  transform(a: CanvasNumber, b: CanvasNumber, c: CanvasNumber, d: CanvasNumber, e: CanvasNumber, f: CanvasNumber): void {
+    this.out.push(CV_TRANSFORM, a, b, c, d, e, f);
+  }
+  setTransform(a: CanvasNumber, b: CanvasNumber, c: CanvasNumber, d: CanvasNumber, e: CanvasNumber, f: CanvasNumber): void {
+    this.out.push(CV_SET_TRANSFORM, a, b, c, d, e, f);
+  }
+  resetTransform(): void {
+    this.out.push(CV_SET_TRANSFORM, 1, 0, 0, 1, 0, 0);
+  }
+  setLineDash(segments: number[]): void {
+    this.s.lineDash = [...segments];
+    this.out.push(CV_LINE_DASH, this.s.lineDash);
+  }
+  getLineDash(): number[] {
+    const d = this.s.lineDash;
+    return d.length % 2 ? [...d, ...d] : [...d];
+  }
+
+  beginPath(): void {
+    this.out.push(CV_BEGIN_PATH);
+  }
+  fill(path?: Path2D | "nonzero" | "evenodd", rule?: "nonzero" | "evenodd"): void {
+    if (path instanceof Path2D) this.out.push(CV_FILL, path.ops, rule ?? "nonzero");
+    else this.out.push(CV_FILL, null, path ?? "nonzero");
+  }
+  stroke(path?: Path2D): void {
+    this.out.push(CV_STROKE, path ? path.ops : null);
+  }
+  clip(path?: Path2D | "nonzero" | "evenodd", rule?: "nonzero" | "evenodd"): void {
+    if (path instanceof Path2D) this.out.push(CV_CLIP, path.ops, rule ?? "nonzero");
+    else this.out.push(CV_CLIP, null, path ?? "nonzero");
+  }
+  fillRect(x: CanvasNumber, y: CanvasNumber, w: CanvasNumber, h: CanvasNumber): void {
+    this.out.push(CV_FILL_RECT, x, y, w, h);
+  }
+  strokeRect(x: CanvasNumber, y: CanvasNumber, w: CanvasNumber, h: CanvasNumber): void {
+    this.out.push(CV_STROKE_RECT, x, y, w, h);
+  }
+  clearRect(x: CanvasNumber, y: CanvasNumber, w: CanvasNumber, h: CanvasNumber): void {
+    this.out.push(CV_CLEAR_RECT, x, y, w, h);
+  }
+  fillText(text: string, x: CanvasNumber, y: CanvasNumber, maxWidth?: number): void {
+    this.out.push(CV_FILL_TEXT, String(text), x, y, maxWidth ?? null);
+  }
+  strokeText(text: string, x: CanvasNumber, y: CanvasNumber, maxWidth?: number): void {
+    this.out.push(CV_STROKE_TEXT, String(text), x, y, maxWidth ?? null);
+  }
+  /** Measured by the platform's text engine with the current `font`. */
+  measureText(text: string): TextMetrics {
+    return { width: __yf_measure_text(this.s.font, String(text)) };
+  }
+
+  createLinearGradient(x0: number, y0: number, x1: number, y1: number): CanvasGradient {
+    return new CanvasGradient(0, [x0, y0, x1, y1]);
+  }
+  createRadialGradient(x0: number, y0: number, r0: number, x1: number, y1: number, r1: number): CanvasGradient {
+    return new CanvasGradient(1, [x0, y0, r0, x1, y1, r1]);
+  }
+  /** `startAngle` in radians, clockwise from the x axis. */
+  createConicGradient(startAngle: number, x: number, y: number): CanvasGradient {
+    return new CanvasGradient(2, [startAngle, x, y]);
+  }
+
+  /**
+   * Draws an image (a URL or an imported asset), loaded natively:
+   * `(image, dx, dy)` at its natural size, `(image, dx, dy, dw, dh)`, or
+   * `(image, sx, sy, sw, sh, dx, dy, dw, dh)` for part of it (source in
+   * image pixels). The canvas draws again once it has loaded.
+   */
+  drawImage(image: string | ImageAsset | { uri: string }, ...args: CanvasNumber[]): void {
+    const uri = typeof image === "string" ? image : image.uri;
+    const asset = typeof image === "string" ? null : (image as Partial<ImageAsset>);
+    if (args.length >= 8) {
+      this.out.push(CV_DRAW_IMAGE, uri, args.slice(0, 4), args[4], args[5], args[6], args[7]);
+    } else if (args.length >= 4) {
+      this.out.push(CV_DRAW_IMAGE, uri, null, args[0], args[1], args[2], args[3]);
+    } else {
+      this.out.push(CV_DRAW_IMAGE, uri, null, args[0] ?? 0, args[1] ?? 0, asset?.width ?? NaN, asset?.height ?? NaN);
+    }
+  }
+}
+
+export interface CanvasSize {
+  width: number;
+  height: number;
+}
+
+export interface CanvasProps extends ViewProps {
+  /**
+   * Draws the canvas. Runs again when signals it reads change and when the
+   * canvas resizes (it first runs once the size is known); native values
+   * passed as numbers or colors animate without running it.
+   */
+  draw: (ctx: CanvasRenderingContext2D, size: CanvasSize) => void;
+}
+
+/**
+ * A view drawn with a 2D context (HTML Canvas 2D API). `draw` records the
+ * drawing in one go; the platform replays it natively (CGContext, Android
+ * Canvas), at the screen's resolution.
+ */
+export function Canvas(props: CanvasProps): YNode {
+  const [local, others] = splitProps(props, ["draw", "onLayout"]);
+  const node = createElement("canvas");
+  const [size, setSize] = createSignal<CanvasSize | null>(null, {
+    equals: (a, b) => a !== null && b !== null && a.width === b.width && a.height === b.height,
+  });
+  spread(
+    node,
+    mergeSolidProps(others, {
+      onLayout(e: LayoutEvent) {
+        setSize({ width: e.width, height: e.height });
+        local.onLayout?.(e);
+      },
+    }),
+    false,
+  );
+  createRenderEffect(() => {
+    const s = size();
+    if (!s) return;
+    // Its own list: native values made while drawing push ops of their own.
+    const out: unknown[] = [];
+    const ctx = new CanvasRenderingContext2D(out, s);
+    try {
+      local.draw(ctx, s);
+    } finally {
+      ctx.close();
+      ops.push(OP_DRAW, node.id, out);
+      // The native values it reads live as long as the view.
+      const used: NativeNode[] = [];
+      for (const v of out) {
+        if (v instanceof NativeNode) used.push(v);
+        else if (Array.isArray(v)) for (const w of v) if (w instanceof NativeNode) used.push(w);
+      }
+      node.anims = { ...node.anims, draw: used };
+      schedule();
+    }
+  });
+  return node;
+}
+
 // --- Input accessories ------------------------------------------------------------
 
 export interface InputAccessoryViewProps {
@@ -1762,229 +2096,6 @@ export function InputAccessoryView(props: InputAccessoryViewProps): YNode | null
   insert(node, () => props.children);
   return node;
 }
-
-// --- Drawer ---------------------------------------------------------------------
-
-export type DrawerState = "Idle" | "Dragging" | "Settling";
-
-export interface DrawerLayoutHandle {
-  openDrawer(): void;
-  closeDrawer(): void;
-  /** 0 closed .. 1 open, natively: interpolate it for styles that follow
-   * the drawer (React Native's `onDrawerSlide` without a JS call per frame). */
-  readonly progress: NativeNode;
-}
-
-export interface DrawerLayoutProps {
-  /** The drawer's content. */
-  renderNavigationView: () => JSX.Element;
-  /** Default: the window's width less 56, at most 320. */
-  drawerWidth?: number;
-  drawerPosition?: "left" | "right";
-  /** Default white. */
-  drawerBackgroundColor?: ColorValue;
-  /** `locked-closed` / `locked-open` keep it so (the methods still work). */
-  drawerLockMode?: "unlocked" | "locked-closed" | "locked-open";
-  /** `on-drag`: dragging the drawer hides the keyboard. */
-  keyboardDismissMode?: "none" | "on-drag";
-  onDrawerOpen?: () => void;
-  onDrawerClose?: () => void;
-  onDrawerStateChanged?: (state: DrawerState) => void;
-  style?: StyleProp<ViewStyle>;
-  class?: string;
-  children?: JSX.Element;
-  ref?: (handle: DrawerLayoutHandle) => void;
-}
-
-/** Width of the strip along the edge that drags the closed drawer out. */
-const DRAWER_EDGE = 20;
-
-/**
- * A drawer that slides over the content from the left or right edge, on
- * both platforms (React Native's `DrawerLayoutAndroid`). Drags move it
- * natively (`pan`); JS only decides where it settles when the finger
- * lifts. Open it by dragging from the edge or with the `ref`'s
- * `openDrawer()`; close it by dragging it back, tapping the dimmed
- * content or `closeDrawer()`.
- */
-export function DrawerLayout(props: DrawerLayoutProps): YNode {
-  const width = createMemo(() => props.drawerWidth ?? Math.min(windowSize().width - 56, 320));
-  const right = () => props.drawerPosition === "right";
-  // How far it is out: 0..width from the left edge, -width..0 from the
-  // right one, so a drag's translation moves it either way.
-  const offset = createNativeValue(0);
-  const [open, setOpen] = createSignal(false);
-  const [state, setState] = createSignal<DrawerState>("Idle");
-  const lock = () => props.drawerLockMode ?? "unlocked";
-  const out = (w: number) => (right() ? -w : w);
-  const shown = createMemo(() => {
-    const w = width();
-    return right()
-      ? offset.interpolate({ inputRange: [-w, 0], outputRange: [1, 0] })
-      : offset.interpolate({ inputRange: [0, w], outputRange: [0, 1] });
-  });
-  let generation = 0;
-  const settle = (to: boolean, velocity = 0) => {
-    const id = ++generation;
-    setState("Settling");
-    props.onDrawerStateChanged?.("Settling");
-    offset.spring(to ? out(width()) : 0, { velocity, stiffness: 500, damping: 50 }).then((finished) => {
-      if (!finished || id !== generation) return;
-      setState("Idle");
-      props.onDrawerStateChanged?.("Idle");
-      if (to !== untrack(open)) {
-        setOpen(to);
-        (to ? props.onDrawerOpen : props.onDrawerClose)?.();
-      }
-    });
-  };
-  let mounted = false;
-  createRenderEffect(() => {
-    const l = lock();
-    if (l === "unlocked") return;
-    const to = l === "locked-open";
-    if (mounted) {
-      settle(to);
-    } else {
-      // Starts there.
-      offset.set(to ? out(untrack(width)) : 0);
-      setOpen(to);
-    }
-  });
-  mounted = true;
-  // A new width or side: jump to where the drawer belongs.
-  createRenderEffect((first: boolean) => {
-    const w = width();
-    right();
-    if (!first && untrack(state) === "Idle") offset.set(untrack(open) ? out(w) : 0);
-    return false;
-  }, true);
-  const panStart = () => {
-    generation++;
-    setState("Dragging");
-    props.onDrawerStateChanged?.("Dragging");
-    if (props.keyboardDismissMode === "on-drag") Keyboard.dismiss();
-  };
-  const panEnd = (e: { velocityX: number; valueX?: number }) => {
-    const w = width();
-    const shownBy = Math.min(1, Math.max(0, (right() ? -(e.valueX ?? 0) : (e.valueX ?? 0)) / w));
-    const v = right() ? -e.velocityX : e.velocityX;
-    settle(v > 300 || (v > -300 && shownBy > 0.5), e.velocityX);
-  };
-  const draggable = () => lock() === "unlocked";
-  const pan = () => (draggable() ? { x: offset } : undefined);
-  const handle: DrawerLayoutHandle = {
-    openDrawer: () => settle(true),
-    closeDrawer: () => settle(false),
-    get progress() {
-      return shown();
-    },
-  };
-
-  const node = createElement("view");
-  spread(
-    node,
-    {
-      get style() {
-        return [{ flex: 1, overflow: "hidden" }, props.style];
-      },
-      get class() {
-        return props.class;
-      },
-    },
-    true,
-  );
-  insert(node, () => props.children, null);
-  // The dimmed content: taps close, drags too.
-  const scrim = createElement("view");
-  spread(
-    scrim,
-    {
-      get style() {
-        const w = width();
-        return [
-          absoluteFill,
-          {
-            backgroundColor: "black",
-            opacity: right()
-              ? offset.interpolate({ inputRange: [-w, 0], outputRange: [0.5, 0] })
-              : offset.interpolate({ inputRange: [0, w], outputRange: [0, 0.5] }),
-          },
-        ];
-      },
-      get pointerEvents() {
-        return open() || state() !== "Idle" ? "auto" : "none";
-      },
-      get onPress() {
-        return lock() === "locked-open" ? undefined : () => settle(false);
-      },
-      get pan() {
-        return open() ? pan() : undefined;
-      },
-      onPanStart: panStart,
-      onPanEnd: panEnd,
-    },
-    true,
-  );
-  insertNode(node, scrim);
-  const panel = createElement("view");
-  spread(
-    panel,
-    {
-      get style() {
-        const w = width();
-        return {
-          position: "absolute",
-          top: 0,
-          bottom: 0,
-          [right() ? "right" : "left"]: 0,
-          width: w,
-          backgroundColor: props.drawerBackgroundColor ?? "white",
-          transform: [
-            {
-              translateX: right()
-                ? offset.interpolate({ inputRange: [-w, 0], outputRange: [0, w] })
-                : offset.interpolate({ inputRange: [0, w], outputRange: [-w, 0] }),
-            },
-          ],
-        };
-      },
-      get pan() {
-        return pan();
-      },
-      onPanStart: panStart,
-      onPanEnd: panEnd,
-    },
-    true,
-  );
-  insert(panel, () => props.renderNavigationView());
-  insertNode(node, panel);
-  // Drags from the edge pull the closed drawer out.
-  const edge = createElement("view");
-  spread(
-    edge,
-    {
-      get style() {
-        return { position: "absolute", top: 0, bottom: 0, [right() ? "right" : "left"]: 0, width: DRAWER_EDGE };
-      },
-      get pointerEvents() {
-        return !open() && draggable() ? "auto" : "none";
-      },
-      get pan() {
-        return pan();
-      },
-      onPanStart: panStart,
-      onPanEnd: panEnd,
-    },
-    true,
-  );
-  insertNode(node, edge);
-  props.ref?.(handle);
-  return node;
-}
-
-/** React Native's name for {@link DrawerLayout} (yf's runs on iOS too). */
-export const DrawerLayoutAndroid: (props: DrawerLayoutProps) => YNode = DrawerLayout;
 
 export interface ModalProps {
   /** Shown while true (default). */
@@ -2391,67 +2502,6 @@ export function List<T>(props: ListProps<T>): YNode {
   return list;
 }
 
-/** A section of a `SectionList`. */
-export interface Section<T> {
-  data: readonly T[];
-  [key: string]: any;
-}
-
-type SectionRow<S extends Section<unknown>> =
-  | { header: true; section: S }
-  | { header: false; section: S; item: S["data"][number]; index: number };
-
-export interface SectionListProps<S extends Section<unknown>>
-  extends Omit<ListProps<SectionRow<S>>, "each" | "children" | "stickyHeaderIndices"> {
-  sections: readonly S[];
-  /** Section headers stick to the top while their section scrolls (default true). */
-  stickySectionHeadersEnabled?: boolean;
-  renderSectionHeader: (section: () => S) => JSX.Element;
-  /** `index` is the item's index within its section. */
-  renderItem: (item: () => S["data"][number], index: () => number, section: () => S) => JSX.Element;
-}
-
-/**
- * A `List` of sections, each with a header (sticky by default) and its
- * items. Header and item rows share the recycled cells.
- */
-export function SectionList<S extends Section<unknown>>(props: SectionListProps<S>): YNode {
-  const flat = createMemo(() => {
-    const rows: SectionRow<S>[] = [];
-    const headers: number[] = [];
-    for (const section of props.sections) {
-      headers.push(rows.length);
-      rows.push({ header: true, section });
-      section.data.forEach((item, index) => rows.push({ header: false, section, item, index }));
-    }
-    return { rows, headers };
-  });
-  const [, rest] = splitProps(props, ["sections", "stickySectionHeadersEnabled", "renderSectionHeader", "renderItem"]);
-  return List(
-    mergeSolidProps(rest, {
-      get each() {
-        return flat().rows;
-      },
-      get stickyHeaderIndices() {
-        return props.stickySectionHeadersEnabled === false ? undefined : flat().headers;
-      },
-      children: (row: () => SectionRow<S>) => {
-        const header = createMemo(() => row().header);
-        return createMemo(() =>
-          header()
-            ? untrack(() => props.renderSectionHeader(() => row().section))
-            : untrack(() =>
-                props.renderItem(
-                  () => (row() as any).item,
-                  () => (row() as any).index,
-                  () => row().section,
-                ),
-              ),
-        );
-      },
-    }) as ListProps<SectionRow<S>>,
-  );
-}
 
 (globalThis as any).__yf_list = (id: number, flat: number[]) => lists.get(id)?.(flat);
 

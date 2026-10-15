@@ -173,7 +173,28 @@ pub struct AttributedText {
     /// The block is laid out right to left: `auto` alignment is the right
     /// side.
     pub rtl: bool,
+    /// A long press copies the text (`selectable`; drawing only).
+    pub selectable: bool,
+    /// Inline views and images, in text order: each is an object
+    /// replacement character (U+FFFC) the engine gives the attachment's
+    /// size, sitting on the baseline.
+    pub attachments: Vec<TextAttachment>,
 }
+
+/// A view or image inside a text block (see
+/// [`AttributedText::attachments`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextAttachment {
+    /// Its placeholder character (UTF-16 offset).
+    pub index: u32,
+    /// Width in points.
+    pub width: f32,
+    /// Height in points (all above the baseline).
+    pub height: f32,
+}
+
+/// The character standing for an attachment.
+pub const ATTACHMENT_CHAR: char = '\u{FFFC}';
 
 /// A nested `<text>` span with press listeners: presses on its characters
 /// go to it rather than to the block.
@@ -201,6 +222,18 @@ impl AttributedText {
             .iter()
             .filter(|l| index >= l.start && index < l.end)
             .min_by_key(|l| l.end - l.start)
+    }
+
+    /// Appends an attachment of `width` x `height` points: its
+    /// placeholder character in `style` (the line's font around it).
+    pub fn push_attachment(&mut self, width: f32, height: f32, style: ResolvedTextStyle) {
+        let index = self.len_utf16();
+        self.push(ATTACHMENT_CHAR.encode_utf8(&mut [0; 3]), style);
+        self.attachments.push(TextAttachment {
+            index,
+            width,
+            height,
+        });
     }
 
     /// Appends `s` with `style`, merging with the previous run when the
@@ -235,6 +268,7 @@ impl AttributedText {
             && self.ellipsize == other.ellipsize
             && self.no_wrap == other.no_wrap
             && self.text == other.text
+            && self.attachments == other.attachments
             && self.spans.len() == other.spans.len()
             && self
                 .spans
@@ -256,6 +290,9 @@ impl AttributedText {
             s.style.font_size.to_bits().hash(&mut h);
             s.style.line_height.to_bits().hash(&mut h);
             s.style.letter_spacing.to_bits().hash(&mut h);
+        }
+        for a in &self.attachments {
+            (a.index, a.width.to_bits(), a.height.to_bits()).hash(&mut h);
         }
         h.finish()
     }
@@ -300,6 +337,22 @@ pub trait TextEngine {
     /// The final layout in a box of exactly `size`, for drawing.
     fn layout(&self, prepared: &Self::Prepared, size: Size) -> TextLayout;
 
+    /// The lines of a final layout (`onTextLayout`); `text` is left empty
+    /// (the core fills it in).
+    fn lines(&self, layout: &TextLayout) -> Vec<TextLine> {
+        let _ = layout;
+        Vec::new()
+    }
+
+    /// Where a final layout put the text's attachments, in order: the
+    /// top left `(x, y)` of each placeholder in the content box (y down,
+    /// points), or `None` when it was cut off (lines past the limit, an
+    /// ellipsis).
+    fn attachments(&self, layout: &TextLayout) -> Vec<Option<(f32, f32)>> {
+        let _ = layout;
+        Vec::new()
+    }
+
     /// Makes the font in `data` (TrueType / OpenType) available by its
     /// family name. Fonts are registered before the text using them is
     /// measured.
@@ -309,6 +362,64 @@ pub trait TextEngine {
     }
 }
 
+/// A shared engine, e.g. one the core lays text out with and canvas
+/// `measureText` measures with.
+impl<T: TextEngine> TextEngine for std::rc::Rc<T> {
+    type Prepared = T::Prepared;
+
+    fn prepare(&self, text: &AttributedText) -> Self::Prepared {
+        (**self).prepare(text)
+    }
+
+    fn measure(&self, prepared: &Self::Prepared, max_width: Option<f32>) -> Size {
+        (**self).measure(prepared, max_width)
+    }
+
+    fn layout(&self, prepared: &Self::Prepared, size: Size) -> TextLayout {
+        (**self).layout(prepared, size)
+    }
+
+    fn lines(&self, layout: &TextLayout) -> Vec<TextLine> {
+        (**self).lines(layout)
+    }
+
+    fn attachments(&self, layout: &TextLayout) -> Vec<Option<(f32, f32)>> {
+        (**self).attachments(layout)
+    }
+
+    fn register_font(&self, data: &[u8]) -> Result<(), String> {
+        (**self).register_font(data)
+    }
+}
+
+/// One line of laid-out text (`onTextLayout`), in the content box (y
+/// down, points).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TextLine {
+    /// Its characters.
+    pub text: String,
+    /// Start offset in the text (UTF-16 units, inclusive).
+    pub start: u32,
+    /// End offset (UTF-16 units, exclusive).
+    pub end: u32,
+    /// Left edge.
+    pub x: f32,
+    /// Top edge.
+    pub y: f32,
+    /// Typographic width.
+    pub width: f32,
+    /// Height (ascender + descender + leading).
+    pub height: f32,
+    /// Above the baseline.
+    pub ascender: f32,
+    /// Below the baseline.
+    pub descender: f32,
+    /// Height of capitals.
+    pub cap_height: f32,
+    /// Height of lowercase letters.
+    pub x_height: f32,
+}
+
 /// A deterministic, platform-free [`TextEngine`] for headless runs and
 /// tests: every character is `0.55 × font size` wide and lines are
 /// `1.2 × font size` tall.
@@ -316,17 +427,22 @@ pub trait TextEngine {
 pub struct ApproxTextEngine;
 
 impl TextEngine for ApproxTextEngine {
-    /// `(character count, font size, max lines)`.
-    type Prepared = (usize, f32, u32);
+    /// `(character count, font size, max lines, attachments)`.
+    type Prepared = (usize, f32, u32, Vec<TextAttachment>);
 
-    fn prepare(&self, text: &AttributedText) -> (usize, f32, u32) {
+    fn prepare(&self, text: &AttributedText) -> Self::Prepared {
         let size = text.spans.first().map_or(14.0, |s| s.style.font_size);
-        (text.text.chars().count(), size, text.max_lines)
+        (
+            text.text.chars().count(),
+            size,
+            text.max_lines,
+            text.attachments.clone(),
+        )
     }
 
     fn measure(
         &self,
-        &(chars, size, max_lines): &(usize, f32, u32),
+        &(chars, size, max_lines, _): &Self::Prepared,
         max_width: Option<f32>,
     ) -> Size {
         let width = chars as f32 * size * 0.55;
@@ -341,8 +457,21 @@ impl TextEngine for ApproxTextEngine {
         Size::new(width, lines * line)
     }
 
-    fn layout(&self, _: &(usize, f32, u32), size: Size) -> TextLayout {
-        TextLayout(Arc::new(size))
+    fn layout(&self, prepared: &Self::Prepared, size: Size) -> TextLayout {
+        // On one line, each character as wide as the others.
+        let (_, font, _, attachments) = prepared;
+        let line = font * 1.2;
+        let points: Vec<Option<(f32, f32)>> = attachments
+            .iter()
+            .map(|a| Some((a.index as f32 * font * 0.55, (line - a.height).max(0.0))))
+            .collect();
+        TextLayout(Arc::new((size, points)))
+    }
+
+    fn attachments(&self, layout: &TextLayout) -> Vec<Option<(f32, f32)>> {
+        layout
+            .downcast::<(Size, Vec<Option<(f32, f32)>>)>()
+            .map_or_else(Vec::new, |(_, p)| p.clone())
     }
 
     fn register_font(&self, _: &[u8]) -> Result<(), String> {

@@ -10,6 +10,7 @@
 //! thread.
 
 mod bytecode;
+mod canvas;
 mod console;
 mod env;
 mod error;
@@ -23,6 +24,6 @@ pub use crate::{
     bytecode::{BUNDLE_NAME, BYTECODE_VERSION, compile_bytecode},
     env::{ColorScheme, Environment, Idiom, Insets},
     error::JsError,
-    host::{ErrorHandler, Host},
+    host::{ErrorHandler, Host, TextMeasurer},
     net::{HttpRequest, HttpResponse, NetworkQueue, RequestId},
 };

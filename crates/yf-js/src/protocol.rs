@@ -32,6 +32,7 @@ const OP_REMOVE: i32 = 5;
 const OP_RELEASE: i32 = 6;
 const OP_ANIM: i32 = 7;
 const OP_COMMAND: i32 = 8;
+const OP_DRAW: i32 = 9;
 
 // Sub-opcodes of `OP_ANIM`.
 const ANIM_VALUE: i32 = 0;
@@ -187,6 +188,18 @@ pub(crate) fn decode<'js>(
             },
             OP_RELEASE => Op::Release { id: r.id()? },
             OP_ANIM => Op::Anim(decode_anim(&mut r)?),
+            OP_DRAW => {
+                let id = r.id()?;
+                let list = r.value()?;
+                let drawing = match list.as_array() {
+                    Some(list) => crate::canvas::decode(ctx, list, 0, list.len())?,
+                    None => Default::default(),
+                };
+                Op::Draw {
+                    id,
+                    drawing: Box::new(drawing),
+                }
+            }
             OP_COMMAND => {
                 let id = r.id()?;
                 let name = r.string()?;
@@ -246,6 +259,17 @@ pub(crate) fn decode<'js>(
                             .unwrap_or_default(),
                     ),
                     "accessibilityFocus" => Command::AccessibilityFocus,
+                    "imageInfo" => {
+                        let o = arg.as_object();
+                        Command::ImageInfo {
+                            id: o
+                                .and_then(|o| o.get::<_, Option<u32>>("id").ok().flatten())
+                                .unwrap_or(0),
+                            uri: o
+                                .and_then(|o| o.get::<_, Option<String>>("uri").ok().flatten())
+                                .unwrap_or_default(),
+                        }
+                    }
                     "toast" => {
                         let o = arg.as_object();
                         Command::Toast {
@@ -278,6 +302,22 @@ pub(crate) fn decode<'js>(
                             .unwrap_or(true),
                     },
                     "layoutAnimation" => Command::LayoutAnimation(decode_layout_animation(&arg)?),
+                    "zoomTo" => {
+                        let field = |key: &str| {
+                            arg.as_object()
+                                .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
+                        };
+                        Command::ZoomTo {
+                            scale: field("scale").unwrap_or(1.0) as f32,
+                            center: field("x")
+                                .zip(field("y"))
+                                .map(|(x, y)| (x as f32, y as f32)),
+                            animated: arg
+                                .as_object()
+                                .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
+                                .unwrap_or(true),
+                        }
+                    }
                     "scrollTo" => {
                         let field = |key: &str| {
                             arg.as_object()
@@ -645,6 +685,7 @@ fn decode_prop<'js>(
         "editable" => Prop::Editable(value.as_bool().unwrap_or(true)),
         "blurOnSubmit" => Prop::BlurOnSubmit(value.as_bool().unwrap_or(true)),
         "autoFocus" => Prop::AutoFocus(value.as_bool().unwrap_or(false)),
+        "caretHidden" => Prop::CaretHidden(value.as_bool().unwrap_or(false)),
         "inputAccessoryViewID" => {
             Prop::InputAccessoryViewId(opt_string(&value)?.map(|s| (*s).into()))
         }
@@ -677,6 +718,9 @@ fn decode_prop<'js>(
             "interactive" => KeyboardDismissMode::Interactive,
             _ => KeyboardDismissMode::None,
         }),
+        "selectable" => Prop::Selectable(value.as_bool().unwrap_or(false)),
+        "adjustsFontSizeToFit" => Prop::AdjustsFontSizeToFit(value.as_bool().unwrap_or(false)),
+        "minimumFontScale" => Prop::MinimumFontScale(number(&value).unwrap_or(0.0).clamp(0.0, 1.0)),
         "numberOfLines" => Prop::NumberOfLines(number(&value).unwrap_or(0.0).max(0.0) as u32),
         "ellipsizeMode" => Prop::EllipsizeMode(
             match value
@@ -898,6 +942,14 @@ fn decode_prop<'js>(
         "disableIntervalMomentum" => Prop::Scroll(ScrollProp::DisableIntervalMomentum(
             value.as_bool().unwrap_or(false),
         )),
+        "minimumZoomScale" => Prop::Scroll(ScrollProp::MinZoom(number(&value).unwrap_or(1.0))),
+        "maximumZoomScale" => Prop::Scroll(ScrollProp::MaxZoom(number(&value).unwrap_or(1.0))),
+        "zoomScale" => Prop::Scroll(ScrollProp::Zoom(number(&value).unwrap_or(1.0))),
+        "bouncesZoom" => Prop::Scroll(ScrollProp::BouncesZoom(value.as_bool().unwrap_or(true))),
+        "pinchGestureEnabled" => Prop::Scroll(ScrollProp::Pinch(value.as_bool().unwrap_or(true))),
+        "centerContent" => {
+            Prop::Scroll(ScrollProp::CenterContent(value.as_bool().unwrap_or(false)))
+        }
         "contentInset" => Prop::Scroll(ScrollProp::ContentInset(insets(&value)?)),
         "contentOffset" => {
             let field = |key: &str| {

@@ -662,6 +662,9 @@ extern "system" fn Java_dev_yf_Native_eventMap(
                 "start" => "start",
                 "end" => "end",
                 "key" => "key",
+                "loaded" => "loaded",
+                "total" => "total",
+                "error" => "error",
                 _ => continue,
             };
             if let Some(v) = read(&mut env, i) {
@@ -740,6 +743,22 @@ extern "system" fn Java_dev_yf_Native_scroll(
     }
     finish(host, &mut ui);
     floats(&env, &ui.outputs())
+}
+
+/// A zoomable scroll view's zoom scale changed (before its offset report).
+#[unsafe(no_mangle)]
+extern "system" fn Java_dev_yf_Native_zoom(
+    _: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    id: jint,
+    scale: jfloat,
+) {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    if let Some(control) = host.control() {
+        control.zoom(id as NodeId, scale);
+    }
 }
 
 /// Whether view `id` follows drags (it has `pan` values).

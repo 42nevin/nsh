@@ -1,4 +1,5 @@
 import { createSignal, For, Index } from "solid-js";
+import { Image } from "yf";
 import bounce from "../bounce.gif";
 import logo from "../logo@2x.png";
 import spinner from "../spinner.webp";
@@ -50,6 +51,42 @@ function Blur() {
           </view>
         )}
       </Index>
+    </view>
+  );
+}
+
+function Info() {
+  const big = "https://picsum.photos/seed/yf-progress/2400/1600";
+  const [size, setSize] = createSignal("");
+  const [prefetched, setPrefetched] = createSignal("");
+  const [progress, setProgress] = createSignal("");
+  const [show, setShow] = createSignal(false);
+  return (
+    <view style={{ gap: 10 }}>
+      <view style={{ flexDirection: "row", gap: 8 }}>
+        <Button
+          label="getSize"
+          onPress={() =>
+            Image.getSize(big).then(
+              (s) => setSize(`${s.width}×${s.height} px`),
+              (e) => setSize(String(e)),
+            )
+          }
+        />
+        <Button label="prefetch" color="#8250df" onPress={() => Image.prefetch(big).then((ok) => setPrefetched(ok ? "prefetched" : "failed"))} />
+        <Button label={show() ? "Hide" : "Show"} color="#1a7f37" onPress={() => setShow(!show())} />
+      </view>
+      <text style={{ color: colors.muted }}>
+        {[size(), prefetched(), progress()].filter(Boolean).join(" · ") || "Prefetch, then show: no download, no progress"}
+      </text>
+      {show() && (
+        <image
+          src={big}
+          onProgress={(e) => setProgress(`${Math.round((e.loaded / Math.max(1, e.total)) * 100)}%`)}
+          onLoad={() => setProgress((p) => (p ? `${p} loaded` : "loaded (no download)"))}
+          style={{ height: 160, borderRadius: 10, backgroundColor: "#eaeef2" }}
+        />
+      )}
     </view>
   );
 }
@@ -118,6 +155,9 @@ export function Images() {
         </Section>
         <Section title="Blur radius">
           <Blur />
+        </Section>
+        <Section title="Image.getSize, Image.prefetch, onProgress">
+          <Info />
         </Section>
         <Section title="Events">
           <view style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>

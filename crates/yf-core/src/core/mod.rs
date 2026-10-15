@@ -67,6 +67,8 @@ mod dirty {
     pub(super) const NATIVE: u32 = 1 << 14;
     /// Emit [`crate::MountItem::ScrollBehavior`].
     pub(super) const SCROLL_BEHAVIOR: u32 = 1 << 15;
+    /// Emit [`crate::MountItem::Canvas`].
+    pub(super) const CANVAS: u32 = 1 << 16;
 }
 
 /// A layout root other than the surface's: screens, modals and header
@@ -102,6 +104,12 @@ struct Paragraph {
     max_font_multiplier: f32,
     /// `ellipsizeMode` was set (it then wins over classes).
     ellipsize_set: bool,
+    /// `selectable` as set (it wins over `select-*` classes).
+    selectable: Option<bool>,
+    /// `adjustsFontSizeToFit`.
+    fit: bool,
+    /// `minimumFontScale`.
+    min_font_scale: f32,
 }
 
 impl Default for Paragraph {
@@ -112,6 +120,9 @@ impl Default for Paragraph {
             allow_font_scaling: true,
             max_font_multiplier: 0.0,
             ellipsize_set: false,
+            selectable: None,
+            fit: false,
+            min_font_scale: 0.0,
         }
     }
 }
@@ -145,6 +156,7 @@ enum Kind {
     Modal,
     HeaderItem,
     InputAccessory,
+    Canvas,
     WebView,
     Video,
 }
@@ -185,6 +197,7 @@ impl Kind {
             Kind::Modal => ViewKind::Modal,
             Kind::HeaderItem => ViewKind::HeaderItem,
             Kind::InputAccessory => ViewKind::InputAccessory,
+            Kind::Canvas => ViewKind::Canvas,
             Kind::WebView => ViewKind::WebView,
             Kind::Video => ViewKind::Video,
             Kind::View | Kind::Cell | Kind::RawText => ViewKind::View,
@@ -213,6 +226,8 @@ struct ScrollState {
     behavior: ScrollBehavior,
     /// Minimum milliseconds between `onScroll` events.
     event_throttle_ms: f32,
+    /// The zoom scale the platform reported.
+    zoom: f32,
 }
 
 impl Default for ScrollState {
@@ -227,6 +242,7 @@ impl Default for ScrollState {
             content: None,
             behavior: ScrollBehavior::default(),
             event_throttle_ms: 0.0,
+            zoom: 1.0,
         }
     }
 }
@@ -242,6 +258,8 @@ struct InputState {
     config: InputConfig,
     /// Last content box sent to the platform.
     content: Option<Rect>,
+    /// Last size `onContentSizeChange` reported.
+    content_size: Option<Size>,
 }
 
 #[derive(Debug, Default)]
@@ -266,6 +284,8 @@ struct Node {
     view_style: ViewStyle,
     text_style: TextStyle,
     animated: Vec<(AnimProp, yf_anim::NodeId)>,
+    /// What a canvas draws.
+    drawing: Option<Arc<crate::canvas::Drawing>>,
     /// The `style` prop as written, applied over the class styles.
     inline_style: StylePatch,
     /// `class` / `classList` as set.
@@ -278,7 +298,7 @@ struct Node {
     states: u8,
     /// States the platform reports for the view.
     tracked: u8,
-    /// `underlayColor` and `underlayOpacity` (`TouchableHighlight`).
+    /// `underlayColor` and `underlayOpacity`.
     underlay: Option<Box<(crate::Color, f32)>>,
     /// A child's classes read their position among siblings.
     positional_children: bool,
@@ -321,6 +341,9 @@ struct Node {
     text_queued: bool,
     /// A list cell whose subtree was laid out again this commit.
     relaid: bool,
+    /// A text block: its attachments (inline views and images, in text
+    /// order) whose native views are inside its own.
+    attached: Vec<NodeId>,
 }
 
 impl Node {
@@ -364,6 +387,7 @@ impl Node {
             view_style: ViewStyle::default(),
             text_style: TextStyle::default(),
             animated: Vec::new(),
+            drawing: None,
             inline_style: StylePatch::default(),
             class_names: None,
             classes: None,
@@ -396,6 +420,7 @@ impl Node {
             gestures: GestureValues::default(),
             created: false,
             frame: Rect::UNSET,
+            attached: Vec::new(),
             dirty: 0,
             queued: false,
             text_queued: false,
@@ -413,8 +438,9 @@ struct TextContext<P> {
     prepared: Option<P>,
     /// Last measurement: `(max_width, size)`.
     cache: Option<(Option<f32>, Size)>,
-    /// Last final layout sent to the platform and the box it was made for.
-    laid_out: Option<(Size, TextLayout)>,
+    /// Last final layout sent to the platform and the content box it was
+    /// made for (where in the view the text goes).
+    laid_out: Option<(Rect, TextLayout)>,
 }
 
 impl<P> TextContext<P> {
@@ -475,6 +501,9 @@ pub struct Core<M: TextEngine> {
     measure_cache: MeasureCache,
     /// Text blocks whose final layout must be (re)made after layout.
     pending_text: Vec<Key>,
+    /// Text blocks with attachments (checked for attachments laid out
+    /// again).
+    attachment_blocks: Vec<Key>,
     /// Live list nodes.
     lists: Vec<Key>,
     /// Live screens, modals and header items.
@@ -528,6 +557,7 @@ impl<M: TextEngine> Core<M> {
             text_engine,
             measure_cache: MeasureCache::default(),
             pending_text: Vec::new(),
+            attachment_blocks: Vec::new(),
             lists: Vec::new(),
             roots: Vec::new(),
             accessories: Default::default(),
@@ -637,20 +667,31 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
+    /// The platform zoomed scroll view `id` to `scale`.
+    pub fn set_zoom(&mut self, id: NodeId, scale: f32) {
+        let Ok(key) = self.key(id) else { return };
+        if let Some(scroll) = self.nodes[key as usize].scroll.as_mut() {
+            scroll.zoom = scale;
+        }
+    }
+
     /// What `onScroll` reports for scroll view `id`, if it listens to it:
-    /// the minimum milliseconds between events, the content size and the
-    /// viewport size.
-    pub fn scroll_listener(&self, id: NodeId) -> Option<(f32, Size, Size)> {
+    /// the minimum milliseconds between events, the content size (zoomed),
+    /// the viewport size and the zoom scale.
+    pub fn scroll_listener(&self, id: NodeId) -> Option<(f32, Size, Size, f32)> {
         let node = &self.nodes[self.key(id).ok()? as usize];
         if !node.events.contains(EventKind::Scroll) {
             return None;
         }
         let scroll = node.scroll.as_ref()?;
         let frame = Size::new(node.frame.width, node.frame.height);
+        let content = scroll.content.unwrap_or(frame);
+        let z = scroll.zoom;
         Some((
             scroll.event_throttle_ms,
-            scroll.content.unwrap_or(frame),
+            Size::new(content.width * z, content.height * z),
             frame,
+            z,
         ))
     }
 
@@ -783,6 +824,24 @@ impl<M: TextEngine> Core<M> {
                 self.mount.push(MountItem::Anim(op));
                 Ok(())
             }
+            Op::Draw { id, drawing } => {
+                let key = self.key(id)?;
+                let node = &mut self.nodes[key as usize];
+                if node.kind != Kind::Canvas {
+                    return Ok(());
+                }
+                let slots_changed = node
+                    .drawing
+                    .as_ref()
+                    .map_or(!drawing.slots.is_empty(), |d| d.slots != drawing.slots);
+                if node.drawing.as_deref() == Some(&*drawing) {
+                    return Ok(());
+                }
+                node.drawing = Some(Arc::from(drawing));
+                let flags = dirty::CANVAS | if slots_changed { dirty::ANIM } else { 0 };
+                self.mark(key, flags);
+                Ok(())
+            }
             Op::Command {
                 command: Command::LayoutAnimation(animation),
                 ..
@@ -900,6 +959,7 @@ impl<M: TextEngine> Core<M> {
             Tag::Modal => Kind::Modal,
             Tag::HeaderItem => Kind::HeaderItem,
             Tag::InputAccessory => Kind::InputAccessory,
+            Tag::Canvas => Kind::Canvas,
             Tag::WebView => Kind::WebView,
             Tag::Video => Kind::Video,
         };
@@ -1315,6 +1375,24 @@ impl<M: TextEngine> Core<M> {
                         ScrollProp::ContentInset(i) => b.content_inset = i,
                         ScrollProp::KeyboardTaps(t) => b.keyboard_taps = t,
                         ScrollProp::DisableIntervalMomentum(on) => b.one_step = on,
+                        ScrollProp::MinZoom(v) => b.min_zoom = v.max(0.01),
+                        ScrollProp::MaxZoom(v) => b.max_zoom = v.max(0.01),
+                        ScrollProp::BouncesZoom(on) => b.bounces_zoom = on,
+                        ScrollProp::Pinch(on) => b.pinch = on,
+                        ScrollProp::CenterContent(on) => b.center_content = on,
+                        ScrollProp::Zoom(scale) => {
+                            // After the limits (sent with this commit's
+                            // behavior) are applied.
+                            let id = node.id;
+                            self.commands.push((
+                                id,
+                                Command::ZoomTo {
+                                    scale,
+                                    center: None,
+                                    animated: false,
+                                },
+                            ));
+                        }
                         ScrollProp::EventThrottle(ms) => scroll.event_throttle_ms = ms.max(0.0),
                         ScrollProp::ContentOffset(x, y) => {
                             // Where it starts: scrolled there after layout.
@@ -1442,6 +1520,29 @@ impl<M: TextEngine> Core<M> {
                 if node.paragraph.allow_font_scaling != allow {
                     node.paragraph.allow_font_scaling = allow;
                     self.font_settings_changed(key);
+                }
+            }
+            Prop::Selectable(on) => {
+                if node.paragraph.selectable != Some(on) {
+                    node.paragraph.selectable = Some(on);
+                    self.mark_text_block(key);
+                }
+            }
+            Prop::AdjustsFontSizeToFit(_) | Prop::MinimumFontScale(_) => {
+                let before = (node.paragraph.fit, node.paragraph.min_font_scale);
+                match prop {
+                    Prop::AdjustsFontSizeToFit(on) => node.paragraph.fit = on,
+                    Prop::MinimumFontScale(min) => node.paragraph.min_font_scale = min,
+                    _ => {}
+                }
+                if (node.paragraph.fit, node.paragraph.min_font_scale) != before {
+                    self.queue_text(key);
+                    if let Some(layout) = self.nodes[key as usize].layout
+                        && let Some(LeafContext::Text(ctx)) =
+                            self.layout.get_node_context_mut(layout)
+                    {
+                        ctx.laid_out = None;
+                    }
                 }
             }
             Prop::MaxFontSizeMultiplier(max) => {
@@ -1724,6 +1825,10 @@ impl<M: TextEngine> Core<M> {
                         c.auto_focus = on;
                         false
                     }
+                    Prop::CaretHidden(on) => {
+                        c.caret_hidden = on;
+                        false
+                    }
                     Prop::InputAccessoryViewId(name) => {
                         c.accessory_id = name;
                         false
@@ -1784,7 +1889,9 @@ impl<M: TextEngine> Core<M> {
         }
 
         let p = &self.nodes[parent as usize];
-        let inline = p.kind == Kind::Text || p.inline;
+        // Inside a block or a span (not inside an attachment: its children
+        // are its own layout's).
+        let inline = p.kind == Kind::Text;
         let pos = match before {
             Some(b) => p
                 .children
@@ -1922,6 +2029,9 @@ impl<M: TextEngine> Core<M> {
         if node.kind == Kind::List {
             self.lists.retain(|&k| k != key);
         }
+        if node.kind == Kind::Text {
+            self.attachment_blocks.retain(|&k| k != key);
+        }
         if node.kind.is_root() {
             self.roots.retain(|&k| k != key);
         }
@@ -2046,6 +2156,7 @@ impl<M: TextEngine> Core<M> {
     /// Creates the native views of `key`'s subtree if needed, wiring up the
     /// children in order.
     fn ensure_created(&mut self, key: Key) {
+        let has_attachments = self.attachment_blocks.contains(&key);
         let node = &mut self.nodes[key as usize];
         if node.created || node.layout.is_none() {
             return;
@@ -2067,6 +2178,11 @@ impl<M: TextEngine> Core<M> {
         }
         if kind == Kind::Text {
             flags |= dirty::TEXT_MOUNT;
+            if has_attachments {
+                // Its attachments' views go inside the new view.
+                node.attached.clear();
+                flags |= dirty::TEXT_BUILD;
+            }
         }
         if node.image.as_ref().is_some_and(|i| i.source.is_some()) {
             flags |= dirty::IMAGE;
@@ -2077,8 +2193,11 @@ impl<M: TextEngine> Core<M> {
                 flags |= dirty::REFRESHING;
             }
         }
-        if !node.animated.is_empty() {
+        if !node.animated.is_empty() || node.drawing.as_ref().is_some_and(|d| !d.slots.is_empty()) {
             flags |= dirty::ANIM;
+        }
+        if node.drawing.is_some() {
+            flags |= dirty::CANVAS;
         }
         if !node.gestures.is_empty() {
             flags |= dirty::PAN;
@@ -2167,6 +2286,19 @@ impl<M: TextEngine> Core<M> {
     }
 
     fn flush_dirty(&mut self) {
+        loop {
+            self.flush_dirty_once();
+            // Text blocks create the views of new attachments while
+            // flushing, which queues them; texts inside attachments built
+            // after their block resize them, which builds the block again.
+            self.check_attachments();
+            if self.queue.is_empty() {
+                break;
+            }
+        }
+    }
+
+    fn flush_dirty_once(&mut self) {
         let mut queue = std::mem::take(&mut self.queue);
         for &key in &queue {
             let Some(node) = self.nodes.get_mut(key as usize) else {
@@ -2232,9 +2364,23 @@ impl<M: TextEngine> Core<M> {
                 }
             }
             if flags & dirty::ANIM != 0 {
-                self.mount.push(MountItem::AnimBindings {
+                let mut bindings = node.animated.clone();
+                if let Some(d) = &node.drawing {
+                    bindings.extend(
+                        d.slots
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &n)| (AnimProp::CanvasArg(i as u16), n)),
+                    );
+                }
+                self.mount.push(MountItem::AnimBindings { id, bindings });
+            }
+            if flags & dirty::CANVAS != 0
+                && let Some(drawing) = &node.drawing
+            {
+                self.mount.push(MountItem::Canvas {
                     id,
-                    bindings: node.animated.clone(),
+                    drawing: drawing.clone(),
                 });
             }
             if flags & dirty::PAN != 0 {
@@ -2313,9 +2459,39 @@ impl<M: TextEngine> Core<M> {
             }
         }
         queue.clear();
-        // Keep the allocation; nothing is queued while flushing.
-        debug_assert!(self.queue.is_empty());
-        self.queue = queue;
+        // Keep the allocation (unless flushing queued more).
+        if self.queue.is_empty() {
+            self.queue = queue;
+        }
+    }
+
+    /// `onContentSizeChange` of input `key` if the size of its text (at the
+    /// content box's width when multiline) changed.
+    fn report_content_size(&mut self, key: Key, width: f32) {
+        let node = &self.nodes[key as usize];
+        let (Some(input), Some(layout)) = (node.input.as_ref(), node.layout) else {
+            return;
+        };
+        let max = input.config.multiline.then_some(width);
+        let Some(LeafContext::Text(ctx)) = self.layout.get_node_context_mut(layout) else {
+            return;
+        };
+        let size = measure_text(&self.text_engine, &mut self.measure_cache, ctx, max);
+        let node = &mut self.nodes[key as usize];
+        let input = node.input.as_mut().expect("input state");
+        if input.content_size == Some(size) {
+            return;
+        }
+        input.content_size = Some(size);
+        let id = node.id;
+        self.events.push((
+            id,
+            EventKind::ContentSizeChange,
+            EventPayload::Map(vec![
+                ("width", PayloadValue::Number(size.width as f64)),
+                ("height", PayloadValue::Number(size.height as f64)),
+            ]),
+        ));
     }
 
     fn text_ctx(&mut self, layout: LayoutId) -> &mut TextContext<M::Prepared> {
@@ -2409,20 +2585,32 @@ impl<M: TextEngine> Core<M> {
             // must ellipsize at the box (`truncate`).
             no_wrap: max_lines == 0 && class.and_then(|c| c.no_wrap).unwrap_or(false),
             shadow: node.text_style.shadow(),
+            selectable: node
+                .paragraph
+                .selectable
+                .or(class.and_then(|c| c.selectable))
+                .unwrap_or(false),
             ..AttributedText::default()
         };
         let base = inherited.inherit(&node.text_style);
-        self.collect_text(key, base, &mut text);
         let multiplier = node.paragraph.font_multiplier(self.font_scale);
+        let inserted = self.update_attachments(key);
+        self.collect_text(key, base, &mut text);
         if multiplier != 1.0 {
             for span in &mut text.spans {
                 span.style = scaled(span.style, multiplier);
             }
         }
-        let layout = node.layout.expect("text block has layout");
+        let layout = self.nodes[key as usize]
+            .layout
+            .expect("text block has layout");
         let ctx = self.text_ctx(layout);
         if *ctx.text == text {
-            return false;
+            if inserted {
+                // New attachment views: placed with the next final layout.
+                ctx.laid_out = None;
+            }
+            return inserted;
         }
         let same_layout = ctx.text.layout_eq(&text);
         ctx.text = Arc::new(text);
@@ -2455,7 +2643,131 @@ impl<M: TextEngine> Core<M> {
                         });
                     }
                 }
+                // An attachment, laid out by `update_attachments`.
+                _ => {
+                    if let Some(l) = child.layout {
+                        let size = self.layout.layout(l).expect("taffy layout").size;
+                        out.push_attachment(size.width, size.height, style);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The attachments of text block `key` (views and images inside it,
+    /// also inside its spans), in text order.
+    fn attachments_of(&self, key: Key, out: &mut Vec<Key>) {
+        for &c in &self.nodes[key as usize].children {
+            let child = &self.nodes[c as usize];
+            match child.kind {
+                Kind::RawText => {}
+                Kind::Text => self.attachments_of(c, out),
+                _ if child.layout.is_some() => out.push(c),
                 _ => {}
+            }
+        }
+    }
+
+    /// The text block an attachment is in, if it is one.
+    fn attachment_block(&self, key: Key) -> Option<Key> {
+        let node = &self.nodes[key as usize];
+        if !node.inline || node.layout.is_none() || node.kind == Kind::Text {
+            return None;
+        }
+        let mut k = node.parent;
+        while k != NO_KEY {
+            let n = &self.nodes[k as usize];
+            if !n.inline {
+                return (n.kind == Kind::Text).then_some(k);
+            }
+            k = n.parent;
+        }
+        None
+    }
+
+    /// Lays out the attachments of text block `key` (each a layout root
+    /// at its own content size) and keeps their native views inside the
+    /// block's. Returns true if views were inserted (they need placing).
+    fn update_attachments(&mut self, key: Key) -> bool {
+        let mut keys = Vec::new();
+        self.attachments_of(key, &mut keys);
+        let block = &self.nodes[key as usize];
+        if keys.is_empty() && block.attached.is_empty() {
+            return false;
+        }
+        let (block_id, created) = (block.id, block.created);
+        let old = std::mem::take(&mut self.nodes[key as usize].attached);
+        let mut inserted = false;
+        for &a in &keys {
+            let id = self.nodes[a as usize].id;
+            let new = !old.contains(&id);
+            if created && new {
+                self.ensure_created(a);
+                self.mount.push(MountItem::Insert {
+                    parent: block_id,
+                    child: id,
+                    before: None,
+                });
+                inserted = true;
+            }
+            let layout = self.nodes[a as usize].layout.expect("attachment layout");
+            let dirty = self.layout.dirty(layout).unwrap_or(true);
+            if dirty {
+                self.layout_root(
+                    layout,
+                    taffy::Size {
+                        width: AvailableSpace::MaxContent,
+                        height: AvailableSpace::MaxContent,
+                    },
+                );
+            }
+            if created && (dirty || new) {
+                // Its own frame follows the text; its subtree's now.
+                let children = std::mem::take(&mut self.nodes[a as usize].children);
+                for &child in &children {
+                    self.emit_frames(child);
+                }
+                self.nodes[a as usize].children = children;
+            }
+        }
+        // Views that left the block and were not moved natively elsewhere.
+        for id in old {
+            let Ok(k) = self.key(id) else { continue };
+            let n = &self.nodes[k as usize];
+            let moved = n.parent != NO_KEY && !n.inline && self.nodes[n.parent as usize].created;
+            if n.created && !moved && self.attachment_block(k).is_none() {
+                self.mount.push(MountItem::Remove { id });
+            }
+        }
+        let ids: Vec<NodeId> = keys.iter().map(|&a| self.nodes[a as usize].id).collect();
+        let has = !ids.is_empty();
+        self.nodes[key as usize].attached = if created { ids } else { Vec::new() };
+        match (has, self.attachment_blocks.contains(&key)) {
+            (true, false) => self.attachment_blocks.push(key),
+            (false, true) => self.attachment_blocks.retain(|&k| k != key),
+            _ => {}
+        }
+        inserted
+    }
+
+    /// Text blocks whose attachments' content changed are built again.
+    fn check_attachments(&mut self) {
+        let mut i = 0;
+        while i < self.attachment_blocks.len() {
+            let key = self.attachment_blocks[i];
+            i += 1;
+            let Some(node) = self.nodes.get(key as usize) else {
+                continue;
+            };
+            let dirty = node.attached.iter().any(|&id| {
+                self.key(id).is_ok_and(|k| {
+                    self.nodes[k as usize]
+                        .layout
+                        .is_some_and(|l| self.layout.dirty(l).unwrap_or(true))
+                })
+            });
+            if dirty {
+                self.mark(key, dirty::TEXT_BUILD);
             }
         }
     }
@@ -2796,11 +3108,20 @@ impl<M: TextEngine> Core<M> {
     /// box changed, and emits it.
     fn flush_text(&mut self) {
         let mut pending = std::mem::take(&mut self.pending_text);
+        // Attachment views to place: (block, its final layout, content box).
+        let mut placements: Vec<(Key, TextLayout, Rect)> = Vec::new();
         for &key in &pending {
             let Some(node) = self.nodes.get_mut(key as usize) else {
                 continue;
             };
             node.text_queued = false;
+            let align_vertical = node.text_style.align_vertical.unwrap_or(0.0);
+            let report_lines = node.events.contains(EventKind::TextLayout);
+            // Shrinking stops at a tenth: smaller is unreadable anyway.
+            let fit = node
+                .paragraph
+                .fit
+                .then_some(node.paragraph.min_font_scale.max(0.1));
             let (id, created, Some(layout)) = (node.id, node.created, node.layout) else {
                 continue;
             };
@@ -2819,15 +3140,65 @@ impl<M: TextEngine> Core<M> {
                     .width
                     .max(measure_text(engine, cache, ctx, None).width);
             }
+            if align_vertical > 0.0 {
+                // Text shorter than its box: moved down within it.
+                let height = measure_text(engine, cache, ctx, Some(content.width)).height;
+                if height < content.height {
+                    content.y += (content.height - height) * align_vertical;
+                    content.height = height;
+                }
+            }
             let size = Size::new(content.width, content.height);
-            if matches!(&ctx.laid_out, Some((s, _)) if *s == size) {
+            if let Some(min) = fit {
+                // Shrunk to fit: its own text, laid out on its own.
+                if matches!(&ctx.laid_out, Some((r, _)) if *r == content) {
+                    continue;
+                }
+                let text = Arc::new(fitted(engine, &ctx.text, size, min));
+                let prepared = engine.prepare(&text);
+                let text_layout = engine.layout(&prepared, size);
+                ctx.laid_out = Some((content, text_layout.clone()));
+                if report_lines {
+                    self.events.push((
+                        id,
+                        EventKind::TextLayout,
+                        text_lines(engine, &text, &text_layout),
+                    ));
+                }
+                if !text.attachments.is_empty() {
+                    placements.push((key, text_layout.clone(), content));
+                }
+                self.mount.push(MountItem::Text {
+                    id,
+                    text,
+                    layout: text_layout,
+                    content,
+                });
                 continue;
             }
-            let prepared = ctx
-                .prepared
-                .get_or_insert_with(|| engine.prepare(&ctx.text));
-            let text_layout = engine.layout(prepared, size);
-            ctx.laid_out = Some((size, text_layout.clone()));
+            let text_layout = match &ctx.laid_out {
+                Some((r, _)) if *r == content => continue,
+                // Only moved (padding, vertical alignment): the same layout.
+                Some((r, l)) if r.width == size.width && r.height == size.height => l.clone(),
+                _ => {
+                    let prepared = ctx
+                        .prepared
+                        .get_or_insert_with(|| engine.prepare(&ctx.text));
+                    let layout = engine.layout(prepared, size);
+                    if report_lines {
+                        self.events.push((
+                            id,
+                            EventKind::TextLayout,
+                            text_lines(engine, &ctx.text, &layout),
+                        ));
+                    }
+                    layout
+                }
+            };
+            ctx.laid_out = Some((content, text_layout.clone()));
+            if !ctx.text.attachments.is_empty() {
+                placements.push((key, text_layout.clone(), content));
+            }
             self.mount.push(MountItem::Text {
                 id,
                 text: ctx.text.clone(),
@@ -2837,6 +3208,39 @@ impl<M: TextEngine> Core<M> {
         }
         pending.clear();
         self.pending_text = pending;
+        for (key, layout, content) in placements {
+            self.place_attachments(key, &layout, content);
+        }
+    }
+
+    /// Moves the views of text block `key`'s attachments onto their
+    /// placeholders in `layout` (content box `content`); cut off ones out
+    /// of sight.
+    fn place_attachments(&mut self, key: Key, layout: &TextLayout, content: Rect) {
+        let points = self.text_engine.attachments(layout);
+        let attached = std::mem::take(&mut self.nodes[key as usize].attached);
+        for (i, &id) in attached.iter().enumerate() {
+            let Ok(a) = self.key(id) else { continue };
+            let Some(l) = self.nodes[a as usize].layout else {
+                continue;
+            };
+            let size = self.layout.layout(l).expect("taffy layout").size;
+            let (x, y) = match points.get(i).copied().flatten() {
+                Some((x, y)) => (content.x + x, content.y + y),
+                // Far away, like unbound list cells.
+                None => (-100_000.0, 0.0),
+            };
+            self.set_frame(
+                a,
+                Rect {
+                    x,
+                    y,
+                    width: size.width,
+                    height: size.height,
+                },
+            );
+        }
+        self.nodes[key as usize].attached = attached;
     }
 
     /// Emits the frame of `key` and its subtree (if changed).
@@ -2878,6 +3282,9 @@ impl<M: TextEngine> Core<M> {
                     id: node.id,
                     content,
                 });
+            }
+            if node.events.contains(EventKind::ContentSizeChange) {
+                self.report_content_size(key, content.width);
             }
         }
         if kind == Kind::Scroll {
@@ -3312,6 +3719,74 @@ fn image_size(natural: Size, w: Option<f32>, h: Option<f32>) -> taffy::Size<f32>
 
 /// Measures a text block: per-node cache, then the shared content-addressed
 /// cache, then the platform engine.
+/// The lines of `layout` with their characters.
+fn text_lines<M: TextEngine>(
+    engine: &M,
+    text: &AttributedText,
+    layout: &TextLayout,
+) -> EventPayload {
+    let units: Vec<u16> = text.text.encode_utf16().collect();
+    let mut lines = engine.lines(layout);
+    for line in &mut lines {
+        let (start, end) = (line.start as usize, (line.end as usize).min(units.len()));
+        if start < end {
+            line.text = String::from_utf16_lossy(&units[start..end]);
+        }
+    }
+    EventPayload::TextLayout(lines)
+}
+
+/// `text` with its fonts scaled down (to at least `min`) until it fits
+/// `size` within its line limit: the largest scale that fits, by
+/// bisection.
+fn fitted<M: TextEngine>(
+    engine: &M,
+    text: &AttributedText,
+    size: Size,
+    min: f32,
+) -> AttributedText {
+    let scaled = |scale: f32| {
+        let mut t = text.clone();
+        for span in &mut t.spans {
+            span.style.font_size *= scale;
+            span.style.line_height *= scale;
+            span.style.letter_spacing *= scale;
+        }
+        t
+    };
+    let fits = |t: &AttributedText| {
+        // Untruncated, the text must be no taller than its truncated self
+        // (nothing cut) and than the box.
+        let all = AttributedText {
+            max_lines: 0,
+            ..t.clone()
+        };
+        let full = engine.measure(&engine.prepare(&all), Some(size.width));
+        let limited = if t.max_lines > 0 {
+            engine.measure(&engine.prepare(t), Some(size.width)).height
+        } else {
+            f32::INFINITY
+        };
+        full.height <= size.height.min(limited) + 0.5 && full.width <= size.width + 0.5
+    };
+    if fits(text) {
+        return text.clone();
+    }
+    let (mut lo, mut hi) = (min, 1.0f32);
+    if !fits(&scaled(lo)) {
+        return scaled(lo);
+    }
+    for _ in 0..7 {
+        let mid = (lo + hi) / 2.0;
+        if fits(&scaled(mid)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    scaled(lo)
+}
+
 fn measure_text<M: TextEngine>(
     engine: &M,
     cache: &mut MeasureCache,

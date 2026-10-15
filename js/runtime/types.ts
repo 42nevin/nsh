@@ -112,6 +112,8 @@ export interface ViewStyle extends LayoutStyle {
   borderStartColor?: ColorValue;
   borderEndColor?: ColorValue;
   borderStyle?: "solid" | "dashed" | "dotted";
+  /** `continuous`: corners whose curvature eases into the edges (iOS app icons). */
+  borderCurve?: "circular" | "continuous";
   borderRadius?: number;
   borderTopLeftRadius?: number;
   borderTopRightRadius?: number;
@@ -156,6 +158,8 @@ export interface TextStyle extends ViewStyle {
   fontVariant?: ("small-caps" | "oldstyle-nums" | "lining-nums" | "tabular-nums" | "proportional-nums")[];
   /** Base direction of the text; `auto` takes it from the content. */
   writingDirection?: "auto" | "ltr" | "rtl";
+  /** Where text shorter than its box sits (`<text>` with a height). */
+  textAlignVertical?: "auto" | "top" | "center" | "bottom";
 }
 
 /** Styles of images. */
@@ -336,7 +340,7 @@ export interface CommonProps extends TouchProps {
   hitSlop?: number | { top?: number; right?: number; bottom?: number; left?: number };
   /** Opacity while pressed (native, no JS round trip). */
   activeOpacity?: number;
-  /** The background while pressed (`TouchableHighlight`; native, no JS round trip). */
+  /** The background while pressed; the children fade to `underlayOpacity` (native, no JS round trip). */
   underlayColor?: ColorValue;
   /** The children's opacity while `underlayColor` shows (default 0.85). */
   underlayOpacity?: number;
@@ -383,6 +387,18 @@ export interface ViewProps extends CommonProps {
 }
 
 /** `<text>`: nested `<text>` elements are spans of the same paragraph. */
+export interface TextLayoutLine {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  ascender: number;
+  descender: number;
+  capHeight: number;
+  xHeight: number;
+}
+
 export interface TextProps extends CommonProps {
   style?: StyleProp<TextStyle>;
   /** 0 (default) is unlimited. */
@@ -392,6 +408,14 @@ export interface TextProps extends CommonProps {
   allowFontScaling?: boolean;
   /** Upper bound of the system scale (0 is none). */
   maxFontSizeMultiplier?: number;
+  /** A long press offers to copy the text. */
+  selectable?: boolean;
+  /** Shrink the font until the text fits its lines (`numberOfLines`) and box. */
+  adjustsFontSizeToFit?: boolean;
+  /** How far `adjustsFontSizeToFit` shrinks at most (0..1, default 0.1). */
+  minimumFontScale?: number;
+  /** The laid-out lines (in the text's content box), after each layout. */
+  onTextLayout?: (e: { lines: TextLayoutLine[] }) => void;
 }
 
 /** An image asset (`import logo from "./logo.png"`), sized in points. */
@@ -414,6 +438,8 @@ export interface ImageProps extends CommonProps {
   /** How long a loaded image fades in, in milliseconds (default 0 on iOS, 300 on Android, like React Native). */
   fadeDuration?: number;
   onLoadStart?: () => void;
+  /** Download progress in bytes (`total` 0 when unknown); at most every 100 ms. */
+  onProgress?: (e: { loaded: number; total: number }) => void;
   /** The source image's size in pixels (not the decoded, downsampled one). */
   onLoad?: (e: { width: number; height: number }) => void;
   onError?: (e: { message: string }) => void;
@@ -425,10 +451,13 @@ export interface ImageProps extends CommonProps {
 export interface ScrollEvent {
   x: number;
   y: number;
+  /** The content's size (zoomed). */
   contentWidth: number;
   contentHeight: number;
   width: number;
   height: number;
+  /** The zoom scale (1 unless the scroll view zooms). */
+  zoomScale: number;
 }
 
 /** How scroll views and lists scroll (React Native's ScrollView props). */
@@ -466,6 +495,17 @@ export interface ScrollBehaviorProps {
 
 /** `<scroll>` */
 export interface ScrollProps extends CommonProps, ScrollBehaviorProps {
+  /** Pinching zooms the content when `maximumZoomScale` is above `minimumZoomScale` (default 1 both); zoomed in, it scrolls both ways. */
+  maximumZoomScale?: number;
+  minimumZoomScale?: number;
+  /** Zooms to this scale when it changes (the user's zoom is kept otherwise). */
+  zoomScale?: number;
+  /** Pinching may go past the limits and springs back (default true). */
+  bouncesZoom?: boolean;
+  /** The user can pinch to zoom (default true). */
+  pinchGestureEnabled?: boolean;
+  /** Content smaller than the viewport (zoomed out) is centered. */
+  centerContent?: boolean;
   style?: StyleProp<ViewStyle>;
   horizontal?: boolean;
   showsIndicator?: boolean;
@@ -497,6 +537,10 @@ export interface InputProps extends CommonProps {
   onSelectionChange?: (e: { start: number; end: number }) => void;
   /** Before the text changes: `key` is the typed text, `Backspace` or `Enter`. */
   onKeyPress?: (e: { key: string }) => void;
+  /** No caret is drawn. */
+  caretHidden?: boolean;
+  /** The size of the text (at the input's width when multiline): grow a multiline input with it. */
+  onContentSizeChange?: (e: { width: number; height: number }) => void;
   /** iOS: the `nativeID` of an `InputAccessoryView` shown over the keyboard while this input has focus. */
   inputAccessoryViewID?: string;
   /** What the input holds, for autofill (React Native's values, e.g. "username", "current-password", "new-password", "one-time-code", "email", "tel", "postal-code", "cc-number", "off"). */
@@ -537,6 +581,7 @@ export declare namespace JSX {
     scroll: ScrollProps;
     input: InputProps;
     inputaccessory: ControlProps;
+    canvas: ControlProps;
     webview: ControlProps;
     video: ControlProps;
     stack: ControlProps;

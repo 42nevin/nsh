@@ -1,6 +1,9 @@
-use std::{cell::RefCell, sync::Arc};
+use std::{cell::RefCell, ptr::NonNull, sync::Arc};
 
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained};
+use block2::RcBlock;
+use objc2::{
+    DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, rc::Retained,
+};
 use objc2_core_foundation::{
     CFArray, CFDictionary, CFIndex, CFNumber, CFRange, CFString, CFType, CGAffineTransform,
     CGFloat, CGPoint, CGRect, CGSize,
@@ -10,7 +13,7 @@ use objc2_core_text::{CTFont, CTRun, kCTFontAttributeName};
 use objc2_foundation::{NSObject, NSString};
 use objc2_ui_kit::{
     UIAccessibilityTraitStaticText, UIAccessibilityTraits, UIColor, UIGraphicsGetCurrentContext,
-    UIResponder, UIView,
+    UILongPressGestureRecognizer, UIPasteboard, UIResponder, UIView,
 };
 use yf_core::{AttributedText, Rect, TextLayout, TextLink};
 
@@ -162,6 +165,14 @@ pub(crate) struct TextViewIvars {
     layout: RefCell<Option<(TextLayout, Rect)>>,
     /// The content, for accessibility and the block's shadow.
     text: RefCell<Option<Arc<AttributedText>>>,
+    /// `selectable`: the long press that offers to copy the text.
+    select: RefCell<Option<Retained<UILongPressGestureRecognizer>>>,
+    /// The copy menu shows: the text is highlighted.
+    selected: std::cell::Cell<bool>,
+    /// Observes the menu hiding while it shows.
+    menu_observer: RefCell<
+        Option<Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>>,
+    >,
 }
 
 define_class!(
@@ -196,6 +207,71 @@ define_class!(
             traits | unsafe { UIAccessibilityTraitStaticText }
         }
 
+        #[unsafe(method(canBecomeFirstResponder))]
+        fn can_become_first_responder(&self) -> bool {
+            self.selectable()
+        }
+
+        #[unsafe(method(canPerformAction:withSender:))]
+        fn can_perform_action(&self, action: objc2::runtime::Sel, _sender: Option<&objc2::runtime::AnyObject>) -> bool {
+            self.selectable() && action == objc2::sel!(copy:)
+        }
+
+        #[unsafe(method(copy:))]
+        fn copy(&self, _sender: Option<&objc2::runtime::AnyObject>) {
+            if let Some(text) = self.ivars().text.borrow().as_ref() {
+                // Without the placeholders of attachments.
+                let copied = text.text.replace(yf_core::ATTACHMENT_CHAR, "");
+                // SAFETY: a plain setter.
+                unsafe { UIPasteboard::generalPasteboard().setString(Some(&NSString::from_str(&copied))) };
+            }
+            self.set_selected(false);
+        }
+
+        #[unsafe(method(resignFirstResponder))]
+        fn resign_first_responder(&self) -> bool {
+            self.set_selected(false);
+            // SAFETY: calling the superclass implementation.
+            unsafe { msg_send![super(self), resignFirstResponder] }
+        }
+
+        #[unsafe(method(handleSelect:))]
+        fn handle_select(&self, recognizer: &UILongPressGestureRecognizer) {
+            if recognizer.state() != objc2_ui_kit::UIGestureRecognizerState::Began || !self.selectable() {
+                return;
+            }
+            self.becomeFirstResponder();
+            self.set_selected(true);
+            // UIEditMenuInteraction needs iOS 16; the menu controller works
+            // everywhere.
+            #[allow(deprecated)]
+            {
+                let menu = objc2_ui_kit::UIMenuController::sharedMenuController(self.mtm());
+                menu.showMenuFromView_rect(self, self.bounds());
+            }
+            // The highlight goes when the menu does.
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            let observer = RcBlock::new(move |_: NonNull<objc2_foundation::NSNotification>| {
+                if let Some(view) = weak.load() {
+                    view.set_selected(false);
+                }
+            });
+            let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+            // SAFETY: the observer removes itself in its first call below
+            // via `set_selected(false)` being idempotent; the block only
+            // holds a weak reference.
+            #[allow(deprecated)]
+            let token = unsafe {
+                center.addObserverForName_object_queue_usingBlock(
+                    Some(objc2_ui_kit::UIMenuControllerDidHideMenuNotification),
+                    None,
+                    Some(&objc2_foundation::NSOperationQueue::mainQueue()),
+                    &observer,
+                )
+            };
+            *self.ivars().menu_observer.borrow_mut() = Some(token);
+        }
+
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: CGRect) {
             let layout = self.ivars().layout.borrow();
@@ -203,6 +279,18 @@ define_class!(
             let Some(text) = layout.downcast::<CoreTextLayout>() else { return };
             let Some(ctx) = UIGraphicsGetCurrentContext() else { return };
             let c = Some(&*ctx);
+            if self.ivars().selected.get() {
+                // The whole text is what the menu copies.
+                let tint = self
+                    .tintColor()
+                    .unwrap_or_else(UIColor::systemBlueColor)
+                    .colorWithAlphaComponent(0.25);
+                tint.setFill();
+                objc2_ui_kit::UIRectFill(CGRect::new(
+                    CGPoint::new(content.x as CGFloat, content.y as CGFloat),
+                    CGSize::new(content.width as CGFloat, content.height as CGFloat),
+                ));
+            }
             CGContext::save_g_state(c);
             // CoreText draws in a y-up space with the origin at the bottom of
             // the box.
@@ -249,9 +337,56 @@ impl TextView {
     }
 
     pub(crate) fn set_layout(&self, text: Arc<AttributedText>, layout: TextLayout, content: Rect) {
+        let selectable = text.selectable;
         *self.ivars().layout.borrow_mut() = Some((layout, content));
         *self.ivars().text.borrow_mut() = Some(text);
+        let mut select = self.ivars().select.borrow_mut();
+        match (select.is_some(), selectable) {
+            (false, true) => {
+                // SAFETY: `handleSelect:` is implemented by the view, which
+                // the recognizer is attached to.
+                let r = unsafe {
+                    UILongPressGestureRecognizer::initWithTarget_action(
+                        UILongPressGestureRecognizer::alloc(self.mtm()),
+                        Some(self),
+                        Some(objc2::sel!(handleSelect:)),
+                    )
+                };
+                self.addGestureRecognizer(&r);
+                self.setUserInteractionEnabled(true);
+                *select = Some(r);
+            }
+            (true, false) => {
+                if let Some(r) = select.take() {
+                    self.removeGestureRecognizer(&r);
+                }
+                drop(select);
+                self.set_selected(false);
+            }
+            _ => {}
+        }
         self.setNeedsDisplay();
+    }
+
+    fn selectable(&self) -> bool {
+        self.ivars()
+            .text
+            .borrow()
+            .as_ref()
+            .is_some_and(|t| t.selectable)
+    }
+
+    fn set_selected(&self, on: bool) {
+        if self.ivars().selected.replace(on) != on {
+            self.setNeedsDisplay();
+        }
+        if !on && let Some(token) = self.ivars().menu_observer.borrow_mut().take() {
+            // SAFETY: an observer token from this center.
+            unsafe {
+                objc2_foundation::NSNotificationCenter::defaultCenter()
+                    .removeObserver(objc2::runtime::ProtocolObject::as_ref(&token))
+            };
+        }
     }
 
     /// Whether the text has pressable spans.

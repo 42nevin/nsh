@@ -46,6 +46,8 @@ pub enum Tag {
     /// (`<inputaccessory>`, iOS), as wide as the window and as tall as its
     /// content.
     InputAccessory,
+    /// A 2D drawing (`<canvas>`, filled by [`Op::Draw`]).
+    Canvas,
     /// A web page (`<webview>`).
     WebView,
     /// A video player (`<video>`).
@@ -69,6 +71,7 @@ impl Tag {
             "modal" => Tag::Modal,
             "headeritem" => Tag::HeaderItem,
             "inputaccessory" => Tag::InputAccessory,
+            "canvas" => Tag::Canvas,
             "webview" => Tag::WebView,
             "video" => Tag::Video,
             _ => return None,
@@ -155,6 +158,9 @@ events! {
     SelectionChange = "onSelectionChange": "The selection (or caret) of an input moved (payload: `start`, `end` in UTF-16 units).",
     KeyPress = "onKeyPress": "A key was pressed in an input (payload: `key`: the character, `Backspace` or `Enter`).",
     LoadEnd = "onLoadEnd": "An image finished loading, or failed.",
+    ImageInfo = "onImageInfo": "An `Image.getSize` / `Image.prefetch` request finished (root only; payload: `id`, `width` and `height` in pixels, or `error`).",
+    TextLayout = "onTextLayout": "A text block was laid out (payload: [`EventPayload::TextLayout`]).",
+    ContentSizeChange = "onContentSizeChange": "The size of an input's text changed (payload: `width`, `height`; raised by the core).",
 }
 
 /// What an input holds, for the system's autofill and suggestions
@@ -418,6 +424,8 @@ pub enum EventPayload {
     },
     /// Touches (`onTouch`).
     Touch(Box<TouchEvent>),
+    /// The lines of a text block.
+    TextLayout(Vec<crate::text::TextLine>),
 }
 
 impl TouchEvent {
@@ -582,6 +590,18 @@ pub enum ScrollProp {
     EventThrottle(f32),
     /// `disableIntervalMomentum`: a fling moves one snap point at most.
     DisableIntervalMomentum(bool),
+    /// `minimumZoomScale`.
+    MinZoom(f32),
+    /// `maximumZoomScale`.
+    MaxZoom(f32),
+    /// `zoomScale`: zooms there when it changes.
+    Zoom(f32),
+    /// `bouncesZoom`.
+    BouncesZoom(bool),
+    /// `pinchGestureEnabled`.
+    Pinch(bool),
+    /// `centerContent`.
+    CenterContent(bool),
 }
 
 /// What a list cell holds.
@@ -755,6 +775,17 @@ pub enum Command {
         /// Extra distance from that position.
         view_offset: f32,
     },
+    /// Zoom a zoomable scroll view to `scale`, with the content point
+    /// (`x`, `y`) (points, unzoomed) in the middle of the viewport, or
+    /// around the viewport's middle.
+    ZoomTo {
+        /// The zoom scale (clamped to the view's limits).
+        scale: f32,
+        /// The content point to center.
+        center: Option<(f32, f32)>,
+        /// Animate the change.
+        animated: bool,
+    },
     /// Scroll a list to the end of its content.
     ScrollToEnd {
         /// Animate the change.
@@ -789,12 +820,20 @@ pub enum Command {
     },
     /// Have the screen reader read a message (on the root).
     Announce(String),
+    /// Load the image at `uri` (keeping its bytes for views that show it
+    /// next) and report its pixel size as [`EventKind::ImageInfo`] `id`
+    /// (on the root).
+    ImageInfo {
+        /// The request.
+        id: u32,
+        /// URL or `asset:/` URI.
+        uri: String,
+    },
     /// Move the screen reader's focus to this view.
     AccessibilityFocus,
 }
 
-/// The children's opacity while an underlay shows (React Native's
-/// `TouchableHighlight` default `activeOpacity`).
+/// The children's opacity while an underlay shows, by default.
 pub const UNDERLAY_OPACITY: f32 = 0.85;
 
 /// The status bar's look.
@@ -936,6 +975,8 @@ pub enum Prop {
     BlurOnSubmit(bool),
     /// `<input autoFocus>`.
     AutoFocus(bool),
+    /// `<input caretHidden>`.
+    CaretHidden(bool),
     /// `<input inputAccessoryViewID>`: the `nativeID` of an input
     /// accessory.
     InputAccessoryViewId(Option<Box<str>>),
@@ -955,7 +996,7 @@ pub enum Prop {
     HitSlop(EdgeInsets),
     /// `activeOpacity`: native press feedback.
     ActiveOpacity(Option<f32>),
-    /// `underlayColor`: the background while pressed (`TouchableHighlight`).
+    /// `underlayColor`: the background while pressed.
     UnderlayColor(Option<Color>),
     /// `underlayOpacity`: the children's opacity while the underlay shows.
     UnderlayOpacity(f32),
@@ -988,6 +1029,12 @@ pub enum Prop {
     AllowFontScaling(bool),
     /// `<text maxFontSizeMultiplier>`: 0 means no limit.
     MaxFontSizeMultiplier(f32),
+    /// `<text selectable>`: a long press offers to copy the text.
+    Selectable(bool),
+    /// `adjustsFontSizeToFit`: text shrinks to fit its lines and box.
+    AdjustsFontSizeToFit(bool),
+    /// `minimumFontScale`: how far it shrinks at most (0..1).
+    MinimumFontScale(f32),
     /// Native animation value driven by pinching the view (`pinch={{ scale }}`).
     PinchValue(Option<yf_anim::NodeId>),
     /// Native animation value driven by rotating the view with two fingers
@@ -1059,6 +1106,13 @@ pub enum NativeProp {
 /// A mutation produced by the JS renderer.
 #[derive(Debug)]
 pub enum Op {
+    /// What a canvas draws (replaces the previous drawing).
+    Draw {
+        /// The canvas.
+        id: NodeId,
+        /// The recorded operations.
+        drawing: Box<crate::canvas::Drawing>,
+    },
     /// Creates a detached element node.
     Create {
         /// New node id.

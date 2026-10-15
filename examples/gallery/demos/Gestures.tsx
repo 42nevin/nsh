@@ -1,5 +1,5 @@
 import { createSignal, For } from "solid-js";
-import { createNativeValue, PanResponder, Pressable, type GestureResponderEvent } from "yf";
+import { createNativeValue, PanResponder, type GestureResponderEvent } from "yf";
 import { Button, colors, Section } from "../ui";
 
 /** Drag, pinch and rotate one card at the same time, all on the UI thread. */
@@ -133,7 +133,7 @@ export function Gestures() {
           </view>
           <text style={{ color: colors.muted }}>{log().join(" · ") || "No events yet"}</text>
           <view style={{ flexDirection: "row", gap: 10 }}>
-            <Pressable
+            <view
               onPress={() => add("ripple")}
               onLongPress={() => add("fast long press")}
               delayLongPress={250}
@@ -141,17 +141,17 @@ export function Gestures() {
               style={{ flex: 1, padding: 14, borderRadius: 10, backgroundColor: "#f6f8fa", alignItems: "center" }}
             >
               <text>Ripple, long press 250 ms</text>
-            </Pressable>
-            <Pressable
+            </view>
+            <view
               onPress={() => add("borderless")}
               android_ripple={{ borderless: true, radius: 40 }}
               style={{ width: 56, height: 56, alignItems: "center", justifyContent: "center" }}
             >
               <text style={{ fontSize: 22 }}>★</text>
-            </Pressable>
+            </view>
           </view>
           <text onPress={() => add("text")} activeOpacity={0.3} style={{ color: colors.accent }}>
-            Pressable text with activeOpacity
+            Text with activeOpacity
           </text>
         </Section>
         <Section title="Hit slop">

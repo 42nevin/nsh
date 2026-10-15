@@ -19,12 +19,22 @@ import java.util.concurrent.Future;
 /**
  * Loads images off the UI thread, decoded at (about) their display size,
  * cached in memory, with concurrent requests for the same image coalesced
- * and downloads nobody waits for cancelled.
+ * (one download per URI, reporting progress) and downloads nobody waits
+ * for cancelled. `Image.prefetch` / `getSize` keep the bytes they fetched
+ * for the views that show them next.
  */
 final class Images {
     /** {@code image}: null on errors. */
     interface Callback {
         void done(Image image, String error);
+
+        /** Bytes downloaded so far, of {@code total} (0: unknown). */
+        default void progress(long loaded, long total) {}
+    }
+
+    /** The pixel size of an image, or an error. */
+    interface InfoCallback {
+        void done(int width, int height, String error);
     }
 
     /** A decoded image and the pixel size of its source (before downsampling). */
@@ -59,12 +69,38 @@ final class Images {
                 }
             };
 
+    /** Encoded images kept for `Image.prefetch` / `getSize` until a view decodes them. */
+    private static final LruCache<String, byte[]> DATA = new LruCache<String, byte[]>(32 << 20) {
+        @Override
+        protected int sizeOf(String uri, byte[] bytes) {
+            return bytes.length;
+        }
+    };
+    /** Progress reports at most this often (ms). */
+    private static final long PROGRESS_INTERVAL = 100;
+
     private final Handler main = new Handler(Looper.getMainLooper());
     private final AssetReader assets;
+    /** Decodes waiting for their bytes, or decoding, by cache key. */
     private final HashMap<String, Inflight> inflight = new HashMap<>();
+    /** Downloads (or reads), one per URI. */
+    private final HashMap<String, Download> downloads = new HashMap<>();
 
     private static final class Inflight {
+        final String uri;
+        final int maxPx, blurPx;
         final List<Callback> waiters = new ArrayList<>();
+
+        Inflight(String uri, int maxPx, int blurPx) {
+            this.uri = uri;
+            this.maxPx = maxPx;
+            this.blurPx = blurPx;
+        }
+    }
+
+    private static final class Download {
+        final List<String> keys = new ArrayList<>();
+        final List<InfoCallback> infos = new ArrayList<>();
         Future<?> task;
     }
 
@@ -90,14 +126,78 @@ final class Images {
             existing.waiters.add(callback);
             return null;
         }
-        Inflight request = new Inflight();
+        Inflight request = new Inflight(uri, maxPx, blurPx);
         request.waiters.add(callback);
         inflight.put(key, request);
-        request.task = POOL.submit(() -> {
+        fetch(uri, key, null);
+        return null;
+    }
+
+    /** `Image.getSize` / `prefetch`: the pixel size of `uri`, keeping its bytes. */
+    void info(String uri, InfoCallback callback) {
+        fetch(uri, null, callback);
+    }
+
+    /** Gets the bytes of `uri` to decode `key` or answer `info`. */
+    private void fetch(String uri, String key, InfoCallback info) {
+        byte[] data = DATA.get(uri);
+        if (data != null) {
+            serve(uri, data, key, info);
+            return;
+        }
+        Download download = downloads.get(uri);
+        if (download == null) {
+            download = new Download();
+            downloads.put(uri, download);
+            Download started = download;
+            download.task = POOL.submit(() -> {
+                byte[] bytes = null;
+                String error = null;
+                try {
+                    bytes = read(uri, started);
+                } catch (Exception e) {
+                    error = String.valueOf(e);
+                }
+                byte[] result = bytes;
+                String message = error;
+                main.post(() -> bytesReady(uri, started, result, message));
+            });
+        }
+        if (key != null) download.keys.add(key);
+        if (info != null) download.infos.add(info);
+    }
+
+    private void bytesReady(String uri, Download download, byte[] bytes, String error) {
+        if (downloads.get(uri) != download) return;
+        downloads.remove(uri);
+        if (bytes != null && !download.infos.isEmpty()) DATA.put(uri, bytes);
+        for (String key : download.keys) {
+            if (bytes != null) serve(uri, bytes, key, null);
+            else finish(key, null, error);
+        }
+        for (InfoCallback info : download.infos) {
+            if (bytes != null) serve(uri, bytes, null, info);
+            else info.done(0, 0, error);
+        }
+    }
+
+    /** Decodes `bytes` for `key` (off the UI thread), or reads their size for `info`. */
+    private void serve(String uri, byte[] bytes, String key, InfoCallback info) {
+        if (info != null) {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+            if (bounds.outWidth > 0 && bounds.outHeight > 0) info.done(bounds.outWidth, bounds.outHeight, null);
+            else info.done(0, 0, "cannot read the size of " + uri);
+            return;
+        }
+        Inflight request = inflight.get(key);
+        if (request == null) return;
+        int maxPx = request.maxPx, blurPx = request.blurPx;
+        POOL.submit(() -> {
             Image image = null;
             String error = null;
             try {
-                byte[] bytes = fetch(uri);
                 image = animated(bytes) ? decodeAnimated(bytes, maxPx) : null;
                 if (image == null) image = decode(bytes, maxPx, blurPx);
                 if (image == null) error = "cannot decode " + uri;
@@ -108,7 +208,15 @@ final class Images {
             String message = error;
             main.post(() -> finish(key, result, message));
         });
-        return null;
+    }
+
+    /** Download progress for the views waiting for `download`'s decodes. */
+    private void progress(Download download, long loaded, long total) {
+        for (String key : download.keys) {
+            Inflight request = inflight.get(key);
+            if (request == null) continue;
+            for (Callback c : request.waiters) c.progress(loaded, total);
+        }
     }
 
     /** GIF, animated WebP (VP8X with the animation flag) or APNG (acTL). */
@@ -155,9 +263,14 @@ final class Images {
         Inflight request = inflight.get(key);
         if (request == null) return;
         request.waiters.remove(callback);
-        if (request.waiters.isEmpty()) {
-            request.task.cancel(true);
-            inflight.remove(key);
+        if (!request.waiters.isEmpty()) return;
+        inflight.remove(key);
+        Download download = downloads.get(uri);
+        if (download == null) return;
+        download.keys.remove(key);
+        if (download.keys.isEmpty() && download.infos.isEmpty()) {
+            download.task.cancel(true);
+            downloads.remove(uri);
         }
     }
 
@@ -165,6 +278,8 @@ final class Images {
         Inflight request = inflight.remove(key);
         if (image != null && image.content instanceof Bitmap) CACHE.put(key, image);
         if (request == null) return;
+        // Shown now: the encoded bytes are not needed any more.
+        if (image != null) DATA.remove(request.uri);
         for (int i = 0; i < request.waiters.size(); i++) {
             Image shared = image;
             // Each view plays its own animation.
@@ -177,7 +292,8 @@ final class Images {
         }
     }
 
-    private byte[] fetch(String uri) throws Exception {
+    /** Reads `uri` (off the UI thread), reporting download progress. */
+    private byte[] read(String uri, Download download) throws Exception {
         if (uri.startsWith("asset:/")) {
             byte[] bytes = assets.read(uri);
             if (bytes == null) throw new java.io.FileNotFoundException(uri);
@@ -188,7 +304,23 @@ final class Images {
             try {
                 c.setConnectTimeout(30_000);
                 c.setReadTimeout(60_000);
-                return Net.readAll(c.getInputStream());
+                int status = c.getResponseCode();
+                if (status >= 400) throw new java.io.IOException("HTTP " + status);
+                long total = Math.max(0, c.getContentLengthLong());
+                InputStream in = c.getInputStream();
+                java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(total > 0 ? (int) Math.min(total, 1 << 26) : 1 << 16);
+                byte[] buffer = new byte[1 << 15];
+                long last = 0;
+                for (int n; (n = in.read(buffer)) > 0; ) {
+                    out.write(buffer, 0, n);
+                    long now = android.os.SystemClock.uptimeMillis();
+                    long loaded = out.size();
+                    if (now - last >= PROGRESS_INTERVAL || loaded == total) {
+                        last = now;
+                        main.post(() -> progress(download, loaded, total));
+                    }
+                }
+                return out.toByteArray();
             } finally {
                 c.disconnect();
             }

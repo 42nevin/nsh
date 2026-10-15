@@ -271,6 +271,37 @@ define_class!(
             self.with_mounter(move |m| m.scrolled(id, offset));
         }
 
+        /// Zoomable scroll views zoom their zoom view.
+        #[unsafe(method_id(viewForZoomingInScrollView:))]
+        fn view_for_zooming(&self, scroll: &UIScrollView) -> Option<Retained<UIView>> {
+            crate::zoom::zoom_view(scroll)
+        }
+
+        #[unsafe(method(scrollViewDidZoom:))]
+        fn scroll_view_did_zoom(&self, scroll: &UIScrollView) {
+            let id = scroll.tag() as NodeId;
+            self.ivars().control.zoom(id, scroll.zoomScale() as f32);
+            self.with_mounter(move |m| m.zoomed(id));
+            // The new scale goes out with an offset report.
+            let offset = scroll.contentOffset();
+            let applied = self.ivars().scrolls_applied.borrow().get(&id).copied().unwrap_or(0);
+            self.ivars()
+                .control
+                .scroll(id, offset.x as f32, offset.y as f32, applied);
+        }
+
+        #[unsafe(method(scrollViewDidEndZooming:withView:atScale:))]
+        fn scroll_view_did_end_zooming(
+            &self,
+            _scroll: &UIScrollView,
+            view: Option<&UIView>,
+            scale: objc2_core_foundation::CGFloat,
+        ) {
+            if let Some(view) = view {
+                crate::zoom::sharpen(view, scale);
+            }
+        }
+
         #[unsafe(method(scrollViewDidEndDecelerating:))]
         fn scroll_view_did_end_decelerating(&self, scroll: &UIScrollView) {
             self.scroll_event(scroll, EventKind::MomentumScrollEnd);

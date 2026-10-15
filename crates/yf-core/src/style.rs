@@ -200,16 +200,20 @@ pub struct CornerRadii {
     pub bottom_right: f32,
     /// Bottom left.
     pub bottom_left: f32,
+    /// `borderCurve: "continuous"`: corners whose curvature grows from the
+    /// edges (iOS app icons) instead of circular arcs; see [`crate::shape`].
+    pub continuous: bool,
 }
 
 impl CornerRadii {
-    /// The same radius on every corner.
+    /// The same circular radius on every corner.
     pub const fn all(r: f32) -> Self {
         Self {
             top_left: r,
             top_right: r,
             bottom_right: r,
             bottom_left: r,
+            continuous: false,
         }
     }
 
@@ -263,6 +267,7 @@ impl CornerRadii {
             top_right: self.top_right * f,
             bottom_right: self.bottom_right * f,
             bottom_left: self.bottom_left * f,
+            ..self
         }
     }
 
@@ -274,6 +279,7 @@ impl CornerRadii {
             top_right: (self.top_right - d).max(0.0),
             bottom_right: (self.bottom_right - d).max(0.0),
             bottom_left: (self.bottom_left - d).max(0.0),
+            ..self
         }
     }
 }
@@ -377,6 +383,8 @@ pub struct ViewStyle {
     /// `borderTopLeftRadius` etc., clockwise from the top left; they
     /// override `border_radius`.
     pub corner_radius: [Option<f32>; 4],
+    /// `borderCurve: "continuous"`.
+    pub continuous_corners: bool,
     /// Borders (their widths also affect layout).
     pub borders: Borders,
     /// Opacity in `0.0..=1.0`.
@@ -586,6 +594,7 @@ impl ViewStyle {
             top_right: tr,
             bottom_right: br,
             bottom_left: bl,
+            continuous: self.continuous_corners,
         }
     }
 }
@@ -596,6 +605,7 @@ impl Default for ViewStyle {
             background_color: Color::TRANSPARENT,
             border_radius: 0.0,
             corner_radius: [None; 4],
+            continuous_corners: false,
             borders: Borders::NONE,
             opacity: 1.0,
             overflow_hidden: false,
@@ -678,6 +688,9 @@ pub struct TextStyle {
     /// `writingDirection`: right to left (`Some(true)`), left to right, or
     /// the layout's direction (`None`, `auto`).
     pub writing_direction: Option<bool>,
+    /// `textAlignVertical`: where text shorter than its box sits, 0 top
+    /// (`auto`, `top`), 0.5 `center`, 1 `bottom`.
+    pub align_vertical: Option<f32>,
 }
 
 impl TextStyle {
@@ -997,6 +1010,7 @@ style_keys! {
     BorderBottomColor = "borderBottomColor",
     BorderLeftColor = "borderLeftColor",
     BorderStyle = "borderStyle",
+    BorderCurve = "borderCurve",
     TintColor = "tintColor",
     Elevation = "elevation",
     BackfaceVisibility = "backfaceVisibility",
@@ -1013,6 +1027,7 @@ style_keys! {
     TextDecorationLine = "textDecorationLine",
     TextDecorationColor = "textDecorationColor",
     WritingDirection = "writingDirection",
+    TextAlignVertical = "textAlignVertical",
     FontVariant = "fontVariant",
     TextShadowColor = "textShadowColor",
     TextShadowRadius = "textShadowRadius",
@@ -1761,6 +1776,13 @@ impl Style {
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
             }
+            StyleKey::BorderCurve => {
+                self.view.continuous_corners = match keyword(value)? {
+                    None | Some("circular") => false,
+                    Some("continuous") => true,
+                    Some(_) => return Err(StyleError::InvalidValue),
+                }
+            }
             StyleKey::TintColor => self.view.tint_color = color(value)?,
             StyleKey::Elevation => self.view.elevation = number(value, 0.0)?.max(0.0),
             StyleKey::BackfaceVisibility => {
@@ -1851,6 +1873,15 @@ impl Style {
                 }
             }
             StyleKey::TextDecorationColor => self.text.decoration_color = color(value)?,
+            StyleKey::TextAlignVertical => {
+                self.text.align_vertical = match keyword(value)? {
+                    None => None,
+                    Some("auto" | "top") => Some(0.0),
+                    Some("center") => Some(0.5),
+                    Some("bottom") => Some(1.0),
+                    Some(_) => return Err(StyleError::InvalidValue),
+                }
+            }
             StyleKey::WritingDirection => {
                 self.text.writing_direction = match keyword(value)? {
                     None | Some("auto") => None,
@@ -2176,6 +2207,7 @@ mod tests {
             top_right: 300.0,
             bottom_right: 0.0,
             bottom_left: 0.0,
+            continuous: false,
         }
         .fit(200.0, 1000.0);
         assert_eq!(r.to_array(), [50.0, 150.0, 0.0, 0.0]);

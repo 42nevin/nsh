@@ -13,24 +13,41 @@ struct FakeEngine {
 }
 
 impl TextEngine for FakeEngine {
-    type Prepared = usize;
+    /// Characters and attachment offsets.
+    type Prepared = (usize, Vec<u32>);
 
-    fn prepare(&self, text: &AttributedText) -> usize {
-        text.text.chars().count()
+    fn prepare(&self, text: &AttributedText) -> (usize, Vec<u32>) {
+        (
+            text.text.chars().count(),
+            text.attachments.iter().map(|a| a.index).collect(),
+        )
     }
 
-    fn measure(&self, chars: &usize, max_width: Option<f32>) -> Size {
+    fn measure(&self, &(chars, _): &(usize, Vec<u32>), max_width: Option<f32>) -> Size {
         self.measures.set(self.measures.get() + 1);
-        let w = *chars as f32 * 8.0;
+        let w = chars as f32 * 8.0;
         match max_width {
             Some(max) if w > max && max > 0.0 => Size::new(max, (w / max).ceil() * 16.0),
             _ => Size::new(w, 16.0),
         }
     }
 
-    fn layout(&self, _: &usize, size: Size) -> TextLayout {
+    fn layout(&self, (_, attachments): &(usize, Vec<u32>), _: Size) -> TextLayout {
         self.layouts.set(self.layouts.get() + 1);
-        TextLayout(Arc::new(size))
+        // One line; the third attachment on is cut off.
+        let points: Vec<Option<(f32, f32)>> = attachments
+            .iter()
+            .enumerate()
+            .map(|(i, &at)| (i < 2).then_some((at as f32 * 8.0, 2.0)))
+            .collect();
+        TextLayout(Arc::new(points))
+    }
+
+    fn attachments(&self, layout: &TextLayout) -> Vec<Option<(f32, f32)>> {
+        layout
+            .downcast::<Vec<Option<(f32, f32)>>>()
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -2386,4 +2403,283 @@ fn input_accessories_are_found_by_native_id() {
     );
     let batch = c.commit().unwrap();
     assert_eq!(accessory(&batch), Some(None));
+}
+
+#[test]
+fn inputs_report_their_content_size() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::Input,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Multiline(true),
+            },
+            Op::SetStyle {
+                id: 2,
+                style: style(&[("width", StyleValue::Number(100.0))]),
+                patch: Default::default(),
+            },
+            Op::Listen {
+                id: 2,
+                event: EventKind::ContentSizeChange,
+                enabled: true,
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    let sizes = |c: &mut Core<FakeEngine>| {
+        let mut events = Vec::new();
+        c.take_events(&mut events);
+        events
+            .into_iter()
+            .filter(|(id, kind, _)| *id == 2 && *kind == EventKind::ContentSizeChange)
+            .count()
+    };
+    c.commit().unwrap();
+    assert_eq!(sizes(&mut c), 1);
+    // Typing a long text wraps it: taller.
+    c.input_changed(2, &"x".repeat(80), 1);
+    c.commit();
+    assert_eq!(sizes(&mut c), 1);
+    // The same text again: no event.
+    c.input_changed(2, &"x".repeat(80), 2);
+    c.commit();
+    assert_eq!(sizes(&mut c), 0);
+}
+
+#[test]
+fn text_shrinks_to_fit_its_lines() {
+    let mut c = Core::new(crate::text::ApproxTextEngine, Size::new(320.0, 480.0));
+    let ops = vec![
+        Op::Create {
+            id: 2,
+            tag: Tag::Text,
+        },
+        Op::SetStyle {
+            id: 2,
+            style: style(&[
+                ("width", StyleValue::Number(60.0)),
+                ("fontSize", StyleValue::Number(20.0)),
+            ]),
+            patch: Default::default(),
+        },
+        Op::SetProp {
+            id: 2,
+            prop: Prop::NumberOfLines(1),
+        },
+        Op::SetProp {
+            id: 2,
+            prop: Prop::AdjustsFontSizeToFit(true),
+        },
+        Op::CreateText {
+            id: 3,
+            text: "Hello world".into(),
+        },
+        Op::Insert {
+            parent: 2,
+            child: 3,
+            before: None,
+        },
+        Op::Insert {
+            parent: ROOT_ID,
+            child: 2,
+            before: None,
+        },
+    ];
+    for op in ops {
+        c.apply(op).unwrap();
+    }
+    let batch = c.commit().unwrap();
+    let size = batch
+        .items
+        .iter()
+        .find_map(|i| match i {
+            MountItem::Text { id: 2, text, .. } => Some(text.spans[0].style.font_size),
+            _ => None,
+        })
+        .unwrap();
+    // 11 characters at 0.55 em in 60pt: at most ~9.9pt.
+    assert!(size < 10.0 && size > 9.0, "{size}");
+}
+
+#[test]
+fn views_inside_text_are_attachments() {
+    let mut c = core();
+    let raw = |id, text: &str| Op::CreateText {
+        id,
+        text: text.into(),
+    };
+    let insert = |parent, child| Op::Insert {
+        parent,
+        child,
+        before: None,
+    };
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::Text,
+            },
+            raw(3, "ab"),
+            Op::Create {
+                id: 4,
+                tag: Tag::View,
+            },
+            style_op(
+                4,
+                &[
+                    ("width", StyleValue::Number(20.0)),
+                    ("height", StyleValue::Number(10.0)),
+                    ("padding", StyleValue::Number(2.0)),
+                ],
+            ),
+            Op::Create {
+                id: 5,
+                tag: Tag::View,
+            },
+            style_op(5, &[("height", StyleValue::Number(3.0))]),
+            insert(4, 5),
+            // A span holding an image (inside a span still attaches to the
+            // block).
+            Op::Create {
+                id: 6,
+                tag: Tag::Text,
+            },
+            raw(7, "cd"),
+            Op::Create {
+                id: 8,
+                tag: Tag::Image,
+            },
+            style_op(
+                8,
+                &[
+                    ("width", StyleValue::Number(12.0)),
+                    ("height", StyleValue::Number(12.0)),
+                ],
+            ),
+            insert(6, 7),
+            insert(6, 8),
+            insert(2, 3),
+            insert(2, 4),
+            insert(2, 6),
+            style_op(2, &[("padding", StyleValue::Number(5.0))]),
+            insert(ROOT_ID, 2),
+        ],
+    );
+    let batch = c.commit().unwrap();
+    let text = batch
+        .items
+        .iter()
+        .find_map(|i| match i {
+            MountItem::Text { id: 2, text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(text.text, "ab\u{FFFC}cd\u{FFFC}");
+    assert_eq!(
+        text.attachments,
+        vec![
+            crate::TextAttachment {
+                index: 2,
+                width: 20.0,
+                height: 10.0
+            },
+            crate::TextAttachment {
+                index: 5,
+                width: 12.0,
+                height: 12.0
+            },
+        ]
+    );
+    // Their views go inside the text view, on their placeholders.
+    let inserts: Vec<_> = batch
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            MountItem::Insert {
+                parent: 2, child, ..
+            } => Some(*child),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(inserts, vec![4, 8]);
+    assert_eq!(
+        frame_of(&batch, 4),
+        Some(Rect {
+            x: 5.0 + 16.0,
+            y: 5.0 + 2.0,
+            width: 20.0,
+            height: 10.0
+        })
+    );
+    assert_eq!(frame_of(&batch, 8).map(|f| f.x), Some(5.0 + 40.0));
+    // The attachment's own subtree is laid out inside it.
+    assert_eq!(
+        frame_of(&batch, 5),
+        Some(Rect {
+            x: 2.0,
+            y: 2.0,
+            width: 16.0,
+            height: 3.0
+        })
+    );
+
+    // Growing an attachment builds the text again.
+    apply(
+        &mut c,
+        vec![style_op(
+            4,
+            &[
+                ("width", StyleValue::Number(30.0)),
+                ("height", StyleValue::Number(10.0)),
+            ],
+        )],
+    );
+    let batch = c.commit().unwrap();
+    let text = batch
+        .items
+        .iter()
+        .find_map(|i| match i {
+            MountItem::Text { id: 2, text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(text.attachments[0].width, 30.0);
+    assert_eq!(frame_of(&batch, 4).map(|f| f.width), Some(30.0));
+
+    // Taken out of the text: its view leaves the text view.
+    apply(
+        &mut c,
+        vec![Op::Remove {
+            parent: 2,
+            child: 4,
+        }],
+    );
+    let batch = c.commit().unwrap();
+    assert!(
+        batch
+            .items
+            .iter()
+            .any(|i| matches!(i, MountItem::Remove { id: 4 }))
+    );
+    let text = batch
+        .items
+        .iter()
+        .find_map(|i| match i {
+            MountItem::Text { id: 2, text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(text.text, "abcd\u{FFFC}");
+    assert_eq!(frame_of(&batch, 8).map(|f| f.x), Some(5.0 + 32.0));
 }

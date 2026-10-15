@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js";
 import { fontScale } from "yf";
 import pacifico from "../fonts/Pacifico-Regular.ttf";
+import logo from "../logo@2x.png";
 
 const LOREM =
   "Native text, typeset once on the engine thread with CoreText and drawn on the main thread without any layout work.";
@@ -9,6 +10,7 @@ export function TextDemo() {
   const caption = { fontSize: 12, color: "#6e7781", marginTop: 10 } as const;
   const link = { color: "#0969da", textDecorationLine: "underline" } as const;
   const [tapped, setTapped] = createSignal("Tap a link in the sentence");
+  const [likes, setLikes] = createSignal(3);
   return (
     <scroll style={{ flex: 1 }}>
       <view style={{ padding: 20, gap: 4 }}>
@@ -28,6 +30,23 @@ export function TextDemo() {
           .
         </text>
         <text style={caption}>{`Pressed: ${tapped()}`}</text>
+        <text style={caption}>Views and images inside text (they wrap with it)</text>
+        <text style={{ fontSize: 16, lineHeight: 26 }}>
+          {"Made with "}
+          <image src={logo} style={{ width: 18, height: 18, borderRadius: 4 }} />
+          {" yf. Status "}
+          <view style={{ backgroundColor: "#1a7f37", borderRadius: 9, paddingHorizontal: 7, height: 18, justifyContent: "center" }}>
+            <text style={{ color: "#ffffff", fontSize: 11, fontWeight: "700" }}>LIVE</text>
+          </view>
+          {" and a button inside the sentence "}
+          <view
+            onPress={() => setLikes(likes() + 1)}
+            style={{ backgroundColor: "#ddf4ff", borderRadius: 6, paddingHorizontal: 8, height: 22, justifyContent: "center" }}
+          >
+            <text style={{ color: "#0969da", fontSize: 13 }}>♥ {likes()}</text>
+          </view>
+          {" that takes presses of its own."}
+        </text>
         <text style={{ fontFamily: pacifico, fontSize: 30, color: "#8250df" }}>Custom fonts</text>
         <text style={caption}>Styles</text>
         <text style={{ fontSize: 17 }}>

@@ -52,6 +52,9 @@ final class Native {
     static final int SELECTION_CHANGE = 40;
     static final int KEY_PRESS = 41;
     static final int LOAD_END = 42;
+    static final int IMAGE_INFO = 43;
+    static final int TEXT_LAYOUT = 44;
+    static final int CONTENT_SIZE_CHANGE = 45;
 
     static native long create(YfView view, float density, boolean trace);
 
@@ -89,6 +92,9 @@ final class Native {
      * else null.
      */
     static native float[] scroll(long handle, int id, float x, float y, int applied);
+
+    /** A zoomable scroll view's zoom scale, reported before its offset. */
+    static native void zoom(long handle, int id, float scale);
 
     /**
      * Touches for the JS responder system. phase: 0 start, 1 move, 2 end,

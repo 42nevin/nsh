@@ -9,6 +9,8 @@ use yf_core::{GestureValues, MAX_TRANSFORMS, MountItem, Transform};
 // Java-side property codes (`Mounter.java`).
 const OPACITY: f32 = 0.0;
 const BACKGROUND: f32 = 7.0;
+/// Canvas native value slot `n` is `CANVAS_ARG + n` (a color as ARGB bits).
+const CANVAS_ARG: f32 = 1000.0;
 /// Codes of the [`view_transform`] values, in order.
 const TRANSFORM_CODES: [f32; 8] = [1.0, 2.0, 4.0, 5.0, 6.0, 8.0, 9.0, 10.0];
 
@@ -206,6 +208,13 @@ impl UiAnim {
                             other => other.number(),
                         };
                         out.extend_from_slice(&[v, BACKGROUND, value]);
+                    }
+                    AnimProp::CanvasArg(k) => {
+                        let value = match self.graph.eval(node) {
+                            AnimValue::Color(c) => f32::from_bits(c.rotate_right(8)),
+                            other => other.number(),
+                        };
+                        out.extend_from_slice(&[v, CANVAS_ARG + k as f32, value]);
                     }
                     AnimProp::Transform(i) => {
                         if let Some(o) = overrides.get_mut(i as usize) {

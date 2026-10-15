@@ -1,37 +1,28 @@
 import { createSignal, For, Show } from "solid-js";
 import {
   AccessibilityInfo,
-  DrawerLayout,
-  type DrawerLayoutHandle,
-  type DrawerState,
-  ImageBackground,
   InputAccessoryView,
   KeyboardAvoidingView,
   LayoutAnimation,
   Modal,
   PixelRatio,
   Platform,
-  Pressable,
   SafeAreaView,
   Screen,
   screenReaderEnabled,
   reduceMotion,
-  StyleSheet,
-  TouchableHighlight,
-  TouchableOpacity,
-  TouchableWithoutFeedback,
 } from "yf";
 import { nav } from "../nav";
 import { Button as UiButton, colors, Section } from "../ui";
 
-const photo = "https://picsum.photos/seed/yf-components/800/500";
+const hairline = 1 / PixelRatio.get();
 
-const styles = StyleSheet.create({
+const styles = {
   row: { flexDirection: "row", alignItems: "center", gap: 12 },
-  card: { backgroundColor: "#ffffff", borderRadius: 10, padding: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
+  card: { backgroundColor: "#ffffff", borderRadius: 10, padding: 12, borderWidth: hairline, borderColor: colors.border },
   label: { fontSize: 15, color: colors.text },
   muted: { fontSize: 13, color: colors.muted },
-});
+} as const;
 
 function LayoutAnimations() {
   const [items, setItems] = createSignal([1, 2, 3]);
@@ -63,18 +54,13 @@ function LayoutAnimations() {
 function PressableSheet() {
   const [sheet, setSheet] = createSignal(false);
   return (
-    <Section title="Pressable and sheet">
-      <Pressable
+    <Section title="Sheet">
+      <view
         onPress={() => setSheet(true)}
-        style={({ pressed }) => ({
-          padding: 14,
-          borderRadius: 10,
-          backgroundColor: pressed ? "#bf3989" : "#8250df",
-          transform: [{ scale: pressed ? 0.97 : 1 }],
-        })}
+        class="rounded-[10px] bg-[#8250df] p-3.5 transition active:scale-[0.97] active:bg-[#bf3989]"
       >
-        {({ pressed }) => <text style={{ color: "#ffffff", fontWeight: "600" }}>{pressed ? "Release to open" : "Open a sheet"}</text>}
-      </Pressable>
+        <text style={{ color: "#ffffff", fontWeight: "600" }}>Open a sheet</text>
+      </view>
       <Modal visible={sheet()} presentationStyle="pageSheet" animationType="slide" onRequestClose={() => setSheet(false)}>
         <SafeAreaView style={{ flex: 1, backgroundColor: colors.surface, padding: 20, gap: 16 }}>
           <text style={{ fontSize: 24, fontWeight: "700" }}>A sheet</text>
@@ -86,75 +72,30 @@ function PressableSheet() {
   );
 }
 
-function Touchables() {
+/** Press feedback is native: opacity, an underlay, classes; `disabled` takes no presses. */
+function PressFeedback() {
   const [last, setLast] = createSignal("nothing yet");
+  const [disabled, setDisabled] = createSignal(false);
   return (
-    <Section title="Touchables">
-      <TouchableOpacity style={styles.card} onPress={() => setLast("TouchableOpacity")}>
-        <text style={styles.label}>TouchableOpacity: fades while pressed</text>
-      </TouchableOpacity>
-      <TouchableHighlight style={styles.card} underlayColor="#dbeafe" onPress={() => setLast("TouchableHighlight")}>
-        <text style={styles.label}>TouchableHighlight: underlay color, no JS round trip</text>
-      </TouchableHighlight>
-      <TouchableWithoutFeedback onPress={() => setLast("TouchableWithoutFeedback")}>
-        <text style={[styles.label, { paddingVertical: 4 }]}>TouchableWithoutFeedback: props go to this text</text>
-      </TouchableWithoutFeedback>
-      <text style={styles.muted}>Last pressed: {last()}</text>
-    </Section>
-  );
-}
-
-function Background() {
-  return (
-    <Section title="ImageBackground">
-      <ImageBackground src={photo} resizeMode="cover" style={{ height: 140, justifyContent: "flex-end" }} imageStyle={{ borderRadius: 10 }}>
-        <view style={{ margin: 10, padding: 8, borderRadius: 8, backgroundColor: "rgba(0,0,0,0.45)" }}>
-          <text style={{ color: "#ffffff", fontWeight: "600" }}>Content over an image</text>
-        </view>
-      </ImageBackground>
-    </Section>
-  );
-}
-
-function Drawer() {
-  let drawer: DrawerLayoutHandle | undefined;
-  const [side, setSide] = createSignal<"left" | "right">("left");
-  const [state, setState] = createSignal<DrawerState>("Idle");
-  const [opened, setOpened] = createSignal(0);
-  const items = ["Inbox", "Starred", "Sent", "Drafts", "Trash"];
-  return (
-    <Section title="DrawerLayout">
-      <view style={{ height: 260, borderRadius: 10, overflow: "hidden", borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border }}>
-        <DrawerLayout
-          ref={(d) => (drawer = d)}
-          drawerPosition={side()}
-          drawerWidth={200}
-          drawerBackgroundColor="#f6f8fa"
-          onDrawerOpen={() => setOpened(opened() + 1)}
-          onDrawerStateChanged={setState}
-          renderNavigationView={() => (
-            <view style={{ paddingVertical: 12 }}>
-              <For each={items}>
-                {(item) => (
-                  <TouchableHighlight underlayColor="#eaeef2" onPress={() => drawer?.closeDrawer()} style={{ paddingHorizontal: 16, paddingVertical: 10 }}>
-                    <text style={styles.label}>{item}</text>
-                  </TouchableHighlight>
-                )}
-              </For>
-            </view>
-          )}
-        >
-          <view style={{ flex: 1, padding: 16, gap: 10, backgroundColor: "#ffffff" }}>
-            <text style={styles.label}>Drag from the {side()} edge, or:</text>
-            <view style={styles.row}>
-              <UiButton label="Open" onPress={() => drawer?.openDrawer()} />
-              <UiButton label={side() === "left" ? "Right side" : "Left side"} color="#57606a" onPress={() => setSide(side() === "left" ? "right" : "left")} />
-            </view>
-            <text style={styles.muted}>
-              State: {state()} · opened {opened()} times. Drags run natively; JS only picks where it settles.
-            </text>
-          </view>
-        </DrawerLayout>
+    <Section title="Press feedback">
+      <view style={styles.card} activeOpacity={0.4} onPress={() => setLast("activeOpacity")}>
+        <text style={styles.label}>activeOpacity: fades while pressed</text>
+      </view>
+      <view style={styles.card} underlayColor="#dbeafe" onPress={() => setLast("underlayColor")}>
+        <text style={styles.label}>underlayColor: the background while pressed</text>
+      </view>
+      <view
+        style={styles.card}
+        disabled={disabled()}
+        underlayColor="#fee2e2"
+        class="disabled:opacity-40"
+        onPress={() => setLast("disabled view")}
+      >
+        <text style={styles.label}>{disabled() ? "disabled: takes no presses" : "enabled"}</text>
+      </view>
+      <view style={styles.row}>
+        <UiButton label={disabled() ? "Enable" : "Disable"} color="#57606a" onPress={() => setDisabled(!disabled())} />
+        <text style={styles.muted}>Last pressed: {last()}</text>
       </view>
     </Section>
   );
@@ -177,7 +118,7 @@ function Accessory() {
         <text style={styles.muted}>Android has no input accessories (as React Native).</text>
       </Show>
       <InputAccessoryView nativeID="counter" backgroundColor="#f6f8fa">
-        <view style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border }}>
+        <view style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 8, borderTopWidth: hairline, borderTopColor: colors.border }}>
           <text style={[styles.muted, { flex: 1 }]}>{text().length} characters</text>
           <UiButton label="Clear" color="#57606a" onPress={() => setText("")} />
           <view style={{ width: 8 }} />
@@ -257,14 +198,13 @@ function PlatformInfo() {
     ["Platform.select", Platform.select({ ios: "ios branch", android: "android branch" }) ?? ""],
     ["PixelRatio.get()", String(PixelRatio.get())],
     ["roundToNearestPixel(10.3)", String(PixelRatio.roundToNearestPixel(10.3))],
-    ["StyleSheet.hairlineWidth", StyleSheet.hairlineWidth.toFixed(3)],
     ["screenReaderEnabled()", String(screenReaderEnabled())],
     ["reduceMotion()", String(reduceMotion())],
   ];
   const [announced, setAnnounced] = createSignal(0);
   let target: any;
   return (
-    <Section title="Platform, PixelRatio, StyleSheet, AccessibilityInfo">
+    <Section title="Platform, PixelRatio, AccessibilityInfo">
       <For each={rows()}>
         {([k, v]) => (
           <view style={[styles.row, { justifyContent: "space-between" }]}>
@@ -273,7 +213,7 @@ function PlatformInfo() {
           </view>
         )}
       </For>
-      <view style={{ height: StyleSheet.hairlineWidth, backgroundColor: colors.text }} />
+      <view style={{ height: hairline, backgroundColor: colors.text }} />
       <text style={styles.muted}>The line above is one device pixel tall.</text>
       <view style={styles.row}>
         <UiButton
@@ -296,11 +236,9 @@ export function Components() {
   return (
     <scroll style={{ flex: 1, backgroundColor: colors.background }} keyboardDismissMode="interactive">
       <view style={{ padding: 16, gap: 20 }}>
-        <Touchables />
+        <PressFeedback />
         <PressableSheet />
         <LayoutAnimations />
-        <Background />
-        <Drawer />
         <Accessory />
         <Section title="KeyboardAvoidingView">
           <UiButton label="padding / height / position" onPress={() => nav.push({ name: "page", page: AvoidingPage })} />

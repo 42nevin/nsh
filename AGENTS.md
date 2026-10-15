@@ -24,7 +24,7 @@ crates/
   yf-ffi/             C ABI (`include/yf.h`, `libyf.a`) for embedding yf in existing iOS apps; shipped as an XCFramework
   yf-cli/             The `yf` command line: init / build / trace / dev / run / package
   xtask/              Maintainer tasks: `cargo xtask android` (Android runtime), `cargo xtask dist` (the distribution)
-js/runtime/index.ts   Solid universal renderer (JS side) and the runtime components (List, Stack, Modal, DrawerLayout, ...), bundled by yf-bundler
+js/runtime/index.ts   Solid universal renderer (JS side) and the runtime components (List, Stack, Modal, Canvas, ...), bundled by yf-bundler
 js/runtime/types.ts   Style, element-prop and JSX types (types only; also the source of `.yf/types/yf/types.d.ts`)
 js/runtime/globals.d.ts  Declarations of the JS globals (console, timers, fetch, ...) and of asset imports
 js/runtime/hot.js     Hot module replacement runtime of development bundles (module registry, component proxies)
@@ -103,11 +103,12 @@ The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distributi
 | JSX | Native (Apple) | Notes |
 |---|---|---|
 | `<view>` | `YFView` (UIView) | `onPress` / `onLongPress` / `onPressIn` / `onPressOut`, `activeOpacity`, `pan={{x, y}}` + `onPanStart` / `onPanEnd`, `pinch` / `rotation` |
-| `<text>` | `TextView` (CTFrame) | nested `<text>` is a span; `numberOfLines`, `ellipsizeMode`, `allowFontScaling`, `maxFontSizeMultiplier` |
-| `<image src>` | UIView + image CALayer | `src` is a URL or `import img from "./a.png"` (an asset descriptor with its size); `resizeMode`; `defaultSource` (placeholder), `blurRadius`, `fadeDuration`; `onLoadStart` / `onLoad` (the source's pixel size) / `onError` / `onLoadEnd`; `tintColor`; animated GIF / WebP / APNG |
-| `<scroll>` | UIScrollView | `horizontal`, `refreshing` + `onRefresh`, `scrollValue`, `onScrollEnd`, `keyboardDismissMode`, see **Scrolling** below |
-| `List`, `SectionList` (runtime) | UIScrollView + recycled cells | see **List** below |
-| `<input>` | UITextField / UITextView in a container | `value` / `defaultValue` / `onChangeText` / `onSubmitEditing` / `onFocus` / `onBlur`, `placeholder`, `secureTextEntry`, `keyboardType`, `returnKeyType`, `autoCapitalize`, `autoCorrect`, `multiline`, `maxLength`, `editable`, `autoFocus`, `selectionColor`, `blurOnSubmit`, `selection` + `onSelectionChange` (UTF-16 `start` / `end`), `onKeyPress` (`key`: the text, `Backspace`, `Enter`), `autoComplete` / `textContentType` (autofill); ref `setSelection(start, end)` |
+| `<text>` | `TextView` (CTFrame) | nested `<text>` is a span, other elements are inline attachments (see **Text**); `numberOfLines`, `ellipsizeMode`, `allowFontScaling`, `maxFontSizeMultiplier`, `adjustsFontSizeToFit` + `minimumFontScale`, `selectable`, `onTextLayout` |
+| `<image src>` | UIView + image CALayer | `src` is a URL or `import img from "./a.png"` (an asset descriptor with its size); `resizeMode`; `defaultSource` (placeholder), `blurRadius`, `fadeDuration`; `onLoadStart` / `onProgress` (`loaded` / `total` bytes) / `onLoad` (the source's pixel size) / `onError` / `onLoadEnd`; `tintColor`; animated GIF / WebP / APNG; `Image.getSize(uri)` / `Image.prefetch(uri)` |
+| `<scroll>` | UIScrollView | `horizontal`, `refreshing` + `onRefresh`, `scrollValue`, `onScrollEnd`, `keyboardDismissMode`, zooming, see **Scrolling** below |
+| `Canvas` (runtime) | `<canvas>`: `CanvasView` (drawRect replay) | see **Canvas** below |
+| `List` (runtime) | UIScrollView + recycled cells | see **List** below |
+| `<input>` | UITextField / UITextView in a container | `value` / `defaultValue` / `onChangeText` / `onSubmitEditing` / `onFocus` / `onBlur`, `placeholder`, `secureTextEntry`, `keyboardType`, `returnKeyType`, `autoCapitalize`, `autoCorrect`, `multiline`, `maxLength`, `editable`, `autoFocus`, `selectionColor`, `blurOnSubmit`, `selection` + `onSelectionChange` (UTF-16 `start` / `end`), `onKeyPress` (`key`: the text, `Backspace`, `Enter`), `autoComplete` / `textContentType` (autofill), `caretHidden`, `onContentSizeChange` (the text's size, for growing inputs); ref `setSelection(start, end)` |
 | `Stack` / `Screen` (runtime) | UINavigationController | `createNavigator(route)`: `push` / `pop` / `popToTop` / `replace` / `reset`; screens keep their state while stacked; native header (`title`, `headerLeft` / `headerRight` / `headerTitle` elements, `headerLargeTitle`, `headerTransparent`, colors, `headerBackTitle`), swipe back |
 | `Modal` (runtime) | presented UIViewController | `visible`, `animationType`, `presentationStyle` (`pageSheet` / `formSheet` on iOS), `transparent`, `statusBarTranslucent` (Android; otherwise the content starts below the status bar), `supportedOrientations` (iOS), `onRequestClose` (controlled), `onShow`, `onDismiss` |
 | `InputAccessoryView` (runtime, iOS) | `<inputaccessory>`: a YFView set as `inputAccessoryView` | `nativeID`; inputs name it with `inputAccessoryViewID`. A layout root as wide as the window and as tall as its content; the core resolves the id (`InputConfig::accessory`). Renders nothing on Android (as React Native) |
@@ -119,19 +120,18 @@ On Android the same elements map to `Box` (ViewGroup), `TextBox`, `ImageBox`, `S
 (MediaPlayer on a TextureView, MediaController); both are `WidgetBox`es. Every host element and runtime component is typed in
 `js/runtime/types.ts` / `index.ts`.
 
-**No platform-styled widgets.** yf provides primitives; apps (and the UI library built on yf) draw controls such as switches,
-sliders, spinners and buttons with views, classes and native animations, so they look the same on iOS and Android (the gallery's
-`Toggle` in `examples/gallery/ui.tsx`). Do not add wrappers of UISwitch / SeekBar and the like.
+**Primitives only.** yf provides the basic capabilities; components are the UI library's (built on yf, separately), drawn with
+views, classes, canvases and native animations so they look the same on iOS and Android (like the gallery's `Toggle` in
+`examples/gallery/ui.tsx`). Do not add platform-styled widgets (UISwitch / SeekBar wrappers and the like), and do not add
+components that are only compositions of existing primitives in JS (section lists, touchables, drawers, ...). React Native
+is a reference for which capabilities exist, not an API to be compatible with. The runtime keeps components that need core
+or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingView`, `InputAccessoryView`, `Canvas`).
 
-- **Runtime components on the primitives**: `TouchableOpacity` (`activeOpacity` 0.2), `TouchableHighlight` (`underlayColor` +
-  `activeOpacity` for the children: `underlayColor` / `underlayOpacity` on any view, applied by the core while the platform
-  reports the view pressed — no JS round trip), `TouchableWithoutFeedback` (spreads its props on its only child),
-  `ImageBackground`, `DrawerLayout` (alias `DrawerLayoutAndroid`; both platforms: one native value is the offset, the panel, the
-  scrim and a 20pt edge strip drive it with `pan`, `onPanEnd`'s `valueX` / velocity decide where it settles; ref:
-  `openDrawer()`, `closeDrawer()`, `progress` (a native node 0..1)), `KeyboardAvoidingView` (`behavior`: `padding` →
-  `insetPadding`, `height` → `insetMargin`, `position` → an inner view moved up; `keyboardVerticalOffset`).
-- **Platform modules**: `Platform` (`OS`, `Version`, `isPad`, `isTV`, `isMacCatalyst`, `select`), `PixelRatio`, `StyleSheet`
-  (`create`, `flatten`, `compose`, `hairlineWidth`, `absoluteFill`), `AccessibilityInfo` (`isScreenReaderEnabled`,
+- **Press feedback primitives** (native, no JS round trip): `activeOpacity`; `underlayColor` + `underlayOpacity` (default 0.85)
+  on any view — the core shows the underlay as the background and fades the children while the platform reports the view
+  pressed; `active:` classes. `KeyboardAvoidingView` (`behavior`: `padding` → `insetPadding`, `height` → `insetMargin`,
+  `position` → an inner view moved up; `keyboardVerticalOffset`).
+- **Platform modules**: `Platform` (`OS`, `Version`, `isPad`, `isTV`, `isMacCatalyst`, `select`), `PixelRatio`, `AccessibilityInfo` (`isScreenReaderEnabled`,
   `isReduceMotionEnabled`, `addEventListener("screenReaderChanged" | "reduceMotionChanged")`, `announceForAccessibility`,
   `setAccessibilityFocus(ref)`), reactive `screenReaderEnabled()` / `reduceMotion()`. The environment carries `pixelRatio`,
   `screenReader`, `osVersion` and `idiom` (VoiceOver / TalkBack changes are observed natively).
@@ -142,13 +142,26 @@ sliders, spinners and buttons with views, classes and native animations, so they
 
 - **Text**: `<text numberOfLines ellipsizeMode="tail|head|middle|clip">`; styles `fontFamily` (system or imported fonts:
   `import Inter from "./Inter.ttf"` evaluates to the family name and registers the font before the first frame), `fontWeight`,
-  `fontStyle`, `letterSpacing`, `textDecorationLine` + `textDecorationColor`, `textTransform`, `lineHeight`, `textAlign`.
+  `fontStyle`, `letterSpacing`, `textDecorationLine` + `textDecorationColor`, `textTransform`, `lineHeight`, `textAlign`,
+  `textAlignVertical` (the core moves the content box down). `adjustsFontSizeToFit` shrinks the fonts (down to
+  `minimumFontScale`, at least 0.1) until the text fits its box and lines (`Paragraph::fit`, a binary search in the core).
+  `onTextLayout` reports the final lines (`TextEngine::lines`: range, box, ascender, descender, cap / x height).
+  `selectable` (or `select-text`): a long press highlights the block and offers Copy (iOS `UIMenuController`, Android a
+  floating action mode); whole blocks only, no range selection.
+- **Inline attachments**: any other element inside a `<text>` (also inside its spans) is an attachment: laid out as its own
+  layout root at its content size (`update_attachments`), it becomes an object replacement character (U+FFFC,
+  `AttributedText::attachments`) that the engine sizes to it on the baseline (CTRunDelegate; Android a `ReplacementSpan`), so
+  it wraps with the text. After the final layout the core places its native view, a child of the text view (Android's
+  `TextBox` is a ViewGroup for this), on the placeholder (`TextEngine::attachments`); attachments cut off by the line limit or
+  an ellipsis move out of sight. Their own children are normal layout children; a text inside them built after the block
+  resizes them and builds the block again (`check_attachments`). They take presses of their own; copying leaves the
+  placeholders out.
 - **Imperative calls**: nodes have `focus()`, `blur()` and `scrollTo({ x, y, animated })` (use `ref`); lists also
   `scrollToIndex({ index, viewPosition, viewOffset, animated })`, `scrollToEnd()`, `scrollToOffset()`; `Keyboard.dismiss()`.
   Commands run after the commit's other mount items; list scrolls are resolved by the core with the current item sizes.
 - **Touch** (React Native semantics): `pointerEvents`, `hitSlop`, `activeOpacity`, `delayLongPress`, `android_ripple`
   (`{ color, borderless, radius, foreground }`, Android only); press-in waits ~130ms inside scroll views; only the innermost
-  pressable view responds. `Pressable` passes `{ pressed }` to `style` / `children`. Nested `<text>` spans with press handlers
+  pressable view responds. Nested `<text>` spans with press handlers
   are links: the core lists them in `AttributedText::links` (UTF-16 ranges) and the block's press recognizer routes a press to
   the span under the finger (CoreText `CTLineGetStringIndexForPosition` / `Layout.getOffsetForHorizontal`).
 - **Raw touches and the responder system**: `onTouchStart/Move/End/Cancel` (+ `Capture`), `onStartShouldSetResponder`,
@@ -167,6 +180,15 @@ sliders, spinners and buttons with views, classes and native animations, so they
 - **Frames**: `requestAnimationFrame` / `cancelAnimationFrame` follow the display (CADisplayLink / Choreographer).
 - **Back button** (Android): `BackHandler.addEventListener("hardwareBackPress", ...)`, after modals and stacks; the app exits
   when nothing handles it.
+- **Zooming** (`<scroll>`, not lists): `maximumZoomScale` above `minimumZoomScale` makes the content zoomable; `zoomScale`
+  zooms when it changes, `bouncesZoom`, `pinchGestureEnabled`, `centerContent` (content smaller than the viewport is centered);
+  ref `zoomTo({ scale, x, y, animated })` (content point `x`, `y` in the middle); `onScroll` reports `zoomScale` and the zoomed
+  content size. iOS: the children live in a `YFZoomView` (`zoom.rs`) that UIKit scales (`viewForZoomingInScrollView:`), its
+  bounds the unzoomed content size, so the core's frames stay valid; texts and canvases are drawn again at the zoomed
+  resolution when a zoom ends. Android has no zooming scroll view: `ScrollBox` switches to its `ZScroll`, which scales the
+  content around its top left and scrolls both ways itself (ScaleGestureDetector around the focal point, panning with any
+  number of fingers, OverScroller flings, rubber bands past the edges and the zoom limits). Pinches start only after
+  Android's minimum span (about 27 mm between the fingers). Zoom reports go to the core (`EngineControl::zoom`).
 - **Scrolling**: `pagingEnabled`, `snapToInterval` / `snapToOffsets` / `snapToAlignment`, `disableIntervalMomentum`,
   `decelerationRate`, `scrollEnabled`, `bounces`, `contentInset`, `contentOffset`, `keyboardShouldPersistTaps`
   (`never` / `handled` / `always`), `onScroll` (+ `scrollEventThrottle`; at most once per engine turn), `onScrollBeginDrag` /
@@ -231,12 +253,18 @@ sliders, spinners and buttons with views, classes and native animations, so they
   `CAKeyframeAnimation`s, blend modes `compositingFilter`, `cursor` a `UIPointerInteraction`, backdrop blur a
   `UIVisualEffectView` (a system material at a fraction: an approximation), text decorations other than solid single lines are
   drawn by `TextView`. Android: `Decor` draws shadows, gradients and outlines; filters are `RenderEffect`s (API 31+; below, only
-  color filters through a layer paint), blend modes a layer paint (API 29+), transitions / keyframes `ValueAnimator`s.
+  color filters through a layer paint), blend modes a layer paint (API 29+), transitions / keyframes `ValueAnimator`s,
+  backdrop blur (API 31+) a `RenderNode` recorded before each frame with what lies behind the view (`Backdrop.java`: each
+  ancestor's background and the siblings drawn before the next ancestor, never the view itself) and blurred by a
+  `RenderEffect`, drawn clipped under the view's background.
   Known limits: iOS has no CSS filters on views (only `opacity`, `brightness` ≤ 1 and `drop-shadow`; images take every color filter
-  and `blur`, applied while decoding); iOS texts draw no gradients or inset shadows; Android has no backdrop blur, and no `blur` /
+  and `blur`, applied while decoding); iOS texts draw no gradients or inset shadows; Android has no backdrop blur, `blur` or
   `drop-shadow` before API 31.
 - **View styles**: `backgroundColor`, `borderWidth` / `borderColor` (also per side: `borderTopWidth`, `borderLeftColor`, ...),
-  `borderStyle` (`solid` / `dashed` / `dotted`), `borderRadius` + the four `borderTopLeftRadius`-style corners, `overflow`, `opacity`,
+  `borderStyle` (`solid` / `dashed` / `dotted`), `borderRadius` + the four `borderTopLeftRadius`-style corners, `borderCurve`
+  (`continuous`: corners easing into the edges, Figma's 60% corner smoothing, shrinking to circular where the box is too
+  small, so pills stay pills; the outline geometry is `yf_core::shape::rounded_rect`, ported to `Decor.java`; iOS layers that
+  draw their own corners use `cornerCurve`), `overflow`, `opacity`,
   `transform` (translate / scale / rotate / rotateX / rotateY / skew / perspective, applied right to left like CSS; Android has no
   skew), `zIndex` (stable order of the native views), `shadowColor` / `shadowOffset` / `shadowOpacity` / `shadowRadius` (RN
   defaults: offset `(0, -3)`, radius 3, opacity 0), `tintColor` (images), `elevation` (Android's material shadow, with
@@ -251,13 +279,25 @@ sliders, spinners and buttons with views, classes and native animations, so they
   pass); with a transparent background the shadow follows the content (e.g. text shadows).
   Known limits: scroll / list only support one radius (the largest wins) and clip their shadow; `<text>` with different radii is masked, which
   clips its shadow too.
+- **Canvas** (`Canvas` component, `<canvas>` element): an HTML Canvas 2D subset recorded in JS and replayed natively
+  (`yf_core::canvas`: `Drawing { ops, slots }`). `draw={(ctx, { width, height }) => ...}` runs again when the signals it reads
+  change (sizes come from `onLayout`). `CanvasRenderingContext2D`: state (`save` / `restore`, `globalAlpha`,
+  `globalCompositeOperation`, line styles and dashes, shadows, `font` (CSS shorthand), `textAlign` / `textBaseline`),
+  transforms, paths (`arc`, `arcTo`, `ellipse`, curves, `rect`, `roundRect`), `fill` / `stroke` / `clip` (also of a `Path2D`,
+  which takes SVG path data; arcs become cubics), `fillRect` / `strokeRect` / `clearRect`, `fillText` / `strokeText` /
+  `measureText` (synchronous, through the shared text engine: `__yf_measure_text`; only `width`), linear / radial / conic
+  gradients, `drawImage` (all three forms, images by URI or asset). Any number argument and colors may be native values
+  (`createNativeValue`, `interpolate`, ...): those become slots bound like style values (`AnimProp::CanvasArg`) and the
+  platform redraws on its own while they animate, without JS. Drawings travel in their own op (`OP_DRAW`), recorded into a
+  separate array: creating native values while drawing pushes ops of its own. iOS replays into the `drawRect:` context,
+  keeping its own transform and path in view space; Android `CanvasBox.java` interprets an `int[]` (`encode.rs`). Not
+  supported: `getImageData` / `putImageData`, filters, `isPointInPath`, SVG images.
 - **List** props: `each`, `estimatedItemSize`, `numColumns`, `inverted` (chat: item 0 at the bottom, starts at the end and keeps its
   distance from the end as content changes), `stickyHeaderIndices` (one column, not inverted), `ListHeaderComponent` /
   `ListFooterComponent` / `ListEmptyComponent` / `ItemSeparatorComponent` (a component or an element), `contentContainerStyle`
   (padding and gaps, numbers), `initialScrollIndex`, `onEndReached` + `onEndReachedThreshold`, `onViewableItemsChanged` +
   `viewabilityConfig` (`itemVisiblePercentThreshold` / `viewAreaCoveragePercentThreshold` / `minimumViewTime`), `keyExtractor`,
-  `refreshing` / `onRefresh`, `scrollValue`. `SectionList` (`sections`, `renderSectionHeader`, `renderItem`) is a `List` of header
-  and item rows with sticky headers. Positions, columns, sticky travel and viewability are all computed in the core; sticky cells
+  `refreshing` / `onRefresh`, `scrollValue`. Positions, columns, sticky travel and viewability are all computed in the core; sticky cells
   are pinned natively on every scroll (`MountItem::StickyCells`: translate by `clamp(offset - start, 0, end - start)`).
 - **List internals**: the window is computed in Rust (`core/list.rs`, Fenwick prefix sums over rows), rendering one extra screen above and below the viewport.
   Rust asks JS to bind cells with `__yf_list(listId, [slot, index, …])`; JS updates the cell content inside `batch` and then sets `cellIndex` to
@@ -288,7 +328,10 @@ sliders, spinners and buttons with views, classes and native animations, so they
   Native). Animated images: iOS decodes up to 600 frames into an animated `UIImage` (frames repeated by their delays' common
   divisor) played by a discrete `CAKeyframeAnimation` on `contents` (a tinted animated image shows its first frame); Android
   (API 28+) uses `ImageDecoder` → `AnimatedImageDrawable`, not cached (each view plays its own copy; no blur). `onLoad` reports the
-  source's size in pixels on both platforms, whatever size the view decodes at. Android `ImageBox` draws its borders above the
+  source's size in pixels on both platforms, whatever size the view decodes at. Downloads are shared per URI (also between
+  views decoding at different sizes) and report `onProgress` at most every 100ms; `Image.getSize` / `Image.prefetch` answer
+  through the root's `onImageInfo` (`Command::ImageInfo`) and keep the downloaded bytes in a data cache (32 MB) until a view
+  decodes them. Android `ImageBox` draws its borders above the
   image (as Core Animation's layer border).
 - **Android differences**: shadows need a background (no content shadows, e.g. text with a transparent background); odd corner
   radii clip by path before API 33; pull to refresh is our own (stretch overscroll stays native); `contentInset` is padding and
