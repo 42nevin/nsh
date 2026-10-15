@@ -19,6 +19,7 @@ mod anim;
 mod app;
 mod blur;
 mod canvas;
+mod component;
 mod decor;
 #[cfg(feature = "dev")]
 pub mod dev;
@@ -48,6 +49,7 @@ pub use nsh_engine::Bundle;
 
 pub use crate::{
     app::{AppOptions, AppSource, in_app_bundle, run_app},
+    component::{ComponentContext, ComponentFactory, Components, NativeComponent},
     image::AssetBase,
     surface::{Surface, SurfaceOptions},
     system::{preferred_status_bar_style, prefers_status_bar_hidden, status_bar_animation},

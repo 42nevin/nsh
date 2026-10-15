@@ -67,6 +67,7 @@ const RUNTIME: &[EmbeddedFile] = embedded! { "runtime":
     "gesture" => Some("nsh/gesture"),
     "webview" => Some("nsh/webview"),
     "video" => Some("nsh/video"),
+    "native" => Some("nsh/native"),
     "ios" => Some("nsh/ios"),
     "android" => Some("nsh/android"),
     "_core" => None,

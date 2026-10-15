@@ -1248,3 +1248,58 @@ fn floats(env: &JNIEnv<'_>, values: &[f32]) -> jfloatArray {
     }
     array.into_raw()
 }
+
+/// A registered native component emitted `name` (JSON data or `null`).
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_longbridge_nsh_Native_componentEvent(
+    mut env: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    id: jint,
+    name: JString<'_>,
+    json: JString<'_>,
+) {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    let Ok(name) = env.get_string(&name).map(String::from) else {
+        return;
+    };
+    let data = if json.is_null() {
+        nsh_core::JsonValue::Null
+    } else {
+        match env.get_string(&json).map(String::from) {
+            Ok(json) => serde_json::from_str(&json).unwrap_or_else(|err| {
+                log::error!("component event data is not JSON: {err}");
+                nsh_core::JsonValue::Null
+            }),
+            Err(_) => return,
+        }
+    };
+    if let Some(control) = host.control() {
+        control.dispatch_event(
+            id as NodeId,
+            EventKind::NativeEvent,
+            EventPayload::Native {
+                name: name.into(),
+                data,
+            },
+        );
+    }
+}
+
+/// A registered native component's own size (dp).
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_longbridge_nsh_Native_componentSize(
+    _: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    id: jint,
+    width: jfloat,
+    height: jfloat,
+) {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    if let Some(control) = host.control() {
+        control.set_component_size(id as NodeId, Size::new(width, height));
+    }
+}

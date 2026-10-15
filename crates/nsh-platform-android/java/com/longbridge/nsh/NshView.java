@@ -221,6 +221,17 @@ public class NshView extends FrameLayout {
     }
 
     /**
+     * Registers native component {@code name} ({@code nativeComponent(name, ...)}
+     * in JS): {@code factory} makes one for every element created from now on.
+     *
+     * @param name the name JS uses
+     * @param factory makes the components (UI thread)
+     */
+    public void registerComponent(String name, NshComponent.Factory factory) {
+        mounter.components.put(name, factory);
+    }
+
+    /**
      * Development: loads from a `nsh dev` server and reloads on every change.
      *
      * @param url the server, {@code ws://host:port/ws}

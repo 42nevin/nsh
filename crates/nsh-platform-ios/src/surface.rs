@@ -404,6 +404,7 @@ impl RootView {
             mounter.clone(),
             asset_base,
             access,
+            self.ivars().options.components.clone(),
         ));
         *self.ivars().running.borrow_mut() = Some(Running { engine, mounter });
         self.ivars().environment.set(Some(self.environment()));
@@ -445,6 +446,8 @@ pub struct SurfaceOptions {
     /// What the embedding app grants the apps it runs at most (`None`: what
     /// each app declares).
     pub granted: Option<nsh_engine::Capabilities>,
+    /// The native components the apps can use (`nsh/native`).
+    pub components: crate::component::Components,
 }
 
 /// One running nsh app hosted in a `UIView`.

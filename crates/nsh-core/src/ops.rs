@@ -52,6 +52,9 @@ pub enum Tag {
     WebView,
     /// A video player (`<video>`).
     Video,
+    /// A component the embedding app registered (`<native component>`,
+    /// created by `nsh/native`'s `nativeComponent`).
+    Native,
 }
 
 impl Tag {
@@ -74,6 +77,7 @@ impl Tag {
             "canvas" => Tag::Canvas,
             "webview" => Tag::WebView,
             "video" => Tag::Video,
+            "native" => Tag::Native,
             _ => return None,
         })
     }
@@ -162,6 +166,7 @@ events! {
     TextLayout = "onTextLayout": "A text block was laid out (payload: [`EventPayload::TextLayout`]).",
     ContentSizeChange = "onContentSizeChange": "The size of an input's text changed (payload: `width`, `height`; raised by the core).",
     BackRequest = "onBackRequest": "The user tried to leave a screen with `preventBack` (back button, header back button).",
+    NativeEvent = "onNativeEvent": "A registered native component emitted an event (payload: [`EventPayload::Native`]).",
 }
 
 /// What an input holds, for the system's autofill and suggestions
@@ -427,6 +432,14 @@ pub enum EventPayload {
     Touch(Box<TouchEvent>),
     /// The lines of a text block.
     TextLayout(Vec<crate::text::TextLine>),
+    /// An event of a registered native component: its name and data (any
+    /// JSON value), handed to JS as `{ name, data }`.
+    Native {
+        /// The event (`regionChange`).
+        name: Arc<str>,
+        /// Its data.
+        data: crate::JsonValue,
+    },
 }
 
 impl TouchEvent {
@@ -837,6 +850,13 @@ pub enum Command {
     },
     /// Move the screen reader's focus to this view.
     AccessibilityFocus,
+    /// A call on a registered native component (`ref.command(name, args)`).
+    Native {
+        /// The command.
+        name: Arc<str>,
+        /// Its arguments (any JSON value).
+        args: crate::JsonValue,
+    },
 }
 
 /// The children's opacity while an underlay shows, by default.
@@ -908,6 +928,12 @@ pub struct Dialog {
 /// A non-style property of a host node.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Prop {
+    /// `component`: which registered native component a `<native>`
+    /// element is (set once, before it is mounted).
+    Component(Arc<str>),
+    /// A property of a registered native component (`$name` from JS):
+    /// any JSON value, `None` to remove it.
+    ComponentProp(Arc<str>, Option<crate::JsonValue>),
     /// `<image src>`.
     Source(Option<ImageSource>),
     /// `<image resizeMode>`.

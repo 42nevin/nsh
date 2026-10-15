@@ -10,7 +10,7 @@ binary written in Rust: no Node.js, and no Rust toolchain for app developers.
 |---|---|
 | `examples/gallery/App.tsx` | A demo index covering what nsh supports: lists (recycling, columns, sticky sections, an inverted chat, horizontal lists), navigation (header options, modals, the back button), forms and the keyboard, controls, gestures, native animations, images, styles, text, web view and video, environment / timers / fetch |
 | `examples/counter/App.tsx` | The smallest app |
-| `examples/embed-ios`, `examples/embed-android` | nsh inside existing native apps (see their READMEs) |
+| `examples/embed-ios`, `examples/embed-android` | nsh inside existing native apps (see their READMEs), running `examples/embedded` with a native component the host app registers |
 
 Every `nsh run` starts a dev server, launches the app and updates it on every save (hot module replacement: only the
 edited components render again, the rest of the app keeps its state). Logs and errors appear in the terminal.

@@ -358,6 +358,7 @@ enum Message {
     Event(NodeId, EventKind, EventPayload),
     Scroll(NodeId, f32, f32, u32),
     Zoom(NodeId, f32),
+    ComponentSize(NodeId, Size),
     AnimationsFinished(Vec<nsh_anim::Finished>),
     Resize(Size),
     Environment(Environment),
@@ -412,6 +413,12 @@ impl EngineControl {
     /// the zoom changed); `onScroll` carries it.
     pub fn zoom(&self, id: NodeId, scale: f32) {
         let _ = self.tx.send(Message::Zoom(id, scale));
+    }
+
+    /// A registered native component's own size (points): it is laid out at
+    /// it where its style leaves a dimension open.
+    pub fn set_component_size(&self, id: NodeId, size: Size) {
+        let _ = self.tx.send(Message::ComponentSize(id, size));
     }
 
     /// Reports native animations that finished or were interrupted.
@@ -1026,6 +1033,7 @@ fn handle<M: TextEngine>(host: &Host, state: &mut State<M>, message: Message) ->
             }
         }
         Message::Zoom(id, scale) => state.core.set_zoom(id, scale),
+        Message::ComponentSize(id, size) => state.core.set_component_size(id, size),
         Message::AnimationsFinished(finished) => host.animations_finished(&finished),
         Message::Resize(size) => state.core.set_viewport(size),
         Message::Environment(env) => {

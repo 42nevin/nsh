@@ -95,6 +95,12 @@ final class Native {
 
     static native void packageFree(long pkg);
 
+    /** A native component emitted {@code name} with {@code json} data (null: none). */
+    static native void componentEvent(long handle, int id, String name, String json);
+
+    /** A native component's own size (dp). */
+    static native void componentSize(long handle, int id, float width, float height);
+
     /** Root size in dp. */
     static native void resize(long handle, float width, float height);
 

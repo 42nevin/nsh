@@ -285,3 +285,113 @@ public final class NshPackage: @unchecked Sendable {
         nsh_package_free(handle)
     }
 }
+
+/// A native component the app registers for `nativeComponent(name, ...)` in
+/// JS (`nsh/native`): a map, a player, any view of the app's own.
+@MainActor
+public protocol NshComponent: AnyObject {
+    /// Its view; it fills the box nsh lays out (decoration, frame and
+    /// touches are the box's).
+    var view: UIView { get }
+    /// Prop `name` changed (`nil`: removed). Values are JSON objects
+    /// (`String`, `NSNumber`, `[Any]`, `[String: Any]`, `NSNull`); every prop
+    /// the app set comes right after the component is made.
+    func setProp(_ name: String, _ value: Any?)
+    /// JS called `ref.command(name, args)`.
+    func command(_ name: String, _ args: Any?)
+}
+
+extension NshComponent {
+    /// Ignores commands.
+    public func command(_ name: String, _ args: Any?) {}
+}
+
+/// What a component tells its app: its events and its own size.
+/// Thread-safe.
+public final class NshComponentContext: @unchecked Sendable {
+    private let handle: OpaquePointer
+
+    fileprivate init(_ handle: OpaquePointer) {
+        self.handle = handle
+    }
+
+    deinit {
+        nsh_component_context_free(handle)
+    }
+
+    /// Emits `event` with `data` (anything `JSONSerialization` takes): the JS
+    /// handler `on<Event>` gets it.
+    public func emit(_ event: String, _ data: Any? = nil) {
+        guard let data else { return nsh_component_emit(handle, event, nil) }
+        guard JSONSerialization.isValidJSONObject([data]),
+            let json = try? JSONSerialization.data(withJSONObject: data, options: .fragmentsAllowed)
+        else {
+            return print("[nsh] event \(event) of a component: data is not JSON")
+        }
+        String(decoding: json, as: UTF8.self).withCString { nsh_component_emit(handle, event, $0) }
+    }
+
+    /// The component's own size (points): used where its style leaves a
+    /// dimension open (e.g. content-sized views).
+    public func setSize(_ size: CGSize) {
+        nsh_component_set_size(handle, Double(size.width), Double(size.height))
+    }
+}
+
+/// Holds a registration's factory for the C callbacks.
+private final class ComponentFactoryBox {
+    let make: @MainActor (NshComponentContext) -> NshComponent
+    init(_ make: @escaping @MainActor (NshComponentContext) -> NshComponent) { self.make = make }
+}
+
+/// Holds a component for the C callbacks.
+private final class ComponentBox {
+    let component: NshComponent
+    init(_ component: NshComponent) { self.component = component }
+}
+
+/// JSON from nsh as Foundation objects.
+private func jsonObject(_ json: UnsafePointer<CChar>?) -> Any? {
+    guard let json else { return nil }
+    let data = Data(bytes: json, count: strlen(json))
+    return try? JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed)
+}
+
+extension NshAppView {
+    /// Registers native component `name` (`nativeComponent(name, ...)` in
+    /// JS): `make` makes one for every element created from now on.
+    public func register(component name: String, _ make: @escaping @MainActor (NshComponentContext) -> NshComponent) {
+        let factory = Unmanaged.passRetained(ComponentFactoryBox(make)).toOpaque()
+        var callbacks = NshComponentCallbacks(
+            create: { factory, context in
+                let box = Unmanaged<ComponentFactoryBox>.fromOpaque(factory!).takeUnretainedValue()
+                // nsh calls it on the main thread.
+                let component = MainActor.assumeIsolated { box.make(NshComponentContext(context)) }
+                return Unmanaged.passRetained(ComponentBox(component)).toOpaque()
+            },
+            view: { component in
+                let box = Unmanaged<ComponentBox>.fromOpaque(component).takeUnretainedValue()
+                return MainActor.assumeIsolated { box.component.view }
+            },
+            set_prop: { component, name, json in
+                let box = Unmanaged<ComponentBox>.fromOpaque(component).takeUnretainedValue()
+                let name = String(cString: name)
+                let value = jsonObject(json)
+                MainActor.assumeIsolated { box.component.setProp(name, value) }
+            },
+            command: { component, name, json in
+                let box = Unmanaged<ComponentBox>.fromOpaque(component).takeUnretainedValue()
+                let name = String(cString: name)
+                let args = jsonObject(json)
+                MainActor.assumeIsolated { box.component.command(name, args) }
+            },
+            destroy: { component in
+                Unmanaged<ComponentBox>.fromOpaque(component).release()
+            },
+            release_factory: { factory in
+                Unmanaged<ComponentFactoryBox>.fromOpaque(factory!).release()
+            }
+        )
+        nsh_app_register_component(app, name, factory, &callbacks)
+    }
+}

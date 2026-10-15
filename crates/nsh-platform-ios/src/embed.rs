@@ -572,3 +572,184 @@ pub unsafe extern "C" fn nsh_package_free(package: *mut NshPackage) {
         drop(unsafe { Box::from_raw(package) });
     }
 }
+
+/// What nsh calls on a component the embedding app made (Swift
+/// `NshComponent`). Every function gets the handle `create` returned.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NshComponentCallbacks {
+    /// Makes a component for an element; takes `context` (free it with
+    /// [`nsh_component_context_free`]). Returns its handle.
+    pub create: unsafe extern "C" fn(
+        factory: *mut c_void,
+        context: *mut NshComponentContext,
+    ) -> *mut c_void,
+    /// The component's view (owned by the component).
+    pub view: unsafe extern "C" fn(component: *mut c_void) -> *mut UIView,
+    /// Prop `name` changed: its JSON, or `NULL` when removed.
+    pub set_prop:
+        unsafe extern "C" fn(component: *mut c_void, name: *const c_char, json: *const c_char),
+    /// JS called `ref.command(name, args)`; `json` is the arguments.
+    pub command:
+        unsafe extern "C" fn(component: *mut c_void, name: *const c_char, json: *const c_char),
+    /// The element is gone: release the component.
+    pub destroy: unsafe extern "C" fn(component: *mut c_void),
+    /// The registration is replaced or the app destroyed: release `factory`.
+    pub release_factory: Option<unsafe extern "C" fn(factory: *mut c_void)>,
+}
+
+/// What a component tells its app (opaque to C): owned by the component.
+pub struct NshComponentContext(crate::ComponentContext);
+
+/// A registration: the factory pointer and its callbacks.
+struct CFactory {
+    factory: *mut c_void,
+    callbacks: NshComponentCallbacks,
+}
+
+impl Drop for CFactory {
+    fn drop(&mut self) {
+        if let Some(release) = self.callbacks.release_factory {
+            // SAFETY: the contract of `nsh_app_register_component`.
+            unsafe { release(self.factory) };
+        }
+    }
+}
+
+/// A component made through C callbacks.
+struct CComponent {
+    handle: *mut c_void,
+    callbacks: NshComponentCallbacks,
+    view: objc2::rc::Retained<UIView>,
+}
+
+impl crate::NativeComponent for CComponent {
+    fn view(&self) -> &UIView {
+        &self.view
+    }
+
+    fn set_prop(&mut self, name: &str, value: Option<&nsh_core::JsonValue>) {
+        let name = CString::new(name).unwrap_or_default();
+        let json = value.map(|v| CString::new(v.to_string()).unwrap_or_default());
+        // SAFETY: the contract of `nsh_app_register_component`.
+        unsafe {
+            (self.callbacks.set_prop)(
+                self.handle,
+                name.as_ptr(),
+                json.as_ref().map_or(std::ptr::null(), |j| j.as_ptr()),
+            )
+        };
+    }
+
+    fn command(&mut self, name: &str, args: &nsh_core::JsonValue) {
+        let name = CString::new(name).unwrap_or_default();
+        let json = CString::new(args.to_string()).unwrap_or_default();
+        // SAFETY: the contract of `nsh_app_register_component`.
+        unsafe { (self.callbacks.command)(self.handle, name.as_ptr(), json.as_ptr()) };
+    }
+}
+
+impl Drop for CComponent {
+    fn drop(&mut self) {
+        // SAFETY: the contract of `nsh_app_register_component`.
+        unsafe { (self.callbacks.destroy)(self.handle) };
+    }
+}
+
+/// Registers native component `name` (`nativeComponent(name, ...)` in JS):
+/// `callbacks.create(factory, context)` makes one for every element created
+/// from now on.
+///
+/// # Safety
+///
+/// `app` must come from [`nsh_app_create`]; `name` must be a NUL-terminated
+/// string; the callbacks must be safe to call on the main thread with
+/// `factory` (and the handles `create` returns) until `release_factory`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_app_register_component(
+    app: *mut NshApp,
+    name: *const c_char,
+    factory: *mut c_void,
+    callbacks: *const NshComponentCallbacks,
+) {
+    // SAFETY: guaranteed by the caller.
+    let (app, name, callbacks) = unsafe { (&*app, CStr::from_ptr(name), *callbacks) };
+    let Ok(name) = name.to_str() else {
+        return log::error!("component name is not UTF-8");
+    };
+    let registration = std::rc::Rc::new(CFactory { factory, callbacks });
+    app.view.register_component(
+        name,
+        std::rc::Rc::new(move |context| {
+            let context = Box::into_raw(Box::new(NshComponentContext(context)));
+            let r = &registration;
+            // SAFETY: guaranteed by the caller of `nsh_app_register_component`.
+            let handle = unsafe { (r.callbacks.create)(r.factory, context) };
+            // SAFETY: as above; the component owns its view.
+            let view = unsafe { objc2::rc::Retained::retain((r.callbacks.view)(handle)) }
+                .expect("a component's view");
+            Box::new(CComponent {
+                handle,
+                callbacks: r.callbacks,
+                view,
+            })
+        }),
+    );
+}
+
+/// Emits event `name` with `json` data (`NULL`: no data); the JS handler
+/// `on<Name>` gets it. Any thread.
+///
+/// # Safety
+///
+/// `context` must be a live context from `create`; the strings
+/// NUL-terminated (`json` valid JSON or `NULL`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_component_emit(
+    context: *const NshComponentContext,
+    name: *const c_char,
+    json: *const c_char,
+) {
+    // SAFETY: guaranteed by the caller.
+    let (context, name) = unsafe { (&*context, CStr::from_ptr(name)) };
+    let data = if json.is_null() {
+        nsh_core::JsonValue::Null
+    } else {
+        // SAFETY: guaranteed by the caller.
+        let json = unsafe { CStr::from_ptr(json) }.to_string_lossy();
+        serde_json::from_str(&json).unwrap_or_else(|err| {
+            log::error!("component event data is not JSON: {err}");
+            nsh_core::JsonValue::Null
+        })
+    };
+    context.0.emit(&name.to_string_lossy(), data);
+}
+
+/// The component's own size (points), used where its style leaves a
+/// dimension open. Any thread.
+///
+/// # Safety
+///
+/// `context` must be a live context from `create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_component_set_size(
+    context: *const NshComponentContext,
+    width: f64,
+    height: f64,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { &*context }.0.set_size(width as f32, height as f32);
+}
+
+/// Frees a component's context.
+///
+/// # Safety
+///
+/// `context` must come from `create` and not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_component_context_free(context: *mut NshComponentContext) {
+    if !context.is_null() {
+        // SAFETY: guaranteed by the caller.
+        drop(unsafe { Box::from_raw(context) });
+    }
+}

@@ -10,11 +10,15 @@ import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import com.longbridge.nsh.NshComponent;
+import com.longbridge.nsh.NshComponentContext;
 import com.longbridge.nsh.NshView;
 
 /**
  * An existing Android app that embeds a nsh app below its own native UI.
- * The nsh bundle (`nsh build`) is packaged as APK assets under `nsh/`.
+ * The nsh bundle (`nsh build ../embedded/App.tsx`) is packaged as APK
+ * assets under `nsh/`; it uses a native component the app registers
+ * (`embed.badge`).
  */
 public final class MainActivity extends Activity {
     private NshView nsh;
@@ -54,6 +58,7 @@ public final class MainActivity extends Activity {
         frame.setPadding(Math.round(2 * d), Math.round(2 * d), Math.round(2 * d), Math.round(2 * d));
         nsh = new NshView(this);
         nsh.setErrorListener(message -> Log.e("embed-demo", message));
+        nsh.registerComponent("embed.badge", context -> new Badge(this, context));
         frame.addView(nsh, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         column.addView(frame, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
@@ -66,5 +71,48 @@ public final class MainActivity extends Activity {
     protected void onDestroy() {
         nsh.destroy();
         super.onDestroy();
+    }
+
+    /** {@code embed.badge}: a native label the nsh app lays out. Props {@code text}, {@code color}; emits {@code tap}; command {@code pulse}. */
+    private static final class Badge implements NshComponent {
+        private final TextView label;
+        private final NshComponentContext context;
+        private final float density;
+        private int taps;
+
+        Badge(android.content.Context app, NshComponentContext context) {
+            this.context = context;
+            density = app.getResources().getDisplayMetrics().density;
+            label = new TextView(app);
+            label.setTextColor(Color.WHITE);
+            label.setTextSize(17);
+            label.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            label.setGravity(android.view.Gravity.CENTER);
+            label.setOnClickListener(v -> context.emit("tap", java.util.Collections.singletonMap("count", ++taps)));
+        }
+
+        @Override
+        public android.view.View view() {
+            return label;
+        }
+
+        @Override
+        public void setProp(String name, Object value) {
+            if (name.equals("text")) {
+                label.setText(value instanceof String ? (String) value : "");
+                // Sized to its text, with padding (dp).
+                label.measure(0, 0);
+                context.setSize(label.getMeasuredWidth() / density + 32, label.getMeasuredHeight() / density + 12);
+            } else if (name.equals("color")) {
+                label.setBackgroundColor(value instanceof String ? Color.parseColor((String) value) : 0xff8250df);
+            }
+        }
+
+        @Override
+        public void command(String name, Object args) {
+            if (!name.equals("pulse")) return;
+            label.setAlpha(0.3f);
+            label.animate().alpha(1).setDuration(600).start();
+        }
     }
 }

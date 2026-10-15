@@ -108,6 +108,41 @@ void nsh_app_run_package(NshApp *app, NshPackage *package);
 /// Frees a package that will not run.
 void nsh_package_free(NshPackage *_Nullable package);
 
+/// What a component tells its app (owned by the component).
+typedef struct NshComponentContext NshComponentContext;
+
+/// What nsh calls on a component the app made; every function gets the
+/// handle `create` returned. Main thread.
+typedef struct {
+    /// Makes a component for an element; takes `context`. Returns its handle.
+    void *_Nonnull (*_Nonnull create)(void *_Nullable factory, NshComponentContext *context);
+    /// The component's view (owned by the component).
+    UIView *_Nonnull (*_Nonnull view)(void *component);
+    /// Prop `name` changed: its JSON, or NULL when removed.
+    void (*_Nonnull set_prop)(void *component, const char *name, const char *_Nullable json);
+    /// JS called `ref.command(name, args)`; `json` is the arguments.
+    void (*_Nonnull command)(void *component, const char *name, const char *json);
+    /// The element is gone: release the component.
+    void (*_Nonnull destroy)(void *component);
+    /// The registration is replaced or the app destroyed: release `factory`.
+    void (*_Nullable release_factory)(void *_Nullable factory);
+} NshComponentCallbacks;
+
+/// Registers native component `name` (`nativeComponent(name, ...)` in JS)
+/// for the elements created from now on.
+void nsh_app_register_component(NshApp *app, const char *name, void *_Nullable factory,
+                                const NshComponentCallbacks *callbacks);
+
+/// Emits event `name` with `json` data (NULL: none). Any thread.
+void nsh_component_emit(const NshComponentContext *context, const char *name, const char *_Nullable json);
+
+/// The component's own size (points), used where its style leaves a
+/// dimension open. Any thread.
+void nsh_component_set_size(const NshComponentContext *context, double width, double height);
+
+/// Frees a component's context.
+void nsh_component_context_free(NshComponentContext *_Nullable context);
+
 #ifdef __cplusplus
 }
 #endif

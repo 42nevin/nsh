@@ -46,6 +46,11 @@ pub enum ViewKind {
     Canvas,
     /// A web view.
     WebView,
+    /// The container of a registered native component: the platform
+    /// creates the component in it ([`MountItem::Component`]) and fills it
+    /// with the component's view; decoration and frames are the
+    /// container's.
+    Native,
     /// A video player.
     Video,
 }
@@ -689,6 +694,23 @@ pub enum MountItem {
         id: NodeId,
         /// The options.
         config: ModalConfig,
+    },
+    /// Create the registered component `name` in a [`ViewKind::Native`]
+    /// container (right after its `Create`). Unknown names leave the
+    /// container empty.
+    Component {
+        /// The container.
+        id: NodeId,
+        /// The name it was registered by (`com.example.map`).
+        name: Arc<str>,
+    },
+    /// Properties of a registered native component that changed (all of
+    /// them after [`MountItem::Component`]); `None` removes one.
+    ComponentProps {
+        /// The container.
+        id: NodeId,
+        /// Name and value.
+        props: Vec<(Arc<str>, Option<crate::JsonValue>)>,
     },
     /// An imperative call (`focus()`, `scrollTo()`...).
     Command {

@@ -20,6 +20,7 @@ embed = []
 [dependencies]
 nsh-core.workspace = true
 nsh-engine.workspace = true
+serde_json.workspace = true
 log.workspace = true
 nsh-dev = { workspace = true, features = ["client"], optional = true }
 

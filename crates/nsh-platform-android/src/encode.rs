@@ -51,6 +51,8 @@ const SCROLL_BEHAVIOR: i32 = 25;
 const LAYOUT_DIRECTION: i32 = 26;
 const TRACK_STATES: i32 = 27;
 const CANVAS: i32 = 28;
+const COMPONENT: i32 = 29;
+const COMPONENT_PROPS: i32 = 30;
 
 /// An entry of the object table.
 pub(crate) enum Obj {
@@ -124,6 +126,7 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     // (as React Native).
                     ViewKind::InputAccessory => 0,
                     ViewKind::Canvas => 14,
+                    ViewKind::Native => 15,
                 });
             }
             MountItem::Insert {
@@ -400,6 +403,20 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     e.float(v);
                 }
             }
+            MountItem::Component { id, name } => {
+                e.int(COMPONENT);
+                e.int(id as i32);
+                e.string(name.to_string());
+            }
+            MountItem::ComponentProps { id, props } => {
+                e.int(COMPONENT_PROPS);
+                e.int(id as i32);
+                e.int(props.len() as i32);
+                for (name, value) in props {
+                    e.string(name.to_string());
+                    e.opt_string(value.map(|v| v.to_string()).as_deref());
+                }
+            }
             MountItem::Command { id, command } => {
                 e.int(COMMAND);
                 e.int(id as i32);
@@ -494,6 +511,11 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                         e.float(x);
                         e.float(y);
                         e.bool(animated);
+                    }
+                    Command::Native { name, args } => {
+                        e.int(21);
+                        e.string(name.to_string());
+                        e.string(args.to_string());
                     }
                     // Turned into a mount item / `ScrollTo` by the core.
                     Command::LayoutAnimation(_)

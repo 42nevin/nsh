@@ -225,6 +225,20 @@ pub(crate) fn decode<'js>(
                     "injectJavaScript" => Command::InjectJavaScript(string(&arg)?),
                     "postMessage" => Command::PostMessage(string(&arg)?),
                     "seek" => Command::Seek(arg.as_number().unwrap_or(0.0)),
+                    "native" => {
+                        let o = arg.as_object();
+                        let name = o
+                            .and_then(|o| o.get::<_, Option<String>>("name").ok().flatten())
+                            .unwrap_or_default();
+                        let args = match o.map(|o| o.get::<_, Value>("args")).transpose()? {
+                            Some(args) => to_json(&args)?,
+                            None => nsh_core::JsonValue::Null,
+                        };
+                        Command::Native {
+                            name: name.into(),
+                            args,
+                        }
+                    }
                     "statusBar" => {
                         let o = arg.as_object();
                         let flag = |key: &str| {
@@ -565,7 +579,20 @@ fn decode_prop<'js>(
     value: Value<'js>,
     warnings: &mut Warnings,
 ) -> rquickjs::Result<Option<Op>> {
+    // A registered native component's own props: `$name`, any JSON value.
+    if let Some(key) = name.strip_prefix('$') {
+        let value = if value.is_undefined() {
+            None
+        } else {
+            Some(to_json(&value)?)
+        };
+        return Ok(Some(Op::SetProp {
+            id,
+            prop: Prop::ComponentProp(key.into(), value),
+        }));
+    }
     let prop = match name {
+        "component" => Prop::Component(string(&value)?.into()),
         "style" => {
             let mut entries = Vec::new();
             style_entries(&value, &mut entries)?;
@@ -1549,5 +1576,88 @@ fn decode_composite(
             node: o.get::<_, f64>("node")? as nsh_anim::NodeId,
             driver: decode_driver(r, spec)?,
         },
+    })
+}
+
+/// Deepest nesting of a value sent to a native component.
+const JSON_DEPTH: usize = 64;
+/// Most entries (array items, object fields) in such a value.
+const JSON_ENTRIES: usize = 1 << 20;
+
+/// A JS value as JSON for a native component (like `JSON.stringify`:
+/// functions and symbols become `null`, non-finite numbers too). Values
+/// nested deeper than [`JSON_DEPTH`] or larger than [`JSON_ENTRIES`] throw.
+pub(crate) fn to_json<'js>(value: &Value<'js>) -> rquickjs::Result<nsh_core::JsonValue> {
+    let mut entries = 0;
+    json(value, 0, &mut entries)
+}
+
+fn json<'js>(
+    value: &Value<'js>,
+    depth: usize,
+    entries: &mut usize,
+) -> rquickjs::Result<nsh_core::JsonValue> {
+    use nsh_core::JsonValue as J;
+    let too_big = |ctx: &Ctx<'js>| {
+        Exception::throw_range(
+            ctx,
+            &format!(
+                "a native component value is nested deeper than {JSON_DEPTH} or has more than {JSON_ENTRIES} entries"
+            ),
+        )
+    };
+    if depth > JSON_DEPTH {
+        return Err(too_big(value.ctx()));
+    }
+    Ok(match value.type_of() {
+        Type::Bool => J::Bool(value.as_bool().unwrap_or(false)),
+        Type::Int => J::from(value.as_int().unwrap_or(0)),
+        Type::Float => {
+            let f = value.as_float().unwrap_or(0.0);
+            if f.fract() == 0.0 && f.abs() < 9.0e15 {
+                J::from(f as i64)
+            } else {
+                serde_json::Number::from_f64(f).map_or(J::Null, J::Number)
+            }
+        }
+        Type::String => J::String(
+            value
+                .as_string()
+                .map(|s| s.to_string())
+                .transpose()?
+                .unwrap_or_default(),
+        ),
+        Type::Array => {
+            let array = value.as_array().expect("array");
+            let mut out = Vec::with_capacity(array.len());
+            for item in array.iter::<Value>() {
+                *entries += 1;
+                if *entries > JSON_ENTRIES {
+                    return Err(too_big(value.ctx()));
+                }
+                out.push(json(&item?, depth + 1, entries)?);
+            }
+            J::Array(out)
+        }
+        Type::Object => {
+            let object = value.as_object().expect("object");
+            let mut out = serde_json::Map::new();
+            for entry in object.props::<String, Value>() {
+                let (key, item) = entry?;
+                *entries += 1;
+                if *entries > JSON_ENTRIES {
+                    return Err(too_big(value.ctx()));
+                }
+                if matches!(
+                    item.type_of(),
+                    Type::Undefined | Type::Function | Type::Symbol
+                ) {
+                    continue;
+                }
+                out.insert(key, json(&item, depth + 1, entries)?);
+            }
+            J::Object(out)
+        }
+        _ => J::Null,
     })
 }

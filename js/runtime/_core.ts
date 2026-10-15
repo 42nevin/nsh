@@ -75,6 +75,12 @@ export class YNode {
     command(this.id, "blur");
   }
 
+  /** Calls command `name` of a registered native component
+   * (`nsh/native`) with `args` (any JSON value). */
+  command(name: string, args?: unknown): void {
+    command(this.id, "native", { name, args });
+  }
+
   /** Scrolls a `<scroll>` or `List` to an offset. */
   scrollTo(options: { x?: number; y?: number; animated?: boolean }): void {
     command(this.id, "scrollTo", options);

@@ -654,6 +654,103 @@ fn image_uses_natural_size_and_aspect_ratio() {
 }
 
 #[test]
+fn native_components_get_their_name_props_and_size() {
+    let mut c = core();
+    let prop = |name: &str, value: Option<crate::JsonValue>| Op::SetProp {
+        id: 2,
+        prop: Prop::ComponentProp(name.into(), value),
+    };
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::Native,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Component("com.example.map".into()),
+            },
+            prop("zoom", Some(serde_json::json!(3))),
+            prop("center", Some(serde_json::json!({ "lat": 1.5, "lng": 2 }))),
+            style_op(2, &[("alignSelf", StyleValue::Str("flex-start"))]),
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    let at = |pred: &dyn Fn(&MountItem) -> bool| batch.items.iter().position(pred);
+    let create = at(&|i| {
+        matches!(
+            i,
+            MountItem::Create {
+                id: 2,
+                kind: ViewKind::Native
+            }
+        )
+    })
+    .unwrap();
+    let component =
+        at(&|i| matches!(i, MountItem::Component { id: 2, name } if &**name == "com.example.map"))
+            .unwrap();
+    let props = batch
+        .items
+        .iter()
+        .position(|i| matches!(i, MountItem::ComponentProps { id: 2, .. }))
+        .unwrap();
+    assert!(create < component && component < props);
+    let MountItem::ComponentProps { props: all, .. } = &batch.items[props] else {
+        unreachable!()
+    };
+    assert_eq!(all.len(), 2);
+    assert!(all.contains(&(
+        "center".into(),
+        Some(serde_json::json!({ "lat": 1.5, "lng": 2 }))
+    )));
+    // No size of its own yet.
+    assert_eq!(
+        frame_of(&batch, 2).map(|f| (f.width, f.height)),
+        Some((0.0, 0.0))
+    );
+
+    // Only what changed; removals as `None`.
+    apply(
+        &mut c,
+        vec![
+            prop("zoom", Some(serde_json::json!(4))),
+            prop("center", None),
+        ],
+    );
+    let batch = c.commit().unwrap();
+    let changed: Vec<_> = batch
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            MountItem::ComponentProps { id: 2, props } => Some(props.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        changed,
+        [vec![
+            ("zoom".into(), Some(serde_json::json!(4))),
+            ("center".into(), None)
+        ]]
+    );
+
+    // The size it reports lays it out.
+    c.set_component_size(2, Size::new(120.0, 40.0));
+    let batch = c.commit().unwrap();
+    assert_eq!(
+        frame_of(&batch, 2).map(|f| (f.width, f.height)),
+        Some((120.0, 40.0))
+    );
+}
+
+#[test]
 fn scroll_reports_content_size() {
     let mut c = core();
     let mut ops = vec![

@@ -27,6 +27,9 @@ mod text;
 mod transform;
 
 pub use nsh_anim;
+/// The values registered native components take and emit (props, events,
+/// command arguments): JSON.
+pub use serde_json::Value as JsonValue;
 
 pub use crate::{
     core::{ApplyError, Core, ListBind},

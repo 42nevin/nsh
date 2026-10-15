@@ -24,6 +24,7 @@ log.workspace = true
 jni.workspace = true
 nsh-core.workspace = true
 nsh-engine.workspace = true
+serde_json.workspace = true
 nsh-anim.workspace = true
 rustc-hash.workspace = true
 ttf-parser.workspace = true

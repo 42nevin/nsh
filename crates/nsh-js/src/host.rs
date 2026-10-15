@@ -547,6 +547,10 @@ fn payload_object<'js>(ctx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resu
                 obj.set(*key, payload_value(ctx, value)?)?;
             }
         }
+        EventPayload::Native { name, data } => {
+            obj.set("name", &**name)?;
+            obj.set("data", json_value(ctx, data)?)?;
+        }
         EventPayload::TextLayout(lines) => {
             let list = rquickjs::Array::new(ctx.clone())?;
             for (i, l) in lines.iter().enumerate() {
@@ -637,6 +641,31 @@ fn payload_object<'js>(ctx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resu
         }
     }
     Ok(obj.into_value())
+}
+
+/// JSON (a native component's event data) as a JS value.
+fn json_value<'js>(ctx: &Ctx<'js>, value: &nsh_core::JsonValue) -> rquickjs::Result<Value<'js>> {
+    use nsh_core::JsonValue as J;
+    Ok(match value {
+        J::Null => Value::new_null(ctx.clone()),
+        J::Bool(b) => Value::new_bool(ctx.clone(), *b),
+        J::Number(n) => Value::new_float(ctx.clone(), n.as_f64().unwrap_or(0.0)),
+        J::String(s) => rquickjs::String::from_str(ctx.clone(), s)?.into_value(),
+        J::Array(items) => {
+            let array = rquickjs::Array::new(ctx.clone())?;
+            for (i, item) in items.iter().enumerate() {
+                array.set(i, json_value(ctx, item)?)?;
+            }
+            array.into_value()
+        }
+        J::Object(fields) => {
+            let object = rquickjs::Object::new(ctx.clone())?;
+            for (key, item) in fields {
+                object.set(key.as_str(), json_value(ctx, item)?)?;
+            }
+            object.into_value()
+        }
+    })
 }
 
 fn payload_value<'js>(ctx: &Ctx<'js>, value: &PayloadValue) -> rquickjs::Result<Value<'js>> {

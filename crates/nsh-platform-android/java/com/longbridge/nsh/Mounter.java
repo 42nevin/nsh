@@ -55,6 +55,8 @@ final class Mounter {
     private static final int LAYOUT_DIRECTION = 26;
     private static final int TRACK_STATES = 27;
     private static final int CANVAS = 28;
+    private static final int COMPONENT = 29;
+    private static final int COMPONENT_PROPS = 30;
     /** The surface lays out right to left: native widgets mirror. */
     boolean rtl;
 
@@ -383,6 +385,22 @@ final class Mounter {
                     break;
                 }
                 case COMMAND: command(b, objects); break;
+                case COMPONENT: {
+                    int id = b.getInt();
+                    component(id, string(objects, b.getInt()));
+                    break;
+                }
+                case COMPONENT_PROPS: {
+                    View v = views.get(b.getInt());
+                    int count = b.getInt();
+                    NshComponent c = v instanceof ComponentBox ? ((ComponentBox) v).component : null;
+                    for (int i = 0; i < count; i++) {
+                        String name = string(objects, b.getInt());
+                        String json = string(objects, b.getInt());
+                        if (c != null) c.setProp(name, Json.parse(json));
+                    }
+                    break;
+                }
                 default:
                     throw new IllegalStateException("nsh: unknown mount opcode " + op);
             }
@@ -453,10 +471,29 @@ final class Mounter {
             case 12: v = new WebBox(context, this, id); break;
             case 13: v = new VideoBox(context, this, host, id); break;
             case 14: v = new CanvasBox(context, this, id); break;
+            case 15: v = new ComponentBox(context, this, id); break;
             default: v = new Box(context, this, id);
         }
         views.put(id, v);
         if (layoutAnimation != null) created.add(id);
+    }
+
+    /** The components the app registered ({@link NshView#registerComponent}). */
+    final java.util.Map<String, NshComponent.Factory> components = new java.util.HashMap<>();
+    private final java.util.Set<String> missingComponents = new java.util.HashSet<>();
+
+    /** Makes registered component {@code name} in box {@code id}. */
+    private void component(int id, String name) {
+        View v = views.get(id);
+        if (!(v instanceof ComponentBox)) return;
+        NshComponent.Factory factory = components.get(name);
+        if (factory == null) {
+            if (missingComponents.add(name)) {
+                android.util.Log.w("nsh", "no native component is registered as `" + name + "`: it renders an empty view");
+            }
+            return;
+        }
+        ((ComponentBox) v).attach(factory.create(new NshComponentContext(host, id)));
     }
 
     private static ViewGroup container(View parent) {
@@ -595,6 +632,7 @@ final class Mounter {
         if (v instanceof ImageBox) cancelImage((ImageBox) v);
         if (v instanceof WebBox) ((WebBox) v).destroy();
         if (v instanceof VideoBox) ((VideoBox) v).destroy();
+        if (v instanceof ComponentBox) ((ComponentBox) v).destroy();
         if (v == focused) focused = null;
         views.remove(id);
         headerItems.remove(id);
@@ -1636,6 +1674,14 @@ final class Mounter {
             case 16: {
                 int start = b.getInt(), end = b.getInt();
                 if (v instanceof InputBox) ((InputBox) v).select(start, end);
+                break;
+            }
+            case 21: {
+                String name = string(objects, b.getInt());
+                String json = string(objects, b.getInt());
+                if (v instanceof ComponentBox && ((ComponentBox) v).component != null) {
+                    ((ComponentBox) v).component.command(name, Json.parse(json));
+                }
                 break;
             }
             case 20: {

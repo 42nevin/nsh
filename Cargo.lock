@@ -1915,6 +1915,7 @@ dependencies = [
  "nsh-core",
  "rquickjs",
  "rustc-hash",
+ "serde_json",
  "thiserror 2.0.21",
  "url",
 ]
@@ -1945,6 +1946,7 @@ dependencies = [
  "nsh-dev",
  "nsh-engine",
  "rustc-hash",
+ "serde_json",
  "ttf-parser",
 ]
 
@@ -1969,6 +1971,7 @@ dependencies = [
  "objc2-quartz-core",
  "objc2-ui-kit",
  "rustc-hash",
+ "serde_json",
 ]
 
 [[package]]

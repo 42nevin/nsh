@@ -95,6 +95,18 @@ impl AppView {
         self.reconfigure(|options| options.granted = granted);
     }
 
+    /// Registers native component `name` (`nativeComponent(name, ...)` in
+    /// JS): `factory` makes one for every element. Applies to elements
+    /// created from now on.
+    pub fn register_component(&self, name: &str, factory: crate::ComponentFactory) {
+        self.inner
+            .state
+            .borrow()
+            .options
+            .components
+            .register(name, factory);
+    }
+
     /// The VM limits of the apps this view loads. Applies from the next
     /// [`AppView::load`].
     pub fn set_limits(&self, limits: nsh_engine::Limits) {

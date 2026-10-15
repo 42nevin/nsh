@@ -34,7 +34,8 @@ js/runtime/hot.js     Hot module replacement runtime of development bundles (mod
 js/ui/mobile/*.ts     The mobile UI, `nsh/ui/mobile` (`index.ts` re-exports the others): navigation, modals, safe areas,
                       the software keyboard, the status bar, system dialogs (see **JS modules**)
 js/vendor/solid-js/   Embedded solid-js (version in VERSION) and its type declarations (`types/`, `jsx.d.ts` replaced by nsh's)
-examples/             Example apps (gallery: a demo index, one module per demo; counter) and embedding samples (embed-ios, embed-android)
+examples/             Example apps (gallery: a demo index, one module per demo; counter), embedding samples (embed-ios, embed-android)
+                      and the app they run (embedded: uses a native component the samples register)
 ```
 
 Dependency direction: `nsh-core` ← `nsh-js` ← `nsh-engine` (also ← `nsh-package`) ← `nsh-platform-*` ← `nsh-ios-host` / `nsh-ios-app`; `nsh-cli` depends on `nsh-bundler`, `nsh-js` and `nsh-engine`. `nsh-core` must not depend on any platform or JS crate.
@@ -135,6 +136,7 @@ is no catch-all module, and moved APIs get no compatibility re-exports.
 | `nsh/image` | `Image.getSize`, `Image.prefetch` |
 | `nsh/gesture` | `PanResponder` |
 | `nsh/webview`, `nsh/video` | `WebView`, `Video` |
+| `nsh/native` | `nativeComponent(name, { props, events })`: a component for a native component the embedding app registered |
 | `nsh/ios` | `isAvailable`, `InputAccessoryView` |
 | `nsh/android` | `isAvailable`, `Toast`, `BackHandler`, `setStatusBarBackgroundColor` |
 | `nsh/renderer` | what compiled JSX calls (`createElement`, `insert`, `spread`, ...; the Solid compiler's `moduleName`) |
@@ -167,6 +169,7 @@ is no catch-all module, and moved APIs get no compatibility re-exports.
 | `Modal` (runtime) | presented UIViewController | `visible`, `animationType`, `transparent`, `onRequestClose` (controlled), `onShow`, `onDismiss`; `dismissible` (iOS sheets swipe away, Android back closes natively, then `onRequestClose` + `onDismiss`); `ios={{ presentationStyle, supportedOrientations }}` (`pageSheet` / `formSheet`), `android={{ statusBarTranslucent }}` (otherwise the content starts below the status bar) |
 | `InputAccessoryView` (`nsh/ios`) | `<inputaccessory>`: a NshView set as `inputAccessoryView` | `nativeID`; inputs name it with `ios={{ inputAccessoryViewID }}`. A layout root as wide as the window and as tall as its content; the core resolves the id (`InputConfig::accessory`). Renders nothing on Android |
 | `WebView` | WKWebView (WebKit loaded on first use) | `source` (`uri` / `html` + `baseUrl`), `injectedJavaScript(BeforeContentLoaded)`, `onMessage` (pages call `window.ReactNativeWebView.postMessage`), `onLoad*`, `onNavigationStateChange`; ref: `reload()`, `goBack()`, `goForward()`, `postMessage(data)`, `injectJavaScript(js)` |
+| `nativeComponent` (`nsh/native`) | `<native component>`: a `NshView` box filled by the registered component's view | see **Native components** below |
 | `Video` | AVPlayerLayer / AVPlayerViewController (AVFoundation loaded on first use) | `source`, `paused`, `muted`, `volume`, `rate`, `repeat`, `resizeMode`, `controls`, `onLoad` / `onProgress` / `onEnd` / `onBuffer` / `onError`; ref: `seek(seconds)` |
 
 On Android the same elements map to `Box` (ViewGroup), `TextBox`, `ImageBox`, `ScrollBox` (ScrollView), `InputBox` (EditText),
@@ -488,6 +491,19 @@ For code an app downloads (first-party updates, third-party mini apps): `nsh_pac
 - Embedding: iOS apps link `NativeShell.xcframework` and `import NativeShell` (Swift: `NshAppView`, a `UIView`;
   `NshTrust`, `NshPackage`, `NshLimits`, `NshError`); Android apps add `nsh.aar` and use `com.longbridge.nsh.NshView`.
   `*Dev` / `-dev` variants can also load from a dev server. See `examples/embed-*`.
+- **Native components** (`nsh/native`; `component.rs`, `ComponentBox.java`): the embedding app registers its own native
+  views by name — Swift `NshAppView.register(component:) { context in … }` (`NshComponent`: `view`, `setProp`,
+  `command`), Java `NshView.registerComponent(name, factory)` (`NshComponent`), Rust `AppView::register_component`
+  (`NativeComponent`) — one registry per view, no globals. JS declares one with `nativeComponent<P, E>(name, { props,
+  events })`; the element is a `<native>` leaf: `component` names it, each own prop goes as `$name` (any JSON value,
+  `nsh_core::JsonValue`, sent when it changes; `undefined` removes it), view props (style, classes, accessibility, `ref`)
+  stay the box's. The core sends `Create` (`ViewKind::Native`, a box decorated and placed like any view), then
+  `MountItem::Component { name }` and `ComponentProps` (all props, then the changed ones). The component fills the box,
+  emits events (`ComponentContext::emit` → `onNativeEvent` `{ name, data }` → the `on<Name>` handler) and may report
+  its own size (`set_size`; the leaf measures to it where the style leaves a dimension open, like an image's natural
+  size). `ref.command(name, args)` → `Command::Native`. Unknown names render an empty box (warned once). Props and events
+  cross the C ABI / JNI as JSON text (Swift `JSONSerialization`, Java `org.json` as maps and lists). Registered
+  components are the embedding app's own code: capabilities do not apply to them.
 - **The iOS SDK** (`crates/xtask/src/ios.rs`): per platform slice (device, simulator, Catalyst) a static
   `NativeShell.framework` whose binary is `nsh-platform-ios` with feature `embed` (built by `cargo rustc --crate-type
   staticlib`, so the hosts never build or export it) merged by `libtool` with the Swift module, compiled with library

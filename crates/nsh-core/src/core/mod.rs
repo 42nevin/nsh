@@ -69,6 +69,8 @@ mod dirty {
     pub(super) const SCROLL_BEHAVIOR: u32 = 1 << 15;
     /// Emit [`crate::MountItem::Canvas`].
     pub(super) const CANVAS: u32 = 1 << 16;
+    /// Emit [`crate::MountItem::ComponentProps`].
+    pub(super) const COMPONENT: u32 = 1 << 17;
 }
 
 /// A layout root other than the surface's: screens, modals and header
@@ -159,6 +161,7 @@ enum Kind {
     Canvas,
     WebView,
     Video,
+    Native,
 }
 
 impl Kind {
@@ -200,6 +203,7 @@ impl Kind {
             Kind::Canvas => ViewKind::Canvas,
             Kind::WebView => ViewKind::WebView,
             Kind::Video => ViewKind::Video,
+            Kind::Native => ViewKind::Native,
             Kind::View | Kind::Cell | Kind::RawText => ViewKind::View,
         }
     }
@@ -212,6 +216,15 @@ impl Kind {
             Kind::Text | Kind::Scroll | Kind::List | Kind::Cell | Kind::Screen | Kind::Modal
         )
     }
+}
+
+/// A registered native component: its name and properties, as JS set them.
+#[derive(Debug, Default)]
+struct ComponentState {
+    name: Option<Arc<str>>,
+    props: Vec<(Arc<str>, crate::JsonValue)>,
+    /// Properties changed since the last commit.
+    changed: Vec<Arc<str>>,
 }
 
 #[derive(Debug)]
@@ -327,6 +340,8 @@ struct Node {
     root: Option<Box<RootState>>,
     /// Switches, sliders, activity indicators, web views and videos.
     control: Option<Box<NativeProps>>,
+    /// A registered native component (`<native>`).
+    component: Option<Box<ComponentState>>,
     /// Recycling slot (or role) of a list cell.
     slot: Option<CellSlot>,
     /// Native values driven by gestures on the view.
@@ -419,6 +434,7 @@ impl Node {
                 _ => None,
             }
             .map(Box::new),
+            component: matches!(kind, Kind::Native).then(Box::default),
             slot: None,
             gestures: GestureValues::default(),
             created: false,
@@ -463,6 +479,8 @@ impl<P> TextContext<P> {
 enum LeafContext<P> {
     Text(TextContext<P>),
     Image(Option<Size>),
+    /// A registered native component's own size, once it reported one.
+    Native(Option<Size>),
 }
 
 /// A request for the JS runtime to render list items into cells.
@@ -720,6 +738,22 @@ impl<M: TextEngine> Core<M> {
         let Ok(key) = self.key(id) else { return };
         if let Some(scroll) = self.nodes[key as usize].scroll.as_mut() {
             scroll.zoom = scale;
+        }
+    }
+
+    /// A registered native component reported its own size: it is laid out
+    /// at it where its style leaves a dimension open.
+    pub fn set_component_size(&mut self, id: NodeId, size: Size) {
+        let Ok(key) = self.key(id) else { return };
+        let Some(layout) = self.nodes[key as usize].layout else {
+            return;
+        };
+        if let Some(LeafContext::Native(own)) = self.layout.get_node_context_mut(layout)
+            && *own != Some(size)
+        {
+            *own = Some(size);
+            self.layout.mark_dirty(layout).expect("taffy dirty");
+            self.needs_layout = true;
         }
     }
 
@@ -1053,6 +1087,7 @@ impl<M: TextEngine> Core<M> {
             Tag::Canvas => Kind::Canvas,
             Tag::WebView => Kind::WebView,
             Tag::Video => Kind::Video,
+            Tag::Native => Kind::Native,
         };
         let key = self.alloc(id, kind)?;
         let style = Style::default().layout;
@@ -1067,6 +1102,10 @@ impl<M: TextEngine> Core<M> {
             Kind::Image => self
                 .layout
                 .new_leaf_with_context(style.clone(), LeafContext::Image(None)),
+            // Sized by its style, else by the size the component reports.
+            Kind::Native => self
+                .layout
+                .new_leaf_with_context(style.clone(), LeafContext::Native(None)),
             // Inputs measure like a text block holding their text (or
             // placeholder).
             Kind::Input => self.layout.new_leaf_with_context(
@@ -1897,6 +1936,35 @@ impl<M: TextEngine> Core<M> {
                     flags |= dirty::SCROLL_BEHAVIOR;
                 }
             }
+            Prop::Component(name) => {
+                if let Some(component) = node.component.as_mut() {
+                    match &component.name {
+                        None => component.name = Some(name),
+                        Some(old) if *old != name => log::warn!(
+                            target: "js",
+                            "a native component cannot change from `{old}` to `{name}`; render a new element"
+                        ),
+                        Some(_) => {}
+                    }
+                }
+            }
+            Prop::ComponentProp(name, value) => {
+                if let Some(component) = node.component.as_mut() {
+                    let at = component.props.iter().position(|(k, _)| *k == name);
+                    match (at, value) {
+                        (Some(i), Some(v)) => component.props[i].1 = v,
+                        (None, Some(v)) => component.props.push((name.clone(), v)),
+                        (Some(i), None) => {
+                            component.props.swap_remove(i);
+                        }
+                        (None, None) => {}
+                    }
+                    if !component.changed.contains(&name) {
+                        component.changed.push(name);
+                    }
+                    flags |= dirty::COMPONENT;
+                }
+            }
             Prop::Native(prop) => {
                 if let NativeProp::Disabled(d) = prop {
                     // `disabled:` classes, on any element.
@@ -2384,6 +2452,18 @@ impl<M: TextEngine> Core<M> {
             id,
             kind: kind.view_kind(),
         });
+        if let Some(component) = self.nodes[key as usize].component.as_mut() {
+            match &component.name {
+                Some(name) => self.mount.push(MountItem::Component {
+                    id,
+                    name: name.clone(),
+                }),
+                None => log::warn!(target: "js", "a <native> element without `component`"),
+            }
+            // The new component gets every property.
+            component.changed = component.props.iter().map(|(k, _)| k.clone()).collect();
+            flags |= dirty::COMPONENT;
+        }
         if let Some(item) = self.creation_tracking(key) {
             self.mount.push(item);
         }
@@ -2562,6 +2642,23 @@ impl<M: TextEngine> Core<M> {
                     id,
                     config: Box::new(config),
                 });
+            }
+            if flags & dirty::COMPONENT != 0
+                && let Some(component) = self.nodes[key as usize].component.as_mut()
+                && !component.changed.is_empty()
+            {
+                let props = std::mem::take(&mut component.changed)
+                    .into_iter()
+                    .map(|name| {
+                        let value = component
+                            .props
+                            .iter()
+                            .find(|(k, _)| *k == name)
+                            .map(|(_, v)| v.clone());
+                        (name, value)
+                    })
+                    .collect();
+                self.mount.push(MountItem::ComponentProps { id, props });
             }
             let node = &self.nodes[key as usize];
             if flags & dirty::NATIVE != 0
@@ -3245,6 +3342,10 @@ impl<M: TextEngine> Core<M> {
                         Some(LeafContext::Image(Some(natural))) => {
                             image_size(*natural, known.width, known.height)
                         }
+                        Some(LeafContext::Native(Some(own))) => taffy::Size {
+                            width: known.width.unwrap_or(own.width),
+                            height: known.height.unwrap_or(own.height),
+                        },
                         _ => taffy::Size::ZERO,
                     },
                 )

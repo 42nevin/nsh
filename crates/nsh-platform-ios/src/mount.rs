@@ -60,6 +60,8 @@ enum Native {
     Canvas(Retained<crate::canvas::CanvasView>),
     Web(Box<WebHost>),
     Video(Box<VideoHost>),
+    /// A registered native component in its container.
+    Component(Box<crate::component::ComponentHost>),
 }
 
 impl Native {
@@ -79,6 +81,7 @@ impl Native {
             Native::Canvas(v) => v,
             Native::Web(w) => &w.view,
             Native::Video(v) => &v.view,
+            Native::Component(c) => &c.container,
         }
     }
 
@@ -90,6 +93,7 @@ impl Native {
             | Native::Image(v)
             | Native::HeaderItem(v)
             | Native::InputAccessory(v) => Some(v),
+            Native::Component(c) => Some(&c.container),
             Native::Canvas(v) => Some(v),
             Native::Text(t) => Some(t),
             Native::Stack(s) => Some(&s.container),
@@ -113,7 +117,8 @@ impl Native {
             | Native::InputAccessory(_)
             | Native::Canvas(_)
             | Native::Web(_)
-            | Native::Video(_) => decor::Kind::View,
+            | Native::Video(_)
+            | Native::Component(_) => decor::Kind::View,
             Native::Text(_) => decor::Kind::Text,
             Native::Image(_) => decor::Kind::Image,
             Native::Scroll(_) => decor::Kind::Scroll,
@@ -375,6 +380,8 @@ pub(crate) struct Mounter {
     rtl: bool,
     /// Sticky cells of lists, by list.
     sticky: rustc_hash::FxHashMap<NodeId, Vec<StickyCell>>,
+    /// The native components the app registered.
+    components: crate::component::Components,
     mtm: MainThreadMarker,
 }
 
@@ -386,6 +393,7 @@ impl Mounter {
         shared: SharedMounter,
         asset_base: Option<AssetBase>,
         access: std::sync::Arc<nsh_engine::Access>,
+        components: crate::component::Components,
     ) -> Self {
         let target = EventTarget::new(mtm, control.clone(), shared.clone());
         let target_for_link = target.clone();
@@ -431,6 +439,7 @@ impl Mounter {
             touch_listeners: 0,
             blocked_scrolls: Vec::new(),
             rtl: false,
+            components,
             mtm,
         }
     }
@@ -493,6 +502,12 @@ impl Mounter {
                         self.control.clone(),
                         self.access.clone(),
                     ))),
+                    ViewKind::Native => {
+                        Native::Component(Box::new(crate::component::ComponentHost {
+                            container: NshView::new(self.mtm),
+                            component: None,
+                        }))
+                    }
                     ViewKind::Video => Native::Video(Box::new(VideoHost::new(
                         self.mtm,
                         id,
@@ -949,12 +964,48 @@ impl Mounter {
                     input.set_content(content);
                 }
             }
+            MountItem::Component { id, name } => {
+                let made = self.components.make(&name, id, &self.control);
+                if let (
+                    Some(component),
+                    Some(Slot {
+                        native: Native::Component(host),
+                        ..
+                    }),
+                ) = (made, self.slot_mut(id))
+                {
+                    host.attach(component);
+                }
+            }
+            MountItem::ComponentProps { id, props } => {
+                if let Some(Slot {
+                    native: Native::Component(host),
+                    ..
+                }) = self.slot_mut(id)
+                    && let Some(component) = host.component.as_mut()
+                {
+                    for (name, value) in &props {
+                        component.set_prop(name, value.as_ref());
+                    }
+                }
+            }
             MountItem::Command { id, command } => self.command(id, command),
         }
         false
     }
 
     fn command(&mut self, id: NodeId, command: Command) {
+        if let Command::Native { name, args } = &command {
+            if let Some(Slot {
+                native: Native::Component(host),
+                ..
+            }) = self.slot_mut(id)
+                && let Some(component) = host.component.as_mut()
+            {
+                component.command(name, args);
+            }
+            return;
+        }
         let Some(s) = self.slot(id) else { return };
         match (command, &s.native) {
             (

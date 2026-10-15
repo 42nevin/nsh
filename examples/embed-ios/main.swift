@@ -1,9 +1,11 @@
 // An existing UIKit app that embeds a nsh app below its own native UI.
 //
-// Build: see README.md. The nsh bundle (`nsh build`) is copied into the app
-// as `nsh/bundle.qbc` (+ `nsh/assets`). "Load update" runs a signed package
-// (`nsh publish`) verified against a root key; a real app downloads the
-// package, here it ships as `nsh/update.nshpkg` with `nsh/root.pub`.
+// Build: see README.md. The nsh bundle (`nsh build ../embedded/App.tsx`) is
+// copied into the app as `nsh/bundle.qbc` (+ `nsh/assets`). The app registers
+// a native component the bundle uses (`embed.badge`). "Load update" runs a
+// signed package (`nsh publish`) verified against a root key; a real app
+// downloads the package, here it ships as `nsh/update.nshpkg` with
+// `nsh/root.pub`.
 
 import NativeShell
 import UIKit
@@ -49,6 +51,7 @@ final class EmbedController: UIViewController {
         app.layer.borderWidth = 2
         app.clipsToBounds = true
         app.onError = { [weak self] message in self?.status.text = "nsh error: \(message)" }
+        app.register(component: "embed.badge") { context in Badge(context) }
         view.addSubview(app)
 
         NSLayoutConstraint.activate([
@@ -100,6 +103,61 @@ final class EmbedController: UIViewController {
     override var prefersStatusBarHidden: Bool { NshAppView.prefersStatusBarHidden }
     override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation {
         NshAppView.preferredStatusBarUpdateAnimation
+    }
+}
+
+/// `embed.badge`: a native label the nsh app lays out (`nativeComponent`).
+/// Props `text` and `color`; emits `tap` with the count; command `pulse`.
+final class Badge: NshComponent {
+    let view = UIView()
+    private let label = UILabel()
+    private let context: NshComponentContext
+    private var taps = 0
+
+    init(_ context: NshComponentContext) {
+        self.context = context
+        label.textColor = .white
+        label.font = .boldSystemFont(ofSize: 17)
+        label.textAlignment = .center
+        label.frame = view.bounds
+        label.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(label)
+        view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
+    }
+
+    func setProp(_ name: String, _ value: Any?) {
+        switch name {
+        case "text":
+            label.text = value as? String
+            // Sized to its text, with padding.
+            let size = label.intrinsicContentSize
+            context.setSize(CGSize(width: size.width + 32, height: size.height + 20))
+        case "color":
+            view.backgroundColor = (value as? String).flatMap(UIColor.init(hex:)) ?? .systemPurple
+        default:
+            break
+        }
+    }
+
+    func command(_ name: String, _ args: Any?) {
+        guard name == "pulse" else { return }
+        view.alpha = 0.3
+        UIView.animate(withDuration: 0.6) { self.view.alpha = 1 }
+    }
+
+    @objc private func tapped() {
+        taps += 1
+        context.emit("tap", ["count": taps])
+    }
+}
+
+extension UIColor {
+    /// `#rrggbb`.
+    convenience init?(hex: String) {
+        guard hex.hasPrefix("#"), hex.count == 7, let v = UInt32(hex.dropFirst(), radix: 16) else { return nil }
+        self.init(
+            red: CGFloat((v >> 16) & 0xff) / 255, green: CGFloat((v >> 8) & 0xff) / 255,
+            blue: CGFloat(v & 0xff) / 255, alpha: 1)
     }
 }
 
