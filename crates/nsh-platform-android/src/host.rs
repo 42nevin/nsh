@@ -728,6 +728,7 @@ extern "system" fn Java_com_longbridge_nsh_Native_environment(
     environment.reduce_motion = v[8] != 0.0;
     environment.pixel_ratio = v[9];
     environment.screen_reader = v[10] != 0.0;
+    environment.os = nsh_engine::Os::Android;
     environment.os_version = (v[11] as u16, 0);
     environment.idiom = match v[12] as u8 {
         1 => Idiom::Pad,

@@ -515,17 +515,10 @@ fn environment_object<'js>(ctx: &Ctx<'js>, env: &Environment) -> rquickjs::Resul
     obj.set("reduceMotion", env.reduce_motion)?;
     obj.set("pixelRatio", env.pixel_ratio)?;
     obj.set("screenReader", env.screen_reader)?;
-    obj.set(
-        "os",
-        if cfg!(target_os = "android") {
-            "android"
-        } else {
-            "ios"
-        },
-    )?;
+    obj.set("os", env.os.name())?;
     // React Native: a string on iOS ("17.5"), the API level on Android.
     let (major, minor) = env.os_version;
-    if cfg!(target_os = "android") {
+    if env.os == crate::Os::Android {
         obj.set("osVersion", major)?;
     } else {
         obj.set("osVersion", format!("{major}.{minor}"))?;
@@ -537,6 +530,7 @@ fn environment_object<'js>(ctx: &Ctx<'js>, env: &Environment) -> rquickjs::Resul
             Idiom::Pad => "pad",
             Idiom::Mac => "mac",
             Idiom::Tv => "tv",
+            Idiom::Desktop => "desktop",
         },
     )?;
     Ok(obj.into_value())

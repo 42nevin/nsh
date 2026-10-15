@@ -26,6 +26,7 @@ use nsh_core::{
 };
 pub use nsh_js::{
     BYTECODE_VERSION, ColorScheme, Environment, HttpRequest, HttpResponse, Idiom, Insets, Limits,
+    Os,
 };
 use nsh_js::{Host, HostOptions, JsError, NetworkQueue, RequestId};
 /// Signed packages, release-key certificates, revocations and trust stores.

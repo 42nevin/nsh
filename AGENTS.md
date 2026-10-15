@@ -142,9 +142,9 @@ is no catch-all module, and moved APIs get no compatibility re-exports.
 
 - **Platform modules** are importable on both platforms (one bundle runs on both); on the other one their calls do
   nothing and their components render nothing. `isAvailable` tells which.
-- **Platform-only props** are grouped: `ios={{…}}` / `android={{…}}` on elements and components (`IOSProps` /
-  `AndroidProps` in `types.ts`, extended per element). The renderer (`platformProps` in `_core.ts`) sends only the current
-  platform's object, each key as a prop of its own (keys removed from the object are cleared); the core knows them by
+- **Platform-only props** are grouped: `ios={{…}}` / `android={{…}}` / `desktop={{…}}` (macOS, Windows, Linux) on
+  elements and components (`IOSProps` / `AndroidProps` / `DesktopProps` in `types.ts`, extended per element). The
+  renderer (`platformProps` in `_core.ts`) sends only the current platform's object, each key as a prop of its own (keys removed from the object are cleared); the core knows them by
   those names. Android: `ripple`, `elevation`, `accessibilityLiveRegion`, Modal `statusBarTranslucent`, StatusBar
   `backgroundColor`, Alert `cancelable`. iOS: input `inputAccessoryViewID` / `textContentType`, Screen `headerLargeTitle` /
   `headerBackTitle`, Modal `presentationStyle` / `supportedOrientations`, WebView `allowsBackForwardNavigationGestures`.
@@ -197,7 +197,9 @@ of that kind: with a listener the press is taken, and JS exits the app when no l
   on any view — the core shows the underlay as the background and fades the children while the platform reports the view
   pressed; `active:` classes. `KeyboardAvoidingView` (`behavior`: `padding` → `insetPadding`, `height` → `insetMargin`,
   `position` → an inner view moved up; `keyboardVerticalOffset`).
-- **Platform modules**: `Platform` (`OS`, `Version`, `isPad`, `isTV`, `isMacCatalyst`, `select`), `PixelRatio`, `AccessibilityInfo` (`isScreenReaderEnabled`,
+- **Platform modules**: `Platform` (`OS`: `ios` / `android` / `macos` / `windows` / `linux`, from the platform's
+  `Environment::os` (`nsh_engine::Os`; the default is the build's mobile OS, so `nsh trace` is iOS); `isDesktop`,
+  `Version`, `isPad`, `isTV`, `isMacCatalyst`, `select` (the OS, then `mobile` / `desktop`, `native`, `default`)), `PixelRatio`, `AccessibilityInfo` (`isScreenReaderEnabled`,
   `isReduceMotionEnabled`, `addEventListener("screenReaderChanged" | "reduceMotionChanged")`, `announceForAccessibility`,
   `setAccessibilityFocus(ref)`), reactive `screenReaderEnabled()` / `reduceMotion()`. The environment carries `pixelRatio`,
   `screenReader`, `osVersion` and `idiom` (VoiceOver / TalkBack changes are observed natively).

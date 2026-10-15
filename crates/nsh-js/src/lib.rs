@@ -23,7 +23,7 @@ mod web;
 
 pub use crate::{
     bytecode::{BUNDLE_NAME, BYTECODE_VERSION, compile_bytecode},
-    env::{ColorScheme, Environment, Idiom, Insets},
+    env::{ColorScheme, Environment, Idiom, Insets, Os},
     error::JsError,
     host::{ErrorHandler, Host, HostOptions, TextMeasurer},
     net::{HttpRequest, HttpResponse, NetworkQueue, RequestId},

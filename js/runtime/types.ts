@@ -375,14 +375,19 @@ export interface CommonProps extends TouchProps {
   importantForAccessibility?: "auto" | "yes" | "no" | "no-hide-descendants";
   accessibilityActions?: { name: string; label?: string }[];
   onAccessibilityAction?: (e: { actionName: string }) => void;
-  /** iOS-only props (ignored on Android). */
+  /** iOS-only props (ignored elsewhere). */
   ios?: IOSProps;
-  /** Android-only props (ignored on iOS). */
+  /** Android-only props (ignored elsewhere). */
   android?: AndroidProps;
+  /** Desktop-only props (macOS, Windows, Linux; ignored on mobile). */
+  desktop?: DesktopProps;
 }
 
 /** iOS-only props of every element (`ios={{…}}`); elements add their own. */
 export interface IOSProps {}
+
+/** Desktop-only props of every element (`desktop={{…}}`); elements add their own. */
+export interface DesktopProps {}
 
 /** Android-only props of every element (`android={{…}}`). */
 export interface AndroidProps {

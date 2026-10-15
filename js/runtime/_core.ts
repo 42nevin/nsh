@@ -242,7 +242,10 @@ const renderer = createRenderer<YNode>({
     return node.isText;
   },
   setProperty(node: YNode, name: string, value: any, prev?: any) {
-    if ((name === "ios" || name === "android") && (value === null || typeof value === "object" || value === undefined)) {
+    if (
+      (name === "ios" || name === "android" || name === "desktop") &&
+      (value === null || typeof value === "object" || value === undefined)
+    ) {
       platformProps(node, name, value, prev);
       return;
     }
@@ -347,10 +350,11 @@ export function render(code: () => any, element: YNode): () => void {
   return dispose;
 }
 
-/** `ios={{…}}` / `android={{…}}`: the props of this platform only, each set
- * (or cleared) on its own; the other platform's object is ignored. */
-function platformProps(node: YNode, name: "ios" | "android", value: any, prev: any) {
-  if (name !== os) return;
+/** `ios={{…}}` / `android={{…}}` / `desktop={{…}}`: the props of this
+ * platform only, each set (or cleared) on its own; the other platforms'
+ * objects are ignored. */
+function platformProps(node: YNode, name: "ios" | "android" | "desktop", value: any, prev: any) {
+  if (name === "desktop" ? !desktop : name !== os) return;
   if (prev) {
     for (const key in prev) if (!value || !(key in value)) renderer.setProp(node, key, undefined, prev[key]);
   }
@@ -392,6 +396,9 @@ export interface Insets {
 }
 
 /** What the platform reports about the surface; see the accessors below. */
+/** An operating system (`Platform.OS`). */
+export type OS = "ios" | "android" | "macos" | "windows" | "linux";
+
 export interface Environment {
   window: { width: number; height: number };
   safeArea: Insets;
@@ -403,9 +410,9 @@ export interface Environment {
   reduceMotion: boolean;
   pixelRatio: number;
   screenReader: boolean;
-  os: "ios" | "android";
+  os: OS;
   osVersion: string | number;
-  idiom: "phone" | "pad" | "mac" | "tv";
+  idiom: "phone" | "pad" | "mac" | "tv" | "desktop";
 }
 
 const [environmentSignal, setEnvironment] = createSignal<Environment>((globalThis as any).__nsh_env_value, {
@@ -453,7 +460,9 @@ export const reduceMotion: Accessor<boolean> = parts[6];
 /** The environment when the bundle started (platform constants). */
 export const initialEnvironment: Environment = untrack(environment);
 /** The platform this bundle runs on. */
-export const os: "ios" | "android" = initialEnvironment.os;
+export const os: OS = initialEnvironment.os;
+/** It is a desktop OS (`desktop={{…}}` props apply). */
+export const desktop: boolean = os === "macos" || os === "windows" || os === "linux";
 
 // --- Right to left ------------------------------------------------------------
 

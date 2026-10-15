@@ -24,6 +24,51 @@ pub enum ColorScheme {
     Dark,
 }
 
+/// The operating system (`Platform.OS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    /// iOS, iPadOS, Mac Catalyst.
+    Ios,
+    /// Android.
+    Android,
+    /// macOS (a desktop backend).
+    MacOs,
+    /// Windows.
+    Windows,
+    /// Linux.
+    Linux,
+}
+
+impl Os {
+    /// Its `Platform.OS` name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Os::Ios => "ios",
+            Os::Android => "android",
+            Os::MacOs => "macos",
+            Os::Windows => "windows",
+            Os::Linux => "linux",
+        }
+    }
+
+    /// A desktop OS (`desktop={{…}}` props, `Platform.select({ desktop })`).
+    pub fn is_desktop(self) -> bool {
+        matches!(self, Os::MacOs | Os::Windows | Os::Linux)
+    }
+}
+
+impl Default for Os {
+    /// The mobile OS of this build (`nsh trace` behaves as iOS); desktop
+    /// backends set theirs.
+    fn default() -> Self {
+        if cfg!(target_os = "android") {
+            Os::Android
+        } else {
+            Os::Ios
+        }
+    }
+}
+
 /// The kind of device (React Native's `Platform.isPad`, `isTV`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Idiom {
@@ -36,6 +81,8 @@ pub enum Idiom {
     Mac,
     /// A TV.
     Tv,
+    /// A desktop computer (a desktop backend; Mac Catalyst is [`Idiom::Mac`]).
+    Desktop,
 }
 
 /// What the platform knows about the surface.
@@ -62,7 +109,10 @@ pub struct Environment {
     pub pixel_ratio: f32,
     /// A screen reader runs (VoiceOver, TalkBack).
     pub screen_reader: bool,
-    /// The OS version: iOS major and minor, Android's API level and 0.
+    /// The operating system.
+    pub os: Os,
+    /// The OS version: major and minor (iOS, desktops), Android's API level
+    /// and 0.
     pub os_version: (u16, u16),
     /// The kind of device.
     pub idiom: Idiom,
@@ -81,6 +131,7 @@ impl Default for Environment {
             reduce_motion: false,
             pixel_ratio: 1.0,
             screen_reader: false,
+            os: Os::default(),
             os_version: (0, 0),
             idiom: Idiom::Phone,
         }
