@@ -27,7 +27,7 @@ pub const TSCONFIG: &str = r#"{
     "types": [],
     "paths": {
       "nsh": ["./.nsh/types/nsh/index.d.ts"],
-      "nsh/jsx-runtime": ["./.nsh/types/nsh/jsx-runtime.d.ts"],
+      "nsh/*": ["./.nsh/types/nsh/*.d.ts"],
       "solid-js": ["./.nsh/types/solid-js/types/index.d.ts"],
       "solid-js/universal": ["./.nsh/types/solid-js/types/universal/index.d.ts"]
     }
@@ -112,30 +112,36 @@ fn declarations(source: &str) -> String {
     Codegen::new().build(&ret.program).code
 }
 
-/// The files of `.nsh/types`, as (path relative to it, contents).
-pub fn type_definitions() -> Vec<(&'static str, String)> {
-    let mut files = vec![
-        (
-            "nsh/index.d.ts",
-            declarations(crate::embedded::RUNTIME_SOURCE),
-        ),
-        (
-            "nsh/types.d.ts",
-            declarations(include_str!("../../../js/runtime/types.ts")),
-        ),
-        (
-            "nsh/jsx-runtime.d.ts",
-            "export type { JSX } from \"./types\";\n".to_owned(),
-        ),
-        (
-            "nsh/globals.d.ts",
-            include_str!("../../../js/runtime/globals.d.ts").to_owned(),
-        ),
-    ];
+/// The files of `.nsh/types`, as (path relative to it, contents): one
+/// declaration file per runtime file (`nsh/list.d.ts` for `nsh/list`; they
+/// import each other relatively, as the sources do).
+pub fn type_definitions() -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = crate::embedded::RUNTIME
+        .iter()
+        .map(|f| {
+            (
+                format!("nsh/{}.d.ts", f.file),
+                declarations(f.module.source),
+            )
+        })
+        .collect();
+    files.extend(
+        [
+            (
+                "nsh/jsx-runtime.d.ts",
+                "export type { JSX } from \"./types\";\n".to_owned(),
+            ),
+            (
+                "nsh/globals.d.ts",
+                include_str!("../../../js/runtime/globals.d.ts").to_owned(),
+            ),
+        ]
+        .map(|(path, text)| (path.to_owned(), text)),
+    );
     files.extend(
         SOLID_TYPES
             .iter()
-            .map(|(path, text)| (*path, (*text).to_owned())),
+            .map(|(path, text)| ((*path).to_owned(), (*text).to_owned())),
     );
     files
 }
@@ -144,10 +150,7 @@ pub fn type_definitions() -> Vec<(&'static str, String)> {
 mod tests {
     #[test]
     fn runtime_declarations_need_no_inference() {
-        for source in [
-            crate::embedded::RUNTIME_SOURCE,
-            include_str!("../../../js/runtime/types.ts"),
-        ] {
+        for source in crate::embedded::RUNTIME.iter().map(|f| f.module.source) {
             let allocator = super::Allocator::default();
             let parsed = super::Parser::new(&allocator, source, super::SourceType::ts()).parse();
             let ret = super::IsolatedDeclarations::new(
@@ -163,7 +166,7 @@ mod tests {
         assert!(
             files
                 .iter()
-                .any(|(p, t)| *p == "nsh/index.d.ts" && t.contains("export declare function List"))
+                .any(|(p, t)| p == "nsh/list.d.ts" && t.contains("export declare function List"))
         );
     }
 }

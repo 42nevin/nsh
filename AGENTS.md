@@ -18,13 +18,15 @@ crates/
   nsh-platform-apple/  UIKit backend (iOS / simulator / Mac Catalyst): native view mounting, CoreText text engine, input, AppView, standalone app;
                        feature `dev`: dev server client, log forwarding, error overlay
   nsh-platform-android/ Android backend: `libnsh.so` (JNI glue, StaticLayout text engine, batch encoding, UI-thread animator) + the Java
-                       runtime in `java/dev/nsh` (NshView, Mounter, views, images, networking); feature `dev` as above
+                       runtime in `java/com/longbridge/nsh` (NshView, Mounter, views, images, networking); feature `dev` as above
   nsh-host/            Development host app (Catalyst / iOS simulator); connects to a dev server or runs a local bundle
   nsh-app/             Release runner: the executable of iOS apps built by `nsh package`
   nsh-ffi/             C ABI (`include/nsh.h`, `libnsh.a`) for embedding nsh in existing iOS apps; shipped as an XCFramework
   nsh-cli/             The `nsh` command line: init / build / trace / dev / run / package
   xtask/               Maintainer tasks: `cargo xtask android` (Android runtime), `cargo xtask dist` (the distribution)
-js/runtime/index.ts   Solid universal renderer (JS side) and the runtime components (List, Stack, Modal, Canvas, ...), bundled by nsh-bundler
+js/runtime/*.ts       The JS runtime, one file per module apps import (see **JS modules**): `index.ts` is `nsh`, `list.ts` is
+                      `nsh/list`, ...; `_core.ts` is internal (the Solid universal renderer, the op buffer, the environment,
+                      touches, the engine's hooks), bundled by nsh-bundler
 js/runtime/types.ts   Style, element-prop and JSX types (types only; also the source of `.nsh/types/nsh/types.d.ts`)
 js/runtime/globals.d.ts  Declarations of the JS globals (console, timers, fetch, ...) and of asset imports
 js/runtime/hot.js     Hot module replacement runtime of development bundles (module registry, component proxies)
@@ -98,6 +100,43 @@ The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distributi
 `target/<triple>/<profile>` and `target/android/<profile>[-dev]` with the CLI's own profile (`NSH_RUNTIME` overrides).
 `.cargo/config.toml` sets `IPHONEOS_DEPLOYMENT_TARGET = 15.0` for Rust and C alike.
 
+## JS modules
+
+Apps import features from their own modules (`nsh-bundler/src/embedded.rs` maps the specifiers to the runtime's files;
+`.nsh/types/nsh/<module>.d.ts` declares each, found through the `nsh/*` path of the app's `tsconfig.json`). `nsh` itself
+only has rendering and the types; there is no catch-all module.
+
+| Module | Exports |
+|---|---|
+| `nsh` | `render`, `root`, `YNode`; the types of styles, element props, events and `JSX` |
+| `nsh/animated` | `createNativeValue`, `NativeValue`, `NativeNode`, `Animated`, `Easing`, `LayoutAnimation` |
+| `nsh/device` | `windowSize()`, `safeArea()`, `colorScheme()`, `fontScale()`, `Platform`, `PixelRatio`, `I18nManager` |
+| `nsh/keyboard` | `keyboard()`, `Keyboard.dismiss`, `KeyboardAvoidingView` |
+| `nsh/safe-area` | `SafeAreaView`, `useSafeAreaInsets` |
+| `nsh/accessibility` | `AccessibilityInfo`, `screenReaderEnabled()`, `reduceMotion()` |
+| `nsh/navigation` | `Stack`, `Screen`, `createNavigator`, `Modal` |
+| `nsh/list` | `List` |
+| `nsh/canvas` | `Canvas`, `Path2D`, `CanvasRenderingContext2D`, `CanvasGradient` |
+| `nsh/image` | `Image.getSize`, `Image.prefetch` |
+| `nsh/gesture` | `PanResponder` |
+| `nsh/system` | `StatusBar`, `Alert`, `ActionSheet` (a list dialog on Android) |
+| `nsh/webview`, `nsh/video` | `WebView`, `Video` |
+| `nsh/ios` | `isAvailable`, `InputAccessoryView` |
+| `nsh/android` | `isAvailable`, `Toast`, `BackHandler`, `setStatusBarBackgroundColor` |
+| `nsh/renderer` | what compiled JSX calls (`createElement`, `insert`, `spread`, ...; the Solid compiler's `moduleName`) |
+
+- **Platform modules** are importable on both platforms (one bundle runs on both); on the other one their calls do
+  nothing and their components render nothing. `isAvailable` tells which.
+- **Platform-only props** are grouped: `ios={{…}}` / `android={{…}}` on elements and components (`IOSProps` /
+  `AndroidProps` in `types.ts`, extended per element). The renderer (`platformProps` in `_core.ts`) sends only the current
+  platform's object, each key as a prop of its own (keys removed from the object are cleared); the core knows them by
+  those names. Android: `ripple`, `elevation`, `accessibilityLiveRegion`, Modal `statusBarTranslucent`, StatusBar
+  `backgroundColor`, Alert `cancelable`. iOS: input `inputAccessoryViewID` / `textContentType`, Screen `headerLargeTitle` /
+  `headerBackTitle`, Modal `presentationStyle` / `supportedOrientations`, WebView `allowsBackForwardNavigationGestures`.
+- Module-level code that must always run (the engine's hooks `__nsh_dispatch` / `__nsh_env`, the root's direction, the
+  Tailwind theme) lives in `_core.ts`; feature modules only run when imported (production bundles tree-shake the rest).
+  `_core.ts` recognizes native animation values by their `__nv` field, so it does not import `nsh/animated`.
+
 ## Elements and capabilities
 
 | JSX | Native (Apple) | Notes |
@@ -108,17 +147,17 @@ The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distributi
 | `<scroll>` | UIScrollView | `horizontal`, `refreshing` + `onRefresh`, `scrollValue`, `onScrollEnd`, `keyboardDismissMode`, zooming, see **Scrolling** below |
 | `Canvas` (runtime) | `<canvas>`: `CanvasView` (drawRect replay) | see **Canvas** below |
 | `List` (runtime) | UIScrollView + recycled cells | see **List** below |
-| `<input>` | UITextField / UITextView in a container | `value` / `defaultValue` / `onChangeText` / `onSubmitEditing` / `onFocus` / `onBlur`, `placeholder`, `secureTextEntry`, `keyboardType`, `returnKeyType`, `autoCapitalize`, `autoCorrect`, `multiline`, `maxLength`, `editable`, `autoFocus`, `selectionColor`, `blurOnSubmit`, `selection` + `onSelectionChange` (UTF-16 `start` / `end`), `onKeyPress` (`key`: the text, `Backspace`, `Enter`), `autoComplete` / `textContentType` (autofill), `caretHidden`, `onContentSizeChange` (the text's size, for growing inputs); ref `setSelection(start, end)` |
-| `Stack` / `Screen` (runtime) | UINavigationController | `createNavigator(route)`: `push` / `pop` / `popToTop` / `replace` / `reset`; screens keep their state while stacked; native header (`title`, `headerLeft` / `headerRight` / `headerTitle` elements, `headerLargeTitle`, `headerTransparent`, colors, `headerBackTitle`), swipe back |
-| `Modal` (runtime) | presented UIViewController | `visible`, `animationType`, `presentationStyle` (`pageSheet` / `formSheet` on iOS), `transparent`, `statusBarTranslucent` (Android; otherwise the content starts below the status bar), `supportedOrientations` (iOS), `onRequestClose` (controlled), `onShow`, `onDismiss` |
-| `InputAccessoryView` (runtime, iOS) | `<inputaccessory>`: a NshView set as `inputAccessoryView` | `nativeID`; inputs name it with `inputAccessoryViewID`. A layout root as wide as the window and as tall as its content; the core resolves the id (`InputConfig::accessory`). Renders nothing on Android (as React Native) |
+| `<input>` | UITextField / UITextView in a container | `value` / `defaultValue` / `onChangeText` / `onSubmitEditing` / `onFocus` / `onBlur`, `placeholder`, `secureTextEntry`, `keyboardType`, `returnKeyType`, `autoCapitalize`, `autoCorrect`, `multiline`, `maxLength`, `editable`, `autoFocus`, `selectionColor`, `blurOnSubmit`, `selection` + `onSelectionChange` (UTF-16 `start` / `end`), `onKeyPress` (`key`: the text, `Backspace`, `Enter`), `autoComplete` (autofill; `ios={{ textContentType }}` for iOS's names), `caretHidden`, `onContentSizeChange` (the text's size, for growing inputs); ref `setSelection(start, end)` |
+| `Stack` / `Screen` (runtime) | UINavigationController | `createNavigator(route)`: `push` / `pop` / `popToTop` / `replace` / `reset`; screens keep their state while stacked; native header (`title`, `headerLeft` / `headerRight` / `headerTitle` elements, `headerTransparent`, colors; `ios={{ headerLargeTitle, headerBackTitle }}`), swipe back |
+| `Modal` (runtime) | presented UIViewController | `visible`, `animationType`, `transparent`, `onRequestClose` (controlled), `onShow`, `onDismiss`; `ios={{ presentationStyle, supportedOrientations }}` (`pageSheet` / `formSheet`), `android={{ statusBarTranslucent }}` (otherwise the content starts below the status bar) |
+| `InputAccessoryView` (`nsh/ios`) | `<inputaccessory>`: a NshView set as `inputAccessoryView` | `nativeID`; inputs name it with `ios={{ inputAccessoryViewID }}`. A layout root as wide as the window and as tall as its content; the core resolves the id (`InputConfig::accessory`). Renders nothing on Android |
 | `WebView` | WKWebView (WebKit loaded on first use) | `source` (`uri` / `html` + `baseUrl`), `injectedJavaScript(BeforeContentLoaded)`, `onMessage` (pages call `window.ReactNativeWebView.postMessage`), `onLoad*`, `onNavigationStateChange`; ref: `reload()`, `goBack()`, `goForward()`, `postMessage(data)`, `injectJavaScript(js)` |
 | `Video` | AVPlayerLayer / AVPlayerViewController (AVFoundation loaded on first use) | `source`, `paused`, `muted`, `volume`, `rate`, `repeat`, `resizeMode`, `controls`, `onLoad` / `onProgress` / `onEnd` / `onBuffer` / `onError`; ref: `seek(seconds)` |
 
 On Android the same elements map to `Box` (ViewGroup), `TextBox`, `ImageBox`, `ScrollBox` (ScrollView), `InputBox` (EditText),
 `StackBox` (screens with a Toolbar, predictive back), `ModalHost` (a Dialog), `WebBox` (android.webkit.WebView) and `VideoBox`
 (MediaPlayer on a TextureView, MediaController); both are `WidgetBox`es. Every host element and runtime component is typed in
-`js/runtime/types.ts` / `index.ts`.
+`js/runtime/types.ts` and the runtime's modules.
 
 **Primitives only.** nsh provides the basic capabilities; components are the UI library's (built on nsh, separately), drawn with
 views, classes, canvases and native animations so they look the same on iOS and Android (like the gallery's `Toggle` in
@@ -159,7 +198,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
 - **Imperative calls**: nodes have `focus()`, `blur()` and `scrollTo({ x, y, animated })` (use `ref`); lists also
   `scrollToIndex({ index, viewPosition, viewOffset, animated })`, `scrollToEnd()`, `scrollToOffset()`; `Keyboard.dismiss()`.
   Commands run after the commit's other mount items; list scrolls are resolved by the core with the current item sizes.
-- **Touch** (React Native semantics): `pointerEvents`, `hitSlop`, `activeOpacity`, `delayLongPress`, `android_ripple`
+- **Touch** (React Native semantics): `pointerEvents`, `hitSlop`, `activeOpacity`, `delayLongPress`, `android={{ ripple }}`
   (`{ color, borderless, radius, foreground }`, Android only); press-in waits ~130ms inside scroll views; only the innermost
   pressable view responds. Nested `<text>` spans with press handlers
   are links: the core lists them in `AttributedText::links` (UTF-16 ranges) and the block's press recognizer routes a press to
@@ -178,7 +217,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
 - **Layout animation**: `LayoutAnimation.configureNext(config)` (or the `easeInEaseOut` / `linear` / `spring` presets) animates
   the next commit's frames, insertions and removals natively.
 - **Frames**: `requestAnimationFrame` / `cancelAnimationFrame` follow the display (CADisplayLink / Choreographer).
-- **Back button** (Android): `BackHandler.addEventListener("hardwareBackPress", ...)`, after modals and stacks; the app exits
+- **Back button** (`nsh/android`): `BackHandler.addEventListener("hardwareBackPress", ...)`, after modals and stacks; the app exits
   when nothing handles it.
 - **Zooming** (`<scroll>`, not lists): `maximumZoomScale` above `minimumZoomScale` makes the content zoomable; `zoomScale`
   zooms when it changes, `bouncesZoom`, `pinchGestureEnabled`, `centerContent` (content smaller than the viewport is centered);
@@ -196,7 +235,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   by `ScrollBehavior::snap_target` (core) on iOS and its Java port on Android, from the release offset, the projected glide and
   the velocity. Lists keep the visible rows in place when items are inserted above them (`splice`).
 - **System UI**: `StatusBar` (component and static methods; the last mounted wins, prop by prop), `Alert.alert`,
-  `ActionSheetIOS.showActionSheetWithOptions` (a list dialog on Android), `ToastAndroid`. Answers come back as the root's
+  `ActionSheet.show` (a list dialog on Android), `Toast` (`nsh/android`). Answers come back as the root's
   `onDialog` event. Embedding apps forward their controller's status bar to `nsh_status_bar_style()` / `_hidden()` / `_animation()`.
 - **Right to left**: `I18nManager` (`isRTL`, reactive; `allowRTL`, `forceRTL`, applied at once) sets the root's direction;
   `direction` (`inherit` / `ltr` / `rtl`) overrides it per view. The core resolves each node's direction (inherited, also for
@@ -267,7 +306,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   draw their own corners use `cornerCurve`), `overflow`, `opacity`,
   `transform` (translate / scale / rotate / rotateX / rotateY / skew / perspective, applied right to left like CSS; Android has no
   skew), `zIndex` (stable order of the native views), `shadowColor` / `shadowOffset` / `shadowOpacity` / `shadowRadius` (RN
-  defaults: offset `(0, -3)`, radius 3, opacity 0), `tintColor` (images), `elevation` (Android's material shadow, with
+  defaults: offset `(0, -3)`, radius 3, opacity 0), `tintColor` (images), `android={{ elevation }}` (a prop, not a style: Android's material shadow, with
   `shadowColor` from API 28), `transformOrigin` (keywords / percentages / lengths; iOS conjugates the matrix around it,
   Android sets the pivot), `backfaceVisibility` (iOS `doubleSided`; Android hides the view while its rotations turn it away). `style` may be an array of styles merged left to right
   (falsy entries skipped), decoded in Rust. Text adds `textShadowColor` / `textShadowOffset` / `textShadowRadius`,
@@ -345,7 +384,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   Android: an APK assembled without Gradle (`aapt2 link`, native libraries stored uncompressed and 16 KB aligned, `apksigner`;
   the debug key unless `--keystore`).
 - Embedding: iOS apps link `NativeShell.xcframework` and use the C API in `crates/nsh-ffi/include/nsh.h` (`import NativeShell` in Swift); Android apps
-  add `nsh.aar` and use `dev.nsh.NshView`. `*Dev` / `-dev` variants can also load from a dev server. See `examples/embed-*`.
+  add `nsh.aar` and use `com.longbridge.nsh.NshView`. `*Dev` / `-dev` variants can also load from a dev server. See `examples/embed-*`.
 
 ## TypeScript
 
@@ -353,7 +392,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   generated from the runtime sources with Oxc isolated declarations, `nsh/jsx-runtime.d.ts`, `nsh/globals.d.ts`, and solid-js's
   declarations. `nsh init` writes a `tsconfig.json` mapping `nsh`, `nsh/jsx-runtime` and `solid-js` there (`jsxImportSource: "nsh"`,
   no DOM library), so editors type-check apps without `node_modules`.
-- Exports of `js/runtime/index.ts` and `types.ts` need explicit types (isolated declarations cannot infer); a nsh-bundler test
+- Exports of the runtime's files need explicit types (isolated declarations cannot infer); a nsh-bundler test
   enforces it. Keep `types.ts` in sync with what `style.rs` and `protocol.rs` accept.
 - To check the declarations themselves, run `tsc -p .` in an app with `skipLibCheck` off (only solid's `hydration.d.ts`
   mentions the DOM `Element`).
@@ -442,7 +481,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   wrapped report.
 - **UIFont and CTFont are toll-free bridged**: the text engine gets system fonts with `UIFont::systemFontOfSize_weight` and uses them as
   CTFonts (verified by rendering). CoreText attributes must use CT keys (colors are CGColors), not UIKit's NSForegroundColor.
-- **Op buffer opcodes** are defined in both `js/runtime/index.ts` and `crates/nsh-js/src/protocol.rs` and must stay in sync.
+- **Op buffer opcodes** are defined in both `js/runtime/_core.ts` (and `animated.ts`, `canvas.ts`) and `crates/nsh-js/src/protocol.rs` and must stay in sync.
 - **Text nodes outside `<text>`** (e.g. empty placeholders of `<Show>` / `<For>`) create no native view and take no part in layout. A `<text>`
   nested in `<text>` is a span without a native view; the whole block is merged into one `AttributedText`.
 - **`TextSpan` offsets are UTF-16**, like NSAttributedString / Android Spannable.
@@ -505,7 +544,7 @@ or native support (`List`, `Stack`, `Modal`, `SafeAreaView`, `KeyboardAvoidingVi
   measures again. A layout of precomputed text does not draw `UnderlineSpan` / `StrikethroughSpan` (even ones set after
   `create`): runs carry a `TextLayouts.Decoration` marker and `TextBox` draws the lines. `Layout.Alignment` is relative to each
   paragraph's direction: absolute left / right alignment sets an `AlignmentSpan` per paragraph from its resolved direction.
-- **Android, JNI event maps intern their keys from a fixed list** (`Java_dev_nsh_Native_eventMap`): a new payload key must be
+- **Android, JNI event maps intern their keys from a fixed list** (`Java_com_longbridge_nsh_Native_eventMap`): a new payload key must be
   added there or it is dropped silently.
 - **Android, inputs**: `EditText` reconfiguration (input type, filters, single line) sets the same text again and fires
   `afterTextChanged`: only text that differs from the last known one counts as an edit, or JS values are rejected as stale.

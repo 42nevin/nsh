@@ -1019,8 +1019,10 @@ pub enum Prop {
     Image(ImageProp),
     /// `delayLongPress`: milliseconds before a press becomes a long press.
     LongPressDelay(Option<f32>),
-    /// `android_ripple`: Android's press ripple.
+    /// `android={{ ripple }}`: Android's press ripple.
     Ripple(Option<crate::props::Ripple>),
+    /// `android={{ elevation }}`: Android's material shadow (points).
+    Elevation(f32),
     /// An accessibility property.
     Accessibility(AccessibilityProp),
     /// `testID`.

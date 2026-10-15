@@ -341,6 +341,8 @@ struct Node {
     text_queued: bool,
     /// A list cell whose subtree was laid out again this commit.
     relaid: bool,
+    /// `android={{ elevation }}` (points).
+    elevation: f32,
     /// A text block: its attachments (inline views and images, in text
     /// order) whose native views are inside its own.
     attached: Vec<NodeId>,
@@ -364,6 +366,7 @@ impl Node {
     /// the size resolved with the current frame.
     fn mounted_view_style(&self) -> Box<ViewStyle> {
         let mut style = Box::new(self.view_style.clone());
+        style.elevation = self.elevation;
         if style.transform.has_fractions() {
             let (w, h) = if self.frame.width.is_nan() {
                 (0.0, 0.0)
@@ -421,6 +424,7 @@ impl Node {
             created: false,
             frame: Rect::UNSET,
             attached: Vec::new(),
+            elevation: 0.0,
             dirty: 0,
             queued: false,
             text_queued: false,
@@ -1610,6 +1614,13 @@ impl<M: TextEngine> Core<M> {
                     flags |= dirty::VIEW_PROPS;
                 }
             }
+            Prop::Elevation(value) => {
+                let value = value.max(0.0);
+                if node.elevation != value {
+                    node.elevation = value;
+                    flags |= dirty::VIEW;
+                }
+            }
             Prop::UnderlayColor(color) => {
                 let opacity = node
                     .underlay
@@ -2170,7 +2181,7 @@ impl<M: TextEngine> Core<M> {
         let kind = node.kind;
         // A new native view already has the default style and no listeners.
         let mut flags = 0;
-        if node.view_style != ViewStyle::default() {
+        if node.view_style != ViewStyle::default() || node.elevation != 0.0 {
             flags |= dirty::VIEW;
         }
         if !node.events.is_empty() {

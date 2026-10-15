@@ -270,7 +270,7 @@ pub enum AccessibilityProp {
     Actions(Vec<AccessibilityActionDef>),
 }
 
-/// Android's press ripple (`android_ripple`).
+/// Android's press ripple (`android={{ ripple }}`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Ripple {
     /// Ripple color; the theme's when `None`.

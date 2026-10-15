@@ -397,7 +397,8 @@ pub struct ViewStyle {
     pub transform: Transform,
     /// `tintColor`: recolors an image's opaque pixels.
     pub tint_color: Option<Color>,
-    /// `elevation`: Android's material shadow (points).
+    /// Android's material shadow (points): the node's `android={{ elevation }}`
+    /// prop, not a style.
     pub elevation: f32,
     /// `transformOrigin`: the point transforms act around.
     pub transform_origin: TransformOrigin,
@@ -1012,7 +1013,6 @@ style_keys! {
     BorderStyle = "borderStyle",
     BorderCurve = "borderCurve",
     TintColor = "tintColor",
-    Elevation = "elevation",
     BackfaceVisibility = "backfaceVisibility",
     TransformOrigin = "transformOrigin",
     Opacity = "opacity",
@@ -1784,7 +1784,6 @@ impl Style {
                 }
             }
             StyleKey::TintColor => self.view.tint_color = color(value)?,
-            StyleKey::Elevation => self.view.elevation = number(value, 0.0)?.max(0.0),
             StyleKey::BackfaceVisibility => {
                 self.view.backface_hidden = match keyword(value)? {
                     None | Some("visible") => false,

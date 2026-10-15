@@ -6,7 +6,8 @@ use std::{fs, path::Path};
 use anyhow::{Context as _, bail};
 
 const APP: &str = r##"import { createSignal } from "solid-js";
-import { render, root, SafeAreaView } from "nsh";
+import { render, root } from "nsh";
+import { SafeAreaView } from "nsh/safe-area";
 
 function App() {
   const [count, setCount] = createSignal(0);

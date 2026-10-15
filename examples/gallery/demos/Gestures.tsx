@@ -1,5 +1,7 @@
 import { createSignal, For } from "solid-js";
-import { createNativeValue, PanResponder, type GestureResponderEvent } from "nsh";
+import { type GestureResponderEvent } from "nsh";
+import { createNativeValue } from "nsh/animated";
+import { PanResponder } from "nsh/gesture";
 import { Button, colors, Section } from "../ui";
 
 /** Drag, pinch and rotate one card at the same time, all on the UI thread. */
@@ -137,14 +139,14 @@ export function Gestures() {
               onPress={() => add("ripple")}
               onLongPress={() => add("fast long press")}
               delayLongPress={250}
-              android_ripple={{ color: "rgba(9,105,218,0.3)" }}
+              android={{ ripple: { color: "rgba(9,105,218,0.3)" } }}
               style={{ flex: 1, padding: 14, borderRadius: 10, backgroundColor: "#f6f8fa", alignItems: "center" }}
             >
               <text>Ripple, long press 250 ms</text>
             </view>
             <view
               onPress={() => add("borderless")}
-              android_ripple={{ borderless: true, radius: 40 }}
+              android={{ ripple: { borderless: true, radius: 40 } }}
               style={{ width: 56, height: 56, alignItems: "center", justifyContent: "center" }}
             >
               <text style={{ fontSize: 22 }}>★</text>

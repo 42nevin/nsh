@@ -1,5 +1,8 @@
 import { createSignal, For, onCleanup } from "solid-js";
-import { ActionSheetIOS, Alert, colorScheme, fontScale, keyboard, safeArea, StatusBar, ToastAndroid, windowSize } from "nsh";
+import { Toast } from "nsh/android";
+import { colorScheme, fontScale, safeArea, windowSize } from "nsh/device";
+import { keyboard } from "nsh/keyboard";
+import { ActionSheet, Alert, StatusBar } from "nsh/system";
 import { Button, colors, Section } from "../ui";
 
 function Row(props: { label: string; value: string }) {
@@ -94,7 +97,7 @@ export function System() {
               Alert.alert("Delete the photo?", "This cannot be undone.", [
                 { text: "Cancel", style: "cancel", onPress: () => setAnswer("Cancel") },
                 { text: "Delete", style: "destructive", onPress: () => setAnswer("Delete") },
-              ], { cancelable: true, onDismiss: () => setAnswer("dismissed") })
+              ], { onDismiss: () => setAnswer("dismissed"), android: { cancelable: true } })
             }
           />
           <Button
@@ -112,13 +115,13 @@ export function System() {
             label="Action sheet"
             color="#1a7f37"
             onPress={() =>
-              ActionSheetIOS.showActionSheetWithOptions(
+              ActionSheet.show(
                 { title: "Share the photo", options: ["Cancel", "Copy link", "Save", "Delete"], cancelButtonIndex: 0, destructiveButtonIndex: 3 },
                 (i) => setAnswer(["Cancel", "Copy link", "Save", "Delete"][i] ?? String(i)),
               )
             }
           />
-          <Button label="Toast (Android)" color="#57606a" onPress={() => ToastAndroid.show("Hello from a toast", ToastAndroid.SHORT)} />
+          <Button label="Toast (Android)" color="#57606a" onPress={() => Toast.show("Hello from a toast", Toast.SHORT)} />
           <Row label="Answer" value={answer() || "–"} />
         </Section>
         <Section title="Frames and timers">

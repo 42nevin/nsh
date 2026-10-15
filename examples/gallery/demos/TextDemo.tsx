@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { fontScale } from "nsh";
+import { fontScale } from "nsh/device";
 import pacifico from "../fonts/Pacifico-Regular.ttf";
 import logo from "../logo@2x.png";
 

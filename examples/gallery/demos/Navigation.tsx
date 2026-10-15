@@ -1,5 +1,8 @@
 import { createSignal, For, onCleanup } from "solid-js";
-import { BackHandler, Modal, SafeAreaView, Screen, useSafeAreaInsets, type JSX } from "nsh";
+import { type JSX } from "nsh";
+import { BackHandler } from "nsh/android";
+import { Modal, Screen } from "nsh/navigation";
+import { SafeAreaView, useSafeAreaInsets } from "nsh/safe-area";
 import { nav } from "../nav";
 import { Button, colors, Section } from "../ui";
 
@@ -38,7 +41,7 @@ function Page(props: { children: JSX.Element }) {
 
 function LargeTitle() {
   return (
-    <Screen title="Large title" headerLargeTitle>
+    <Screen title="Large title" ios={{ headerLargeTitle: true }}>
       <Page>
         <text style={{ color: colors.muted }}>iOS: the title shrinks into the bar as the content scrolls.</text>
         <Filler count={20} />
@@ -190,7 +193,7 @@ export function Navigation() {
 
       <Modal
         visible={sheet() === "fullScreen" || sheet() === "pageSheet" || sheet() === "formSheet" || sheet() === "fade"}
-        presentationStyle={sheet() === "pageSheet" ? "pageSheet" : sheet() === "formSheet" ? "formSheet" : "fullScreen"}
+        ios={{ presentationStyle: sheet() === "pageSheet" ? "pageSheet" : sheet() === "formSheet" ? "formSheet" : "fullScreen" }}
         animationType={sheet() === "fade" ? "fade" : "slide"}
         onRequestClose={close}
       >

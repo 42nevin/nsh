@@ -1,5 +1,7 @@
 import { createSignal, For } from "solid-js";
-import { createNativeValue, I18nManager, List } from "nsh";
+import { createNativeValue } from "nsh/animated";
+import { I18nManager } from "nsh/device";
+import { List } from "nsh/list";
 
 const card = {
   width: 150,
@@ -251,7 +253,7 @@ export function Styles() {
       <view style={{ ...card, backgroundColor: "#1f2328", opacity: 0.45 }}>
         <text style={{ color: "#ffffff", fontWeight: "600" }}>opacity 0.45</text>
       </view>
-      <view style={{ ...card, borderRadius: 16, elevation: 10 }}>
+      <view android={{ elevation: 10 }} style={{ ...card, borderRadius: 16 }}>
         <Label>elevation 10 (Android)</Label>
       </view>
       <view style={{ ...card, backgroundColor: "transparent" }}>

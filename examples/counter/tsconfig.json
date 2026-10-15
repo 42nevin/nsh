@@ -13,7 +13,7 @@
     "types": [],
     "paths": {
       "nsh": ["./.nsh/types/nsh/index.d.ts"],
-      "nsh/jsx-runtime": ["./.nsh/types/nsh/jsx-runtime.d.ts"],
+      "nsh/*": ["./.nsh/types/nsh/*.d.ts"],
       "solid-js": ["./.nsh/types/solid-js/types/index.d.ts"],
       "solid-js/universal": ["./.nsh/types/solid-js/types/universal/index.d.ts"]
     }

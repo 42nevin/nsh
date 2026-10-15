@@ -16,7 +16,8 @@ impl MountSink for Sink {
 
 const APP: &str = r#"
 import { createSignal } from "solid-js";
-import { List, render, root } from "nsh";
+import { render, root } from "nsh";
+import { List } from "nsh/list";
 const [rows, setRows] = createSignal(Array.from({ length: 100 }, (_, i) => i));
 function App() {
   return (

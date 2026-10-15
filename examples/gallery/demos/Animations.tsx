@@ -1,5 +1,5 @@
 import { createSignal, For, Index } from "solid-js";
-import { Animated, createNativeValue, Easing, LayoutAnimation } from "nsh";
+import { Animated, createNativeValue, Easing, LayoutAnimation } from "nsh/animated";
 import { Button, colors, Section } from "../ui";
 
 const TRACK = 220;

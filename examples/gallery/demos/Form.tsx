@@ -1,15 +1,8 @@
 import { createSignal, For, splitProps } from "solid-js";
-import {
-  Keyboard,
-  keyboard,
-  KeyboardAvoidingView,
-  Modal,
-  SafeAreaView,
-  Screen,
-  useSafeAreaInsets,
-  type InputProps,
-  type YNode,
-} from "nsh";
+import { type InputProps, type YNode } from "nsh";
+import { Keyboard, keyboard, KeyboardAvoidingView } from "nsh/keyboard";
+import { Modal, Screen } from "nsh/navigation";
+import { SafeAreaView, useSafeAreaInsets } from "nsh/safe-area";
 import { nav } from "../nav";
 import { Button, colors, Section } from "../ui";
 
@@ -178,7 +171,7 @@ export function Form() {
         </view>
       </view>
 
-      <Modal visible={sheet()} presentationStyle="pageSheet" onRequestClose={() => setSheet(false)}>
+      <Modal visible={sheet()} ios={{ presentationStyle: "pageSheet" }} onRequestClose={() => setSheet(false)}>
         <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
           <scroll style={{ flex: 1 }} keyboardDismissMode="interactive">
             <view style={{ padding: 16, gap: 12 }}>

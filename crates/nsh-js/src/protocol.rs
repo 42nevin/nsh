@@ -838,8 +838,9 @@ fn decode_prop<'js>(
             Some(s) => Prop::TailwindTheme(s.to_string()?.into()),
             None => return Ok(None),
         },
+        "elevation" => Prop::Elevation(number(&value).unwrap_or(0.0)),
         "delayLongPress" => Prop::LongPressDelay(number(&value).map(|n| n.max(0.0))),
-        "android_ripple" => Prop::Ripple(match value.as_object() {
+        "ripple" => Prop::Ripple(match value.as_object() {
             Some(o) => {
                 let flag = |key: &str| {
                     o.get::<_, Option<bool>>(key)

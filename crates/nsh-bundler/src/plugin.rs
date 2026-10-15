@@ -24,7 +24,7 @@ use rolldown::{
     },
 };
 
-use crate::embedded::{self, RUNTIME_SPECIFIER};
+use crate::embedded::{self, RENDERER_SPECIFIER};
 
 /// Serves embedded packages and compiles JSX with the Solid universal
 /// compiler.
@@ -125,7 +125,8 @@ impl Plugin for NshPlugin {
         if args.specifier == THEME_SPECIFIER {
             return Ok(Some(HookResolveIdOutput::from_id(THEME_ID)));
         }
-        Ok(embedded::resolve(args.specifier).map(|m| HookResolveIdOutput::from_id(m.id)))
+        Ok(embedded::resolve(args.specifier, args.importer)
+            .map(|m| HookResolveIdOutput::from_id(m.id)))
     }
 
     async fn load(&self, _ctx: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> HookLoadReturn {
@@ -255,7 +256,7 @@ impl Plugin for NshPlugin {
             &jsx,
             &CompileOptions {
                 filename: Some(args.id.to_owned()),
-                module_name: RUNTIME_SPECIFIER.into(),
+                module_name: RENDERER_SPECIFIER.into(),
                 generate: Generate::Universal,
                 source_map: true,
                 ..CompileOptions::default()

@@ -1,5 +1,7 @@
 import { createSignal } from "solid-js";
-import { Video, WebView, type WebViewNavigation, type YNode } from "nsh";
+import { type YNode } from "nsh";
+import { Video } from "nsh/video";
+import { WebView, type WebViewNavigation } from "nsh/webview";
 import { Button, colors, Section } from "../ui";
 
 const page = `<!doctype html><html><head><meta name="viewport" content="width=device-width"></head>

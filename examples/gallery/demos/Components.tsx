@@ -1,17 +1,11 @@
 import { createSignal, For, Show } from "solid-js";
-import {
-  AccessibilityInfo,
-  InputAccessoryView,
-  KeyboardAvoidingView,
-  LayoutAnimation,
-  Modal,
-  PixelRatio,
-  Platform,
-  SafeAreaView,
-  Screen,
-  screenReaderEnabled,
-  reduceMotion,
-} from "nsh";
+import { AccessibilityInfo, reduceMotion, screenReaderEnabled } from "nsh/accessibility";
+import { LayoutAnimation } from "nsh/animated";
+import { PixelRatio, Platform } from "nsh/device";
+import { InputAccessoryView } from "nsh/ios";
+import { KeyboardAvoidingView } from "nsh/keyboard";
+import { Modal, Screen } from "nsh/navigation";
+import { SafeAreaView } from "nsh/safe-area";
 import { nav } from "../nav";
 import { Button as UiButton, colors, Section } from "../ui";
 
@@ -61,7 +55,7 @@ function PressableSheet() {
       >
         <text style={{ color: "#ffffff", fontWeight: "600" }}>Open a sheet</text>
       </view>
-      <Modal visible={sheet()} presentationStyle="pageSheet" animationType="slide" onRequestClose={() => setSheet(false)}>
+      <Modal visible={sheet()} ios={{ presentationStyle: "pageSheet" }} animationType="slide" onRequestClose={() => setSheet(false)}>
         <SafeAreaView style={{ flex: 1, backgroundColor: colors.surface, padding: 20, gap: 16 }}>
           <text style={{ fontSize: 24, fontWeight: "700" }}>A sheet</text>
           <text style={{ color: colors.muted }}>Swipe down (iOS) or press back (Android) to close.</text>
@@ -111,11 +105,11 @@ function Accessory() {
         value={text()}
         onChangeText={setText}
         placeholder="Focus me (iOS shows a bar over the keyboard)"
-        inputAccessoryViewID="counter"
+        ios={{ inputAccessoryViewID: "counter" }}
         style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8, fontSize: 16 }}
       />
       <Show when={Platform.OS === "android"}>
-        <text style={styles.muted}>Android has no input accessories (as React Native).</text>
+        <text style={styles.muted}>Android has no input accessories.</text>
       </Show>
       <InputAccessoryView nativeID="counter" backgroundColor="#f6f8fa">
         <view style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 8, borderTopWidth: hairline, borderTopColor: colors.border }}>
@@ -174,8 +168,8 @@ function ModalOptions() {
       <Modal
         visible={visible()}
         animationType="slide"
-        statusBarTranslucent={translucent()}
-        supportedOrientations={["portrait", "landscape"]}
+        android={{ statusBarTranslucent: translucent() }}
+        ios={{ supportedOrientations: ["portrait", "landscape"] }}
         onRequestClose={() => setVisible(false)}
       >
         <view style={{ flex: 1, backgroundColor: "#fff8c5" }}>

@@ -1,5 +1,5 @@
 import { createSignal, For, Index } from "solid-js";
-import { Image } from "nsh";
+import { Image } from "nsh/image";
 import bounce from "../bounce.gif";
 import logo from "../logo@2x.png";
 import spinner from "../spinner.webp";

@@ -4,7 +4,8 @@
 // Keep in sync with what the core accepts: `crates/nsh-core/src/style.rs`
 // (styles) and `crates/nsh-js/src/protocol.rs` (props and events).
 
-import type { NativeNode, NativeValue, YNode } from "./index";
+import type { YNode } from "./_core";
+import type { NativeNode, NativeValue } from "./animated";
 
 /** A CSS-like color: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`,
  * `rgba()` or a named color (`black`, `white`, `transparent`, …). */
@@ -127,8 +128,6 @@ export interface ViewStyle extends LayoutStyle {
   transformOrigin?: string | (number | string)[];
   /** `"hidden"`: invisible while turned away (3D rotations). */
   backfaceVisibility?: "visible" | "hidden";
-  /** Android's material shadow (ignored on iOS, as in React Native). */
-  elevation?: number;
   shadowColor?: ColorValue;
   /** Default `{ width: 0, height: -3 }`, as in React Native. */
   shadowOffset?: { width: number; height: number };
@@ -346,8 +345,6 @@ export interface CommonProps extends TouchProps {
   underlayOpacity?: number;
   /** Milliseconds before a press becomes a long press (default 500). */
   delayLongPress?: number;
-  /** Android's ripple while pressed (ignored elsewhere). */
-  android_ripple?: { color?: ColorValue; borderless?: boolean; radius?: number; foreground?: boolean };
   testID?: string;
   onPress?: () => void;
   onLongPress?: () => void;
@@ -376,9 +373,25 @@ export interface CommonProps extends TouchProps {
   accessibilityValue?: { min?: number; max?: number; now?: number; text?: string };
   accessibilityElementsHidden?: boolean;
   importantForAccessibility?: "auto" | "yes" | "no" | "no-hide-descendants";
-  accessibilityLiveRegion?: "none" | "polite" | "assertive";
   accessibilityActions?: { name: string; label?: string }[];
   onAccessibilityAction?: (e: { actionName: string }) => void;
+  /** iOS-only props (ignored on Android). */
+  ios?: IOSProps;
+  /** Android-only props (ignored on iOS). */
+  android?: AndroidProps;
+}
+
+/** iOS-only props of every element (`ios={{…}}`); elements add their own. */
+export interface IOSProps {}
+
+/** Android-only props of every element (`android={{…}}`). */
+export interface AndroidProps {
+  /** The material ripple while pressed. */
+  ripple?: { color?: ColorValue; borderless?: boolean; radius?: number; foreground?: boolean };
+  /** The material shadow (points), from the view's shape. */
+  elevation?: number;
+  /** How changes of the view are announced to TalkBack. */
+  accessibilityLiveRegion?: "none" | "polite" | "assertive";
 }
 
 /** `<view>` */
@@ -541,12 +554,8 @@ export interface InputProps extends CommonProps {
   caretHidden?: boolean;
   /** The size of the text (at the input's width when multiline): grow a multiline input with it. */
   onContentSizeChange?: (e: { width: number; height: number }) => void;
-  /** iOS: the `nativeID` of an `InputAccessoryView` shown over the keyboard while this input has focus. */
-  inputAccessoryViewID?: string;
   /** What the input holds, for autofill (React Native's values, e.g. "username", "current-password", "new-password", "one-time-code", "email", "tel", "postal-code", "cc-number", "off"). */
   autoComplete?: AutoComplete;
-  /** iOS names of the same (`autoComplete` covers both platforms). */
-  textContentType?: TextContentType;
   secureTextEntry?: boolean;
   keyboardType?: "default" | "number-pad" | "numeric" | "decimal-pad" | "email-address" | "phone-pad" | "url";
   returnKeyType?: "default" | "done" | "go" | "next" | "search" | "send";
@@ -558,6 +567,15 @@ export interface InputProps extends CommonProps {
   autoFocus?: boolean;
   allowFontScaling?: boolean;
   maxFontSizeMultiplier?: number;
+  ios?: IOSInputProps;
+}
+
+/** iOS-only props of `<input>`. */
+export interface IOSInputProps extends IOSProps {
+  /** The `nativeID` of an `InputAccessoryView` (`nsh/ios`) shown over the keyboard while the input has focus. */
+  inputAccessoryViewID?: string;
+  /** iOS's names for `autoComplete` (which covers both platforms). */
+  textContentType?: TextContentType;
 }
 
 /** Host elements without components of their own take any prop the core
