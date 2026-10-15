@@ -100,6 +100,10 @@ pub(crate) enum PropDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Decl {
     Set(StyleKey, PatchValue),
+    /// A value the utility implies for another property, applied before
+    /// every other rule so any utility of that property wins wherever it is
+    /// in the string (`flex` is a row as in CSS, `flex-col flex` a column).
+    Default(StyleKey, PatchValue),
     Style(StyleDecl),
     Part(Part),
     Prop(PropDecl),
@@ -114,6 +118,8 @@ impl Decl {
             Decl::Set(key, value) => {
                 let _ = style.set_key(*key, value.as_value());
             }
+            // Applied by `ClassList::apply` before the rules.
+            Decl::Default(..) => {}
             Decl::Style(decl) => {
                 let _ = decl.apply(style);
             }
@@ -761,9 +767,17 @@ use StyleKey as K;
 fn keyword(u: &str) -> Option<Vec<Decl>> {
     let d = match u {
         // Display and position.
-        "flex" | "inline-flex" | "block" | "inline-block" | "inline" | "flow-root" => {
-            sets(K::Display, "flex")
+        // A CSS flex container is a row; views without the class keep
+        // React Native's column.
+        "flex" | "inline-flex" => {
+            return Some(vec![
+                sets(K::Display, "flex"),
+                Decl::Default(K::FlexDirection, PatchValue::Str("row".into())),
+            ]);
         }
+        "block" | "flow-root" => sets(K::Display, "block"),
+        // No inline formatting context: inline boxes lay out as views.
+        "inline-block" | "inline" => sets(K::Display, "flex"),
         "grid" | "inline-grid" => sets(K::Display, "grid"),
         "hidden" => sets(K::Display, "none"),
         "static" | "relative" | "sticky" => sets(K::Position, "relative"),

@@ -294,6 +294,16 @@ impl ClassList {
             if rule.cond.placeholder || !rule.cond.matches(cx) {
                 continue;
             }
+            for decl in &rule.decls {
+                if let Decl::Default(key, value) = decl {
+                    let _ = style.set_key(*key, value.as_value());
+                }
+            }
+        }
+        for rule in &self.rules {
+            if rule.cond.placeholder || !rule.cond.matches(cx) {
+                continue;
+            }
             important |= rule.important;
             for decl in &rule.decls {
                 decl.apply(style, props, &mut parts);

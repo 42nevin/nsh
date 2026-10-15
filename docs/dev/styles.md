@@ -3,7 +3,11 @@
 - **Tailwind** (`class` / `classList` on every element): JS only passes the strings; the core resolves them (how, and
   what is cached: `crates/nsh-core/src/tailwind/mod.rs`, `core/classes.rs`). The inline `style` always wins over classes.
   Later utilities win over earlier ones (components append a `class` prop, no `tailwind-merge`); variant rules apply
-  after plain ones in Tailwind's variant order. Variants: `dark:`, `sm:`…`2xl:` / `max-*:` / `min-[..]:`, `portrait:` /
+  after plain ones in Tailwind's variant order. Display follows CSS: `flex` / `inline-flex` are rows unless a direction
+  utility says otherwise, wherever it is in the string (`flex-col flex` is a column; the implied row is a
+  `Decl::Default`, applied before every rule), while views without them keep React Native's column; `block` /
+  `flow-root` use Taffy's block layout; `inline` / `inline-block` lay out as views (there is no inline formatting
+  context). Variants: `dark:`, `sm:`…`2xl:` / `max-*:` / `min-[..]:`, `portrait:` /
   `landscape:`, `ios:` / `android:`, `rtl:` / `ltr:`, `motion-safe:` / `motion-reduce:`, `active:` / `hover:` /
   `focus:` / `focus-within:` / `disabled:` / `enabled:`, `group-*:` (named groups `group/name`), `first:` / `last:` /
   `odd:` / `even:` / `only:`, `placeholder:`, `!` (important). `disabled` (any element) applies `disabled:` and drops

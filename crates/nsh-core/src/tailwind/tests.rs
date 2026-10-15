@@ -235,6 +235,59 @@ fn transitions_and_animations() {
 }
 
 #[test]
+fn display() {
+    // As in CSS, a flex container is a row unless a direction utility says
+    // otherwise, wherever that utility is in the string.
+    let s = styled("flex");
+    assert_eq!(s.layout.display, taffy::Display::Flex);
+    assert_eq!(s.layout.flex_direction, taffy::FlexDirection::Row);
+    assert_eq!(
+        styled("inline-flex").layout.flex_direction,
+        taffy::FlexDirection::Row
+    );
+    assert_eq!(
+        styled("flex-col flex").layout.flex_direction,
+        taffy::FlexDirection::Column
+    );
+    assert_eq!(
+        styled("flex flex-col").layout.flex_direction,
+        taffy::FlexDirection::Column
+    );
+    assert_eq!(
+        styled("flex-col-reverse flex").layout.flex_direction,
+        taffy::FlexDirection::ColumnReverse
+    );
+    // Without `flex`, views keep React Native's column.
+    assert_eq!(
+        styled("items-center").layout.flex_direction,
+        taffy::FlexDirection::Column
+    );
+    // A variant `flex` is a row where it applies; a plain direction still wins.
+    let (env, states) = cx(0);
+    let wide = |c| styled_with(c, env, (800.0, 844.0), states).0;
+    assert_eq!(
+        wide("hidden md:flex").layout.flex_direction,
+        taffy::FlexDirection::Row
+    );
+    assert_eq!(
+        wide("flex-col md:flex").layout.flex_direction,
+        taffy::FlexDirection::Column
+    );
+    assert_eq!(
+        styled("hidden md:flex").layout.display,
+        taffy::Display::None
+    );
+    assert_eq!(
+        styled("hidden md:flex").layout.flex_direction,
+        taffy::FlexDirection::Column
+    );
+    // Block formatting contexts use Taffy's block layout.
+    assert_eq!(styled("block").layout.display, taffy::Display::Block);
+    assert_eq!(styled("flow-root").layout.display, taffy::Display::Block);
+    assert_eq!(styled("inline-block").layout.display, taffy::Display::Flex);
+}
+
+#[test]
 fn grid() {
     let s = styled("grid grid-cols-3 gap-2 col-span-2");
     assert_eq!(s.layout.display, taffy::Display::Grid);

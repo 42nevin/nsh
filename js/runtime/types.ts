@@ -39,7 +39,7 @@ type Distribute = "flex-start" | "flex-end" | "center" | "stretch" | "space-betw
 
 /** Layout (flexbox with React Native's defaults: `column`, no shrinking). */
 export interface LayoutStyle {
-  display?: "flex" | "none";
+  display?: "flex" | "grid" | "block" | "none";
   position?: "relative" | "absolute";
   flexDirection?: "row" | "column" | "row-reverse" | "column-reverse";
   flexWrap?: "wrap" | "nowrap" | "wrap-reverse";

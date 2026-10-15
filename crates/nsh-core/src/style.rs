@@ -1587,6 +1587,7 @@ impl Style {
                 l.display = match keyword(value)? {
                     None | Some("flex") => Display::Flex,
                     Some("grid") => Display::Grid,
+                    Some("block") => Display::Block,
                     Some("none") => Display::None,
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
