@@ -147,10 +147,10 @@ impl Plugin for NshPlugin {
         if let Some(m) = embedded::load(args.id) {
             return Ok(Some(HookLoadOutput {
                 code: m.source.into(),
-                module_type: Some(if m.typescript {
-                    ModuleType::Ts
-                } else {
-                    ModuleType::Js
+                module_type: Some(match m.lang {
+                    embedded::Lang::Js => ModuleType::Js,
+                    embedded::Lang::Ts => ModuleType::Ts,
+                    embedded::Lang::Tsx => ModuleType::Tsx,
                 }),
                 ..Default::default()
             }));

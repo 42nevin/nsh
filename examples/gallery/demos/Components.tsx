@@ -3,7 +3,7 @@ import { AccessibilityInfo, reduceMotion, screenReaderEnabled } from "nsh/access
 import { LayoutAnimation } from "nsh/animated";
 import { PixelRatio, Platform } from "nsh/device";
 import { InputAccessoryView } from "nsh/ios";
-import { KeyboardAvoidingView, Modal, SafeAreaView, Screen } from "nsh/ui/mobile";
+import { Button, KeyboardAvoidingView, Modal, SafeAreaView, Screen } from "nsh/ui/mobile";
 import { nav } from "../nav";
 import { Button as UiButton, colors, Section } from "../ui";
 
@@ -224,10 +224,24 @@ function PlatformInfo() {
   );
 }
 
+/** The components of nsh/ui/mobile (js/ui/mobile/components). */
+function MobileComponents() {
+  const [presses, setPresses] = createSignal(0);
+  return (
+    <Section title="nsh/ui/mobile">
+      <Button title={`Primary (${presses()})`} onPress={() => setPresses(presses() + 1)} />
+      <Button title="Secondary" variant="secondary" onPress={() => setPresses(presses() + 1)} />
+      <Button title="Plain" variant="plain" onPress={() => setPresses(presses() + 1)} />
+      <Button title="Disabled" disabled onPress={() => setPresses(presses() + 1)} />
+    </Section>
+  );
+}
+
 export function Components() {
   return (
     <scroll style={{ flex: 1, backgroundColor: colors.background }} keyboardDismissMode="interactive">
       <view style={{ padding: 16, gap: 20 }}>
+        <MobileComponents />
         <PressFeedback />
         <PressableSheet />
         <LayoutAnimations />

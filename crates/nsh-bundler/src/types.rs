@@ -94,9 +94,13 @@ const SOLID_TYPES: &[(&str, &str)] = &[
 
 /// Declarations of a TypeScript module, from its source (it must have the
 /// explicit types `--isolatedDeclarations` asks for).
-fn declarations(source: &str) -> String {
+fn declarations(source: &str, lang: crate::embedded::Lang) -> String {
     let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    let source_type = match lang {
+        crate::embedded::Lang::Tsx => SourceType::tsx(),
+        _ => SourceType::ts(),
+    };
+    let parsed = Parser::new(&allocator, source, source_type).parse();
     let ret = IsolatedDeclarations::new(
         &allocator,
         IsolatedDeclarationsOptions {
@@ -125,11 +129,11 @@ pub fn type_definitions() -> Vec<(String, String)> {
             root => format!("nsh/{root}"),
         };
         files.push((
-            format!("{dir}/{}.d.ts", f.file),
-            declarations(f.module.source),
+            format!("{dir}/{}.d.ts", f.file()),
+            declarations(f.module.source, f.module.lang),
         ));
         if f.root != "runtime"
-            && f.file == "index"
+            && f.file() == "index"
             && let Some((_, last)) = f.root.rsplit_once('/')
         {
             files.push((
@@ -163,9 +167,13 @@ pub fn type_definitions() -> Vec<(String, String)> {
 mod tests {
     #[test]
     fn runtime_declarations_need_no_inference() {
-        for source in crate::embedded::files().map(|f| f.module.source) {
+        for f in crate::embedded::files() {
             let allocator = super::Allocator::default();
-            let parsed = super::Parser::new(&allocator, source, super::SourceType::ts()).parse();
+            let source_type = match f.module.lang {
+                crate::embedded::Lang::Tsx => super::SourceType::tsx(),
+                _ => super::SourceType::ts(),
+            };
+            let parsed = super::Parser::new(&allocator, f.module.source, source_type).parse();
             let ret = super::IsolatedDeclarations::new(
                 &allocator,
                 super::IsolatedDeclarationsOptions {
