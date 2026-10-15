@@ -7,6 +7,22 @@
 //! items, footer). An inverted list lays the same content out from the end
 //! of the scroll view (item 0 at the bottom) and keeps its distance from
 //! the end while content changes, like React Native's inverted lists.
+//!
+//! # Binding cells
+//!
+//! The window (Fenwick prefix sums over rows) renders one extra screen above
+//! and below the viewport. The core asks JS to bind cells with
+//! `__nsh_list(listId, [slot, index, …])`; JS updates a cell's content inside
+//! `batch` and then sets its `cellIndex` to confirm, and only confirmed cells
+//! are measured and positioned. New cells are created with their first
+//! index. The engine runs at most 8 "bind → JS → layout" rounds per frame,
+//! merged into one batch. Row-local state travels with recycled cells, so
+//! apps keep it outside, keyed by id. Unbound cells keep their last content:
+//! the core moves them out of sight (never with a NaN frame; cells never
+//! placed are skipped). The header, footer and empty placeholder are cells
+//! with a role (`slot="header"`, ...) and are never recycled. Each cell is a
+//! Taffy root of its own (its width follows the list's cross axis), so
+//! scrolling relays out dirty cells only.
 
 use rustc_hash::FxHashMap;
 

@@ -8,6 +8,19 @@
 //! take a `class` prop and append it (no `tailwind-merge`). Variant
 //! utilities apply after plain ones, ordered by Tailwind's variant order
 //! (`hover:` before `active:`, breakpoints ascending, `dark:` last).
+//!
+//! Each class string is parsed once into rules, cached in an LRU of up to
+//! 4096 strings, with what the rules depend on (appearance, window width and
+//! height, direction, the node's own states, a group's states, sibling
+//! position, reduce motion): the core (`core/classes.rs`) resolves a node again only when
+//! one of those changes. Interaction states are reported by the platforms
+//! only for the bits a node's classes read (`MountItem::TrackStates`), and
+//! `focus-within` propagates to ancestors in the core. A node's style is the
+//! default, then its class rules, then its inline `style` replayed on top
+//! (`Op::SetStyle` carries a `StylePatch` besides the merged `Style`). The
+//! theme is Tailwind 4's (the palette converted from OKLCH to sRGB) extended
+//! by `nsh.json` `"tailwind"`, compiled into the bundle as
+//! `nsh:tailwind-theme` and pushed as a root prop at startup.
 
 mod palette;
 mod theme;

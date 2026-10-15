@@ -6,6 +6,15 @@
 //! encoded: they go to the UI-thread animator ([`crate::anim`]).
 //!
 //! The opcodes must match `Mounter.java`.
+//!
+//! The Android data flow: the engine thread typesets with `StaticLayout`
+//! through cached JNI method ids (`java.rs`; classes are cached in
+//! `JNI_OnLoad`, as native threads only see the system class loader). Each
+//! commit is encoded here into one `byte[]` plus the object table and handed
+//! to `NshView.submit` → `Mounter.java` on the UI thread. Java calls
+//! `Native.afterBatch(seq)` after applying a batch and `Native.tick` on
+//! `Choreographer` frames; both return `[animating, (view, prop, value)*]`
+//! float arrays. Units cross as dp; Java converts to px.
 
 use jni::objects::GlobalRef;
 use nsh_core::{

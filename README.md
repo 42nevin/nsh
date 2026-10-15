@@ -61,7 +61,7 @@ nsh publish App.tsx --key release.secret --cert release.cert        # a signed p
 ```
 
 Signing keys: `nsh keygen` (a root key kept offline and release keys), `nsh certify` (the root certifies a release
-key for some app ids), `nsh verify`, `nsh revoke` (a signed revocation list). See **Signed packages** in AGENTS.md.
+key for some app ids), `nsh verify`, `nsh revoke` (a signed revocation list). See [docs/dev/signed-packages.md](docs/dev/signed-packages.md).
 
 ## A new app
 
@@ -73,7 +73,7 @@ nsh run my-app/App.tsx
 `nsh init` creates `App.tsx`, `nsh.json` (name, id, version, icon) and a `tsconfig.json`; type declarations for
 editors are kept in `my-app/.nsh/types`, so TypeScript checking works without `node_modules`.
 
-Contributors: see [AGENTS.md](AGENTS.md) for the architecture, commands and conventions.
+Contributors: see [AGENTS.md](AGENTS.md) (commands, rules, conventions) and [docs/dev](docs/dev/README.md) (architecture and internals).
 
 ## License
 

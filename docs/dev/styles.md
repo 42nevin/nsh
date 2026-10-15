@@ -1,0 +1,61 @@
+# Styles, classes and effects
+
+- **Tailwind** (`class` / `classList` on every element): JS only passes the strings; the core resolves them (how, and
+  what is cached: `crates/nsh-core/src/tailwind/mod.rs`, `core/classes.rs`). The inline `style` always wins over classes.
+  Later utilities win over earlier ones (components append a `class` prop, no `tailwind-merge`); variant rules apply
+  after plain ones in Tailwind's variant order. Variants: `dark:`, `sm:`…`2xl:` / `max-*:` / `min-[..]:`, `portrait:` /
+  `landscape:`, `ios:` / `android:`, `rtl:` / `ltr:`, `motion-safe:` / `motion-reduce:`, `active:` / `hover:` /
+  `focus:` / `focus-within:` / `disabled:` / `enabled:`, `group-*:` (named groups `group/name`), `first:` / `last:` /
+  `odd:` / `even:` / `only:`, `placeholder:`, `!` (important). `disabled` (any element) applies `disabled:` and drops
+  the node's press listeners from what is mounted, so it shows no press feedback either. The theme is Tailwind 4's
+  extended by `nsh.json` `"tailwind"` (`colors`, `spacing`, `breakpoints`, `fontSize`, `radius`, `shadow`, ...; unknown
+  keys are build errors). `nsh build` / `nsh dev` warn about unknown static classes in app code (`file:line:col:
+  unknown class '...'`, target `nsh::build`); the core logs each unknown class once at run time. Class-only settings
+  that are props in React Native (`line-clamp-*`, `truncate`, `whitespace-nowrap`, `pointer-events-*`, `object-*`,
+  `placeholder:text-*`, `caret-*`) lose to explicit props. Not supported: `peer-*`, pseudo-elements, arbitrary CSS
+  properties; `space-x/y-*` are gaps.
+- **Text style inheritance** (CSS-like): a view's text properties (color, font, size, alignment, ...) pass to the texts and inputs
+  inside it, so `class="text-white"` on a button styles its label. `insetPadding` (runtime only: `SafeAreaView`,
+  `KeyboardAvoidingView`) is added to the resolved padding, so classes and styles keep their own padding.
+- **Effects** (styles and classes; `effects.rs`): `boxShadow` (CSS syntax, several, `inset`; also `shadow-*` / `ring-*`),
+  `experimental_backgroundImage` / `backgroundImage` (linear / radial / conic gradients), `filter` (`brightness`, `contrast`,
+  `grayscale`, `hue-rotate`, `invert`, `saturate`, `sepia`, `opacity`, `blur`, `drop-shadow`; color filters are composed into one
+  matrix), `backdropFilter` (blur), `mixBlendMode`, `outline*`, `visibility`, `cursor`, `transition*` (CSS: property groups,
+  duration, delay, easing) and `animation*` (Tailwind's `spin` / `ping` / `pulse` / `bounce`), `display: grid` with
+  `gridTemplateColumns/Rows`, `gridAutoFlow/Columns/Rows`, `gridColumn/Row(Start/End)`, `justifyItems/Self`; text
+  `textDecorationStyle` (`double` / `dotted` / `dashed` / `wavy`), `textDecorationThickness`, `textUnderlineOffset`, `em`
+  letter spacing and unitless line heights (multiples). Translations by a fraction of the size (`translate-x-1/2`) are resolved by
+  the core against the frame and sent again when the size changes.
+  iOS: shadows are one `CALayer` per shadow with a `shadowPath` (outer shadows masked to outside the box, inset ones to the padding
+  box), gradients `CAGradientLayer`, transitions explicit `CABasicAnimation`s from the presented values, keyframes
+  `CAKeyframeAnimation`s, blend modes `compositingFilter`, `cursor` a `UIPointerInteraction`, backdrop blur a
+  `UIVisualEffectView` (a system material at a fraction: an approximation), text decorations other than solid single lines are
+  drawn by `TextView`. Android: `Decor` draws shadows, gradients and outlines; filters are `RenderEffect`s (API 31+; below, only
+  color filters through a layer paint), blend modes a layer paint (API 29+), transitions / keyframes `ValueAnimator`s,
+  backdrop blur (API 31+) a `RenderNode` recorded before each frame with what lies behind the view (`Backdrop.java`: each
+  ancestor's background and the siblings drawn before the next ancestor, never the view itself) and blurred by a
+  `RenderEffect`, drawn clipped under the view's background.
+  Known limits: iOS has no CSS filters on views (only `opacity`, `brightness` ≤ 1 and `drop-shadow`; images take every color filter
+  and `blur`, applied while decoding); iOS texts draw no gradients or inset shadows; Android has no backdrop blur, `blur` or
+  `drop-shadow` before API 31.
+- **View styles**: `backgroundColor`, `borderWidth` / `borderColor` (also per side: `borderTopWidth`, `borderLeftColor`, ...),
+  `borderStyle` (`solid` / `dashed` / `dotted`), `borderRadius` + the four `borderTopLeftRadius`-style corners, `borderCurve`
+  (`continuous`: corners easing into the edges, Figma's 60% corner smoothing, shrinking to circular where the box is too
+  small, so pills stay pills; the outline geometry is `nsh_core::shape::rounded_rect`, ported to `Decor.java`; iOS layers that
+  draw their own corners use `cornerCurve`), `overflow`, `opacity`,
+  `transform` (translate / scale / rotate / rotateX / rotateY / skew / perspective, applied right to left like CSS; Android has no
+  skew), `zIndex` (stable order of the native views), `shadowColor` / `shadowOffset` / `shadowOpacity` / `shadowRadius` (RN
+  defaults: offset `(0, -3)`, radius 3, opacity 0), `tintColor` (images), `android={{ elevation }}` (a prop, not a style: Android's material shadow, with
+  `shadowColor` from API 28), `transformOrigin` (keywords / percentages / lengths; iOS conjugates the matrix around it,
+  Android sets the pivot), `backfaceVisibility` (iOS `doubleSided`; Android hides the view while its rotations turn it away). `style` may be an array of styles merged left to right
+  (falsy entries skipped), decoded in Rust. Text adds `textShadowColor` / `textShadowOffset` / `textShadowRadius`,
+  `fontVariant` (OpenType `smcp` / `onum` / `lnum` / `tnum` / `pnum`: CoreText feature settings, `Paint.setFontFeatureSettings`)
+  and `writingDirection`.
+  On Apple everything is drawn by Core Animation, escalating only as needed (`crates/nsh-platform-ios/src/decor.rs`
+  describes the paths and their limits); Android draws in `Decor.java`.
+
+## Android differences
+
+- **Android differences**: shadows need a background (no content shadows, e.g. text with a transparent background); odd corner
+  radii clip by path before API 33; pull to refresh is our own (stretch overscroll stays native); `contentInset` is padding and
+  `decelerationRate` only shapes snapping glides.

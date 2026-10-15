@@ -20,7 +20,7 @@ nsh.registerComponent("embed.badge", context -> new Badge(this, context));  // B
 The component gets its props (`setProp`, JSON as maps and lists) and commands, emits events with
 `context.emit("tap", data)` and may report its size (dp) with `context.setSize(w, h)`.
 
-Signed packages (`nsh publish`; see **Signed packages** in AGENTS.md), e.g. updates the app
+Signed packages (`nsh publish`; see `docs/dev/signed-packages.md`), e.g. updates the app
 downloads: verify off the UI thread, then run on it.
 
 ```java

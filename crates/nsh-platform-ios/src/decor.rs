@@ -6,6 +6,12 @@
 //! with different radii need shape layers, and only a view that both clips
 //! its children and casts a shadow needs an extra content view (clipping a
 //! layer also clips its shadow).
+//!
+//! With a background a shadow gets a `shadowPath` (no offscreen pass); with a
+//! transparent background it follows the content (text shadows). Known
+//! limits: scroll views and lists take one radius (the largest) and clip
+//! their shadow; a `<text>` with different radii is masked, which clips its
+//! shadow too.
 
 use nsh_core::{BorderStyle, Borders, Color, CornerRadii, ResizeMode, ViewStyle};
 use objc2::{MainThreadMarker, rc::Retained, runtime::AnyObject};

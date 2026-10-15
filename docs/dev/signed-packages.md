@@ -1,0 +1,38 @@
+# Signed packages
+
+For code an app downloads (first-party updates, third-party mini apps): `nsh_package` and `nsh publish`.
+
+- **Bytecode is trusted input.** QuickJS does not validate bytecode; loading crafted bytecode corrupts memory. So
+  `Bundle::bytecode` / `Bundle::read_trusted` are `unsafe` and only called for: the app's own signed resources
+  (`nsh-ios-app`, `AppActivity`, `NshView.loadAssetBundle`, `NshAppView.loadBundle` for a path inside the main bundle —
+  `nsh_platform_ios::in_app_bundle`), bytecode compiled in-process, the dev server the developer connected to (its
+  handshake negotiates the version), and verified packages (`Bundle::from_package`). `Bundle::read` and
+  `NshView.loadBundleFile` refuse `.qbc` files; downloaded code is either JS source or a signed package.
+- **Keys, two levels**: a root key (offline; apps trust its public key, several may be trusted) certifies release keys
+  (`nsh certify`: app id patterns `*` / `com.example.*` / an id, and a validity window). Packages are signed by a
+  release key and carry its certificate, so release keys rotate without app updates. Key ids are derived (first 8
+  bytes of the SHA-256 of the public key). Every signature is over `context \0 sha256(message)` with a context per kind
+  (package, certificate, revocation list), so one can never pass for another.
+- **Package** (`.nshpkg`, format in `nsh-package/src/lib.rs`): a JSON header (app id / name / version / build,
+  declared capabilities, bytecode version, minimum runtime, signing time, the certificate, a file table with SHA-256s)
+  then the files (source, bytecode, source map, assets), then the release key's signature over everything before it.
+  The source is always included; the bytecode is only used when its version is the runtime's `BYTECODE_VERSION`.
+  `nsh publish` refuses to sign what a device would refuse (the certificate must cover the app and the time).
+- **Verification** (`TrustStore::verify`): the certificate's root signature, the release key not revoked, the package
+  signature, the app id and the signing time against the certificate, the minimum runtime, the file table tiling the
+  data exactly, each file's hash, the package hash not revoked, and the build not older than the highest accepted for
+  that app (`accept` records it; rollback protection). Revocation lists (`nsh revoke`, signed by a root) only replace
+  an older list (sequence numbers), so an old list cannot be replayed. The state (newest list, accepted builds)
+  persists in the store's directory (`nsh-trust.json`, written atomically).
+- `nsh_engine::load_package` verifies, extracts the assets once per package to `<root>/<app id>/<sha256>/assets`,
+  accepts the build and returns the bundle (with the package's declared capabilities) and the asset directory.
+- **Embedding**: verifying (hashing, extracting assets) is done off the UI thread, running on it. iOS (Swift)
+  `NshTrust(stateDirectory:)` / `addRoot` / `updateRevocations` / `openPackage(at:) async throws -> NshPackage` (its
+  `info`: id, name, version, build) and `NshAppView.run(_:)`, or `loadPackage(at:trust:) async throws`; Android
+  `NshTrust(stateDir)` / `addRoot` / `updateRevocations` / `openPackage(file) throws NshPackage.RefusedException`
+  (any thread) and `NshView.runPackage(pkg)`. A refused package throws; the running app stays. To try a package on a simulator / emulator: `nsh-ios-host --package <file> --root <root.pub>`, or
+  `DevActivity` with the `package` (path on the device) and `root` (base64) extras; their trust state persists in
+  the temporary / cache directory, so older builds are refused there too.
+- Not done yet: delivering packages (an update server, OTA); the app decides where packages come from.
+
+The format, the trust model and the key handling are documented in `crates/nsh-package/src/lib.rs`.

@@ -11,7 +11,7 @@ native views.
 3. Create an `NshAppView` (a `UIView`), add it to a view hierarchy and call
    `try app.loadBundle(at:)` with the URL of `nsh/bundle.qbc`. The app stops when the view is deallocated.
 
-Signed packages (`nsh publish`; see **Signed packages** in AGENTS.md), e.g. updates the app downloads:
+Signed packages (`nsh publish`; see `docs/dev/signed-packages.md`), e.g. updates the app downloads:
 
 ```swift
 let trust = try NshTrust(stateDirectory: applicationSupport.appendingPathComponent("nsh"))
