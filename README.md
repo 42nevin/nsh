@@ -73,7 +73,8 @@ nsh run my-app/App.tsx
 `nsh init` creates `App.tsx`, `nsh.json` (name, id, version, icon) and a `tsconfig.json`; type declarations for
 editors are kept in `my-app/.nsh/types`, so TypeScript checking works without `node_modules`.
 
-Contributors: see [AGENTS.md](AGENTS.md) (commands, rules, conventions) and [docs/dev](docs/dev/README.md) (architecture and internals).
+Contributors: see [CONTRIBUTING.md](CONTRIBUTING.md) (pull requests, commits, testing), [AGENTS.md](AGENTS.md)
+(commands, rules, conventions) and [docs/dev](docs/dev/README.md) (architecture and internals).
 
 ## License
 

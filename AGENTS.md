@@ -146,6 +146,24 @@ host it is an empty crate, so always run clippy on platform code with the Cataly
 - Dependencies are declared once in the root `Cargo.toml` `[workspace.dependencies]`; crates only write `.workspace = true`.
 - Every `unsafe` block has a `// SAFETY:` comment.
 
+## Commits and pull requests
+
+Details and examples: "Commits and pull requests" in `CONTRIBUTING.md`.
+
+- Subjects and PR titles are `<area>: <What the change does>`: the area in lower case (a crate without `nsh-`:
+  `core`, `js`, `engine`, `bundler`, `cli`, ...; `ios`, `android`; `runtime`, `mobile`, a module; `tailwind`, `text`,
+  `docs`, `examples`, `gallery`), several separated by commas (`ios, android: …`); then an imperative sentence starting
+  with a capital letter, no trailing period, about 72 characters in all. Say what it does for nsh's users, not which
+  files changed. Never conventional prefixes (`fix:`, `feat:`); check `git log` and match it.
+- The body explains why (wrapped at 72 columns); hot path changes include their before / after `nsh trace` numbers.
+- One commit / PR does one thing; no unrelated refactors, cleanup or formatting.
+- A PR that adds, changes or removes public API (Rust items, JS exports, elements, props, style keys, Tailwind
+  utilities, `nsh.json` keys, CLI flags, SDK APIs) lists every item under `## Public API` with its signature and one
+  line on its purpose; changes to existing items also go under `## Breaking Changes` with `diff` blocks
+  (`.github/pull_request_template.md`).
+- A PR review presents, in order: the PR's purpose (the problem and the scope of the changes), whether the requirement
+  and approach are reasonable, then concrete findings, the validation performed and its limits.
+
 ## Performance rules (the project's first priority)
 
 1. **QuickJS is the slowest link: JS does as little as possible.** `js/runtime` only pushes primitive values into one reused array. Parsing,
