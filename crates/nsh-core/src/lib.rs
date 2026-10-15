@@ -8,6 +8,7 @@
 //! Everything here is single-threaded and allocation-conscious: the core runs
 //! on the engine thread, between the JS host and the platform backend.
 
+pub mod access;
 pub mod canvas;
 mod core;
 mod css;

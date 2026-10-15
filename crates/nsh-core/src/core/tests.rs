@@ -2710,3 +2710,78 @@ fn node_quota_and_dense_ids() {
         .unwrap_err();
     assert!(matches!(err, ApplyError::IdOutOfRange(_)) && err.is_fatal());
 }
+
+#[test]
+fn refused_urls_fail_and_send_nothing() {
+    let mut c = core();
+    c.set_access(Arc::new(crate::access::Access {
+        declared: crate::access::Capabilities::from_json(
+            &serde_json::json!({ "network": { "hosts": ["cdn.example.com"] } }),
+        )
+        .unwrap(),
+        granted: None,
+    }));
+    let image = |id, uri: &str| {
+        vec![
+            Op::Create {
+                id,
+                tag: Tag::Image,
+            },
+            Op::Listen {
+                id,
+                event: EventKind::Error,
+                enabled: true,
+            },
+            Op::SetProp {
+                id,
+                prop: Prop::Source(Some(ImageSource {
+                    uri: uri.into(),
+                    size: None,
+                })),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: id,
+                before: None,
+            },
+        ]
+    };
+    let mut ops = image(2, "https://cdn.example.com/a.png");
+    ops.extend(image(3, "https://tracker.io/pixel.gif"));
+    ops.push(Op::Command {
+        id: ROOT_ID,
+        command: Command::StatusBar(Default::default()),
+    });
+    apply(&mut c, ops);
+    let batch = c.commit().unwrap();
+    let sources: Vec<_> = batch
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            MountItem::Image { id, source, .. } => {
+                Some((*id, source.as_ref().map(|s| s.uri.to_string())))
+            }
+            _ => None,
+        })
+        .collect();
+    // The refused image loads nothing.
+    assert_eq!(
+        sources,
+        [
+            (2, Some("https://cdn.example.com/a.png".to_owned())),
+            (3, None)
+        ]
+    );
+    assert!(
+        !batch
+            .items
+            .iter()
+            .any(|i| matches!(i, MountItem::Command { .. }))
+    );
+    let mut events = Vec::new();
+    c.take_events(&mut events);
+    assert!(matches!(
+        &events[..],
+        [(3, EventKind::Error, EventPayload::Error { message })] if message.contains("`tracker.io`")
+    ));
+}

@@ -147,6 +147,11 @@ final class Mounter {
         views.put(1, root);
     }
 
+    /** Whether the running app's web views may navigate to {@code url} (its capabilities). */
+    boolean allowsWebview(String url) {
+        return Native.allowsWebview(handle(), url);
+    }
+
     long handle() {
         return host.handle;
     }

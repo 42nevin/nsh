@@ -33,6 +33,20 @@ UIView *nsh_app_view(NshApp *app);
 /// running app. Returns false (and logs why) if the file cannot be read.
 bool nsh_app_load_bundle(NshApp *app, const char *path);
 
+/// What the apps `app` loads are granted at most: JSON in the form of
+/// `nsh.json`'s `capabilities` (`NULL`: what each app declares), e.g.
+/// `{"network": {"hosts": ["api.example.com"]}}`. An app's request must be
+/// allowed by both its declaration and this grant. Applies from the next
+/// load; returns false (and changes nothing) for an invalid grant.
+bool nsh_app_set_granted_capabilities(NshApp *app, const char *_Nullable json);
+
+/// The VM limits of the apps `app` loads next: JS heap (MB), stack (KB),
+/// the time budget (ms) of loading and of every other call into JS, and
+/// the node quota. 0 keeps a default. Running out of memory or going over a
+/// quota stops the app and reports it to the error handler.
+void nsh_app_set_limits(NshApp *app, uint32_t memory_mb, uint32_t stack_kb, uint32_t load_ms,
+                        uint32_t call_ms, uint32_t max_nodes);
+
 /// Development: loads from a `nsh dev` server (`ws://host:port/ws`) and
 /// reloads on every change, showing errors over the app. Returns false if
 /// the library was built without development support.

@@ -40,6 +40,8 @@ fn class(name: &CStr) -> &'static AnyClass {
 pub(crate) struct WebIvars {
     id: NodeId,
     control: EngineControl,
+    /// What the app may show (its `webview` capability).
+    access: std::sync::Arc<nsh_engine::Access>,
 }
 
 define_class!(
@@ -58,6 +60,37 @@ define_class!(
             let body: Option<Retained<AnyObject>> = unsafe { msg_send![message, body] };
             let data = body.map(|b| describe(&b)).unwrap_or_default();
             self.send(EventKind::Message, EventPayload::Map(vec![("data", PayloadValue::Str(data))]));
+        }
+
+        /// Top-level navigations stay within the app's `webview` capability.
+        #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
+        fn decide_policy(&self, _web: &AnyObject, action: &AnyObject, decide: &block2::Block<dyn Fn(isize)>) {
+            // SAFETY: WebKit's documented API (WKNavigationAction).
+            let (main, url) = unsafe {
+                let frame: Option<Retained<AnyObject>> = msg_send![action, targetFrame];
+                // No target frame: a new window, which counts as top level.
+                let main = frame.is_none_or(|f| msg_send![&*f, isMainFrame]);
+                let request: Retained<AnyObject> = msg_send![action, request];
+                let url: Option<Retained<AnyObject>> = msg_send![&request, URL];
+                let url = url.map(|u| {
+                    let s: Option<Retained<NSString>> = msg_send![&*u, absoluteString];
+                    s.map(|s| s.to_string()).unwrap_or_default()
+                });
+                (main, url.unwrap_or_default())
+            };
+            // WKNavigationActionPolicyCancel = 0, Allow = 1.
+            let allowed = !main || url.is_empty() || self.ivars().access.allows_webview(&url);
+            if !allowed {
+                log::warn!(target: "js", "web view navigation to {url} is not granted");
+                self.send(
+                    EventKind::Error,
+                    EventPayload::Map(vec![
+                        ("message", PayloadValue::Str(format!("navigation to {url} is not granted"))),
+                        ("url", PayloadValue::Str(url)),
+                    ]),
+                );
+            }
+            decide.call((allowed as isize,));
         }
 
         #[unsafe(method(webView:didStartProvisionalNavigation:))]
@@ -87,8 +120,17 @@ define_class!(
 );
 
 impl WebHandler {
-    fn new(mtm: MainThreadMarker, id: NodeId, control: EngineControl) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(WebIvars { id, control });
+    fn new(
+        mtm: MainThreadMarker,
+        id: NodeId,
+        control: EngineControl,
+        access: std::sync::Arc<nsh_engine::Access>,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(WebIvars {
+            id,
+            control,
+            access,
+        });
         // SAFETY: NSObject's designated initializer.
         unsafe { msg_send![super(this), init] }
     }
@@ -169,9 +211,14 @@ pub(crate) struct WebHost {
 }
 
 impl WebHost {
-    pub(crate) fn new(mtm: MainThreadMarker, id: NodeId, control: EngineControl) -> Self {
+    pub(crate) fn new(
+        mtm: MainThreadMarker,
+        id: NodeId,
+        control: EngineControl,
+        access: std::sync::Arc<nsh_engine::Access>,
+    ) -> Self {
         let view = NshView::new(mtm);
-        let handler = WebHandler::new(mtm, id, control);
+        let handler = WebHandler::new(mtm, id, control, access);
         let web = webkit().then(|| {
             // SAFETY: WebKit's documented API, sent dynamically; the handler
             // is unregistered when the host is dropped.

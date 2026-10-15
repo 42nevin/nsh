@@ -557,6 +557,10 @@ pub struct Core<M: TextEngine> {
     class_env: ClassEnvironment,
     /// [`Core::set_max_nodes`].
     max_nodes: usize,
+    /// What the app may reach ([`Core::set_access`]).
+    access: Arc<crate::access::Access>,
+    /// Denials already logged (each once).
+    denied: rustc_hash::FxHashSet<String>,
 }
 
 impl<M: TextEngine> Core<M> {
@@ -581,6 +585,8 @@ impl<M: TextEngine> Core<M> {
             pending_text: Vec::new(),
             attachment_blocks: Vec::new(),
             max_nodes: usize::MAX,
+            access: Arc::default(),
+            denied: Default::default(),
             lists: Vec::new(),
             roots: Vec::new(),
             accessories: Default::default(),
@@ -663,6 +669,19 @@ impl<M: TextEngine> Core<M> {
     /// Number of live nodes, including the root.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// Sets what the app may reach: remote images, canvas images, video
+    /// sources, web views and the status bar are checked against it.
+    pub fn set_access(&mut self, access: Arc<crate::access::Access>) {
+        self.access = access;
+    }
+
+    /// Logs (once) that the app was refused `what`.
+    fn deny(&mut self, what: String) {
+        if self.denied.len() < 256 && self.denied.insert(what.clone()) {
+            log::warn!(target: "js", "{what}");
+        }
     }
 
     /// Caps the number of nodes (each may hold a native view, whose memory
@@ -853,12 +872,28 @@ impl<M: TextEngine> Core<M> {
                 self.mount.push(MountItem::Anim(op));
                 Ok(())
             }
-            Op::Draw { id, drawing } => {
+            Op::Draw { id, mut drawing } => {
                 let key = self.key(id)?;
-                let node = &mut self.nodes[key as usize];
-                if node.kind != Kind::Canvas {
+                if self.nodes[key as usize].kind != Kind::Canvas {
                     return Ok(());
                 }
+                if !self.access.is_unrestricted() {
+                    let access = self.access.clone();
+                    let mut refused = Vec::new();
+                    drawing.ops.retain(|op| match op {
+                        crate::canvas::CanvasOp::DrawImage { image, .. }
+                            if !access.allows_media(&image.uri) =>
+                        {
+                            refused.push(image.uri.clone());
+                            false
+                        }
+                        _ => true,
+                    });
+                    for uri in refused {
+                        self.deny(not_granted("a canvas image", &uri, "network"));
+                    }
+                }
+                let node = &mut self.nodes[key as usize];
                 let slots_changed = node
                     .drawing
                     .as_ref()
@@ -925,6 +960,27 @@ impl<M: TextEngine> Core<M> {
             }
             // Lists resolved theirs in `update_lists`; a scroll view can
             // still scroll to its end.
+            match &command {
+                Command::ImageInfo { id: request, uri } if !self.access.allows_media(uri) => {
+                    let message = not_granted("Image.getSize / prefetch of", uri, "network");
+                    self.events.push((
+                        crate::ROOT_ID,
+                        EventKind::ImageInfo,
+                        EventPayload::Map(vec![
+                            ("id", crate::PayloadValue::Number(*request as f64)),
+                            ("error", crate::PayloadValue::Str(message.clone())),
+                        ]),
+                    ));
+                    self.deny(message);
+                    continue;
+                }
+                Command::StatusBar(_) if !self.access.allows_status_bar() => {
+                    self.deny("the status bar is not granted: add `\"statusBar\": true` to capabilities in nsh.json".into());
+                    continue;
+                }
+                _ => {}
+            }
+            let node = &self.nodes[key as usize];
             match command {
                 Command::ScrollToEnd { animated } => {
                     let Some(content) = node.scroll.as_ref().and_then(|s| s.content) else {
@@ -1332,8 +1388,65 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
+    /// `prop` with what the app may not reach removed: a refused image
+    /// fails (`onError`), a refused video or web view source shows nothing.
+    fn check_prop(&mut self, key: Key, prop: Prop) -> Prop {
+        if self.access.is_unrestricted() {
+            return prop;
+        }
+        let node = &self.nodes[key as usize];
+        let (id, kind) = (node.id, node.kind);
+        // Always reported: the `onError` listener may be set after the
+        // source (JS finds the handler when the event is delivered).
+        let refuse = |core: &mut Self, what: &str, uri: &str, capability: &str| {
+            let message = not_granted(what, uri, capability);
+            core.events.push((
+                id,
+                EventKind::Error,
+                EventPayload::Error {
+                    message: message.clone(),
+                },
+            ));
+            core.deny(message);
+        };
+        match prop {
+            Prop::Source(Some(source)) if !self.access.allows_media(&source.uri) => {
+                refuse(self, "the image", &source.uri, "network");
+                Prop::Source(None)
+            }
+            Prop::Image(ImageProp::DefaultSource(Some(source)))
+                if !self.access.allows_media(&source.uri) =>
+            {
+                refuse(self, "the placeholder", &source.uri, "network");
+                Prop::Image(ImageProp::DefaultSource(None))
+            }
+            Prop::Native(NativeProp::Source(crate::WebSource::Uri(uri)))
+                if kind == Kind::Video && !self.access.allows_media(&uri) =>
+            {
+                refuse(self, "the video", &uri, "network");
+                Prop::Native(NativeProp::Source(crate::WebSource::None))
+            }
+            Prop::Native(NativeProp::Source(crate::WebSource::Uri(uri)))
+                if kind == Kind::WebView && !self.access.allows_webview(&uri) =>
+            {
+                refuse(self, "the web page", &uri, "webview.hosts");
+                Prop::Native(NativeProp::Source(crate::WebSource::None))
+            }
+            Prop::Native(NativeProp::Source(crate::WebSource::Html { .. }))
+                if kind == Kind::WebView && !self.access.allows_webviews() =>
+            {
+                self.deny(
+                    "web views are not granted: add `webview` to capabilities in nsh.json".into(),
+                );
+                Prop::Native(NativeProp::Source(crate::WebSource::None))
+            }
+            prop => prop,
+        }
+    }
+
     fn set_prop(&mut self, id: NodeId, prop: Prop) -> Result<(), ApplyError> {
         let key = self.key(id)?;
+        let prop = self.check_prop(key, prop);
         let node = &mut self.nodes[key as usize];
         let mut flags = 0;
         match prop {
@@ -3862,6 +3975,12 @@ fn definite(size: Size) -> taffy::Size<AvailableSpace> {
         width: AvailableSpace::Definite(size.width),
         height: AvailableSpace::Definite(size.height),
     }
+}
+
+/// The message for a refused URL.
+fn not_granted(what: &str, uri: &str, capability: &str) -> String {
+    let host = crate::access::parse_url(uri).map_or_else(|| uri.to_owned(), |u| u.host);
+    format!("{what} {uri} is not granted: add `{host}` to capabilities.{capability} in nsh.json")
 }
 
 /// Applies one property to a control.

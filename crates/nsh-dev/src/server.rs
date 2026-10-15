@@ -39,6 +39,7 @@ struct Bundle {
     bytecode: axum::body::Bytes,
     source: axum::body::Bytes,
     source_map: Option<axum::body::Bytes>,
+    capabilities: Option<String>,
 }
 
 struct Patch {
@@ -135,6 +136,7 @@ impl DevServer {
         bytecode: Vec<u8>,
         source: String,
         source_map: Option<String>,
+        capabilities: Option<String>,
         patch: Option<(String, Option<String>)>,
     ) {
         let version = {
@@ -158,6 +160,7 @@ impl DevServer {
             bytecode: bytecode.into(),
             source: source.into(),
             source_map: source_map.map(Into::into),
+            capabilities,
         })));
     }
 
@@ -351,6 +354,7 @@ async fn send_event(
                     version: bundle.version,
                     format,
                     source_map: bundle.source_map.is_some(),
+                    capabilities: bundle.capabilities.clone(),
                 },
             )
             .await?;

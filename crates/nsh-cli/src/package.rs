@@ -115,6 +115,9 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
     fs::copy(&runner, app.join(&executable))
         .with_context(|| format!("copy {}", runner.display()))?;
     fs::write(resources.join("bundle.qbc"), &built.bytecode)?;
+    if let Some(json) = built.capabilities_json() {
+        fs::write(resources.join("capabilities.json"), json)?;
+    }
     let root = entry.parent().unwrap_or(Path::new("."));
     for asset in &built.assets {
         let dest = resources.join("assets").join(asset);
@@ -188,6 +191,9 @@ fn package_android(
     let runtime = runtime::android(false)?;
     let root = entry.parent().unwrap_or(Path::new("."));
     let mut assets = vec![("nsh/bundle.qbc".to_owned(), built.bytecode.clone())];
+    if let Some(json) = built.capabilities_json() {
+        assets.push(("nsh/capabilities.json".to_owned(), json.into_bytes()));
+    }
     for asset in &built.assets {
         let path = asset.to_string_lossy().replace('\\', "/");
         let bytes = fs::read(root.join(asset)).with_context(|| format!("read {path}"))?;

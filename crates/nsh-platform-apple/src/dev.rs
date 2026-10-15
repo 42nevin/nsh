@@ -205,6 +205,7 @@ fn handle(view: &Rc<Inner>, ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
             format,
             bytes,
             source_map,
+            capabilities,
         } => {
             let mut bundle = match format {
                 BundleFormat::Bytecode => {
@@ -225,6 +226,10 @@ fn handle(view: &Rc<Inner>, ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
             if let Some(map) = source_map {
                 bundle = bundle.with_source_map(map);
             }
+            bundle = match bundle.with_capabilities_json(capabilities.as_deref()) {
+                Ok(bundle) => bundle,
+                Err(err) => return show_error(ui, container, "Invalid capabilities", &err),
+            };
             hide_status(ui);
             let running = {
                 let mut ui = ui.borrow_mut();

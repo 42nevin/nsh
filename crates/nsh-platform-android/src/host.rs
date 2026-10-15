@@ -46,6 +46,13 @@ pub(crate) struct Host {
     seq: AtomicU64,
     ui: Mutex<UiAnim>,
     epoch: Instant,
+    /// What the embedding app grants loaded apps at most
+    /// (`NshView.setGrantedCapabilities`).
+    granted: Mutex<Option<nsh_engine::Capabilities>>,
+    /// The VM limits of loaded apps (`NshView.setLimits`).
+    limits: Mutex<nsh_engine::Limits>,
+    /// What the running app may reach (web view navigations check it).
+    access: Mutex<Arc<nsh_engine::Access>>,
     #[cfg(feature = "dev")]
     pub(crate) dev: Mutex<Option<crate::dev::DevSession>>,
 }
@@ -56,7 +63,11 @@ impl Host {
     }
 
     /// Runs `bundle`, replacing the running app.
-    pub(crate) fn load(self: &Arc<Self>, bundle: Bundle) {
+    pub(crate) fn load(self: &Arc<Self>, mut bundle: Bundle) {
+        if let Some(granted) = self.granted.lock().expect("granted").clone() {
+            bundle.policy.granted = Some(granted);
+        }
+        *self.access.lock().expect("access") = Arc::new(bundle.policy.access());
         let viewport = *self.viewport.lock().expect("viewport");
         if viewport.width <= 0.0 || viewport.height <= 0.0 {
             *self.pending.lock().expect("pending") = Some(bundle);
@@ -75,7 +86,7 @@ impl Host {
             environment: *self.environment.lock().expect("environment"),
             // Android's toolbar is 56dp; it has no large titles.
             header_heights: (56.0, 56.0),
-            limits: nsh_engine::Limits::default(),
+            limits: *self.limits.lock().expect("limits"),
         };
         let density = self.density;
         let sink = Sink(self.clone());
@@ -304,10 +315,96 @@ extern "system" fn Java_com_longbridge_nsh_Native_create(
         seq: AtomicU64::new(0),
         ui: Mutex::new(UiAnim::default()),
         epoch: Instant::now(),
+        granted: Mutex::new(None),
+        limits: Mutex::new(nsh_engine::Limits::default()),
+        access: Mutex::new(Arc::default()),
         #[cfg(feature = "dev")]
         dev: Mutex::new(None),
     });
     Box::into_raw(Box::new(host)) as jlong
+}
+
+/// What the embedding app grants the apps it loads at most (JSON in the
+/// form of `nsh.json` `capabilities`; null: no ceiling). Returns false for
+/// an invalid grant (which is then ignored). Applies from the next load.
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_longbridge_nsh_Native_setGranted(
+    mut env: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    json: JString<'_>,
+) -> jboolean {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    let granted = if json.is_null() {
+        None
+    } else {
+        let Ok(json) = env.get_string(&json) else {
+            return 0;
+        };
+        match nsh_engine::parse_capabilities(&String::from(json)) {
+            Ok(caps) => Some(caps),
+            Err(err) => {
+                log::error!("invalid grant: {err}");
+                return 0;
+            }
+        }
+    };
+    *host.granted.lock().expect("granted") = granted;
+    1
+}
+
+/// The VM limits of the apps loaded next: heap (MB), stack (KB), the
+/// budgets (ms) of loading and of every other call into JS, and the node
+/// quota; 0 keeps a default.
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_longbridge_nsh_Native_setLimits(
+    _: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    memory_mb: jint,
+    stack_kb: jint,
+    load_ms: jint,
+    call_ms: jint,
+    max_nodes: jint,
+) {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    let mut limits = nsh_engine::Limits::default();
+    let pick = |v: jint| (v > 0).then_some(v as usize);
+    if let Some(mb) = pick(memory_mb) {
+        limits.memory_bytes = mb << 20;
+    }
+    if let Some(kb) = pick(stack_kb) {
+        limits.stack_bytes = (kb << 10).min(limits.stack_bytes);
+    }
+    if let Some(ms) = pick(load_ms) {
+        limits.load_budget = std::time::Duration::from_millis(ms as u64);
+    }
+    if let Some(ms) = pick(call_ms) {
+        limits.call_budget = std::time::Duration::from_millis(ms as u64);
+    }
+    if let Some(n) = pick(max_nodes) {
+        limits.max_nodes = n;
+    }
+    *host.limits.lock().expect("limits") = limits;
+}
+
+/// Whether the running app's web views may navigate to `url`.
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_longbridge_nsh_Native_allowsWebview(
+    mut env: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    url: JString<'_>,
+) -> jboolean {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    let Ok(url) = env.get_string(&url) else {
+        return 0;
+    };
+    let access = host.access.lock().expect("access").clone();
+    access.allows_webview(&String::from(url)).into()
 }
 
 #[unsafe(no_mangle)]
@@ -334,6 +431,7 @@ extern "system" fn Java_com_longbridge_nsh_Native_load(
     code: JByteArray<'_>,
     bytecode: jboolean,
     source_map: JString<'_>,
+    capabilities: JString<'_>,
 ) {
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
@@ -350,7 +448,15 @@ extern "system" fn Java_com_longbridge_nsh_Native_load(
     {
         bundle = bundle.with_source_map(String::from(map));
     }
-    host.load(bundle);
+    let declared = if capabilities.is_null() {
+        None
+    } else {
+        env.get_string(&capabilities).ok().map(String::from)
+    };
+    match bundle.with_capabilities_json(declared.as_deref()) {
+        Ok(bundle) => host.load(bundle),
+        Err(err) => log::error!("cannot load the bundle: {err}"),
+    }
 }
 
 #[unsafe(no_mangle)]

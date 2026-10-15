@@ -89,6 +89,27 @@ impl AppView {
         }
     }
 
+    /// What the apps this view loads are granted at most (`None`: what each
+    /// app declares). Applies from the next [`AppView::load`].
+    pub fn set_granted_capabilities(&self, granted: Option<nsh_engine::Capabilities>) {
+        self.reconfigure(|options| options.granted = granted);
+    }
+
+    /// The VM limits of the apps this view loads. Applies from the next
+    /// [`AppView::load`].
+    pub fn set_limits(&self, limits: nsh_engine::Limits) {
+        self.reconfigure(|options| options.limits = limits);
+    }
+
+    fn reconfigure(&self, change: impl FnOnce(&mut SurfaceOptions)) {
+        let mut state = self.inner.state.borrow_mut();
+        change(&mut state.options);
+        // The next load starts a surface with the new options.
+        if let Some(old) = state.surface.take() {
+            old.view().removeFromSuperview();
+        }
+    }
+
     /// Receives fatal app errors (bundle failed to load, uncaught JS
     /// exceptions) on the main thread. They are always logged; development
     /// builds also show them over the app.

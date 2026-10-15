@@ -330,6 +330,8 @@ pub(crate) struct Mounter {
     target: Retained<EventTarget>,
     animator: Animator,
     images: ImageLoader,
+    /// What the app may reach (web view navigations check it).
+    access: std::sync::Arc<nsh_engine::Access>,
     control: EngineControl,
     shared: SharedMounter,
     /// Mac Catalyst in the Mac idiom (no `UIRefreshControl`).
@@ -383,6 +385,7 @@ impl Mounter {
         control: EngineControl,
         shared: SharedMounter,
         asset_base: Option<AssetBase>,
+        access: std::sync::Arc<nsh_engine::Access>,
     ) -> Self {
         let target = EventTarget::new(mtm, control.clone(), shared.clone());
         let target_for_link = target.clone();
@@ -406,6 +409,7 @@ impl Mounter {
                 })
             }),
             control,
+            access,
             shared,
             mac_idiom: UIDevice::currentDevice(mtm).userInterfaceIdiom()
                 == UIUserInterfaceIdiom::Mac,
@@ -483,9 +487,12 @@ impl Mounter {
                     ViewKind::HeaderItem => Native::HeaderItem(NshView::new(self.mtm)),
                     ViewKind::InputAccessory => Native::InputAccessory(NshView::new(self.mtm)),
                     ViewKind::Canvas => Native::Canvas(crate::canvas::CanvasView::new(self.mtm)),
-                    ViewKind::WebView => {
-                        Native::Web(Box::new(WebHost::new(self.mtm, id, self.control.clone())))
-                    }
+                    ViewKind::WebView => Native::Web(Box::new(WebHost::new(
+                        self.mtm,
+                        id,
+                        self.control.clone(),
+                        self.access.clone(),
+                    ))),
                     ViewKind::Video => Native::Video(Box::new(VideoHost::new(
                         self.mtm,
                         id,

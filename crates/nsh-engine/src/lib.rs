@@ -6,6 +6,7 @@
 //! [`MountBatch`] to the platform through a [`MountSink`]. The platform
 //! thread never blocks on JS.
 
+mod access;
 mod symbolicate;
 
 use std::{
@@ -18,6 +19,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+pub use nsh_core::access::{Access, Capabilities};
 use nsh_core::{
     ApplyError, Core, EdgeInsets, EventKind, EventPayload, ListBind, MountBatch, NodeId, Op,
     PayloadValue, Size, TextEngine,
@@ -58,18 +60,41 @@ pub struct Policy {
     /// prototypes (see `nsh_js::HostOptions::harden`). On by default; off for
     /// development bundles.
     pub harden: bool,
+    /// What the app declared (`nsh.json` `capabilities`); `None`: no
+    /// declaration, everything.
+    pub declared: Option<Capabilities>,
+    /// What the embedding app grants at most; `None`: whatever the app
+    /// declared.
+    pub granted: Option<Capabilities>,
 }
 
 impl Default for Policy {
     fn default() -> Self {
-        Self { harden: true }
+        Self {
+            harden: true,
+            declared: None,
+            granted: None,
+        }
     }
 }
 
 impl Policy {
-    /// Development bundles: `eval` and friends stay (debugging).
+    /// Development bundles: `eval` and friends stay (debugging); the
+    /// capabilities are still enforced, so a missing one shows during
+    /// development.
     pub fn development() -> Self {
-        Self { harden: false }
+        Self {
+            harden: false,
+            ..Self::default()
+        }
+    }
+
+    /// What the app may reach under this policy.
+    pub fn access(&self) -> Access {
+        Access {
+            declared: self.declared.clone().unwrap_or_else(Capabilities::all),
+            granted: self.granted.clone(),
+        }
     }
 }
 
@@ -114,7 +139,8 @@ impl Bundle {
     }
 
     /// Reads a bundle written by `nsh build`: `bundle.qbc` (bytecode) or any
-    /// other file as JS source, plus `bundle.js.map` next to it if present.
+    /// other file as JS source, plus `bundle.js.map` and the app's
+    /// `capabilities.json` next to it if present.
     pub fn read(path: &std::path::Path) -> io::Result<Bundle> {
         let bytes = std::fs::read(path)?;
         let bundle = if path.extension().is_some_and(|e| e == "qbc") {
@@ -122,12 +148,30 @@ impl Bundle {
         } else {
             Bundle::source(String::from_utf8(bytes).map_err(io::Error::other)?)
         };
-        Ok(
-            match std::fs::read_to_string(path.with_file_name("bundle.js.map")) {
-                Ok(map) if !map.is_empty() => bundle.with_source_map(map),
-                _ => bundle,
-            },
-        )
+        let mut bundle = match std::fs::read_to_string(path.with_file_name("bundle.js.map")) {
+            Ok(map) if !map.is_empty() => bundle.with_source_map(map),
+            _ => bundle,
+        };
+        if let Ok(json) = std::fs::read_to_string(path.with_file_name("capabilities.json")) {
+            bundle.policy.declared = Some(parse_capabilities(&json).map_err(io::Error::other)?);
+        }
+        Ok(bundle)
+    }
+}
+
+/// Parses capabilities in their JSON form (`capabilities.json`, the dev
+/// protocol, an embedder's grant).
+pub fn parse_capabilities(json: &str) -> Result<Capabilities, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("capabilities: {e}"))?;
+    Capabilities::from_json(&value)
+}
+
+impl Bundle {
+    /// The declared capabilities from their JSON form, if any.
+    pub fn with_capabilities_json(mut self, json: Option<&str>) -> Result<Self, String> {
+        self.policy.declared = json.map(parse_capabilities).transpose()?;
+        Ok(self)
     }
 }
 
@@ -419,8 +463,10 @@ fn run<M: TextEngine + 'static, S: MountSink>(
     host.set_text_measurer(Box::new(move |font, text| {
         nsh_core::canvas::measure_line(&*measurer, font, text)
     }));
+    let access = Arc::new(config.bundle.policy.access());
     let mut core = Core::new(text_engine, config.viewport);
     core.set_max_nodes(config.limits.max_nodes);
+    core.set_access(access.clone());
     core.set_font_scale(config.environment.font_scale);
     core.set_class_environment(class_environment(&config.environment));
     core.set_header_heights(config.header_heights.0, config.header_heights.1);
@@ -441,6 +487,8 @@ fn run<M: TextEngine + 'static, S: MountSink>(
             tx,
             queue: NetworkQueue::default(),
             inflight: FxHashMap::default(),
+            access: access.clone(),
+            followed: FxHashMap::default(),
         },
     };
     let mut last_gc = Instant::now();
@@ -585,6 +633,10 @@ struct Net {
     tx: Sender<Message>,
     queue: NetworkQueue,
     inflight: FxHashMap<RequestId, CancelFetch>,
+    /// What the app may reach.
+    access: Arc<nsh_core::access::Access>,
+    /// Requests whose redirects the engine follows (to check each hop).
+    followed: FxHashMap<RequestId, access::Followed>,
 }
 
 impl Net {
@@ -595,23 +647,67 @@ impl Net {
             return;
         }
         for id in self.queue.cancels.drain(..) {
+            self.followed.remove(&id);
             if let Some(cancel) = self.inflight.remove(&id) {
                 cancel();
             }
         }
-        for (id, request) in self.queue.requests.drain(..) {
-            let Some(network) = &self.network else {
-                let _ = self.tx.send(Message::FetchDone(
-                    id,
-                    Err("this host has no network stack".to_owned()),
-                ));
-                continue;
-            };
-            let tx = self.tx.clone();
-            let done: FetchDone = Box::new(move |result| {
-                let _ = tx.send(Message::FetchDone(id, result));
-            });
-            self.inflight.insert(id, network.fetch(request, done));
+        let requests = std::mem::take(&mut self.queue.requests);
+        for (id, request) in requests {
+            if self.access.is_unrestricted() {
+                self.start(id, request);
+            } else if !self.access.allows_http(&request.method, &request.url) {
+                host.finish_fetch(id, Err(access::refused(&request.method, &request.url)));
+            } else if request.follow_redirects {
+                let hop = access::hop(&request);
+                self.followed
+                    .insert(id, access::Followed { request, hops: 0 });
+                self.start(id, hop);
+            } else {
+                self.start(id, request);
+            }
+        }
+    }
+
+    /// Hands one request (or redirect hop) to the network.
+    fn start(&mut self, id: RequestId, request: HttpRequest) {
+        let Some(network) = &self.network else {
+            let _ = self.tx.send(Message::FetchDone(
+                id,
+                Err("this host has no network stack".to_owned()),
+            ));
+            return;
+        };
+        let tx = self.tx.clone();
+        let done: FetchDone = Box::new(move |result| {
+            let _ = tx.send(Message::FetchDone(id, result));
+        });
+        self.inflight.insert(id, network.fetch(request, done));
+    }
+
+    /// A hop of request `id` answered: its final result, or `None` when the
+    /// next hop was started (or the request was cancelled).
+    fn finished(
+        &mut self,
+        id: RequestId,
+        result: Result<HttpResponse, String>,
+    ) -> Option<Result<HttpResponse, String>> {
+        // Results of cancelled requests are dropped.
+        if self.inflight.remove(&id).is_none() && self.network.is_some() {
+            return None;
+        }
+        let Some(followed) = self.followed.get_mut(&id) else {
+            return Some(result);
+        };
+        match access::next(&self.access, followed, result) {
+            access::Next::Done(result) => {
+                self.followed.remove(&id);
+                Some(result)
+            }
+            access::Next::Hop(request) => {
+                self.start(id, request);
+                None
+            }
         }
     }
 }
@@ -845,8 +941,7 @@ fn handle<M: TextEngine>(host: &Host, state: &mut State<M>, message: Message) ->
         }
         Message::States(id, states) => state.core.set_states(id, states),
         Message::FetchDone(id, result) => {
-            // Results of cancelled requests are dropped.
-            if state.net.inflight.remove(&id).is_some() || state.net.network.is_none() {
+            if let Some(result) = state.net.finished(id, result) {
                 host.finish_fetch(id, result);
             }
         }

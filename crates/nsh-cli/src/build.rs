@@ -38,6 +38,16 @@ pub(crate) struct Built {
     pub(crate) source_map: Option<String>,
     /// Imported asset files, relative to the entry directory.
     pub(crate) assets: Vec<std::path::PathBuf>,
+    /// What the app declares it may reach (`nsh.json` `capabilities`).
+    pub(crate) capabilities: Option<nsh_core::access::Capabilities>,
+}
+
+impl Built {
+    /// `capabilities.json` (written next to the bundle), when the app
+    /// declares capabilities.
+    pub(crate) fn capabilities_json(&self) -> Option<String> {
+        self.capabilities.as_ref().map(|c| c.to_json().to_string())
+    }
 }
 
 /// Bundles `entry` and compiles it to bytecode.
@@ -61,6 +71,7 @@ pub(crate) fn compile(entry: &Path, release: bool) -> Result<Built, BuildError> 
         bytecode,
         source_map: bundle.source_map,
         assets: bundle.assets,
+        capabilities: bundle.capabilities,
     })
 }
 
@@ -84,6 +95,7 @@ pub(crate) fn compile_hot(entry: &Path) -> Result<(Built, nsh_bundler::HotBundle
         bytecode,
         source_map,
         assets: hot.assets.clone(),
+        capabilities: hot.capabilities.clone(),
     };
     Ok((built, hot))
 }
@@ -101,6 +113,15 @@ pub(crate) fn build(entry: &Path, out: &Path, release: bool) -> anyhow::Result<(
     ] {
         let path = out.join(name);
         fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
+    }
+    let declared = out.join("capabilities.json");
+    match built.capabilities_json() {
+        Some(json) => {
+            fs::write(&declared, json).with_context(|| format!("write {}", declared.display()))?
+        }
+        None => {
+            let _ = fs::remove_file(&declared);
+        }
     }
     // Assets keep their relative paths: `asset:/img/a.png` -> `out/assets/img/a.png`.
     let root = entry

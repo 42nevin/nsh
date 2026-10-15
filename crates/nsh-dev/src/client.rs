@@ -43,6 +43,8 @@ pub enum DevEvent {
         bytes: Vec<u8>,
         /// Source map (JSON), when the server has one.
         source_map: Option<String>,
+        /// What the app declares it may reach (JSON), if it declares it.
+        capabilities: Option<String>,
     },
 }
 
@@ -134,6 +136,7 @@ fn session(
         base: Option<u64>,
         format: BundleFormat,
         source_map: bool,
+        capabilities: Option<String>,
         bytes: Option<Vec<u8>>,
     }
     let mut pending: Option<Pending> = None;
@@ -165,12 +168,14 @@ fn session(
                     version,
                     format,
                     source_map,
+                    capabilities,
                 }) => {
                     pending = Some(Pending {
                         version,
                         base: None,
                         format,
                         source_map,
+                        capabilities,
                         bytes: None,
                     })
                 }
@@ -184,6 +189,7 @@ fn session(
                         base: Some(base),
                         format: BundleFormat::Source,
                         source_map,
+                        capabilities: None,
                         bytes: None,
                     })
                 }
@@ -218,6 +224,7 @@ fn session(
                         format: p.format,
                         bytes,
                         source_map,
+                        capabilities: p.capabilities,
                     }),
                 }
             }

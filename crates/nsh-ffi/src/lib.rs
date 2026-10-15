@@ -60,7 +60,7 @@ pub extern "C" fn nsh_app_create(frame: CGRect, trace: bool) -> *mut NshApp {
     init_logging();
     let options = SurfaceOptions {
         trace,
-        asset_base: None,
+        ..SurfaceOptions::default()
     };
     let view = AppView::new(main_thread(), frame, options);
     Box::into_raw(Box::new(NshApp { view }))
@@ -109,6 +109,78 @@ pub unsafe extern "C" fn nsh_app_load_bundle(app: *mut NshApp, path: *const c_ch
             false
         }
     }
+}
+
+/// What the apps `app` loads are granted at most: JSON in the form of
+/// `nsh.json`'s `capabilities` (`NULL`: what each app declares). Applies from
+/// the next load. Returns false (and changes nothing) for an invalid grant.
+///
+/// # Safety
+///
+/// `app` must come from [`nsh_app_create`]; `json` must be `NULL` or a
+/// NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_app_set_granted_capabilities(
+    app: *mut NshApp,
+    json: *const c_char,
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    let app = unsafe { &*app };
+    let granted = if json.is_null() {
+        None
+    } else {
+        // SAFETY: guaranteed by the caller.
+        let Ok(json) = unsafe { CStr::from_ptr(json) }.to_str() else {
+            log::error!("grant is not UTF-8");
+            return false;
+        };
+        match nsh_engine::parse_capabilities(json) {
+            Ok(caps) => Some(caps),
+            Err(err) => {
+                log::error!("invalid grant: {err}");
+                return false;
+            }
+        }
+    };
+    app.view.set_granted_capabilities(granted);
+    true
+}
+
+/// The VM limits of the apps `app` loads next: heap (MB), stack (KB), the
+/// time budgets (ms) of loading and of every other call into JS, and the
+/// node quota; 0 keeps a default.
+///
+/// # Safety
+///
+/// `app` must come from [`nsh_app_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_app_set_limits(
+    app: *mut NshApp,
+    memory_mb: u32,
+    stack_kb: u32,
+    load_ms: u32,
+    call_ms: u32,
+    max_nodes: u32,
+) {
+    // SAFETY: guaranteed by the caller.
+    let app = unsafe { &*app };
+    let mut limits = nsh_engine::Limits::default();
+    if memory_mb > 0 {
+        limits.memory_bytes = (memory_mb as usize) << 20;
+    }
+    if stack_kb > 0 {
+        limits.stack_bytes = ((stack_kb as usize) << 10).min(limits.stack_bytes);
+    }
+    if load_ms > 0 {
+        limits.load_budget = std::time::Duration::from_millis(load_ms.into());
+    }
+    if call_ms > 0 {
+        limits.call_budget = std::time::Duration::from_millis(call_ms.into());
+    }
+    if max_nodes > 0 {
+        limits.max_nodes = max_nodes as usize;
+    }
+    app.view.set_limits(limits);
 }
 
 /// Development: loads from a `nsh dev` server (`ws://host:port/ws`) and

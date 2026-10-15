@@ -1812,6 +1812,7 @@ dependencies = [
  "nsh-js",
  "oxc_sourcemap 9.0.0",
  "rustc-hash",
+ "serde_json",
 ]
 
 [[package]]

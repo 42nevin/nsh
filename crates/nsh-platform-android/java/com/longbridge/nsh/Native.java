@@ -60,7 +60,17 @@ final class Native {
 
     static native void destroy(long handle);
 
-    static native void load(long handle, byte[] code, boolean bytecode, String sourceMap);
+    /** What loaded apps are granted at most (capabilities JSON; null: no ceiling); false if invalid. */
+    static native boolean setGranted(long handle, String capabilities);
+
+    /** VM limits of the apps loaded next (0 keeps a default). */
+    static native void setLimits(long handle, int memoryMb, int stackKb, int loadMs, int callMs, int maxNodes);
+
+    /** Whether the running app's web views may navigate to {@code url}. */
+    static native boolean allowsWebview(long handle, String url);
+
+    /** {@code capabilities}: the app's declaration (JSON), or null for none. */
+    static native void load(long handle, byte[] code, boolean bytecode, String sourceMap, String capabilities);
 
     static native boolean connectDevServer(long handle, String url);
 

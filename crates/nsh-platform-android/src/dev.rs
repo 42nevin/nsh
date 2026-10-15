@@ -112,6 +112,7 @@ fn handle(host: &Arc<Host>, state: &Mutex<DevState>, event: DevEvent) {
             format,
             bytes,
             source_map,
+            capabilities,
         } => {
             let mut bundle = match format {
                 BundleFormat::Bytecode => {
@@ -130,6 +131,10 @@ fn handle(host: &Arc<Host>, state: &Mutex<DevState>, event: DevEvent) {
             if let Some(map) = source_map {
                 bundle = bundle.with_source_map(map);
             }
+            bundle = match bundle.with_capabilities_json(capabilities.as_deref()) {
+                Ok(bundle) => bundle,
+                Err(err) => return host.dev_error(Some(("Invalid capabilities", &err))),
+            };
             host.dev_status(None);
             let running = {
                 let mut state = state.lock().expect("dev state");

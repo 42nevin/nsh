@@ -104,8 +104,29 @@ pub struct Bundle {
     /// Asset files the app imports, relative to the entry directory
     /// (`asset:/<path>` URIs refer to them).
     pub assets: Vec<PathBuf>,
+    /// What the app declares it may reach (`nsh.json` `capabilities`);
+    /// `None` without a declaration.
+    pub capabilities: Option<nsh_core::access::Capabilities>,
     /// Wall time spent bundling, in milliseconds.
     pub elapsed_ms: f64,
+}
+
+/// The `"capabilities"` of the `nsh.json` next to the entry, checked.
+pub fn capabilities(
+    dir: &std::path::Path,
+) -> Result<Option<nsh_core::access::Capabilities>, BundleError> {
+    let Ok(text) = std::fs::read_to_string(dir.join("nsh.json")) else {
+        return Ok(None);
+    };
+    let config: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| BundleError::other(format!("nsh.json: {e}")))?;
+    config
+        .get("capabilities")
+        .map(|c| {
+            nsh_core::access::Capabilities::from_json(c)
+                .map_err(|e| BundleError::other(format!("nsh.json: {e}")))
+        })
+        .transpose()
 }
 
 /// The `"tailwind"` object of the `nsh.json` next to the entry, checked.
@@ -149,6 +170,7 @@ pub async fn bundle_async(options: &BundleOptions) -> Result<Bundle, BundleError
     let cwd_for_errors = cwd.clone();
     let cwd_root = cwd.clone();
     let tailwind = tailwind_setup(&cwd)?;
+    let capabilities = capabilities(&cwd)?;
     let plugin_error = Arc::new(Mutex::new(None));
     let assets = Arc::new(Mutex::new(Vec::new()));
     let mut bundler = Bundler::with_plugins(
@@ -208,6 +230,7 @@ pub async fn bundle_async(options: &BundleOptions) -> Result<Bundle, BundleError
         code,
         source_map,
         assets,
+        capabilities,
         elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
     })
 }
@@ -226,6 +249,8 @@ pub struct HotBundle {
     solid: String,
     /// Asset files the app imports (as in [`Bundle::assets`]).
     pub assets: Vec<PathBuf>,
+    /// As in [`Bundle::capabilities`].
+    pub capabilities: Option<nsh_core::access::Capabilities>,
     /// Wall time spent bundling, in milliseconds.
     pub elapsed_ms: f64,
 }
@@ -362,6 +387,7 @@ pub async fn bundle_hot_async(entry: &std::path::Path) -> Result<HotBundle, Bund
     let plugin_error = Arc::new(Mutex::new(None));
     let assets = Arc::new(Mutex::new(Vec::new()));
     let tailwind = tailwind_setup(&cwd)?;
+    let capabilities = capabilities(&cwd)?;
     let mut bundler = Bundler::with_plugins(
         BundlerOptions {
             input: Some(vec![InputItem {
@@ -437,6 +463,7 @@ pub async fn bundle_hot_async(entry: &std::path::Path) -> Result<HotBundle, Bund
         entry: entry_id.ok_or_else(|| BundleError::other("bundle produced no entry chunk"))?,
         solid: solid.ok_or_else(|| BundleError::other("the bundle does not include solid-js"))?,
         assets,
+        capabilities,
         elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
     })
 }

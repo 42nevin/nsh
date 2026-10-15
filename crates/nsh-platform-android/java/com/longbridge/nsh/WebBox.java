@@ -49,6 +49,18 @@ final class WebBox extends WidgetBox {
     }
 
     private final class Client extends WebViewClient {
+        /** Top-level navigations stay within the app's `webview` capability. */
+        @Override
+        public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+            if (!request.isForMainFrame()) return false;
+            String url = request.getUrl().toString();
+            if (mounter.allowsWebview(url)) return false;
+            android.util.Log.w("nsh", "web view navigation to " + url + " is not granted");
+            mounter.eventMap(id, Native.ERROR, new String[] {"message", "url"},
+                    new Object[] {"navigation to " + url + " is not granted", url});
+            return true;
+        }
+
         @Override
         public void onPageStarted(WebView view, String url, Bitmap favicon) {
             if (injectedBefore != null) view.evaluateJavascript(injectedBefore, null);

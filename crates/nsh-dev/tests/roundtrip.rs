@@ -29,6 +29,7 @@ fn bundles_errors_and_logs_round_trip() {
         vec![1, 2, 3],
         "source v1".into(),
         Some("{\"version\":3}".into()),
+        Some("{\"statusBar\":true}".into()),
         None,
     );
     let url = format!("ws://{}{WS_PATH}", server.local_addr());
@@ -46,9 +47,11 @@ fn bundles_errors_and_logs_round_trip() {
             format: BundleFormat::Bytecode,
             bytes,
             source_map,
+            capabilities,
         } => {
             assert_eq!(bytes, [1, 2, 3]);
             assert_eq!(source_map.as_deref(), Some("{\"version\":3}"));
+            assert_eq!(capabilities.as_deref(), Some("{\"statusBar\":true}"));
         }
         other => panic!("{other:?}"),
     }
@@ -61,6 +64,7 @@ fn bundles_errors_and_logs_round_trip() {
     server.publish(
         vec![4],
         "source v2".into(),
+        None,
         None,
         Some(("patch v2".into(), Some("{}".into()))),
     );

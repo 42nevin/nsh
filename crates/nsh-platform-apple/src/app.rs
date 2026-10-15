@@ -163,6 +163,7 @@ fn connect(mtm: MainThreadMarker, scene: &UIWindowScene) {
         SurfaceOptions {
             trace: options.trace,
             asset_base: options.asset_base,
+            ..SurfaceOptions::default()
         },
     );
     root.addSubview(view.view());

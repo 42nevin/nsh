@@ -109,8 +109,14 @@ impl DevSession {
         if self.release {
             match build::compile(&self.entry, true) {
                 Ok(built) => {
-                    self.server
-                        .publish(built.bytecode, built.code, built.source_map, None)
+                    let capabilities = built.capabilities_json();
+                    self.server.publish(
+                        built.bytecode,
+                        built.code,
+                        built.source_map,
+                        capabilities,
+                        None,
+                    )
                 }
                 Err(err) => self.failed(err),
             }
@@ -118,10 +124,12 @@ impl DevSession {
         }
         match build::compile_hot(&self.entry) {
             Ok((built, hot)) => {
+                // Other capabilities: the app starts again under them.
                 let patch = self
                     .hot
                     .borrow()
                     .as_ref()
+                    .filter(|previous| previous.capabilities == hot.capabilities)
                     .map(|previous| hot.patch(previous));
                 let patch = match patch {
                     Some(nsh_bundler::HotPatch::Update { code, source_map }) => {
@@ -131,8 +139,14 @@ impl DevSession {
                     Some(nsh_bundler::HotPatch::Unchanged) => Some(("true".to_owned(), None)),
                     Some(nsh_bundler::HotPatch::Reload) | None => None,
                 };
-                self.server
-                    .publish(built.bytecode, built.code, built.source_map, patch);
+                let capabilities = built.capabilities_json();
+                self.server.publish(
+                    built.bytecode,
+                    built.code,
+                    built.source_map,
+                    capabilities,
+                    patch,
+                );
                 *self.hot.borrow_mut() = Some(hot);
             }
             Err(err) => self.failed(err),

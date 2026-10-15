@@ -93,6 +93,25 @@ public class NshView extends FrameLayout {
         errorListener = listener;
     }
 
+    /**
+     * What the apps this view loads are granted at most, as JSON in the
+     * form of {@code nsh.json}'s {@code capabilities} ({@code null}: what
+     * each app declares). Applies from the next load; false (and ignored)
+     * when the grant is invalid.
+     */
+    public boolean setGrantedCapabilities(String capabilities) {
+        return Native.setGranted(handle, capabilities);
+    }
+
+    /**
+     * The VM limits of the apps this view loads next: heap (MB), stack (KB),
+     * the time budget of loading and of every other call into JS (ms), and
+     * the node quota. 0 keeps a default.
+     */
+    public void setLimits(int memoryMb, int stackKb, int loadMs, int callMs, int maxNodes) {
+        Native.setLimits(handle, memoryMb, stackKb, loadMs, callMs, maxNodes);
+    }
+
     /** Runs a bundle written by `nsh build` (`bundle.qbc` or `bundle.js`); assets come from `assets/` next to it. */
     public boolean loadBundleFile(File file) {
         try {
@@ -100,10 +119,13 @@ public class NshView extends FrameLayout {
             String map = null;
             File mapFile = new File(file.getParentFile(), "bundle.js.map");
             if (mapFile.exists()) map = new String(Net.readAll(new FileInputStream(mapFile)), StandardCharsets.UTF_8);
+            File declared = new File(file.getParentFile(), "capabilities.json");
+            String capabilities = declared.exists()
+                    ? new String(Net.readAll(new FileInputStream(declared)), StandardCharsets.UTF_8) : null;
             assetHttp = null;
             assetApk = null;
             assetDir = new File(file.getParentFile(), "assets");
-            Native.load(handle, code, file.getName().endsWith(".qbc"), map);
+            Native.load(handle, code, file.getName().endsWith(".qbc"), map, capabilities);
             return true;
         } catch (Exception e) {
             reportError("cannot read bundle " + file + ": " + e);
@@ -115,10 +137,17 @@ public class NshView extends FrameLayout {
     public boolean loadAssetBundle(String dir) {
         try {
             byte[] code = Net.readAll(getContext().getAssets().open(dir + "/bundle.qbc"));
+            String capabilities = null;
+            try {
+                capabilities = new String(Net.readAll(getContext().getAssets().open(dir + "/capabilities.json")),
+                        StandardCharsets.UTF_8);
+            } catch (java.io.IOException none) {
+                // The app declares no capabilities.
+            }
             assetHttp = null;
             assetDir = null;
             assetApk = dir + "/assets/";
-            Native.load(handle, code, true, null);
+            Native.load(handle, code, true, null, capabilities);
             return true;
         } catch (Exception e) {
             reportError("cannot read the app bundle: " + e);

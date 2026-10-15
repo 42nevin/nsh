@@ -364,8 +364,12 @@ impl RootView {
         }
     }
 
-    fn start(&self, bundle: Bundle, viewport: Size) {
+    fn start(&self, mut bundle: Bundle, viewport: Size) {
         let mtm = self.mtm();
+        if let Some(granted) = &self.ivars().options.granted {
+            bundle.policy.granted = Some(granted.clone());
+        }
+        let access = Arc::new(bundle.policy.access());
         let mounter: SharedMounter = Arc::new(MainThreadBound::new(RefCell::new(None), mtm));
         let config = EngineConfig {
             bundle,
@@ -377,7 +381,7 @@ impl RootView {
             ))),
             environment: self.environment(),
             header_heights: header_heights(mtm),
-            limits: nsh_engine::Limits::default(),
+            limits: self.ivars().options.limits,
         };
         let sink = MainThreadSink {
             mounter: mounter.clone(),
@@ -398,6 +402,7 @@ impl RootView {
             engine.control(),
             mounter.clone(),
             asset_base,
+            access,
         ));
         *self.ivars().running.borrow_mut() = Some(Running { engine, mounter });
         self.ivars().environment.set(Some(self.environment()));
@@ -434,6 +439,11 @@ pub struct SurfaceOptions {
     pub trace: bool,
     /// Where `asset:/` image URIs (bundled assets) are loaded from.
     pub asset_base: Option<AssetBase>,
+    /// The VM limits of the apps it runs.
+    pub limits: nsh_engine::Limits,
+    /// What the embedding app grants the apps it runs at most (`None`: what
+    /// each app declares).
+    pub granted: Option<nsh_engine::Capabilities>,
 }
 
 /// One running nsh app hosted in a `UIView`.

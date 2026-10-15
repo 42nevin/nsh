@@ -80,6 +80,10 @@ pub enum ServerMessage {
         /// A second binary frame with the source map follows.
         #[serde(default)]
         source_map: bool,
+        /// What the app declares it may reach (JSON), so development runs
+        /// with the same capabilities as the release.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capabilities: Option<String>,
     },
 }
 
@@ -131,7 +135,9 @@ mod tests {
             version: 3,
             format: BundleFormat::Bytecode,
             source_map: true,
+            capabilities: None,
         };
+        // No declaration: the field is left out (older hosts read the same).
         assert_eq!(
             serde_json::to_string(&msg).unwrap(),
             r#"{"type":"bundle","version":3,"format":"bytecode","source_map":true}"#
