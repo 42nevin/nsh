@@ -4,9 +4,12 @@
 //!   into `target/android/<profile>`, where `nsh run` / `nsh package` find it.
 //! - `dist`: the distribution in `dist/nsh`: the `nsh` CLI plus every
 //!   prebuilt runtime, so app developers never need Rust.
+//! - `ios-embed`: only the iOS embedding SDK (`NativeShell.xcframework`,
+//!   `NativeShellDev.xcframework`) into `dist/nsh/embed/ios`.
 
 mod android;
 mod dist;
+mod ios;
 
 use clap::{Parser, Subcommand};
 
@@ -35,6 +38,8 @@ enum Task {
     ClippyAndroid,
     /// Build the distribution in `dist/nsh`.
     Dist,
+    /// Build only the iOS embedding XCFrameworks.
+    IosEmbed,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -49,5 +54,6 @@ fn main() -> anyhow::Result<()> {
         }
         Task::ClippyAndroid => android::clippy(),
         Task::Dist => dist::dist(),
+        Task::IosEmbed => ios::build().map(|out| println!("{}", out.display())),
     }
 }

@@ -16,13 +16,13 @@ crates/
                        the `nsh:tailwind-theme` module (nsh.json `tailwind`) and the unknown-class check (`classes.rs`);
                        development bundles with hot module replacement (`hot.rs`); the TypeScript declarations of `.nsh/types` (`types.rs`)
   nsh-dev/             Dev tooling: dev server protocol, server (CLI, feature `server`), client (host, feature `client`)
-  nsh-platform-apple/  UIKit backend (iOS / simulator / Mac Catalyst): native view mounting, CoreText text engine, input, AppView, standalone app;
-                       feature `dev`: dev server client, log forwarding, error overlay
+  nsh-platform-ios/    UIKit backend (iOS / simulator / Mac Catalyst): native view mounting, CoreText text engine, input, AppView, standalone app;
+                       feature `dev`: dev server client, log forwarding, error overlay; feature `embed`: the C ABI (`embed.rs`,
+                       `include/nsh.h`) under the `NativeShell` Swift module (`swift/NativeShell.swift`) iOS apps embed nsh with
   nsh-platform-android/ Android backend: `libnsh.so` (JNI glue, StaticLayout text engine, batch encoding, UI-thread animator) + the Java
                        runtime in `java/com/longbridge/nsh` (NshView, Mounter, views, images, networking); feature `dev` as above
   nsh-host/            Development host app (Catalyst / iOS simulator); connects to a dev server or runs a local bundle
   nsh-app/             Release runner: the executable of iOS apps built by `nsh package`
-  nsh-ffi/             C ABI (`include/nsh.h`, `libnsh.a`) for embedding nsh in existing iOS apps; shipped as an XCFramework
   nsh-cli/             The `nsh` command line: init / build / trace / dev / run / package; keygen / certify / publish / verify / revoke
   xtask/               Maintainer tasks: `cargo xtask android` (Android runtime), `cargo xtask dist` (the distribution)
 js/runtime/*.ts       The JS runtime, one file per module apps import (see **JS modules**): `index.ts` is `nsh`, `list.ts` is
@@ -35,7 +35,7 @@ js/vendor/solid-js/   Embedded solid-js (version in VERSION) and its type declar
 examples/             Example apps (gallery: a demo index, one module per demo; counter) and embedding samples (embed-ios, embed-android)
 ```
 
-Dependency direction: `nsh-core` ← `nsh-js` ← `nsh-engine` (also ← `nsh-package`) ← `nsh-platform-*` ← `nsh-host` / `nsh-app` / `nsh-ffi`; `nsh-cli` depends on `nsh-bundler`, `nsh-js` and `nsh-engine`. `nsh-core` must not depend on any platform or JS crate.
+Dependency direction: `nsh-core` ← `nsh-js` ← `nsh-engine` (also ← `nsh-package`) ← `nsh-platform-*` ← `nsh-host` / `nsh-app`; `nsh-cli` depends on `nsh-bundler`, `nsh-js` and `nsh-engine`. `nsh-core` must not depend on any platform or JS crate.
 
 ## Data flow and threads
 
@@ -97,10 +97,11 @@ cargo test --release -p nsh-engine --test list_bench -- --ignored --nocapture   
 cargo test --release -p nsh-core bench_ -- --ignored --nocapture                # row / cell relayout benchmarks
 cargo +nightly fmt --all                                                        # .rustfmt.toml uses nightly options
 cargo clippy --workspace --all-targets
-cargo clippy -p nsh-platform-apple -p nsh-host --target aarch64-apple-ios-macabi
+cargo clippy -p nsh-platform-ios -p nsh-host -p nsh-app --target aarch64-apple-ios-macabi --features nsh-platform-ios/embed,nsh-platform-ios/dev
+cargo xtask ios-embed                                                           # NativeShell(Dev).xcframework into dist/nsh/embed/ios
 ```
 
-`nsh-platform-apple` only compiles for `target_os = "ios"` (iOS devices, the iOS simulator and Catalyst); on a macOS host it is an empty crate, so always run clippy on platform code with the Catalyst target. Likewise `nsh-platform-android` is empty off Android: check it with `cargo xtask android` (which sets up the NDK linker, `CC`, `AR` and bindgen's sysroot) and `cargo xtask clippy-android`.
+`nsh-platform-ios` only compiles for `target_os = "ios"` (iOS devices, the iOS simulator and Catalyst); on a macOS host it is an empty crate, so always run clippy on platform code with the Catalyst target. Likewise `nsh-platform-android` is empty off Android: check it with `cargo xtask android` (which sets up the NDK linker, `CC`, `AR` and bindgen's sysroot) and `cargo xtask clippy-android`.
 
 The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distribution layout) or, in a checkout, in
 `target/<triple>/<profile>` and `target/android/<profile>[-dev]` with the CLI's own profile (`NSH_RUNTIME` overrides).
@@ -404,7 +405,7 @@ trusted as the app's own code: every limit and check is enforced in Rust, never 
   (`hosts`: `*`, `*.example.com` or a host, any method; `http`: a host with `methods` / `schemes` / `pathPrefix`),
   `webview` (`hosts` a web view may show and navigate to), `statusBar`. Everything not listed is denied and unknown keys
   are build errors; an app without the key may do everything (a standalone app is its developer's own). The embedding app
-  may grant less (`nsh_app_set_granted_capabilities` / `NshView.setGrantedCapabilities`, the same JSON): a request must be
+  may grant less (`NshAppView.grantCapabilities` / `NshView.setGrantedCapabilities`, the same JSON): a request must be
   allowed by both (`Access`). The declaration travels with the bundle (`capabilities.json` next to it, written by
   `nsh build` / `nsh package`; the dev protocol's `Bundle` message, so development enforces the same capabilities; a change
   reloads instead of patching) into `Policy::declared`.
@@ -415,8 +416,8 @@ trusted as the app's own code: every limit and check is enforced in Rust, never 
   each refusal is logged once, target `js`, saying which key to add); top-level web view navigations on the platforms
   (`WKNavigationDelegate decidePolicyForNavigationAction` / `WebViewClient.shouldOverrideUrlLoading` → `Native.allowsWebview`).
   `asset:` URIs are always allowed. Host checks take the host after the last `@` (`https://ok.com@evil.io` is evil.io).
-- **Embedding limits**: `nsh_app_set_limits` / `NshView.setLimits` (heap MB, stack KB, load / call budgets ms, node
-  quota; 0 keeps a default), from the next load.
+- **Embedding limits**: `NshAppView.limits` (`NshLimits`) / `NshView.setLimits` (heap MB, stack KB, load / call
+  budgets, node quota; unset / 0 keeps a default), from the next load.
 
 ## Signed packages
 
@@ -424,8 +425,8 @@ For code an app downloads (first-party updates, third-party mini apps): `nsh_pac
 
 - **Bytecode is trusted input.** QuickJS does not validate bytecode; loading crafted bytecode corrupts memory. So
   `Bundle::bytecode` / `Bundle::read_trusted` are `unsafe` and only called for: the app's own signed resources
-  (`nsh-app`, `AppActivity`, `NshView.loadAssetBundle`, `nsh_app_load_bundle` for a path inside the main bundle —
-  `nsh_platform_apple::in_app_bundle`), bytecode compiled in-process, the dev server the developer connected to (its
+  (`nsh-app`, `AppActivity`, `NshView.loadAssetBundle`, `NshAppView.loadBundle` for a path inside the main bundle —
+  `nsh_platform_ios::in_app_bundle`), bytecode compiled in-process, the dev server the developer connected to (its
   handshake negotiates the version), and verified packages (`Bundle::from_package`). `Bundle::read` and
   `NshView.loadBundleFile` refuse `.qbc` files; downloaded code is either JS source or a signed package.
 - **Keys, two levels**: a root key (offline; apps trust its public key, several may be trusted) certifies release keys
@@ -446,10 +447,11 @@ For code an app downloads (first-party updates, third-party mini apps): `nsh_pac
   persists in the store's directory (`nsh-trust.json`, written atomically).
 - `nsh_engine::load_package` verifies, extracts the assets once per package to `<root>/<app id>/<sha256>/assets`,
   accepts the build and returns the bundle (with the package's declared capabilities) and the asset directory.
-- **Embedding**: iOS `nsh_trust_create(state_dir)` / `nsh_trust_add_root` / `nsh_trust_update_revocations` /
-  `nsh_app_load_package(app, trust, path)` (`AppView::load_package`); Android `NshTrust(stateDir)` / `addRoot` /
-  `updateRevocations` / `NshView.loadPackage(trust, file)`. A refused package goes to the error handler and the
-  running app stays. To try a package on a simulator / emulator: `nsh-host --package <file> --root <root.pub>`, or
+- **Embedding**: verifying (hashing, extracting assets) is done off the UI thread, running on it. iOS (Swift)
+  `NshTrust(stateDirectory:)` / `addRoot` / `updateRevocations` / `openPackage(at:) async throws -> NshPackage` (its
+  `info`: id, name, version, build) and `NshAppView.run(_:)`, or `loadPackage(at:trust:) async throws`; Android
+  `NshTrust(stateDir)` / `addRoot` / `updateRevocations` / `openPackage(file) throws NshPackage.RefusedException`
+  (any thread) and `NshView.runPackage(pkg)`. A refused package throws; the running app stays. To try a package on a simulator / emulator: `nsh-host --package <file> --root <root.pub>`, or
   `DevActivity` with the `package` (path on the device) and `root` (base64) extras; their trust state persists in
   the temporary / cache directory, so older builds are refused there too.
 - Not done yet: delivering packages (an update server, OTA); the app decides where packages come from.
@@ -461,8 +463,17 @@ For code an app downloads (first-party updates, third-party mini apps): `nsh_pac
   --profile <file.mobileprovision>` (entitlements come from the profile; icons are compiled by `actool` into `Assets.car`).
   Android: an APK assembled without Gradle (`aapt2 link`, native libraries stored uncompressed and 16 KB aligned, `apksigner`;
   the debug key unless `--keystore`).
-- Embedding: iOS apps link `NativeShell.xcframework` and use the C API in `crates/nsh-ffi/include/nsh.h` (`import NativeShell` in Swift); Android apps
-  add `nsh.aar` and use `com.longbridge.nsh.NshView`. `*Dev` / `-dev` variants can also load from a dev server. See `examples/embed-*`.
+- Embedding: iOS apps link `NativeShell.xcframework` and `import NativeShell` (Swift: `NshAppView`, a `UIView`;
+  `NshTrust`, `NshPackage`, `NshLimits`, `NshError`); Android apps add `nsh.aar` and use `com.longbridge.nsh.NshView`.
+  `*Dev` / `-dev` variants can also load from a dev server. See `examples/embed-*`.
+- **The iOS SDK** (`crates/xtask/src/ios.rs`): per platform slice (device, simulator, Catalyst) a static
+  `NativeShell.framework` whose binary is `nsh-platform-ios` with feature `embed` (built by `cargo rustc --crate-type
+  staticlib`, so the hosts never build or export it) merged by `libtool` with the Swift module, compiled with library
+  evolution (`.swiftinterface`: apps on other Swift compilers can import it). The Swift module imports the C ABI's
+  module `NativeShellC` with `internal import`, so it is neither in the interface nor shipped; its module map's `link`
+  lines become autolink entries of the Swift objects (apps link nothing but the framework). Catalyst frameworks use the
+  versioned macOS layout and Swift needs the SDK's `iOSSupport` paths. The C functions return errors as strings
+  (`nsh_string_free`) that Swift throws as `NshError`; the error handler's context is released by a callback.
 
 ## TypeScript
 

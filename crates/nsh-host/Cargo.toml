@@ -10,7 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-nsh-platform-apple = { workspace = true, features = ["dev"] }
+nsh-platform-ios = { workspace = true, features = ["dev"] }
 nsh-dev.workspace = true
 nsh-engine.workspace = true
 log.workspace = true

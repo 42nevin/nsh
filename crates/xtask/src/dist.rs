@@ -70,30 +70,9 @@ pub(crate) fn dist() -> anyhow::Result<()> {
         make_aar(&built, &abis, dev, &aar)?;
     }
 
-    // iOS embedding: one static library per platform in an XCFramework.
-    for (dev, name) in [(false, "NativeShell"), (true, "NativeShellDev")] {
-        let mut libs = Vec::new();
-        for triple in [IOS, IOS_SIM, CATALYST] {
-            let mut args = vec!["build", "--release", "-p", "nsh-ffi", "--target", triple];
-            if dev {
-                args.extend(["--features", "dev"]);
-            }
-            cargo(&args)?;
-            // Separate copies: dev and release builds share the target dir.
-            let lib = out.join("work").join(name).join(triple).join("libnsh.a");
-            copy(&release.join(triple).join("release/libnsh.a"), &lib)?;
-            libs.push(lib);
-        }
-        let framework = out.join("embed/ios").join(format!("{name}.xcframework"));
-        let headers = root.join("crates/nsh-ffi/include");
-        let mut cmd = Command::new("xcodebuild");
-        cmd.arg("-create-xcframework");
-        for lib in &libs {
-            cmd.arg("-library").arg(lib).arg("-headers").arg(&headers);
-        }
-        cmd.arg("-output").arg(&framework);
-        run(&mut cmd)?;
-    }
+    // iOS embedding: a static framework per platform (Rust + the Swift
+    // module) in an XCFramework.
+    crate::ios::xcframeworks(&out.join("embed/ios"), &out.join("work"))?;
     fs::remove_dir_all(out.join("work"))?;
     println!("{}", out.display());
     Ok(())
@@ -155,12 +134,12 @@ fn abs(p: &Path) -> PathBuf {
     }
 }
 
-fn cargo(args: &[&str]) -> anyhow::Result<()> {
+pub(crate) fn cargo(args: &[&str]) -> anyhow::Result<()> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     run(Command::new(cargo).current_dir(android::root()).args(args))
 }
 
-fn copy(from: &Path, to: &Path) -> anyhow::Result<()> {
+pub(crate) fn copy(from: &Path, to: &Path) -> anyhow::Result<()> {
     if let Some(dir) = to.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -168,7 +147,7 @@ fn copy(from: &Path, to: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run(cmd: &mut Command) -> anyhow::Result<()> {
+pub(crate) fn run(cmd: &mut Command) -> anyhow::Result<()> {
     let status = cmd
         .status()
         .with_context(|| format!("run {:?}", cmd.get_program()))?;

@@ -1807,7 +1807,7 @@ name = "nsh-app"
 version = "0.1.0"
 dependencies = [
  "log",
- "nsh-platform-apple",
+ "nsh-platform-ios",
 ]
 
 [[package]]
@@ -1897,25 +1897,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "nsh-ffi"
-version = "0.1.0"
-dependencies = [
- "log",
- "nsh-engine",
- "nsh-platform-apple",
- "objc2",
- "objc2-core-foundation",
- "objc2-ui-kit",
-]
-
-[[package]]
 name = "nsh-host"
 version = "0.1.0"
 dependencies = [
  "log",
  "nsh-dev",
  "nsh-engine",
- "nsh-platform-apple",
+ "nsh-platform-ios",
 ]
 
 [[package]]
@@ -1961,7 +1949,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nsh-platform-apple"
+name = "nsh-platform-ios"
 version = "0.1.0"
 dependencies = [
  "block2",

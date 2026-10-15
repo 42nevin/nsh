@@ -1,14 +1,21 @@
 // An existing UIKit app that embeds a nsh app below its own native UI.
 //
 // Build: see README.md. The nsh bundle (`nsh build`) is copied into the app
-// as `nsh/bundle.qbc` (+ `nsh/assets`).
+// as `nsh/bundle.qbc` (+ `nsh/assets`). "Load update" runs a signed package
+// (`nsh publish`) verified against a root key; a real app downloads the
+// package, here it ships as `nsh/update.nshpkg` with `nsh/root.pub`.
 
-import UIKit
 import NativeShell
+import UIKit
 
 final class EmbedController: UIViewController {
-    private var app: OpaquePointer?
-    private let reloads = UILabel()
+    private let app = NshAppView()
+    private let status = UILabel()
+    private var count = 0
+    private lazy var trust: NshTrust? = {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return try? NshTrust(stateDirectory: support.appendingPathComponent("nsh"))
+    }()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -21,9 +28,15 @@ final class EmbedController: UIViewController {
         let reload = UIButton(type: .system)
         reload.setTitle("Reload nsh", for: .normal)
         reload.addTarget(self, action: #selector(load), for: .touchUpInside)
-        reloads.font = .systemFont(ofSize: 13)
-        reloads.textColor = .secondaryLabel
-        let header = UIStackView(arrangedSubviews: [title, reload, reloads])
+        let update = UIButton(type: .system)
+        update.setTitle("Load update", for: .normal)
+        update.addTarget(self, action: #selector(loadUpdate), for: .touchUpInside)
+        status.font = .systemFont(ofSize: 13)
+        status.textColor = .secondaryLabel
+        status.numberOfLines = 0
+        let buttons = UIStackView(arrangedSubviews: [reload, update])
+        buttons.spacing = 16
+        let header = UIStackView(arrangedSubviews: [title, buttons, status])
         header.axis = .vertical
         header.alignment = .leading
         header.spacing = 6
@@ -31,51 +44,62 @@ final class EmbedController: UIViewController {
         view.addSubview(header)
 
         // The embedded nsh app.
-        let container = UIView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.layer.borderColor = UIColor.systemPurple.cgColor
-        container.layer.borderWidth = 2
-        container.clipsToBounds = true
-        view.addSubview(container)
+        app.translatesAutoresizingMaskIntoConstraints = false
+        app.layer.borderColor = UIColor.systemPurple.cgColor
+        app.layer.borderWidth = 2
+        app.clipsToBounds = true
+        app.onError = { [weak self] message in self?.status.text = "nsh error: \(message)" }
+        view.addSubview(app)
 
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
             header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            container.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 12),
-            container.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            container.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            container.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
+            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            app.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 12),
+            app.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            app.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            app.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
         ])
-
-        let app = nsh_app_create(container.bounds, false)
-        self.app = app
-        let nshView = nsh_app_view(app)
-        nshView.frame = container.bounds
-        container.addSubview(nshView)
-        nsh_app_set_error_handler(app, { _, message in
-            print("nsh error: \(String(cString: message))")
-        }, nil)
         load()
     }
 
-    private var count = 0
-
     @objc private func load() {
-        guard let app, let path = Bundle.main.path(forResource: "bundle", ofType: "qbc", inDirectory: "nsh") else {
+        guard let url = Bundle.main.url(forResource: "bundle", withExtension: "qbc", subdirectory: "nsh") else {
             return
         }
-        count += 1
-        reloads.text = "loaded \(count)×"
-        nsh_app_load_bundle(app, path)
+        do {
+            try app.loadBundle(at: url)
+            count += 1
+            status.text = "loaded \(count)×"
+        } catch {
+            status.text = "\(error)"
+        }
+    }
+
+    @objc private func loadUpdate() {
+        guard let trust,
+            let package = Bundle.main.url(forResource: "update", withExtension: "nshpkg", subdirectory: "nsh"),
+            let root = Bundle.main.url(forResource: "root", withExtension: "pub", subdirectory: "nsh")
+        else {
+            status.text = "no nsh/update.nshpkg and nsh/root.pub in the app"
+            return
+        }
+        Task {
+            do {
+                try trust.addRoot(String(contentsOf: root, encoding: .utf8))
+                let info = try await app.loadPackage(at: package, trust: trust)
+                status.text = "running \(info.id) \(info.version) (build \(info.build))"
+            } catch {
+                status.text = "\(error)"
+            }
+        }
     }
 
     // Let the embedded app's `StatusBar` set the status bar.
-    override var preferredStatusBarStyle: UIStatusBarStyle { nsh_status_bar_style() }
-    override var prefersStatusBarHidden: Bool { nsh_status_bar_hidden() }
-    override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation { nsh_status_bar_animation() }
-
-    deinit {
-        nsh_app_destroy(app)
+    override var preferredStatusBarStyle: UIStatusBarStyle { NshAppView.preferredStatusBarStyle }
+    override var prefersStatusBarHidden: Bool { NshAppView.prefersStatusBarHidden }
+    override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation {
+        NshAppView.preferredStatusBarUpdateAnimation
     }
 }
 

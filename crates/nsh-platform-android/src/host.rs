@@ -13,7 +13,7 @@ use std::{
 
 use jni::{
     JNIEnv,
-    objects::{GlobalRef, JByteArray, JClass, JFloatArray, JObject, JString, JValue},
+    objects::{GlobalRef, JByteArray, JClass, JFloatArray, JObject, JObjectArray, JString, JValue},
     signature::{Primitive, ReturnType},
     sys::{jboolean, jfloat, jfloatArray, jint, jlong},
 };
@@ -558,47 +558,95 @@ extern "system" fn Java_com_longbridge_nsh_Native_trustDestroy(
     }
 }
 
-/// Verifies the package `bytes` and runs it; false when refused (reported
-/// to the view's error listener; the running app stays).
+/// A verified package waiting to run (`NshPackage.java`).
+struct Package {
+    bundle: Bundle,
+    assets: std::path::PathBuf,
+}
+
+/// Verifies and unpacks the package at `path` (any thread): a package
+/// handle, or 0 with the reason in `error[0]`.
 #[unsafe(no_mangle)]
-extern "system" fn Java_com_longbridge_nsh_Native_loadPackage(
+extern "system" fn Java_com_longbridge_nsh_Native_trustOpenPackage(
+    mut env: JNIEnv<'_>,
+    _: JClass<'_>,
+    trust_handle: jlong,
+    path: JString<'_>,
+    info: JObjectArray<'_>,
+) -> jlong {
+    // SAFETY: Java passes its live handle.
+    let trust = unsafe { trust(trust_handle) };
+    let opened = env
+        .get_string(&path)
+        .map(String::from)
+        .map_err(|e| e.to_string())
+        .and_then(|path| {
+            let bytes =
+                std::fs::read(&path).map_err(|err| format!("cannot read package {path}: {err}"))?;
+            let mut store = trust.store.lock().expect("trust");
+            nsh_engine::load_package(&mut store, &bytes, &trust.packages)
+                .map_err(|err| format!("refused package: {err}"))
+        });
+    // `info`: the error, or the app's id, name, version and build.
+    let (handle, fields) = match opened {
+        Ok(loaded) => {
+            let app = loaded.app;
+            let handle = Box::into_raw(Box::new(Package {
+                bundle: loaded.bundle,
+                assets: loaded.assets,
+            })) as jlong;
+            (
+                handle,
+                vec![app.id, app.name, app.version, app.build.to_string()],
+            )
+        }
+        Err(message) => (0, vec![message]),
+    };
+    for (i, field) in fields.into_iter().enumerate() {
+        if let Ok(s) = env.new_string(field) {
+            let _ = env.set_object_array_element(&info, i as i32, s);
+        }
+    }
+    handle
+}
+
+/// Runs a package from `trustOpenPackage` (taking it).
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_longbridge_nsh_Native_runPackage(
     mut env: JNIEnv<'_>,
     _: JClass<'_>,
     handle: jlong,
-    trust_handle: jlong,
-    bytes: JByteArray<'_>,
-) -> jboolean {
-    // SAFETY: Java passes its live handles.
-    let (host, trust) = unsafe { (host(handle), trust(trust_handle)) };
-    let Ok(bytes) = env.convert_byte_array(bytes) else {
-        return 0;
-    };
-    let loaded = {
-        let mut store = trust.store.lock().expect("trust");
-        nsh_engine::load_package(&mut store, &bytes, &trust.packages)
-    };
-    match loaded {
-        Ok((bundle, assets)) => {
-            // Before the engine starts: it may read assets (fonts) at once.
-            let set = env.new_string(assets.to_string_lossy()).and_then(|dir| {
-                env.call_method(
-                    host.view.as_obj(),
-                    "usePackageAssets",
-                    "(Ljava/lang/String;)V",
-                    &[JValue::Object(&dir)],
-                )
-            });
-            if let Err(err) = set {
-                log::error!("cannot set the package's assets: {err}");
-                return 0;
-            }
-            host.load(bundle);
-            1
-        }
-        Err(err) => {
-            host.report_error(&format!("refused package: {err}"));
-            0
-        }
+    package: jlong,
+) {
+    // SAFETY: Java passes its live handle and a package it never uses again.
+    let (host, package) = unsafe { (host(handle), Box::from_raw(package as *mut Package)) };
+    // Before the engine starts: it may read assets (fonts) at once.
+    let set = env
+        .new_string(package.assets.to_string_lossy())
+        .and_then(|dir| {
+            env.call_method(
+                host.view.as_obj(),
+                "usePackageAssets",
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&dir)],
+            )
+        });
+    if let Err(err) = set {
+        return log::error!("cannot set the package's assets: {err}");
+    }
+    host.load(package.bundle);
+}
+
+/// Frees a package that will not run.
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_longbridge_nsh_Native_packageFree(
+    _: JNIEnv<'_>,
+    _: JClass<'_>,
+    package: jlong,
+) {
+    if package != 0 {
+        // SAFETY: Java passes a package it never uses again.
+        drop(unsafe { Box::from_raw(package as *mut Package) });
     }
 }
 

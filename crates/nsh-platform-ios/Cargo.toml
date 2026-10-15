@@ -1,6 +1,6 @@
 [package]
-name = "nsh-platform-apple"
-description = "UIKit backend: native view mounting, text measurement, input and app hosting."
+name = "nsh-platform-ios"
+description = "UIKit backend: native view mounting, text measurement, input, app hosting and the embedding API (C ABI under the NativeShell Swift module)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,10 @@ workspace = true
 [features]
 # Development host support: dev-server client, log forwarding, error overlay.
 dev = ["dep:nsh-dev"]
+# The C ABI the NativeShell Swift module is built on (`embed`), exported for
+# the static library `cargo xtask dist` builds with `cargo rustc --crate-type
+# staticlib`. Off for nsh-host / nsh-app, so they export nothing.
+embed = []
 
 [dependencies]
 nsh-core.workspace = true

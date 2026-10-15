@@ -3,7 +3,7 @@
 
 #[cfg(target_os = "ios")]
 fn main() {
-    use nsh_platform_apple::{AppOptions, AppSource, AssetBase, Bundle, run_app};
+    use nsh_platform_ios::{AppOptions, AppSource, AssetBase, Bundle, run_app};
 
     struct Logger;
     impl log::Log for Logger {

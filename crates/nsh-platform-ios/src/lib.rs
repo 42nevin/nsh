@@ -8,6 +8,8 @@
 //!   one main-queue hop per commit.
 //! - Text is measured on the engine thread with the same attributed strings
 //!   the labels render, so layout and rendering agree.
+//! - [`embed`] (feature `embed`) is the C ABI of the `NativeShell` Swift
+//!   module (`swift/`) that iOS apps embed nsh with.
 //!
 //! On non-UIKit targets this crate is empty.
 
@@ -20,6 +22,8 @@ mod canvas;
 mod decor;
 #[cfg(feature = "dev")]
 pub mod dev;
+#[cfg(feature = "embed")]
+pub mod embed;
 mod image;
 mod input;
 mod interaction;

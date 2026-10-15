@@ -212,15 +212,25 @@ impl Bundle {
     }
 }
 
+/// A verified package, unpacked ([`load_package`]).
+#[derive(Debug)]
+pub struct LoadedPackage {
+    /// Its bundle.
+    pub bundle: Bundle,
+    /// Where its assets are (`asset:/…`).
+    pub assets: std::path::PathBuf,
+    /// Its app.
+    pub app: nsh_package::App,
+}
+
 /// Verifies the package `bytes` with `trust`, writes its assets under
 /// `assets_root` (`<root>/<app id>/<package hash>/`, once per package) and
 /// records its build (older builds of the app are refused from now on).
-/// Returns the bundle and its asset directory.
 pub fn load_package(
     trust: &mut nsh_package::TrustStore,
     bytes: &[u8],
     assets_root: &std::path::Path,
-) -> Result<(Bundle, std::path::PathBuf), String> {
+) -> Result<LoadedPackage, String> {
     let package = trust
         .verify(bytes, BYTECODE_VERSION)
         .map_err(|e| e.to_string())?;
@@ -241,7 +251,11 @@ pub fn load_package(
         std::fs::write(&done, b"").map_err(|e| e.to_string())?;
     }
     trust.accept(&package).map_err(|e| e.to_string())?;
-    Ok((bundle, dir.join("assets")))
+    Ok(LoadedPackage {
+        bundle,
+        assets: dir.join("assets"),
+        app: package.app,
+    })
 }
 
 /// Parses capabilities in their JSON form (`capabilities.json`, the dev

@@ -21,10 +21,9 @@ nsh-package = { path = "crates/nsh-package" }
 nsh-js = { path = "crates/nsh-js" }
 nsh-engine = { path = "crates/nsh-engine" }
 nsh-bundler = { path = "crates/nsh-bundler" }
-nsh-platform-apple = { path = "crates/nsh-platform-apple" }
+nsh-platform-ios = { path = "crates/nsh-platform-ios" }
 nsh-platform-android = { path = "crates/nsh-platform-android" }
 nsh-dev = { path = "crates/nsh-dev" }
-nsh-ffi = { path = "crates/nsh-ffi" }
 
 anyhow = "1"
 thiserror = "2"

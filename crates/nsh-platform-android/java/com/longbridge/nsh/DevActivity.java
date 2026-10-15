@@ -28,7 +28,11 @@ public final class DevActivity extends Activity {
             if (roots != null) {
                 for (String root : roots.split(",")) trust.addRoot(root);
             }
-            view.loadPackage(trust, new java.io.File(pkg));
+            try {
+                view.runPackage(trust.openPackage(new java.io.File(pkg)));
+            } catch (NshPackage.RefusedException e) {
+                view.reportError(e.getMessage());
+            }
             return;
         }
         String url = getIntent().getStringExtra("url");

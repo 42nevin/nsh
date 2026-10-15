@@ -83,8 +83,16 @@ final class Native {
 
     static native void trustDestroy(long trust);
 
-    /** Verifies and runs a signed package; false if refused (reported to the view). */
-    static native boolean loadPackage(long handle, long trust, byte[] bytes);
+    /**
+     * Verifies and unpacks a signed package (any thread): a package handle and
+     * {@code info} = id, name, version, build; or 0 and {@code info[0]} = why.
+     */
+    static native long trustOpenPackage(long trust, String path, String[] info);
+
+    /** Runs a package from {@link #trustOpenPackage}, taking it. */
+    static native void runPackage(long handle, long pkg);
+
+    static native void packageFree(long pkg);
 
     /** Root size in dp. */
     static native void resize(long handle, float width, float height);

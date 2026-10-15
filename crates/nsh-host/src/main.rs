@@ -15,7 +15,7 @@
 fn main() {
     use std::{env, path::PathBuf};
 
-    use nsh_platform_apple::{AppOptions, AppSource, AssetBase, Bundle, dev, run_app};
+    use nsh_platform_ios::{AppOptions, AppSource, AssetBase, Bundle, dev, run_app};
 
     dev::init_logging();
     let mut source = None;
@@ -77,7 +77,7 @@ fn main() {
 fn load_package(
     path: &std::path::Path,
     roots: &[std::path::PathBuf],
-) -> Result<(nsh_platform_apple::Bundle, std::path::PathBuf), String> {
+) -> Result<(nsh_platform_ios::Bundle, std::path::PathBuf), String> {
     use nsh_engine::package::{PublicKey, TrustStore};
 
     let state = std::env::temp_dir().join("nsh-host-trust");
@@ -87,7 +87,8 @@ fn load_package(
         trust.add_root(PublicKey::from_base64(&key).map_err(|e| e.to_string())?);
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    nsh_engine::load_package(&mut trust, &bytes, &state.join("packages"))
+    let loaded = nsh_engine::load_package(&mut trust, &bytes, &state.join("packages"))?;
+    Ok((loaded.bundle, loaded.assets))
 }
 
 #[cfg(not(target_os = "ios"))]

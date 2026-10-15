@@ -30,7 +30,7 @@ import java.nio.charset.StandardCharsets;
 /**
  * A view running a nsh app. Add it anywhere in a view hierarchy, then load
  * a bundle ({@link #loadBundleFile}, {@link #loadAssetBundle}), a signed
- * package ({@link #loadPackage}) or, in
+ * package ({@link NshTrust#openPackage}, {@link #runPackage}) or, in
  * development builds, connect to a `nsh dev` server. Call {@link #destroy}
  * when done.
  */
@@ -116,7 +116,7 @@ public class NshView extends FrameLayout {
     /**
      * Runs a JS bundle written by `nsh build` (`bundle.js`); assets come from
      * `assets/` next to it. Bytecode only loads from the APK's own assets
-     * ({@link #loadAssetBundle}) or a signed package ({@link #loadPackage}):
+     * ({@link #loadAssetBundle}) or a signed package ({@link #runPackage}):
      * files can be replaced, and QuickJS does not validate bytecode.
      */
     public boolean loadBundleFile(File file) {
@@ -166,25 +166,14 @@ public class NshView extends FrameLayout {
     }
 
     /**
-     * Verifies the signed package {@code file} (`.nshpkg`, written by
-     * `nsh publish`) with {@code trust} and runs it: its release key must be
-     * certified by a trusted root for the app's id, not revoked, and its
-     * build not older than one accepted before (accepting it refuses older
-     * builds from now on). Returns false if it is refused: the reason goes to
-     * the error listener and the running app stays.
+     * Runs a verified package ({@link NshTrust#openPackage}), replacing the
+     * running app. Takes the package: it cannot run again.
      */
-    public boolean loadPackage(NshTrust trust, File file) {
-        byte[] bytes;
-        try {
-            bytes = Net.readAll(new FileInputStream(file));
-        } catch (Exception e) {
-            reportError("cannot read package " + file + ": " + e);
-            return false;
-        }
-        return Native.loadPackage(handle, trust.handle(), bytes);
+    public void runPackage(NshPackage pkg) {
+        Native.runPackage(handle, pkg.take());
     }
 
-    /** Called by {@code Native.loadPackage} before the package starts. */
+    /** Called by {@code Native.runPackage} before the package starts. */
     void usePackageAssets(String dir) {
         assetHttp = null;
         assetApk = null;

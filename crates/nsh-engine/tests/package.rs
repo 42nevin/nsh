@@ -86,8 +86,9 @@ fn a_verified_package_runs_and_older_builds_are_refused() {
 
     // Bytecode for this runtime.
     let v2 = build(&counter(2, nsh_js::BYTECODE_VERSION), &release, &cert).unwrap();
-    let (bundle, assets) =
-        nsh_engine::load_package(&mut trust, &v2, &dir.join("packages")).unwrap();
+    let loaded = nsh_engine::load_package(&mut trust, &v2, &dir.join("packages")).unwrap();
+    assert_eq!(loaded.app.build, 2);
+    let (bundle, assets) = (loaded.bundle, loaded.assets);
     assert!(matches!(bundle.code, nsh_engine::BundleCode::Bytecode(_)));
     let access = bundle.policy.access();
     assert!(access.allows_http("GET", "https://api.example.com/x"));
@@ -100,7 +101,9 @@ fn a_verified_package_runs_and_older_builds_are_refused() {
 
     // Bytecode for another runtime: the source runs.
     let other = build(&counter(2, "another"), &release, &cert).unwrap();
-    let (bundle, _) = nsh_engine::load_package(&mut trust, &other, &dir.join("packages")).unwrap();
+    let bundle = nsh_engine::load_package(&mut trust, &other, &dir.join("packages"))
+        .unwrap()
+        .bundle;
     assert!(matches!(bundle.code, nsh_engine::BundleCode::Source(_)));
     assert!(first_texts(bundle).contains(&"0".to_owned()));
 

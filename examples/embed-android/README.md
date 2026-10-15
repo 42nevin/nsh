@@ -10,6 +10,19 @@ its own native views.
 3. Create a `com.longbridge.nsh.NshView`, add it to a layout and call
    `loadAssetBundle("nsh")`. Call `destroy()` when the activity goes away.
 
+Signed packages (`nsh publish`; see **Signed packages** in AGENTS.md), e.g. updates the app
+downloads: verify off the UI thread, then run on it.
+
+```java
+NshTrust trust = new NshTrust(new File(getFilesDir(), "nsh"));
+trust.addRoot(rootPublicKey);                    // root.pub from `nsh keygen`
+NshPackage pkg = trust.openPackage(downloaded);  // throws NshPackage.RefusedException
+runOnUiThread(() -> nsh.runPackage(pkg));
+```
+
+`loadBundleFile` only takes JS source (`bundle.js`): bytecode loads from the APK's assets or a
+signed package.
+
 With `nsh-dev.aar`, `connectDevServer("ws://<mac ip>:8790/ws")` loads from
 `nsh dev` instead and reloads on every change (for an emulator, run
 `adb reverse tcp:8790 tcp:8790` and use `ws://127.0.0.1:8790/ws`). Assets then
