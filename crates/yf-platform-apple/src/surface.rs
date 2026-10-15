@@ -18,13 +18,13 @@ use objc2_foundation::{
     NSValue,
 };
 use objc2_ui_kit::{
-    NSValueUIGeometryExtensions, UIFont, UIFontTextStyleBody,
+    NSValueUIGeometryExtensions, UIDevice, UIFont, UIFontTextStyleBody,
     UIKeyboardAnimationDurationUserInfoKey, UIKeyboardFrameEndUserInfoKey,
     UIKeyboardWillChangeFrameNotification, UIKeyboardWillHideNotification, UIResponder,
-    UITraitCollection, UITraitEnvironment, UIUserInterfaceStyle, UIView,
+    UITraitCollection, UITraitEnvironment, UIUserInterfaceIdiom, UIUserInterfaceStyle, UIView,
 };
 use yf_core::{MountBatch, Size};
-use yf_engine::{Bundle, ColorScheme, Engine, EngineConfig, Environment, Insets, MountSink};
+use yf_engine::{Bundle, ColorScheme, Engine, EngineConfig, Environment, Idiom, Insets, MountSink};
 
 use crate::{
     image::AssetBase,
@@ -184,10 +184,12 @@ impl RootView {
         let insets = self.safeAreaInsets();
         let (keyboard_height, keyboard_duration) = self.ivars().keyboard.get();
         // SAFETY: plain getters.
-        let (style, body) = unsafe {
+        let (style, body, scale) = unsafe {
+            let traits = self.traitCollection();
             (
-                self.traitCollection().userInterfaceStyle(),
+                traits.userInterfaceStyle(),
                 UIFont::preferredFontForTextStyle(UIFontTextStyleBody).pointSize(),
+                traits.displayScale(),
             )
         };
         Environment {
@@ -209,6 +211,15 @@ impl RootView {
             font_scale: (body / 17.0) as f32,
             rtl: preferred_language_rtl(),
             reduce_motion: objc2_ui_kit::UIAccessibilityIsReduceMotionEnabled(),
+            pixel_ratio: scale as f32,
+            screen_reader: objc2_ui_kit::UIAccessibilityIsVoiceOverRunning(),
+            os_version: os_version(self.mtm()),
+            idiom: match UIDevice::currentDevice(self.mtm()).userInterfaceIdiom() {
+                UIUserInterfaceIdiom::Pad => Idiom::Pad,
+                UIUserInterfaceIdiom::Mac => Idiom::Mac,
+                UIUserInterfaceIdiom::TV => Idiom::Tv,
+                _ => Idiom::Phone,
+            },
         }
     }
 
@@ -251,15 +262,24 @@ impl RootView {
                 view.publish_environment();
             }
         });
-        // SAFETY: as below.
-        observers.push(unsafe {
-            center.addObserverForName_object_queue_usingBlock(
-                Some(objc2_ui_kit::UIAccessibilityReduceMotionStatusDidChangeNotification),
-                None,
-                Some(&NSOperationQueue::mainQueue()),
-                &settings,
-            )
-        });
+        // SAFETY: immutable UIKit constants.
+        let settings_names = unsafe {
+            [
+                objc2_ui_kit::UIAccessibilityReduceMotionStatusDidChangeNotification,
+                objc2_ui_kit::UIAccessibilityVoiceOverStatusDidChangeNotification,
+            ]
+        };
+        for name in settings_names {
+            // SAFETY: as below.
+            observers.push(unsafe {
+                center.addObserverForName_object_queue_usingBlock(
+                    Some(name),
+                    None,
+                    Some(&NSOperationQueue::mainQueue()),
+                    &settings,
+                )
+            });
+        }
         for name in names {
             // SAFETY: as above; the observer is removed when the view stops.
             observers.push(unsafe {
@@ -355,7 +375,6 @@ impl RootView {
             ))),
             environment: self.environment(),
             header_heights: header_heights(mtm),
-            control_sizes: crate::controls::sizes(mtm),
         };
         let sink = MainThreadSink {
             mounter: mounter.clone(),
@@ -512,4 +531,15 @@ fn preferred_language_rtl() -> bool {
             NSLocale::characterDirectionForLanguage(&language)
                 == NSLocaleLanguageDirection::RightToLeft
         })
+}
+
+/// The iOS version (`UIDevice.systemVersion`, the iOS version Catalyst
+/// apps run as), read once.
+fn os_version(mtm: MainThreadMarker) -> (u16, u16) {
+    static VERSION: std::sync::OnceLock<(u16, u16)> = std::sync::OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let version = UIDevice::currentDevice(mtm).systemVersion().to_string();
+        let mut parts = version.split('.').map(|p| p.parse().unwrap_or(0));
+        (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+    })
 }

@@ -127,7 +127,10 @@ impl Decl {
                 PropDecl::Selectable(b) => props.selectable = Some(*b),
                 PropDecl::Caret(c) => props.caret_color = Some(*c),
             },
-            Decl::Screen(key, fw, fh) => parts.screen.push((*key, *fw, *fh)),
+            Decl::Screen(key, fw, fh) => {
+                parts.screen.push((*key, *fw, *fh));
+                parts.touched |= touched::SCREEN;
+            }
         }
     }
 
@@ -150,9 +153,26 @@ impl Decl {
     }
 }
 
+/// Groups of properties [`Parts::finish`] writes.
+pub(crate) mod touched {
+    pub(crate) const SCREEN: u16 = 1;
+    pub(crate) const TRANSFORM: u16 = 2;
+    pub(crate) const SHADOWS: u16 = 4;
+    pub(crate) const GRADIENT: u16 = 8;
+    pub(crate) const FILTERS: u16 = 16;
+    pub(crate) const BACKDROP: u16 = 32;
+    pub(crate) const FONT_VARIANT: u16 = 64;
+    pub(crate) const TRANSITION: u16 = 128;
+    pub(crate) const ANIMATE: u16 = 256;
+    pub(crate) const TEXT_SHADOW: u16 = 512;
+    pub(crate) const ALL: u16 = u16::MAX;
+}
+
 /// Accumulated [`Part`]s of the matching rules, later ones winning.
 #[derive(Debug, Default)]
 pub(crate) struct Parts {
+    /// [`touched`] groups the parts pushed since this was last cleared.
+    pub(crate) touched: u16,
     translate: [Option<Len>; 2],
     rotate: [Option<f32>; 3],
     scale: [Option<f32>; 2],
@@ -194,6 +214,28 @@ pub(crate) struct Parts {
 impl Parts {
     fn push(&mut self, part: Part) {
         use Part::*;
+        self.touched |= match &part {
+            TranslateX(_) | TranslateY(_) | Rotate(_) | RotateX(_) | RotateY(_) | ScaleX(_)
+            | ScaleY(_) | SkewX(_) | SkewY(_) | Perspective(_) | TransformNone => {
+                touched::TRANSFORM
+            }
+            Shadow(_) | ShadowColor(..) | InsetShadow(_) | InsetShadowColor(..) | Ring(_)
+            | RingInset | RingColor(_) | RingOffset(_) | RingOffsetColor(_) | InsetRing(_)
+            | InsetRingColor(_) => touched::SHADOWS,
+            Gradient(_) | GradientNone | From(_) | Via(_) | To(_) | FromPos(_) | ViaPos(_)
+            | ToPos(_) => touched::GRADIENT,
+            Filter {
+                backdrop: false, ..
+            }
+            | FilterNone { backdrop: false } => touched::FILTERS,
+            Filter { backdrop: true, .. } | FilterNone { backdrop: true } => touched::BACKDROP,
+            FontVariant { .. } => touched::FONT_VARIANT,
+            TransitionProps(_) | Duration(_) | Ease(_) | Delay(_) | TransitionNone => {
+                touched::TRANSITION
+            }
+            Animate(_) => touched::ANIMATE,
+            TextShadow(_) | TextShadowColor(..) => touched::TEXT_SHADOW,
+        };
         match part {
             TranslateX(l) => (self.translate[0], self.transform_set) = (Some(l), true),
             TranslateY(l) => (self.translate[1], self.transform_set) = (Some(l), true),
@@ -279,22 +321,24 @@ impl Parts {
         }
     }
 
-    /// Writes the built properties into `style`; `window` resolves
-    /// window-relative lengths.
+    /// Writes the built properties of the [`touched`] groups in `only`
+    /// into `style`; `window` resolves window-relative lengths.
     pub(crate) fn finish(
-        self,
+        &self,
         style: &mut Style,
         props: &mut ClassProps,
         theme: &Theme,
         window: (f32, f32),
+        only: u16,
     ) {
-        for &(key, fw, fh) in &self.screen {
+        let has = |group: u16| only & group != 0;
+        for &(key, fw, fh) in self.screen.iter().filter(|_| has(touched::SCREEN)) {
             let _ = style.set_key(
                 key,
                 crate::style::StyleValue::Number(fw * window.0 + fh * window.1),
             );
         }
-        if self.transform_set {
+        if self.transform_set && has(touched::TRANSFORM) {
             let _ = StyleDecl::ClearTransform.apply(style);
             // CSS: `translate`, `rotate`, `scale`, then `transform`
             // (rotate-x / -y, skews); a list applies right to left.
@@ -340,7 +384,7 @@ impl Parts {
                 push(TransformKind::SkewY, s);
             }
         }
-        if self.shadows_set {
+        if self.shadows_set && has(touched::SHADOWS) {
             let current = style.text.color.unwrap_or(Color::BLACK);
             let recolor = |layers: &[BoxShadow], color: Option<(Color, bool)>| -> Vec<BoxShadow> {
                 layers
@@ -392,7 +436,7 @@ impl Parts {
             }
             style.set_box_shadows(list);
         }
-        if let Some(kind) = self.gradient {
+        if let Some(kind) = self.gradient.filter(|_| has(touched::GRADIENT)) {
             match kind {
                 None => style.set_background_images(Vec::new()),
                 Some(kind) => {
@@ -420,16 +464,17 @@ impl Parts {
                 }
             }
         }
-        if self.filters_set {
+        if self.filters_set && has(touched::FILTERS) {
             style.set_filters(self.filters.iter().flatten().copied().collect(), false);
         }
-        if self.backdrop_set {
+        if self.backdrop_set && has(touched::BACKDROP) {
             style.set_filters(self.backdrop.iter().flatten().copied().collect(), true);
         }
-        if let Some(bits) = self.font_variant {
+        if let Some(bits) = self.font_variant.filter(|_| has(touched::FONT_VARIANT)) {
             style.text.font_variant = Some(FontVariant(bits));
         }
-        if self.transition_none {
+        if !has(touched::TRANSITION) {
+        } else if self.transition_none {
             style.view.transition = None;
         } else if self.transition_props.is_some() || self.duration.is_some() || self.ease.is_some()
         {
@@ -446,7 +491,7 @@ impl Parts {
                 easing: self.ease.unwrap_or(ease),
             });
         }
-        if let Some(k) = self.animate {
+        if let Some(k) = self.animate.filter(|_| has(touched::ANIMATE)) {
             style.view.animation = k.map(|keyframes| match keyframes {
                 Keyframes::Spin => KeyframeAnimation {
                     keyframes,
@@ -478,7 +523,11 @@ impl Parts {
                 },
             });
         }
-        if let Some(layers) = self.text_shadow {
+        if let Some(layers) = self
+            .text_shadow
+            .as_ref()
+            .filter(|_| has(touched::TEXT_SHADOW))
+        {
             // One text shadow natively: the widest layer stands for all.
             let mut shadow = layers
                 .iter()

@@ -31,3 +31,22 @@ export function Section(props: { title: string; children: JSX.Element }) {
     </view>
   );
 }
+
+/** An on / off toggle drawn with views (the same on every platform). */
+export function Toggle(props: { value: boolean; onChange: (value: boolean) => void }) {
+  return (
+    <view
+      onPress={() => props.onChange(!props.value)}
+      accessibilityRole="switch"
+      accessibilityState={{ checked: props.value }}
+      hitSlop={8}
+      class="h-[31px] w-[51px] rounded-full p-0.5 transition-colors duration-200"
+      classList={{ "bg-[#34c759]": props.value, "bg-zinc-300": !props.value }}
+    >
+      <view
+        class="size-[27px] rounded-full bg-white shadow-md transition-transform duration-200"
+        classList={{ "translate-x-5": props.value }}
+      />
+    </view>
+  );
+}

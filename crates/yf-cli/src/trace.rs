@@ -68,7 +68,6 @@ pub(crate) fn trace(
         ))),
         environment: Default::default(),
         header_heights: (44.0, 96.0),
-        control_sizes: Default::default(),
     };
     let control = Arc::new(OnceLock::new());
     let sink = ChannelSink {

@@ -246,8 +246,21 @@ public class YfView extends FrameLayout {
             // "Remove animations" sets the animator scale to 0.
             android.provider.Settings.Global.getFloat(getContext().getContentResolver(),
                     android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0 ? 1 : 0,
+            density,
+            accessibility().isTouchExplorationEnabled() ? 1 : 0,
+            Build.VERSION.SDK_INT,
+            (c.uiMode & Configuration.UI_MODE_TYPE_MASK) == Configuration.UI_MODE_TYPE_TELEVISION ? 3
+                    : c.smallestScreenWidthDp >= 600 ? 1 : 0,
         }, dark);
     }
+
+    private android.view.accessibility.AccessibilityManager accessibility() {
+        return (android.view.accessibility.AccessibilityManager) getContext().getSystemService(Context.ACCESSIBILITY_SERVICE);
+    }
+
+    /** TalkBack turning on or off: `AccessibilityInfo` and its events. */
+    private final android.view.accessibility.AccessibilityManager.TouchExplorationStateChangeListener screenReader =
+            enabled -> publishEnvironment(getRootWindowInsets());
 
     /** The safe-area insets last published (dp: top, right, bottom, left). */
     private float[] safe = new float[4];
@@ -304,8 +317,15 @@ public class YfView extends FrameLayout {
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
+        accessibility().addTouchExplorationStateChangeListener(screenReader);
         // The dispatcher exists once attached.
         if (handle != 0) mounter.updateBack();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+        accessibility().removeTouchExplorationStateChangeListener(screenReader);
     }
 
     /** `BackHandler.exitApp()`: what the back button does without the app. */

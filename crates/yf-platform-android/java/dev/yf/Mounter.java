@@ -329,9 +329,11 @@ final class Mounter {
                     int animation = b.getInt();
                     b.getInt(); // presentation: Android modals cover the window
                     boolean transparent = b.getInt() != 0;
+                    boolean translucent = b.getInt() != 0;
                     if (modal != null) {
                         modal.animation = animation;
                         modal.transparent = transparent;
+                        modal.setStatusBarTranslucent(translucent);
                     }
                     break;
                 }
@@ -413,9 +415,6 @@ final class Mounter {
                 v = modal.root;
                 break;
             }
-            case 9: v = new Controls.SwitchBox(context, this, id); break;
-            case 10: v = new Controls.SliderBox(context, this, id); break;
-            case 11: v = new Controls.ActivityBox(context, this, id); break;
             case 12: v = new WebBox(context, this, id); break;
             case 13: v = new VideoBox(context, this, host, id); break;
             default: v = new Box(context, this, id);
@@ -1563,6 +1562,17 @@ final class Mounter {
                 if (v instanceof InputBox) ((InputBox) v).select(start, end);
                 break;
             }
+            case 17: {
+                String text = (String) objects[b.getInt()];
+                (v != null ? v : host).announceForAccessibility(text);
+                break;
+            }
+            case 18: {
+                if (v != null) {
+                    v.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null);
+                }
+                break;
+            }
             default: break;
         }
     }
@@ -1582,29 +1592,6 @@ final class Mounter {
     private void nativeProps(ByteBuffer b, Object[] objects) {
         View v = views.get(b.getInt());
         switch (b.getInt()) {
-            case 0: {
-                boolean value = b.getInt() != 0, disabled = b.getInt() != 0;
-                Integer on = optColor(b), off = optColor(b), thumb = optColor(b);
-                if (v instanceof Controls.SwitchBox) ((Controls.SwitchBox) v).configure(value, disabled, on, off, thumb);
-                break;
-            }
-            case 1: {
-                float value = b.getFloat(), min = b.getFloat(), max = b.getFloat(), step = b.getFloat();
-                boolean disabled = b.getInt() != 0;
-                Integer minTrack = optColor(b), maxTrack = optColor(b), thumb = optColor(b);
-                if (v instanceof Controls.SliderBox) {
-                    ((Controls.SliderBox) v).configure(value, min, max, step, disabled, minTrack, maxTrack, thumb);
-                }
-                break;
-            }
-            case 2: {
-                boolean animating = b.getInt() != 0;
-                Integer color = optColor(b);
-                b.getInt(); // large: the frame sizes it
-                b.getInt(); // hidesWhenStopped: always hidden when stopped
-                if (v instanceof Controls.ActivityBox) ((Controls.ActivityBox) v).configure(animating, color);
-                break;
-            }
             case 3: {
                 Object[] source;
                 switch (b.getInt()) {
@@ -1723,11 +1710,6 @@ final class Mounter {
 
     void event(int id, int kind) {
         Native.event(handle(), id, kind, null, 0, 0, 0);
-    }
-
-    /** An event whose payload is one {@code Boolean}, {@code Double} or {@code String}. */
-    void eventValue(int id, int kind, Object value) {
-        Native.eventMap(handle(), id, kind, null, new Object[] {value});
     }
 
     /** An event with an object payload. */

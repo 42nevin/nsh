@@ -58,7 +58,6 @@ fn uncaught_errors_point_at_app_sources() {
         assets: None,
         environment: Default::default(),
         header_heights: (44.0, 96.0),
-        control_sizes: Default::default(),
     };
     let _engine = Engine::start(config, || ApproxTextEngine, sink).unwrap();
     let error = rx

@@ -13,8 +13,8 @@ use self::list::{ExtraKind, ListState};
 use crate::{
     geometry::{Rect, Size},
     mount::{
-        ActivityProps, ControlSizes, InputConfig, ModalConfig, MountBatch, MountItem, NativeProps,
-        ScreenConfig, ScrollBehavior, SliderProps, StickyCell, SwitchProps, VideoProps, ViewKind,
+        InputConfig, ModalConfig, MountBatch, MountItem, NativeProps, ScreenConfig, ScrollBehavior,
+        StickyCell, VideoProps, ViewKind,
     },
     ops::{
         CellSlot, Command, EventKind, EventMask, EventPayload, HeaderSlot, ImageProp, ImageSource,
@@ -69,17 +69,6 @@ mod dirty {
     pub(super) const SCROLL_BEHAVIOR: u32 = 1 << 15;
 }
 
-/// A native control: its properties, and for switches and sliders the
-/// value JS set (the platform may have moved away from it).
-#[derive(Debug)]
-struct ControlState {
-    props: NativeProps,
-    /// The value JS set last (switches: 0 or 1).
-    js_value: f32,
-    /// JS set the value since the user last changed it.
-    js_set: bool,
-}
-
 /// A layout root other than the surface's: screens, modals and header
 /// items are laid out on their own, at a size their container gives them.
 #[derive(Debug, Default)]
@@ -96,6 +85,8 @@ struct RootState {
     modal: ModalConfig,
     /// Where a header item goes (header items).
     slot: HeaderSlot,
+    /// `nativeID` (input accessories).
+    native_id: Option<Box<str>>,
 }
 
 /// Paragraph settings of a text block (or input).
@@ -153,9 +144,7 @@ enum Kind {
     Screen,
     Modal,
     HeaderItem,
-    Switch,
-    Slider,
-    Activity,
+    InputAccessory,
     WebView,
     Video,
 }
@@ -173,12 +162,16 @@ impl Kind {
                 | Kind::Screen
                 | Kind::Modal
                 | Kind::HeaderItem
+                | Kind::InputAccessory
         )
     }
 
     /// Kinds laid out as their own root, not as part of their parent.
     fn is_root(self) -> bool {
-        matches!(self, Kind::Screen | Kind::Modal | Kind::HeaderItem)
+        matches!(
+            self,
+            Kind::Screen | Kind::Modal | Kind::HeaderItem | Kind::InputAccessory
+        )
     }
 
     fn view_kind(self) -> ViewKind {
@@ -191,9 +184,7 @@ impl Kind {
             Kind::Screen => ViewKind::Screen,
             Kind::Modal => ViewKind::Modal,
             Kind::HeaderItem => ViewKind::HeaderItem,
-            Kind::Switch => ViewKind::Switch,
-            Kind::Slider => ViewKind::Slider,
-            Kind::Activity => ViewKind::ActivityIndicator,
+            Kind::InputAccessory => ViewKind::InputAccessory,
             Kind::WebView => ViewKind::WebView,
             Kind::Video => ViewKind::Video,
             Kind::View | Kind::Cell | Kind::RawText => ViewKind::View,
@@ -287,10 +278,12 @@ struct Node {
     states: u8,
     /// States the platform reports for the view.
     tracked: u8,
+    /// `underlayColor` and `underlayOpacity` (`TouchableHighlight`).
+    underlay: Option<Box<(crate::Color, f32)>>,
     /// A child's classes read their position among siblings.
     positional_children: bool,
-    /// Padding added to the style's (`insetPadding`).
-    inset_padding: EdgeInsets,
+    /// `insetPadding` and `insetMargin`: added to the style's.
+    insets: Option<Box<[EdgeInsets; 2]>>,
     events: EventMask,
     /// `zIndex`: native views are ordered by it (stable) among siblings.
     z_index: i32,
@@ -313,7 +306,7 @@ struct Node {
     /// Screens, modals and header items.
     root: Option<Box<RootState>>,
     /// Switches, sliders, activity indicators, web views and videos.
-    control: Option<Box<ControlState>>,
+    control: Option<Box<NativeProps>>,
     /// Recycling slot (or role) of a list cell.
     slot: Option<CellSlot>,
     /// Native values driven by gestures on the view.
@@ -377,8 +370,9 @@ impl Node {
             class_props: None,
             states: 0,
             tracked: 0,
+            underlay: None,
             positional_children: false,
-            inset_padding: EdgeInsets::default(),
+            insets: None,
             events: EventMask::default(),
             z_index: 0,
             rtl: false,
@@ -393,20 +387,11 @@ impl Node {
             input: matches!(kind, Kind::Input).then(Box::default),
             root: kind.is_root().then(Box::default),
             control: match kind {
-                Kind::Switch => Some(NativeProps::Switch(SwitchProps::default())),
-                Kind::Slider => Some(NativeProps::Slider(SliderProps::default())),
-                Kind::Activity => Some(NativeProps::Activity(ActivityProps::default())),
                 Kind::WebView => Some(NativeProps::WebView(Box::default())),
                 Kind::Video => Some(NativeProps::Video(Box::<VideoProps>::default())),
                 _ => None,
             }
-            .map(|props| {
-                Box::new(ControlState {
-                    props,
-                    js_value: 0.0,
-                    js_set: false,
-                })
-            }),
+            .map(Box::new),
             slot: None,
             gestures: GestureValues::default(),
             created: false,
@@ -444,13 +429,10 @@ impl<P> TextContext<P> {
     }
 }
 
-/// Measured leaves: text blocks, images with a known natural size and
-/// controls of a fixed size.
+/// Measured leaves: text blocks and images with a known natural size.
 enum LeafContext<P> {
     Text(TextContext<P>),
     Image(Option<Size>),
-    /// A control's natural size; a zero width takes the layout's.
-    Fixed(Size),
 }
 
 /// A request for the JS runtime to render list items into cells.
@@ -497,12 +479,11 @@ pub struct Core<M: TextEngine> {
     lists: Vec<Key>,
     /// Live screens, modals and header items.
     roots: Vec<Key>,
+    /// Attached input accessories by `nativeID`.
+    accessories: rustc_hash::FxHashMap<Box<str>, NodeId>,
     /// Height of the native header bar of screens: normal and large title.
     header_heights: (f32, f32),
     /// Natural sizes of the platform's controls.
-    control_sizes: ControlSizes,
-    /// Switches the user toggled: JS gets a turn to accept the change.
-    toggled: Vec<Key>,
     /// The surface's safe-area insets (stacks at the top extend their
     /// headers under the status bar).
     safe_area: EdgeInsets,
@@ -549,9 +530,8 @@ impl<M: TextEngine> Core<M> {
             pending_text: Vec::new(),
             lists: Vec::new(),
             roots: Vec::new(),
+            accessories: Default::default(),
             header_heights: (44.0, 96.0),
-            control_sizes: ControlSizes::default(),
-            toggled: Vec::new(),
             safe_area: EdgeInsets::default(),
             list_binds: Vec::new(),
             events: Vec::new(),
@@ -575,31 +555,6 @@ impl<M: TextEngine> Core<M> {
         if self.header_heights != (normal, large) {
             self.header_heights = (normal, large);
             self.needs_layout = true;
-        }
-    }
-
-    /// Sets the natural sizes of the platform's controls (before any
-    /// control is created).
-    pub fn set_control_sizes(&mut self, sizes: ControlSizes) {
-        self.control_sizes = sizes;
-    }
-
-    /// The user moved switch or slider `id` to `value` (a switch: 0 or 1),
-    /// before JS hears about it. A switch whose `value` JS does not change
-    /// in response goes back to it (controlled, like React Native).
-    pub fn control_changed(&mut self, id: NodeId, value: f32) {
-        let Ok(key) = self.key(id) else { return };
-        let Some(control) = self.nodes[key as usize].control.as_mut() else {
-            return;
-        };
-        control.js_set = false;
-        match &mut control.props {
-            NativeProps::Switch(p) => {
-                p.value = value != 0.0;
-                self.toggled.push(key);
-            }
-            NativeProps::Slider(p) => p.value = value,
-            _ => {}
         }
     }
 
@@ -846,23 +801,6 @@ impl<M: TextEngine> Core<M> {
     /// Finishes a turn: rebuilds text, runs layout, updates lists and
     /// returns the mount items, or `None` when nothing changed.
     pub fn commit(&mut self) -> Option<MountBatch> {
-        // Switches the user toggled whose value JS kept: back to it.
-        for key in std::mem::take(&mut self.toggled) {
-            let Some(control) = self
-                .nodes
-                .get_mut(key as usize)
-                .and_then(|n| n.control.as_mut())
-            else {
-                continue;
-            };
-            if let NativeProps::Switch(p) = &mut control.props
-                && !control.js_set
-                && p.value != (control.js_value != 0.0)
-            {
-                p.value = control.js_value != 0.0;
-                self.mark(key, dirty::NATIVE);
-            }
-        }
         // Platforms animate the frames, insertions and removals that follow
         // in the batch; ops may already have queued some.
         if let Some(animation) = self.layout_animation.take() {
@@ -961,9 +899,7 @@ impl<M: TextEngine> Core<M> {
             Tag::Screen => Kind::Screen,
             Tag::Modal => Kind::Modal,
             Tag::HeaderItem => Kind::HeaderItem,
-            Tag::Switch => Kind::Switch,
-            Tag::Slider => Kind::Slider,
-            Tag::ActivityIndicator => Kind::Activity,
+            Tag::InputAccessory => Kind::InputAccessory,
             Tag::WebView => Kind::WebView,
             Tag::Video => Kind::Video,
         };
@@ -985,18 +921,6 @@ impl<M: TextEngine> Core<M> {
             Kind::Input => self.layout.new_leaf_with_context(
                 style.clone(),
                 LeafContext::Text(TextContext::new(Arc::default())),
-            ),
-            Kind::Switch => self.layout.new_leaf_with_context(
-                style.clone(),
-                LeafContext::Fixed(self.control_sizes.switch),
-            ),
-            Kind::Activity => self.layout.new_leaf_with_context(
-                style.clone(),
-                LeafContext::Fixed(self.control_sizes.activity_small),
-            ),
-            Kind::Slider => self.layout.new_leaf_with_context(
-                style.clone(),
-                LeafContext::Fixed(Size::new(0.0, self.control_sizes.slider_height)),
             ),
             _ => self.layout.new_leaf(style.clone()),
         }
@@ -1152,18 +1076,27 @@ impl<M: TextEngine> Core<M> {
         let rtl = self.resolved_rtl(key);
         crate::style::apply_direction(&mut layout, &mut view, &logical, rtl);
         let node = &mut self.nodes[key as usize];
-        let extra = node.inset_padding;
-        if extra != EdgeInsets::default() {
+        if let Some([padding, margin]) = node.insets.as_deref() {
             // On top of points; percentages cannot take an addition.
             let add = |p: &mut taffy::LengthPercentage, d: f32| {
                 if let taffy::style::ExpandedLengthPercentage::Length(v) = p.expand() {
                     *p = taffy::LengthPercentage::length(v + d);
                 }
             };
-            add(&mut layout.padding.top, extra.top);
-            add(&mut layout.padding.right, extra.right);
-            add(&mut layout.padding.bottom, extra.bottom);
-            add(&mut layout.padding.left, extra.left);
+            add(&mut layout.padding.top, padding.top);
+            add(&mut layout.padding.right, padding.right);
+            add(&mut layout.padding.bottom, padding.bottom);
+            add(&mut layout.padding.left, padding.left);
+            // `auto` margins stay automatic.
+            let add = |m: &mut taffy::LengthPercentageAuto, d: f32| {
+                if let taffy::style::ExpandedLengthPercentageAuto::Length(v) = m.expand() {
+                    *m = taffy::LengthPercentageAuto::length(v + d);
+                }
+            };
+            add(&mut layout.margin.top, margin.top);
+            add(&mut layout.margin.right, margin.right);
+            add(&mut layout.margin.bottom, margin.bottom);
+            add(&mut layout.margin.left, margin.left);
         }
         let flipped = node.rtl != rtl;
         node.rtl = rtl;
@@ -1343,11 +1276,7 @@ impl<M: TextEngine> Core<M> {
                     image.resize_mode = mode;
                     flags |= dirty::IMAGE;
                 } else if let Some(control) = node.control.as_mut() {
-                    apply_native(
-                        control,
-                        NativeProp::VideoResizeMode(mode),
-                        self.control_sizes,
-                    );
+                    apply_native(control, NativeProp::VideoResizeMode(mode));
                     flags |= dirty::NATIVE;
                 }
             }
@@ -1535,9 +1464,12 @@ impl<M: TextEngine> Core<M> {
                     flags |= dirty::VIEW_PROPS;
                 }
             }
-            Prop::InsetPadding(insets) => {
-                if node.inset_padding != insets {
-                    node.inset_padding = insets;
+            Prop::InsetPadding(insets) | Prop::InsetMargin(insets) => {
+                let slot = usize::from(matches!(prop, Prop::InsetMargin(_)));
+                let mut all = node.insets.as_deref().copied().unwrap_or_default();
+                if all[slot] != insets {
+                    all[slot] = insets;
+                    node.insets = (all != <[EdgeInsets; 2]>::default()).then(|| Box::new(all));
                     self.restyle(key);
                 }
                 return Ok(());
@@ -1575,6 +1507,25 @@ impl<M: TextEngine> Core<M> {
                 if props.ripple != value {
                     props.ripple = value;
                     flags |= dirty::VIEW_PROPS;
+                }
+            }
+            Prop::UnderlayColor(color) => {
+                let opacity = node
+                    .underlay
+                    .as_ref()
+                    .map_or(crate::ops::UNDERLAY_OPACITY, |u| u.1);
+                let underlay = color.map(|c| Box::new((c, opacity)));
+                if node.underlay != underlay {
+                    node.underlay = underlay;
+                    self.underlay_changed(key);
+                }
+            }
+            Prop::UnderlayOpacity(opacity) => {
+                if let Some(u) = node.underlay.as_mut()
+                    && u.1 != opacity
+                {
+                    u.1 = opacity;
+                    self.underlay_changed(key);
                 }
             }
             Prop::ActiveOpacity(value) => {
@@ -1642,6 +1593,21 @@ impl<M: TextEngine> Core<M> {
                     flags |= dirty::SCREEN;
                 }
             }
+            Prop::NativeId(name) => {
+                if node.kind == Kind::InputAccessory {
+                    let attached = node.parent != NO_KEY;
+                    if attached {
+                        self.accessory_attached(key, false);
+                    }
+                    if let Some(root) = self.nodes[key as usize].root.as_mut() {
+                        root.native_id = name;
+                    }
+                    if attached {
+                        self.accessory_attached(key, true);
+                    }
+                }
+                return Ok(());
+            }
             Prop::Modal(prop) => {
                 if let Some(root) = node.root.as_mut() {
                     let c = &mut root.modal;
@@ -1649,6 +1615,8 @@ impl<M: TextEngine> Core<M> {
                         ModalProp::Animation(v) => c.animation = v,
                         ModalProp::Presentation(v) => c.presentation = v,
                         ModalProp::Transparent(v) => c.transparent = v,
+                        ModalProp::StatusBarTranslucent(v) => c.status_bar_translucent = v,
+                        ModalProp::Orientations(v) => c.orientations = v,
                     }
                     flags |= dirty::MODAL;
                 }
@@ -1678,18 +1646,8 @@ impl<M: TextEngine> Core<M> {
                 }
                 let node = &mut self.nodes[key as usize];
                 if let Some(control) = node.control.as_mut() {
-                    let resize = apply_native(control, prop, self.control_sizes);
+                    apply_native(control, prop);
                     flags |= dirty::NATIVE;
-                    if let Some(size) = resize {
-                        let layout = node.layout.expect("control layout");
-                        if let Some(LeafContext::Fixed(s)) =
-                            self.layout.get_node_context_mut(layout)
-                        {
-                            *s = size;
-                        }
-                        self.layout.mark_dirty(layout).expect("taffy dirty");
-                        self.needs_layout = true;
-                    }
                 }
             }
             Prop::Value(value) => {
@@ -1764,6 +1722,10 @@ impl<M: TextEngine> Core<M> {
                     }
                     Prop::AutoFocus(on) => {
                         c.auto_focus = on;
+                        false
+                    }
+                    Prop::InputAccessoryViewId(name) => {
+                        c.accessory_id = name;
                         false
                     }
                     Prop::SelectionColor(color) => {
@@ -1863,6 +1825,9 @@ impl<M: TextEngine> Core<M> {
             self.sync_layout_style(child);
         }
         let child_kind = self.nodes[child as usize].kind;
+        if child_kind == Kind::InputAccessory {
+            self.accessory_attached(child, true);
+        }
         if child_kind == Kind::HeaderItem {
             self.mark(parent, dirty::SCREEN);
         }
@@ -1921,6 +1886,9 @@ impl<M: TextEngine> Core<M> {
             return;
         }
         let kind = self.nodes[key as usize].kind;
+        if kind == Kind::InputAccessory {
+            self.accessory_attached(key, false);
+        }
         if kind == Kind::HeaderItem {
             self.mark(parent, dirty::SCREEN);
         }
@@ -2215,7 +2183,7 @@ impl<M: TextEngine> Core<M> {
             }
             let id = node.id;
             if flags & dirty::VIEW != 0 {
-                let style = node.mounted_view_style();
+                let style = self.mounted_view_style(key);
                 self.mount.push(MountItem::ViewStyle { id, style });
             }
             if flags & dirty::EVENTS != 0 {
@@ -2298,7 +2266,7 @@ impl<M: TextEngine> Core<M> {
             {
                 self.mount.push(MountItem::NativeProps {
                     id,
-                    props: control.props.clone(),
+                    props: (**control).clone(),
                 });
             }
             if flags & dirty::MODAL != 0
@@ -2312,6 +2280,10 @@ impl<M: TextEngine> Core<M> {
             if let Some(input) = &node.input {
                 if flags & dirty::INPUT != 0 {
                     let mut config = input.config.clone();
+                    config.accessory = config
+                        .accessory_id
+                        .as_deref()
+                        .and_then(|name| self.accessories.get(name).copied());
                     if let Some(c) = node.class_props.as_deref() {
                         config.placeholder_color = config.placeholder_color.or(c.placeholder_color);
                         config.selection_color = config.selection_color.or(c.caret_color);
@@ -2525,6 +2497,36 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
+    /// Input accessory `key` was attached to the tree (or detached): the
+    /// inputs that name it are configured again.
+    fn accessory_attached(&mut self, key: Key, attached: bool) {
+        let node = &self.nodes[key as usize];
+        let Some(name) = node.root.as_ref().and_then(|r| r.native_id.clone()) else {
+            return;
+        };
+        let id = node.id;
+        if attached {
+            self.accessories.insert(name.clone(), id);
+        } else if self.accessories.get(&name) == Some(&id) {
+            self.accessories.remove(&name);
+        } else {
+            return;
+        }
+        let inputs: Vec<Key> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| {
+                n.input
+                    .as_ref()
+                    .is_some_and(|i| i.config.accessory_id.as_deref() == Some(&*name))
+            })
+            .map(|(k, _)| k as Key)
+            .collect();
+        for k in inputs {
+            self.mark(k, dirty::INPUT);
+        }
+    }
+
     /// Number of screens / modals / header items above `key`.
     fn root_depth(&self, mut key: Key) -> u32 {
         let mut depth = 0;
@@ -2597,6 +2599,15 @@ impl<M: TextEngine> Core<M> {
                 let size = root.reported.unwrap_or(self.viewport);
                 (size, 0.0, definite(size))
             }
+            // As wide as the window, as tall as its content.
+            Kind::InputAccessory => (
+                Size::new(self.viewport.width, 0.0),
+                0.0,
+                taffy::Size {
+                    width: AvailableSpace::Definite(self.viewport.width),
+                    height: AvailableSpace::MaxContent,
+                },
+            ),
             _ => (
                 Size::default(),
                 0.0,
@@ -2610,7 +2621,11 @@ impl<M: TextEngine> Core<M> {
         if !changed && !self.layout.dirty(layout).unwrap_or(true) {
             return;
         }
-        if kind != Kind::HeaderItem {
+        if kind == Kind::InputAccessory {
+            let mut style = self.layout.style(layout).expect("taffy style").clone();
+            style.size.width = taffy::Dimension::length(size.width);
+            self.layout.set_style(layout, style).expect("taffy style");
+        } else if kind != Kind::HeaderItem {
             let config_padding = match kind {
                 // Large titles and transparent headers lay the content out
                 // under the header (scroll views inset themselves natively).
@@ -2761,10 +2776,6 @@ impl<M: TextEngine> Core<M> {
                         Some(LeafContext::Image(Some(natural))) => {
                             image_size(*natural, known.width, known.height)
                         }
-                        Some(LeafContext::Fixed(size)) => taffy::Size {
-                            width: known.width.unwrap_or(size.width),
-                            height: known.height.unwrap_or(size.height),
-                        },
                         _ => taffy::Size::ZERO,
                     },
                 )
@@ -2917,7 +2928,7 @@ impl<M: TextEngine> Core<M> {
             let node = &self.nodes[key as usize];
             // Translations by a fraction of the size follow it.
             if node.view_style.transform.has_fractions() {
-                let style = node.mounted_view_style();
+                let style = self.mounted_view_style(key);
                 self.mount.push(MountItem::ViewStyle { id, style });
             }
             if is_text {
@@ -3336,44 +3347,10 @@ fn definite(size: Size) -> taffy::Size<AvailableSpace> {
     }
 }
 
-/// Applies one property to a control. Returns its new natural size when it
-/// changed (activity indicator sizes).
-fn apply_native(control: &mut ControlState, prop: NativeProp, sizes: ControlSizes) -> Option<Size> {
+/// Applies one property to a control.
+fn apply_native(control: &mut NativeProps, prop: NativeProp) {
     use NativeProp as P;
-    match (&mut control.props, prop) {
-        (NativeProps::Switch(p), P::SwitchValue(v)) => {
-            p.value = v;
-            control.js_value = if v { 1.0 } else { 0.0 };
-            control.js_set = true;
-        }
-        (NativeProps::Switch(p), P::Disabled(v)) => p.disabled = v,
-        (NativeProps::Switch(p), P::TrackOn(c)) => p.track_on = c,
-        (NativeProps::Switch(p), P::TrackOff(c)) => p.track_off = c,
-        (NativeProps::Switch(p), P::Thumb(c)) => p.thumb = c,
-        (NativeProps::Slider(p), P::SliderValue(v)) => {
-            p.value = v;
-            control.js_value = v;
-            control.js_set = true;
-        }
-        (NativeProps::Slider(p), P::Minimum(v)) => p.min = v,
-        (NativeProps::Slider(p), P::Maximum(v)) => p.max = v,
-        (NativeProps::Slider(p), P::Step(v)) => p.step = v.max(0.0),
-        (NativeProps::Slider(p), P::Disabled(v)) => p.disabled = v,
-        (NativeProps::Slider(p), P::TrackOn(c)) => p.min_track = c,
-        (NativeProps::Slider(p), P::TrackOff(c)) => p.max_track = c,
-        (NativeProps::Slider(p), P::Thumb(c)) => p.thumb = c,
-        (NativeProps::Activity(p), P::Animating(v)) => p.animating = v,
-        (NativeProps::Activity(p), P::Color(c)) => p.color = c,
-        (NativeProps::Activity(p), P::HidesWhenStopped(v)) => p.hides_when_stopped = v,
-        (NativeProps::Activity(p), P::Large(v)) => {
-            p.large = v;
-            return Some(if v {
-                sizes.activity_large
-            } else {
-                sizes.activity_small
-            });
-        }
-        (NativeProps::Switch(p), P::TrackColors(on, off)) => (p.track_on, p.track_off) = (on, off),
+    match (control, prop) {
         (NativeProps::WebView(p), P::Source(v)) => p.source = v,
         (NativeProps::WebView(p), P::InjectedJavaScript(v)) => p.injected_js = v,
         (NativeProps::WebView(p), P::InjectedJavaScriptBefore(v)) => p.injected_js_before = v,
@@ -3397,7 +3374,6 @@ fn apply_native(control: &mut ControlState, prop: NativeProp, sizes: ControlSize
         (NativeProps::Video(p), P::ProgressInterval(v)) => p.progress_interval_ms = v.max(16.0),
         _ => {}
     }
-    None
 }
 
 /// `style` with its font metrics multiplied for the user's text size.

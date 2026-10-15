@@ -19,12 +19,13 @@ use std::{
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use rustc_hash::FxHashMap;
-pub use yf_core::ControlSizes;
 use yf_core::{
     Core, EdgeInsets, EventKind, EventPayload, ListBind, MountBatch, NodeId, Op, PayloadValue,
     Size, TextEngine,
 };
-pub use yf_js::{BYTECODE_VERSION, ColorScheme, Environment, HttpRequest, HttpResponse, Insets};
+pub use yf_js::{
+    BYTECODE_VERSION, ColorScheme, Environment, HttpRequest, HttpResponse, Idiom, Insets,
+};
 use yf_js::{Host, JsError, NetworkQueue, RequestId};
 
 use crate::symbolicate::Symbolicator;
@@ -158,8 +159,6 @@ pub struct EngineConfig {
     /// Height of the platform's screen header bar, normal and with a large
     /// title (status bar excluded).
     pub header_heights: (f32, f32),
-    /// Natural sizes of the platform's controls.
-    pub control_sizes: ControlSizes,
 }
 
 impl std::fmt::Debug for EngineConfig {
@@ -172,7 +171,6 @@ impl std::fmt::Debug for EngineConfig {
             .field("assets", &self.assets.is_some())
             .field("environment", &self.environment)
             .field("header_heights", &self.header_heights)
-            .field("control_sizes", &self.control_sizes)
             .finish()
     }
 }
@@ -373,7 +371,6 @@ fn run<M: TextEngine, S: MountSink>(
     core.set_font_scale(config.environment.font_scale);
     core.set_class_environment(class_environment(&config.environment));
     core.set_header_heights(config.header_heights.0, config.header_heights.1);
-    core.set_control_sizes(config.control_sizes);
     core.set_safe_area(insets(&config.environment));
     let mut state = State {
         core,
@@ -717,18 +714,6 @@ fn handle<M: TextEngine>(host: &Host, state: &mut State<M>, message: Message) ->
             // values from JS.
             if let (EventKind::ChangeText, EventPayload::Text { text, count }) = (event, &payload) {
                 state.core.input_changed(id, text, *count);
-            }
-            // Likewise for switches and sliders the user moved.
-            if event == EventKind::ValueChange {
-                match payload {
-                    EventPayload::Value(PayloadValue::Bool(on)) => {
-                        state.core.control_changed(id, if on { 1.0 } else { 0.0 })
-                    }
-                    EventPayload::Value(PayloadValue::Number(v)) => {
-                        state.core.control_changed(id, v as f32)
-                    }
-                    _ => {}
-                }
             }
             if let EventPayload::Touch(touch) = payload {
                 if touch.phase == yf_core::TouchPhase::Move {

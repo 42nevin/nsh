@@ -15,7 +15,7 @@ use yf_core::{
     AccessibilityValue, AutoCapitalize, AutoFill, CellSlot, Checked, Color, Command, Dialog,
     DialogButton, DialogButtonStyle, EdgeInsets, EllipsizeMode, EventKind, HeaderSlot, ImageProp,
     ImageSource, KeyboardDismissMode, KeyboardTaps, KeyboardType, LayoutAnimation, LayoutCurve,
-    LayoutProperty, LayoutTransition, ListContentStyle, LiveRegion, ModalAnimation,
+    LayoutProperty, LayoutTransition, ListContentStyle, LiveRegion, ModalAnimation, ModalConfig,
     ModalPresentation, ModalProp, NativeProp, NodeId, Op, PointerEvents, Prop, ResizeMode,
     ReturnKeyType, ScreenAnimation, ScreenProp, ScrollProp, SnapAlignment, StatusBarConfig,
     StatusBarStyle, Style, StyleDecl, StyleError, StylePatch, StyleValue, Tag, TransformKind,
@@ -239,6 +239,13 @@ pub(crate) fn decode<'js>(
                             end: field("end"),
                         }
                     }
+                    "announce" => Command::Announce(
+                        arg.as_string()
+                            .map(|s| s.to_string())
+                            .transpose()?
+                            .unwrap_or_default(),
+                    ),
+                    "accessibilityFocus" => Command::AccessibilityFocus,
                     "toast" => {
                         let o = arg.as_object();
                         Command::Toast {
@@ -577,43 +584,8 @@ fn decode_prop<'js>(
             None => Viewability::default(),
         }),
         "endReachedThreshold" => Prop::EndReachedThreshold(number(&value).unwrap_or(1.0)),
-        // Switches take booleans, sliders numbers, inputs strings.
-        "value" if value.is_bool() => {
-            Prop::Native(NativeProp::SwitchValue(value.as_bool().unwrap_or(false)))
-        }
-        "value" if value.is_number() => {
-            Prop::Native(NativeProp::SliderValue(number(&value).unwrap_or(0.0)))
-        }
         "value" => Prop::Value(string(&value)?),
         "disabled" => Prop::Native(NativeProp::Disabled(value.as_bool().unwrap_or(false))),
-        "trackColor" => {
-            let side = |key: &str| -> rquickjs::Result<Option<Color>> {
-                match value.as_object() {
-                    Some(o) => prop_color(&o.get::<_, Value>(key)?),
-                    None => Ok(None),
-                }
-            };
-            Prop::Native(NativeProp::TrackColors(side("true")?, side("false")?))
-        }
-        "thumbColor" | "thumbTintColor" => Prop::Native(NativeProp::Thumb(prop_color(&value)?)),
-        "minimumTrackTintColor" => Prop::Native(NativeProp::TrackOn(prop_color(&value)?)),
-        "maximumTrackTintColor" => Prop::Native(NativeProp::TrackOff(prop_color(&value)?)),
-        "minimumValue" => Prop::Native(NativeProp::Minimum(number(&value).unwrap_or(0.0))),
-        "maximumValue" => Prop::Native(NativeProp::Maximum(number(&value).unwrap_or(1.0))),
-        "step" => Prop::Native(NativeProp::Step(number(&value).unwrap_or(0.0))),
-        "animating" => Prop::Native(NativeProp::Animating(value.as_bool().unwrap_or(true))),
-        "color" => Prop::Native(NativeProp::Color(prop_color(&value)?)),
-        "size" => Prop::Native(NativeProp::Large(
-            value
-                .as_string()
-                .map(|s| s.to_string())
-                .transpose()?
-                .as_deref()
-                == Some("large"),
-        )),
-        "hidesWhenStopped" => Prop::Native(NativeProp::HidesWhenStopped(
-            value.as_bool().unwrap_or(true),
-        )),
         "source" => Prop::Native(NativeProp::Source(web_source(&value)?)),
         "injectedJavaScript" => Prop::Native(NativeProp::InjectedJavaScript(opt_string(&value)?)),
         "injectedJavaScriptBeforeContentLoaded" => {
@@ -673,6 +645,10 @@ fn decode_prop<'js>(
         "editable" => Prop::Editable(value.as_bool().unwrap_or(true)),
         "blurOnSubmit" => Prop::BlurOnSubmit(value.as_bool().unwrap_or(true)),
         "autoFocus" => Prop::AutoFocus(value.as_bool().unwrap_or(false)),
+        "inputAccessoryViewID" => {
+            Prop::InputAccessoryViewId(opt_string(&value)?.map(|s| (*s).into()))
+        }
+        "nativeID" => Prop::NativeId(opt_string(&value)?.map(|s| (*s).into())),
         "maxLength" => Prop::MaxLength(number(&value).map(|n| n.max(0.0) as u32)),
         "keyboardType" => Prop::KeyboardType(match string(&value)?.as_str() {
             "number-pad" | "numeric" => KeyboardType::Number,
@@ -754,6 +730,25 @@ fn decode_prop<'js>(
             }))
         }
         "transparent" => Prop::Modal(ModalProp::Transparent(value.as_bool().unwrap_or(false))),
+        "statusBarTranslucent" => Prop::Modal(ModalProp::StatusBarTranslucent(
+            value.as_bool().unwrap_or(false),
+        )),
+        "supportedOrientations" => Prop::Modal(ModalProp::Orientations({
+            let mut bits = 0;
+            if let Some(list) = value.as_array() {
+                for name in list.iter::<String>() {
+                    bits |= match name?.as_str() {
+                        "portrait" => ModalConfig::PORTRAIT,
+                        "portrait-upside-down" => ModalConfig::PORTRAIT_UPSIDE_DOWN,
+                        "landscape" => ModalConfig::LANDSCAPE_LEFT | ModalConfig::LANDSCAPE_RIGHT,
+                        "landscape-left" => ModalConfig::LANDSCAPE_LEFT,
+                        "landscape-right" => ModalConfig::LANDSCAPE_RIGHT,
+                        _ => 0,
+                    };
+                }
+            }
+            bits
+        })),
         "headerSlot" => Prop::HeaderSlot(match string(&value)?.as_str() {
             "right" => HeaderSlot::Right,
             "title" => HeaderSlot::Title,
@@ -770,7 +765,12 @@ fn decode_prop<'js>(
             None => insets(&value)?,
         }),
         "activeOpacity" => Prop::ActiveOpacity(number(&value).map(|n| n.clamp(0.0, 1.0))),
+        "underlayColor" => Prop::UnderlayColor(prop_color(&value)?),
+        "underlayOpacity" => Prop::UnderlayOpacity(
+            number(&value).map_or(yf_core::UNDERLAY_OPACITY, |n| n.clamp(0.0, 1.0)),
+        ),
         "insetPadding" => Prop::InsetPadding(insets(&value)?),
+        "insetMargin" => Prop::InsetMargin(insets(&value)?),
         "layoutDirectionRtl" => Prop::LayoutDirection(value.as_bool().unwrap_or(false)),
         "class" => Prop::Class(match value.as_string() {
             Some(s) => s.to_string()?.into(),

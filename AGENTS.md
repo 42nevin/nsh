@@ -24,7 +24,7 @@ crates/
   yf-ffi/             C ABI (`include/yf.h`, `libyf.a`) for embedding yf in existing iOS apps; shipped as an XCFramework
   yf-cli/             The `yf` command line: init / build / trace / dev / run / package
   xtask/              Maintainer tasks: `cargo xtask android` (Android runtime), `cargo xtask dist` (the distribution)
-js/runtime/index.ts   Solid universal renderer (JS side) and the runtime components (List, Stack, Modal, Switch, ...), bundled by yf-bundler
+js/runtime/index.ts   Solid universal renderer (JS side) and the runtime components (List, Stack, Modal, DrawerLayout, ...), bundled by yf-bundler
 js/runtime/types.ts   Style, element-prop and JSX types (types only; also the source of `.yf/types/yf/types.d.ts`)
 js/runtime/globals.d.ts  Declarations of the JS globals (console, timers, fetch, ...) and of asset imports
 js/runtime/hot.js     Hot module replacement runtime of development bundles (module registry, component proxies)
@@ -109,15 +109,36 @@ The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distributi
 | `List`, `SectionList` (runtime) | UIScrollView + recycled cells | see **List** below |
 | `<input>` | UITextField / UITextView in a container | `value` / `defaultValue` / `onChangeText` / `onSubmitEditing` / `onFocus` / `onBlur`, `placeholder`, `secureTextEntry`, `keyboardType`, `returnKeyType`, `autoCapitalize`, `autoCorrect`, `multiline`, `maxLength`, `editable`, `autoFocus`, `selectionColor`, `blurOnSubmit`, `selection` + `onSelectionChange` (UTF-16 `start` / `end`), `onKeyPress` (`key`: the text, `Backspace`, `Enter`), `autoComplete` / `textContentType` (autofill); ref `setSelection(start, end)` |
 | `Stack` / `Screen` (runtime) | UINavigationController | `createNavigator(route)`: `push` / `pop` / `popToTop` / `replace` / `reset`; screens keep their state while stacked; native header (`title`, `headerLeft` / `headerRight` / `headerTitle` elements, `headerLargeTitle`, `headerTransparent`, colors, `headerBackTitle`), swipe back |
-| `Modal` (runtime) | presented UIViewController | `visible`, `animationType`, `presentationStyle` (`pageSheet` / `formSheet` on iOS), `transparent`, `onRequestClose` (controlled), `onShow`, `onDismiss` |
-| `Switch`, `Slider`, `ActivityIndicator` | UISwitch, UISlider, UIActivityIndicatorView | controlled `value` + `onValueChange` (a switch JS did not flip goes back), `onSlidingComplete`, colors |
+| `Modal` (runtime) | presented UIViewController | `visible`, `animationType`, `presentationStyle` (`pageSheet` / `formSheet` on iOS), `transparent`, `statusBarTranslucent` (Android; otherwise the content starts below the status bar), `supportedOrientations` (iOS), `onRequestClose` (controlled), `onShow`, `onDismiss` |
+| `InputAccessoryView` (runtime, iOS) | `<inputaccessory>`: a YFView set as `inputAccessoryView` | `nativeID`; inputs name it with `inputAccessoryViewID`. A layout root as wide as the window and as tall as its content; the core resolves the id (`InputConfig::accessory`). Renders nothing on Android (as React Native) |
 | `WebView` | WKWebView (WebKit loaded on first use) | `source` (`uri` / `html` + `baseUrl`), `injectedJavaScript(BeforeContentLoaded)`, `onMessage` (pages call `window.ReactNativeWebView.postMessage`), `onLoad*`, `onNavigationStateChange`; ref: `reload()`, `goBack()`, `goForward()`, `postMessage(data)`, `injectJavaScript(js)` |
 | `Video` | AVPlayerLayer / AVPlayerViewController (AVFoundation loaded on first use) | `source`, `paused`, `muted`, `volume`, `rate`, `repeat`, `resizeMode`, `controls`, `onLoad` / `onProgress` / `onEnd` / `onBuffer` / `onError`; ref: `seek(seconds)` |
 
 On Android the same elements map to `Box` (ViewGroup), `TextBox`, `ImageBox`, `ScrollBox` (ScrollView), `InputBox` (EditText),
-`StackBox` (screens with a Toolbar, predictive back), `ModalHost` (a Dialog), `Controls.SwitchBox` / `SliderBox` (SeekBar) /
-`ActivityBox` (ProgressBar), `WebBox` (android.webkit.WebView) and `VideoBox` (MediaPlayer on a TextureView, MediaController).
-Every host element and runtime component is typed in `js/runtime/types.ts` / `index.ts`.
+`StackBox` (screens with a Toolbar, predictive back), `ModalHost` (a Dialog), `WebBox` (android.webkit.WebView) and `VideoBox`
+(MediaPlayer on a TextureView, MediaController); both are `WidgetBox`es. Every host element and runtime component is typed in
+`js/runtime/types.ts` / `index.ts`.
+
+**No platform-styled widgets.** yf provides primitives; apps (and the UI library built on yf) draw controls such as switches,
+sliders, spinners and buttons with views, classes and native animations, so they look the same on iOS and Android (the gallery's
+`Toggle` in `examples/gallery/ui.tsx`). Do not add wrappers of UISwitch / SeekBar and the like.
+
+- **Runtime components on the primitives**: `TouchableOpacity` (`activeOpacity` 0.2), `TouchableHighlight` (`underlayColor` +
+  `activeOpacity` for the children: `underlayColor` / `underlayOpacity` on any view, applied by the core while the platform
+  reports the view pressed — no JS round trip), `TouchableWithoutFeedback` (spreads its props on its only child),
+  `ImageBackground`, `DrawerLayout` (alias `DrawerLayoutAndroid`; both platforms: one native value is the offset, the panel, the
+  scrim and a 20pt edge strip drive it with `pan`, `onPanEnd`'s `valueX` / velocity decide where it settles; ref:
+  `openDrawer()`, `closeDrawer()`, `progress` (a native node 0..1)), `KeyboardAvoidingView` (`behavior`: `padding` →
+  `insetPadding`, `height` → `insetMargin`, `position` → an inner view moved up; `keyboardVerticalOffset`).
+- **Platform modules**: `Platform` (`OS`, `Version`, `isPad`, `isTV`, `isMacCatalyst`, `select`), `PixelRatio`, `StyleSheet`
+  (`create`, `flatten`, `compose`, `hairlineWidth`, `absoluteFill`), `AccessibilityInfo` (`isScreenReaderEnabled`,
+  `isReduceMotionEnabled`, `addEventListener("screenReaderChanged" | "reduceMotionChanged")`, `announceForAccessibility`,
+  `setAccessibilityFocus(ref)`), reactive `screenReaderEnabled()` / `reduceMotion()`. The environment carries `pixelRatio`,
+  `screenReader`, `osVersion` and `idiom` (VoiceOver / TalkBack changes are observed natively).
+- **`disabled`** on any element applies `disabled:` classes and removes its press listeners from what is mounted (no press,
+  no feedback).
+- **`onPanEnd` / `onPanStart`** carry `valueX` / `valueY`: the bound pan values at that moment (a drag may grab a value mid
+  animation), for snapping.
 
 - **Text**: `<text numberOfLines ellipsizeMode="tail|head|middle|clip">`; styles `fontFamily` (system or imported fonts:
   `import Inter from "./Inter.ttf"` evaluates to the family name and registers the font before the first frame), `fontWeight`,
@@ -454,6 +475,12 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
   whether a rectangle is visible. `YfView` is a scroll container (`setScrollContainer(true)`) so that windows without a soft
   input mode resize instead of panning: the system picks the mode at the first layout, before the app's content is mounted,
   and a mode set from code afterwards is overridden. Windows that ask for `adjustPan` are left to the system.
+- **Android, drags that start on a child**: a pannable `Box` intercepts the move that exceeds the slop and starts its pan right
+  there; that intercepted move never reaches its `onTouchEvent`, so starting the pan there is what makes a quick flick (few moves)
+  pan and end at all.
+- **Android, modal content placement**: `Box.place` lays a view out at its core frame directly, so the status bar offset of a
+  non-translucent modal is a content view inside the dialog's container, not an offset applied to the root's layout; the dialog
+  copies the activity's bar appearance (light / dark icons).
 - **Android, nested scrolling**: scroll views enable nested scrolling, or an outer vertical ScrollView intercepts every vertical
   drag meant for an inner one.
 - **Android, safe area**: `YfView` reports only the parts of the system bars / keyboard that overlap it (like UIKit's
@@ -493,8 +520,7 @@ Every host element and runtime component is typed in `js/runtime/types.ts` / `in
   the window's size as `preferredContentSize`. Standalone apps have a white root view (UIKit windows are black).
 - **Development hosts never restore windows**: `yf run` launches the Catalyst host with `-ApplePersistenceIgnoreState YES`;
   after a crash, macOS would otherwise show a modal "reopen windows?" alert over it.
-- **Android widgets**: a null tint list clears the theme's drawable tint (keep the default until a color is set: `Controls.Tint`);
-  `MediaPlayer.setPlaybackParams` starts playback (set the rate only while playing) and a paused player draws nothing until
+- **Android widgets**: `MediaPlayer.setPlaybackParams` starts playback (set the rate only while playing) and a paused player draws nothing until
   it seeks; `WebView` JavaScript bridge calls arrive on a binder thread (post to the UI thread).
 - **Synthetic clicks on the Simulator / Catalyst windows go to whatever macOS window is on top at that point**: floating windows
   of other apps (e.g. a Slack huddle bar at window level 1001) silently swallow clicks over a band of the app. When a tap does

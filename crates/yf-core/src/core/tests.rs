@@ -2021,6 +2021,33 @@ fn classes_style_views_and_inline_styles_win() {
 }
 
 #[test]
+fn important_classes_win_over_inline_styles() {
+    let mut c = core();
+    view_with_classes(
+        &mut c,
+        2,
+        "!bg-blue-500 translate-x-2 !scale-150 opacity-50",
+    );
+    c.apply(style_op(
+        2,
+        &[
+            ("backgroundColor", StyleValue::Str("#ff0000")),
+            ("opacity", StyleValue::Number(0.8)),
+        ],
+    ))
+    .unwrap();
+    let v = view_style_of(&c.commit().unwrap(), 2).unwrap();
+    assert_eq!(v.background_color, Color(0x2b7f_ffff));
+    // Not important: the inline style wins.
+    assert_eq!(v.opacity, 0.8);
+    // The important scale still composes with the plain translation.
+    let mut expected = crate::Transform::default();
+    let _ = expected.push(crate::TransformKind::TranslateX, 8.0);
+    let _ = expected.push(crate::TransformKind::Scale, 1.5);
+    assert_eq!(v.transform, expected);
+}
+
+#[test]
 fn dark_mode_and_breakpoints_restyle_natively() {
     let mut c = core();
     view_with_classes(&mut c, 2, "bg-white dark:bg-black p-2 md:p-8");
@@ -2238,4 +2265,125 @@ fn disabled_views_take_no_presses() {
     let batch = c.commit().unwrap();
     assert!(events_of(&batch).unwrap().contains(EventKind::Press));
     assert_eq!(view_style_of(&batch, 2).unwrap().opacity, 1.0);
+}
+
+#[test]
+fn underlay_shows_while_pressed() {
+    let mut c = core();
+    view_with_classes(&mut c, 2, "bg-white");
+    view_with_classes(&mut c, 3, "opacity-50");
+    apply(
+        &mut c,
+        vec![
+            Op::Remove {
+                parent: ROOT_ID,
+                child: 3,
+            },
+            Op::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::UnderlayColor(Color::parse("#dddddd")),
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    assert!(batch.items.iter().any(|i| matches!(
+        i,
+        MountItem::TrackStates { id: 2, states } if *states == crate::tailwind::state::PRESSED
+    )));
+    c.set_states(2, crate::tailwind::state::PRESSED);
+    let batch = c.commit().unwrap();
+    assert_eq!(
+        view_style_of(&batch, 2).unwrap().background_color,
+        Color(0xdddd_ddff)
+    );
+    assert_eq!(view_style_of(&batch, 3).unwrap().opacity, 0.5 * 0.85);
+    c.set_states(2, 0);
+    let batch = c.commit().unwrap();
+    assert_eq!(
+        view_style_of(&batch, 2).unwrap().background_color,
+        Color(0xffff_ffff)
+    );
+    assert_eq!(view_style_of(&batch, 3).unwrap().opacity, 0.5);
+}
+
+#[test]
+fn input_accessories_are_found_by_native_id() {
+    let mut c = core();
+    let accessory = |batch: &MountBatch| {
+        batch.items.iter().rev().find_map(|i| match i {
+            MountItem::Input { id: 2, config } => Some(config.accessory),
+            _ => None,
+        })
+    };
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::Input,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::InputAccessoryViewId(Some("bar".into())),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    assert_eq!(accessory(&batch), Some(None));
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 3,
+                tag: Tag::InputAccessory,
+            },
+            Op::SetProp {
+                id: 3,
+                prop: Prop::NativeId(Some("bar".into())),
+            },
+            Op::Create {
+                id: 4,
+                tag: Tag::View,
+            },
+            Op::SetStyle {
+                id: 4,
+                style: style(&[("height", StyleValue::Number(44.0))]),
+                patch: Default::default(),
+            },
+            Op::Insert {
+                parent: 3,
+                child: 4,
+                before: None,
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 3,
+                before: None,
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    assert_eq!(accessory(&batch), Some(Some(3)));
+    // As wide as the window, as tall as its content.
+    let frame = frame_of(&batch, 3).unwrap();
+    assert_eq!((frame.width, frame.height), (320.0, 44.0));
+    apply(
+        &mut c,
+        vec![Op::Remove {
+            parent: ROOT_ID,
+            child: 3,
+        }],
+    );
+    let batch = c.commit().unwrap();
+    assert_eq!(accessory(&batch), Some(None));
 }

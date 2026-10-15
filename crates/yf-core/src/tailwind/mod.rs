@@ -18,7 +18,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 pub use self::theme::{Theme, ThemeError};
-use self::utilities::{Decl, Parts};
+use self::utilities::{Decl, Parts, touched};
 use crate::{
     ops::ResizeMode,
     props::PointerEvents,
@@ -273,12 +273,15 @@ impl ClassList {
         theme: &Theme,
         style: &mut Style,
         props: &mut ClassProps,
+        inline: impl FnOnce(&mut Style),
     ) {
         let mut parts = Parts::default();
+        let mut important = false;
         for rule in &self.rules {
             if rule.cond.placeholder || !rule.cond.matches(cx) {
                 continue;
             }
+            important |= rule.important;
             for decl in &rule.decls {
                 decl.apply(style, props, &mut parts);
             }
@@ -294,7 +297,28 @@ impl ClassList {
                 }
             }
         }
-        parts.finish(style, props, theme, cx.window);
+        parts.finish(style, props, theme, cx.window, touched::ALL);
+        inline(style);
+        if important {
+            // `!` utilities win over the inline style too, as in CSS. The
+            // parts keep every rule's values (a `!scale-*` still composes
+            // with a plain `translate-*`); only the groups the important
+            // rules touch are written again.
+            parts.touched = 0;
+            parts.screen.clear();
+            for rule in self
+                .rules
+                .iter()
+                .filter(|r| r.important && !r.cond.placeholder)
+            {
+                if rule.cond.matches(cx) {
+                    for decl in &rule.decls {
+                        decl.apply(style, props, &mut parts);
+                    }
+                }
+            }
+            parts.finish(style, props, theme, cx.window, parts.touched);
+        }
     }
 }
 

@@ -394,6 +394,33 @@ impl Input {
         }
     }
 
+    /// The input accessory view this input names, if mounted.
+    pub(crate) fn accessory(&self) -> Option<NodeId> {
+        self.config.as_ref().and_then(|c| c.accessory)
+    }
+
+    /// Shows `view` over the keyboard while this input has focus
+    /// (`inputAccessoryViewID`); `reload` refreshes a shown keyboard (a new
+    /// view or height).
+    pub(crate) fn set_accessory(&self, view: Option<&UIView>, reload: bool) {
+        let editor = self.editor_view();
+        // SAFETY: UITextField and UITextView redeclare `inputAccessoryView`
+        // read-write.
+        let current: Option<Retained<UIView>> = unsafe { msg_send![editor, inputAccessoryView] };
+        let same = match (&current, view) {
+            (Some(a), Some(b)) => std::ptr::eq(&**a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            // SAFETY: as above.
+            let _: () = unsafe { msg_send![editor, setInputAccessoryView: view] };
+        }
+        if (!same || reload) && editor.isFirstResponder() {
+            editor.reloadInputViews();
+        }
+    }
+
     /// Sets the text from JS unless the user typed since JS saw `count`.
     pub(crate) fn set_value(&mut self, text: &str, count: u32) {
         if count != self.count || self.text() == text {

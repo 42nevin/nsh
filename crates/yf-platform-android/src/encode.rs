@@ -117,11 +117,11 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     ViewKind::Screen => 6,
                     ViewKind::Modal => 7,
                     ViewKind::HeaderItem => 8,
-                    ViewKind::Switch => 9,
-                    ViewKind::Slider => 10,
-                    ViewKind::ActivityIndicator => 11,
                     ViewKind::WebView => 12,
                     ViewKind::Video => 13,
+                    // The runtime renders no input accessories on Android
+                    // (as React Native).
+                    ViewKind::InputAccessory => 0,
                 });
             }
             MountItem::Insert {
@@ -358,6 +358,7 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     ModalPresentation::FormSheet => 2,
                 });
                 e.bool(config.transparent);
+                e.bool(config.status_bar_translucent);
             }
             MountItem::LayoutAnimation(animation) => {
                 e.int(LAYOUT_ANIMATION);
@@ -456,6 +457,11 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                         e.int(start as i32);
                         e.int(end as i32);
                     }
+                    Command::Announce(text) => {
+                        e.int(17);
+                        e.string(text);
+                    }
+                    Command::AccessibilityFocus => e.int(18),
                     // Turned into a mount item / `ScrollTo` by the core.
                     Command::LayoutAnimation(_)
                     | Command::ScrollToIndex { .. }
@@ -709,31 +715,6 @@ fn opt_color(e: &mut Encoded, c: Option<Color>) {
 /// `Mounter.java` `nativeProps`: a kind, then its fields.
 fn native_props(e: &mut Encoded, p: &NativeProps) {
     match p {
-        NativeProps::Switch(s) => {
-            e.int(0);
-            e.bool(s.value);
-            e.bool(s.disabled);
-            opt_color(e, s.track_on);
-            opt_color(e, s.track_off);
-            opt_color(e, s.thumb);
-        }
-        NativeProps::Slider(s) => {
-            e.int(1);
-            for v in [s.value, s.min, s.max, s.step] {
-                e.float(v);
-            }
-            e.bool(s.disabled);
-            opt_color(e, s.min_track);
-            opt_color(e, s.max_track);
-            opt_color(e, s.thumb);
-        }
-        NativeProps::Activity(a) => {
-            e.int(2);
-            e.bool(a.animating);
-            opt_color(e, a.color);
-            e.bool(a.large);
-            e.bool(a.hides_when_stopped);
-        }
         NativeProps::WebView(w) => {
             e.int(3);
             match &w.source {

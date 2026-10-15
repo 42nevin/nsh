@@ -147,6 +147,17 @@ impl UiAnim {
         }
     }
 
+    /// The values the drag on `id` moves (`pan.x`, `pan.y`).
+    pub(crate) fn pan_values(&self, id: u32) -> (Option<f32>, Option<f32>) {
+        let Some(g) = self.gestures.get(&id) else {
+            return (None, None);
+        };
+        (
+            g.values.pan_x.and_then(|n| self.graph.value(n)),
+            g.values.pan_y.and_then(|n| self.graph.value(n)),
+        )
+    }
+
     /// A pinch (`rotation` false) or two-finger rotation began.
     pub(crate) fn transform_began(&mut self, id: u32, rotation: bool) {
         let graph = &self.graph;

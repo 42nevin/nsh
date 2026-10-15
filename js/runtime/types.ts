@@ -180,6 +180,10 @@ export interface PanEvent {
   translationY: number;
   velocityX: number;
   velocityY: number;
+  /** The `pan.x` value now (with one). */
+  valueX?: number;
+  /** The `pan.y` value now (with one). */
+  valueY?: number;
 }
 
 export type AccessibilityRole =
@@ -332,6 +336,10 @@ export interface CommonProps extends TouchProps {
   hitSlop?: number | { top?: number; right?: number; bottom?: number; left?: number };
   /** Opacity while pressed (native, no JS round trip). */
   activeOpacity?: number;
+  /** The background while pressed (`TouchableHighlight`; native, no JS round trip). */
+  underlayColor?: ColorValue;
+  /** The children's opacity while `underlayColor` shows (default 0.85). */
+  underlayOpacity?: number;
   /** Milliseconds before a press becomes a long press (default 500). */
   delayLongPress?: number;
   /** Android's ripple while pressed (ignored elsewhere). */
@@ -489,6 +497,8 @@ export interface InputProps extends CommonProps {
   onSelectionChange?: (e: { start: number; end: number }) => void;
   /** Before the text changes: `key` is the typed text, `Backspace` or `Enter`. */
   onKeyPress?: (e: { key: string }) => void;
+  /** iOS: the `nativeID` of an `InputAccessoryView` shown over the keyboard while this input has focus. */
+  inputAccessoryViewID?: string;
   /** What the input holds, for autofill (React Native's values, e.g. "username", "current-password", "new-password", "one-time-code", "email", "tel", "postal-code", "cc-number", "off"). */
   autoComplete?: AutoComplete;
   /** iOS names of the same (`autoComplete` covers both platforms). */
@@ -507,7 +517,7 @@ export interface InputProps extends CommonProps {
 }
 
 /** Host elements without components of their own take any prop the core
- * knows; their typed forms are the runtime's components (`Switch`, …). */
+ * knows; their typed forms are the runtime's components (`WebView`, …). */
 interface ControlProps extends CommonProps {
   style?: StyleProp<ViewStyle>;
   [prop: string]: any;
@@ -526,9 +536,7 @@ export declare namespace JSX {
     image: ImageProps;
     scroll: ScrollProps;
     input: InputProps;
-    switch: ControlProps;
-    slider: ControlProps;
-    activityindicator: ControlProps;
+    inputaccessory: ControlProps;
     webview: ControlProps;
     video: ControlProps;
     stack: ControlProps;

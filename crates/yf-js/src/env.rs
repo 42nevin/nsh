@@ -24,6 +24,20 @@ pub enum ColorScheme {
     Dark,
 }
 
+/// The kind of device (React Native's `Platform.isPad`, `isTV`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Idiom {
+    /// A phone.
+    #[default]
+    Phone,
+    /// A tablet.
+    Pad,
+    /// A Mac (Mac Catalyst).
+    Mac,
+    /// A TV.
+    Tv,
+}
+
 /// What the platform knows about the surface.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Environment {
@@ -44,6 +58,14 @@ pub struct Environment {
     /// The user asked for less motion (iOS Reduce Motion, Android's
     /// animator duration scale at 0).
     pub reduce_motion: bool,
+    /// Device pixels per point.
+    pub pixel_ratio: f32,
+    /// A screen reader runs (VoiceOver, TalkBack).
+    pub screen_reader: bool,
+    /// The OS version: iOS major and minor, Android's API level and 0.
+    pub os_version: (u16, u16),
+    /// The kind of device.
+    pub idiom: Idiom,
 }
 
 impl Default for Environment {
@@ -57,6 +79,10 @@ impl Default for Environment {
             font_scale: 1.0,
             rtl: false,
             reduce_motion: false,
+            pixel_ratio: 1.0,
+            screen_reader: false,
+            os_version: (0, 0),
+            idiom: Idiom::Phone,
         }
     }
 }

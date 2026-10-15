@@ -42,12 +42,10 @@ pub enum Tag {
     /// A view placed in a screen's native header (`<headeritem slot>`),
     /// sized to its content.
     HeaderItem,
-    /// An on / off switch (`<switch>`).
-    Switch,
-    /// A slider (`<slider>`).
-    Slider,
-    /// A spinning activity indicator (`<activityindicator>`).
-    ActivityIndicator,
+    /// A bar over the keyboard of the inputs naming its `nativeID`
+    /// (`<inputaccessory>`, iOS), as wide as the window and as tall as its
+    /// content.
+    InputAccessory,
     /// A web page (`<webview>`).
     WebView,
     /// A video player (`<video>`).
@@ -70,9 +68,7 @@ impl Tag {
             "screen" => Tag::Screen,
             "modal" => Tag::Modal,
             "headeritem" => Tag::HeaderItem,
-            "switch" => Tag::Switch,
-            "slider" => Tag::Slider,
-            "activityindicator" => Tag::ActivityIndicator,
+            "inputaccessory" => Tag::InputAccessory,
             "webview" => Tag::WebView,
             "video" => Tag::Video,
             _ => return None,
@@ -137,8 +133,6 @@ events! {
     RotationStart = "onRotationStart": "A two-finger rotation started (payload: `rotation`, `velocity`).",
     RotationEnd = "onRotationEnd": "A two-finger rotation ended (payload: `rotation`, `velocity`).",
     AccessibilityAction = "onAccessibilityAction": "An assistive technology performed an action (payload: `actionName`).",
-    ValueChange = "onValueChange": "A switch or slider changed (payload: the value).",
-    SlidingComplete = "onSlidingComplete": "The user released a slider (payload: the value).",
     Dismiss = "onDismiss": "A screen was popped or a modal dismissed by the user or the system.",
     RequestClose = "onRequestClose": "The user asked to close a modal (back button, swipe down).",
     Show = "onShow": "A modal finished appearing.",
@@ -389,6 +383,10 @@ pub enum EventPayload {
         velocity_x: f32,
         /// Vertical velocity.
         velocity_y: f32,
+        /// The `pan.x` value now (`None` without one).
+        value_x: Option<f32>,
+        /// The `pan.y` value now.
+        value_y: Option<f32>,
     },
     /// A scroll position.
     Scroll {
@@ -705,6 +703,10 @@ pub enum ModalProp {
     Presentation(ModalPresentation),
     /// `transparent`: what is behind shows through the modal's background.
     Transparent(bool),
+    /// `statusBarTranslucent` (Android).
+    StatusBarTranslucent(bool),
+    /// `supportedOrientations` (iOS): [`crate::ModalConfig::PORTRAIT`] bits.
+    Orientations(u8),
 }
 
 /// An imperative call on a native view (`ref.focus()` and the like).
@@ -785,7 +787,15 @@ pub enum Command {
         /// Show it longer.
         long: bool,
     },
+    /// Have the screen reader read a message (on the root).
+    Announce(String),
+    /// Move the screen reader's focus to this view.
+    AccessibilityFocus,
 }
+
+/// The children's opacity while an underlay shows (React Native's
+/// `TouchableHighlight` default `activeOpacity`).
+pub const UNDERLAY_OPACITY: f32 = 0.85;
 
 /// The status bar's look.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -926,6 +936,11 @@ pub enum Prop {
     BlurOnSubmit(bool),
     /// `<input autoFocus>`.
     AutoFocus(bool),
+    /// `<input inputAccessoryViewID>`: the `nativeID` of an input
+    /// accessory.
+    InputAccessoryViewId(Option<Box<str>>),
+    /// `nativeID` of an input accessory.
+    NativeId(Option<Box<str>>),
     /// `<input selectionColor>` (caret and selection).
     SelectionColor(Option<Color>),
     /// `<input autoComplete>` / `textContentType`.
@@ -940,12 +955,19 @@ pub enum Prop {
     HitSlop(EdgeInsets),
     /// `activeOpacity`: native press feedback.
     ActiveOpacity(Option<f32>),
+    /// `underlayColor`: the background while pressed (`TouchableHighlight`).
+    UnderlayColor(Option<Color>),
+    /// `underlayOpacity`: the children's opacity while the underlay shows.
+    UnderlayOpacity(f32),
     /// The surface lays out right to left (on the root, from
     /// `I18nManager`).
     LayoutDirection(bool),
     /// Padding added to the style's own (safe areas, the keyboard), in
     /// points on the physical edges.
     InsetPadding(EdgeInsets),
+    /// Margin added to the style's own (`KeyboardAvoidingView`'s
+    /// `height` behavior), in points on the physical edges.
+    InsetMargin(EdgeInsets),
     /// `class`: Tailwind classes.
     Class(Box<str>),
     /// `classList`: the names whose value is truthy.
@@ -977,8 +999,7 @@ pub enum Prop {
     Modal(ModalProp),
     /// `<headeritem slot>`.
     HeaderSlot(HeaderSlot),
-    /// A property of a native control (switch, slider, activity indicator,
-    /// web view, video).
+    /// A property of a native control (web view, video), or `disabled`.
     Native(NativeProp),
 }
 
@@ -1001,36 +1022,10 @@ pub enum WebSource {
 /// A property of a native control.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NativeProp {
-    /// `value` of a switch.
-    SwitchValue(bool),
-    /// `value` of a slider.
-    SliderValue(f32),
-    /// `minimumValue` of a slider.
-    Minimum(f32),
-    /// `maximumValue` of a slider.
-    Maximum(f32),
-    /// `step` of a slider (0: continuous).
-    Step(f32),
-    /// `disabled`.
+    /// `disabled` (any element): no presses, `disabled:` classes.
     Disabled(bool),
-    /// Switch `trackColor.true`, slider `minimumTrackTintColor`.
-    TrackOn(Option<Color>),
-    /// Switch `trackColor.false`, slider `maximumTrackTintColor`.
-    TrackOff(Option<Color>),
-    /// `thumbColor` / `thumbTintColor`.
-    Thumb(Option<Color>),
-    /// Activity indicator `animating`.
-    Animating(bool),
-    /// Activity indicator `color`.
-    Color(Option<Color>),
-    /// Activity indicator `size` (`"large"`).
-    Large(bool),
-    /// Activity indicator `hidesWhenStopped`.
-    HidesWhenStopped(bool),
     /// Web view / video `source`.
     Source(WebSource),
-    /// Switch `trackColor`: `{ true, false }`.
-    TrackColors(Option<Color>, Option<Color>),
     /// Web view `injectedJavaScript` (after the page loads).
     InjectedJavaScript(Option<Arc<str>>),
     /// Web view `injectedJavaScriptBeforeContentLoaded`.

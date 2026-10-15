@@ -79,7 +79,6 @@ fn list_scrolls_with_recycled_cells() {
         assets: None,
         environment: Default::default(),
         header_heights: (44.0, 96.0),
-        control_sizes: Default::default(),
     };
     let engine = Engine::start(config, || ApproxTextEngine, Sink(tx)).unwrap();
     let first = rx.recv_timeout(Duration::from_secs(5)).unwrap();

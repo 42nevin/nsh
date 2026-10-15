@@ -1,6 +1,6 @@
 import { createSignal, For, Index } from "solid-js";
 import { List, windowSize, type ScrollEvent } from "yf";
-import { Button, colors, Section } from "../ui";
+import { Button, colors, Section, Toggle as Switch } from "../ui";
 
 const palette = ["#0969da", "#8250df", "#bf3989", "#cf222e", "#bc4c00", "#1a7f37", "#0a3069"];
 
@@ -8,7 +8,7 @@ function Toggle(props: { label: string; value: boolean; onChange: (v: boolean) =
   return (
     <view style={{ flexDirection: "row", alignItems: "center" }}>
       <text style={{ flex: 1 }}>{props.label}</text>
-      <switch value={props.value} onValueChange={props.onChange} />
+      <Switch value={props.value} onChange={props.onChange} />
     </view>
   );
 }

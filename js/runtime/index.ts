@@ -36,6 +36,10 @@ import type {
   ScrollBehaviorProps,
   StyleProp,
   TouchPoint,
+  ColorValue,
+  ImageProps,
+  ImageStyle,
+  TextStyle,
   ViewProps,
   ViewStyle,
 } from "./types";
@@ -1013,6 +1017,12 @@ interface Environment {
   fontScale: number;
   /** The user's language is written right to left. */
   rtl: boolean;
+  reduceMotion: boolean;
+  pixelRatio: number;
+  screenReader: boolean;
+  os: "ios" | "android";
+  osVersion: string | number;
+  idiom: "phone" | "pad" | "mac" | "tv";
 }
 
 const [environment, setEnvironment] = createSignal<Environment>((globalThis as any).__yf_env_value, {
@@ -1033,6 +1043,8 @@ const parts = createRoot(() => {
     part("keyboard", (a, b) => a.height === b.height && a.duration === b.duration),
     part("colorScheme", (a, b) => a === b),
     part("fontScale", (a, b) => a === b),
+    part("screenReader", (a, b) => a === b),
+    part("reduceMotion", (a, b) => a === b),
   ] as const;
 });
 
@@ -1048,6 +1060,135 @@ export const keyboard: Accessor<Environment["keyboard"]> = parts[2];
 export const colorScheme: Accessor<Environment["colorScheme"]> = parts[3];
 /** The user's preferred text size relative to the default (reactive). */
 export const fontScale: Accessor<number> = parts[4];
+/** Whether a screen reader (VoiceOver, TalkBack) runs (reactive). */
+export const screenReaderEnabled: Accessor<boolean> = parts[5];
+/** Whether the user asked for less motion (reactive; also `motion-reduce:`). */
+export const reduceMotion: Accessor<boolean> = parts[6];
+
+// --- Platform -----------------------------------------------------------------
+
+const initialEnvironment = untrack(environment);
+
+export interface PlatformSelectSpec<T> {
+  ios?: T;
+  android?: T;
+  /** Both platforms (yf only runs natively). */
+  native?: T;
+  default?: T;
+}
+
+export interface PlatformStatic {
+  readonly OS: "ios" | "android";
+  /** iOS: the version string (`"17.5"`); Android: the API level. */
+  readonly Version: string | number;
+  readonly isPad: boolean;
+  readonly isTV: boolean;
+  /** Mac Catalyst in the Mac idiom. */
+  readonly isMacCatalyst: boolean;
+  readonly constants: {
+    readonly osVersion: string | number;
+    readonly interfaceIdiom: "phone" | "pad" | "mac" | "tv";
+  };
+  /** The value for this platform: `ios` / `android`, else `native`, else `default`. */
+  select<T>(spec: PlatformSelectSpec<T>): T | undefined;
+}
+
+/** The platform the app runs on (React Native's `Platform`). */
+export const Platform: PlatformStatic = {
+  OS: initialEnvironment.os,
+  Version: initialEnvironment.osVersion,
+  isPad: initialEnvironment.idiom === "pad",
+  isTV: initialEnvironment.idiom === "tv",
+  isMacCatalyst: initialEnvironment.idiom === "mac",
+  constants: { osVersion: initialEnvironment.osVersion, interfaceIdiom: initialEnvironment.idiom },
+  select<T>(spec: PlatformSelectSpec<T>): T | undefined {
+    const own = spec[initialEnvironment.os];
+    if (own !== undefined) return own;
+    return spec.native !== undefined ? spec.native : spec.default;
+  },
+};
+
+/** Device pixels per point (React Native's `PixelRatio`). Not reactive:
+ * read in components that also read `windowSize()` to follow a window
+ * moving to another screen. */
+export interface PixelRatioStatic {
+  get(): number;
+  getFontScale(): number;
+  getPixelSizeForLayoutSize(size: number): number;
+  roundToNearestPixel(size: number): number;
+}
+
+export const PixelRatio: PixelRatioStatic = {
+  get(): number {
+    return untrack(environment).pixelRatio;
+  },
+  /** The user's text size preference (also `fontScale()`). */
+  getFontScale(): number {
+    return untrack(environment).fontScale;
+  },
+  /** `size` points in whole device pixels. */
+  getPixelSizeForLayoutSize(size: number): number {
+    return Math.round(size * PixelRatio.get());
+  },
+  /** `size` rounded to the nearest device pixel, in points. */
+  roundToNearestPixel(size: number): number {
+    const ratio = PixelRatio.get();
+    return Math.round(size * ratio) / ratio;
+  },
+};
+
+// --- Accessibility --------------------------------------------------------------
+
+export type AccessibilityChangeEvent = "screenReaderChanged" | "reduceMotionChanged";
+
+const accessibilityListeners: Record<AccessibilityChangeEvent, Set<(enabled: boolean) => void>> = {
+  screenReaderChanged: new Set(),
+  reduceMotionChanged: new Set(),
+};
+createRoot(() => {
+  const watch = (name: AccessibilityChangeEvent, value: Accessor<boolean>) => {
+    let last = untrack(value);
+    createRenderEffect(() => {
+      const now = value();
+      if (now === last) return;
+      last = now;
+      for (const listener of [...accessibilityListeners[name]]) listener(now);
+    });
+  };
+  watch("screenReaderChanged", screenReaderEnabled);
+  watch("reduceMotionChanged", reduceMotion);
+});
+
+/** Screen reader and motion settings (React Native's `AccessibilityInfo`).
+ * `screenReaderEnabled()` and `reduceMotion()` are the reactive forms. */
+export interface AccessibilityInfoStatic {
+  isScreenReaderEnabled(): Promise<boolean>;
+  isReduceMotionEnabled(): Promise<boolean>;
+  addEventListener(event: AccessibilityChangeEvent, listener: (enabled: boolean) => void): { remove(): void };
+  announceForAccessibility(message: string): void;
+  setAccessibilityFocus(node: YNode): void;
+}
+
+export const AccessibilityInfo: AccessibilityInfoStatic = {
+  isScreenReaderEnabled(): Promise<boolean> {
+    return Promise.resolve(untrack(screenReaderEnabled));
+  },
+  isReduceMotionEnabled(): Promise<boolean> {
+    return Promise.resolve(untrack(reduceMotion));
+  },
+  addEventListener(event: AccessibilityChangeEvent, listener: (enabled: boolean) => void): { remove(): void } {
+    accessibilityListeners[event].add(listener);
+    return { remove: () => accessibilityListeners[event].delete(listener) };
+  },
+  /** The screen reader reads `message` (VoiceOver announcement, TalkBack). */
+  announceForAccessibility(message: string): void {
+    command(1, "announce", message);
+  },
+  /** Moves the screen reader's focus to `node` (a `ref`). */
+  setAccessibilityFocus(node: YNode): void {
+    command(node.id, "accessibilityFocus");
+  },
+};
 
 // --- Right to left ------------------------------------------------------------
 
@@ -1083,6 +1224,66 @@ export const I18nManager = {
   },
   getConstants(): { isRTL: boolean; doLeftAndRightSwapInRTL: boolean } {
     return { isRTL: isRTL(), doLeftAndRightSwapInRTL: true };
+  },
+};
+
+// --- StyleSheet -------------------------------------------------------------
+
+type AnyStyle = ViewStyle | TextStyle | ImageStyle;
+
+export interface AbsoluteFillStyle {
+  readonly position: "absolute";
+  readonly left: 0;
+  readonly right: 0;
+  readonly top: 0;
+  readonly bottom: 0;
+}
+
+const absoluteFill: AbsoluteFillStyle = Object.freeze({ position: "absolute", left: 0, right: 0, top: 0, bottom: 0 } as const);
+
+function flattenInto(out: Record<string, unknown>, style: unknown) {
+  if (!style) return;
+  if (Array.isArray(style)) {
+    for (const s of style) flattenInto(out, s);
+    return;
+  }
+  Object.assign(out, style);
+}
+
+export interface StyleSheetStatic {
+  readonly hairlineWidth: number;
+  readonly absoluteFill: AbsoluteFillStyle;
+  readonly absoluteFillObject: AbsoluteFillStyle;
+  create<T extends Record<string, AnyStyle>>(styles: T): T;
+  flatten<T extends AnyStyle>(style: StyleProp<T> | readonly StyleProp<T>[]): T;
+  compose<T extends AnyStyle>(a: StyleProp<T>, b: StyleProp<T>): StyleProp<T>;
+}
+
+/** React Native's `StyleSheet`. Styles are plain objects (decoded in Rust,
+ * arrays merged there too): `create` only types them. */
+export const StyleSheet: StyleSheetStatic = {
+  /** The thinnest line the screen draws: one device pixel, at least 0.4pt
+   * rounded to whole pixels (React Native's value). */
+  hairlineWidth: ((): number => {
+    const ratio = initialEnvironment.pixelRatio || 1;
+    const width = Math.round(0.4 * ratio) / ratio;
+    return width === 0 ? 1 / ratio : width;
+  })(),
+  /** Fills the parent: `position: "absolute"` with all edges 0. */
+  absoluteFill,
+  absoluteFillObject: absoluteFill,
+  create<T extends Record<string, AnyStyle>>(styles: T): T {
+    return styles;
+  },
+  /** One object from a style or a (nested) array of styles; later entries win. */
+  flatten<T extends AnyStyle>(style: StyleProp<T> | readonly StyleProp<T>[]): T {
+    const out: Record<string, unknown> = {};
+    flattenInto(out, style);
+    return out as T;
+  },
+  /** `a` and `b` as one style prop (`b` wins). */
+  compose<T extends AnyStyle>(a: StyleProp<T>, b: StyleProp<T>): StyleProp<T> {
+    return a && b ? ([a, b] as unknown as StyleProp<T>) : a || b;
   },
 };
 
@@ -1128,6 +1329,121 @@ export function Pressable(props: PressableProps): YNode {
     const c = local.children;
     return typeof c === "function" && c.length === 1 ? c({ pressed: pressed() }) : c;
   });
+  return node;
+}
+
+// --- Touchables --------------------------------------------------------------
+
+/** A view whose opacity drops to `activeOpacity` (0.2) while pressed,
+ * natively (React Native's `TouchableOpacity`). */
+export function TouchableOpacity(props: ViewProps): YNode {
+  const node = createElement("view");
+  spread(node, mergeSolidProps({ activeOpacity: 0.2, accessible: true }, props), false);
+  return node;
+}
+
+export interface TouchableHighlightProps extends Omit<ViewProps, "underlayOpacity"> {
+  /** The background while pressed (default black). */
+  underlayColor?: ColorValue;
+  /** The children's opacity while pressed (default 0.85). */
+  activeOpacity?: number;
+  onShowUnderlay?: () => void;
+  onHideUnderlay?: () => void;
+}
+
+/** A view whose background becomes `underlayColor` and whose children fade
+ * to `activeOpacity` while pressed, natively (React Native's
+ * `TouchableHighlight`). Give it a background of its own, or nothing shows
+ * the underlay's edge. */
+export function TouchableHighlight(props: TouchableHighlightProps): YNode {
+  const [local, others] = splitProps(props, ["activeOpacity", "onShowUnderlay", "onHideUnderlay", "onPressIn", "onPressOut"]);
+  const node = createElement("view");
+  spread(
+    node,
+    mergeSolidProps({ underlayColor: "black", accessible: true }, others, {
+      get underlayOpacity() {
+        return local.activeOpacity;
+      },
+      // Only listen when someone does: presses stay native otherwise.
+      get onPressIn() {
+        return local.onShowUnderlay || local.onPressIn
+          ? () => {
+              local.onShowUnderlay?.();
+              local.onPressIn?.();
+            }
+          : undefined;
+      },
+      get onPressOut() {
+        return local.onHideUnderlay || local.onPressOut
+          ? () => {
+              local.onHideUnderlay?.();
+              local.onPressOut?.();
+            }
+          : undefined;
+      },
+    }),
+    false,
+  );
+  return node;
+}
+
+export interface TouchableWithoutFeedbackProps extends Omit<ViewProps, "children"> {
+  /** One element, which gets the props. */
+  children?: JSX.Element;
+}
+
+/** Puts its props (`onPress`, accessibility, ...) on its only child, with
+ * no view and no feedback of its own (React Native's
+ * `TouchableWithoutFeedback`). */
+export function TouchableWithoutFeedback(props: TouchableWithoutFeedbackProps): JSX.Element {
+  const [local, others] = splitProps(props, ["children"]);
+  const child = resolveChildren(() => local.children);
+  createRenderEffect(() => {
+    const c = child();
+    const node = Array.isArray(c) ? c[0] : c;
+    if (node instanceof YNode && !node.isText) spread(node, mergeSolidProps({ accessible: true }, others), true);
+  });
+  return child as unknown as JSX.Element;
+}
+
+export interface ImageBackgroundProps extends Omit<ImageProps, "style"> {
+  /** The view's style (the image fills it). */
+  style?: StyleProp<ViewStyle>;
+  /** The image's style, over the fill. */
+  imageStyle?: StyleProp<ImageStyle>;
+  children?: JSX.Element;
+}
+
+/** A view with an image filling its background (React Native's
+ * `ImageBackground`): the image gets every prop but `style`, `class` and
+ * `children`. */
+export function ImageBackground(props: ImageBackgroundProps): YNode {
+  const [local, image] = splitProps(props, ["style", "class", "imageStyle", "children"]);
+  const node = createElement("view");
+  spread(
+    node,
+    {
+      get style() {
+        return local.style;
+      },
+      get class() {
+        return local.class;
+      },
+    },
+    true,
+  );
+  const img = createElement("image");
+  spread(
+    img,
+    mergeSolidProps(image, {
+      get style() {
+        return [absoluteFill, local.imageStyle];
+      },
+    }),
+    true,
+  );
+  insertNode(node, img);
+  insert(node, () => local.children, null);
   return node;
 }
 
@@ -1177,22 +1493,41 @@ export function SafeAreaView(props: SafeAreaViewProps): YNode {
 export interface KeyboardAvoidingViewProps extends ViewProps {
   /** Avoid the keyboard (default true). */
   enabled?: boolean;
+  /**
+   * How (React Native's names): `padding` (default) pads the bottom by the
+   * keyboard's height; `height` shrinks the view instead (a bottom margin,
+   * so its background ends at the keyboard); `position` moves an inner
+   * content view (`contentContainerStyle`) up.
+   */
+  behavior?: "padding" | "height" | "position";
+  /** Added to the keyboard's height while it shows (e.g. a tab bar below the view). */
+  keyboardVerticalOffset?: number;
+  /** The inner view of `behavior="position"`. */
+  contentContainerStyle?: StyleProp<ViewStyle>;
 }
 
 /**
- * A view that keeps its content above the software keyboard by padding its
- * bottom by the keyboard's height (on top of its own padding), animated
- * with the keyboard. For content outside scroll views, such as a message
- * bar at the bottom of a screen (inputs inside scroll views are kept
- * visible natively). It assumes it reaches the bottom of the surface, as a
- * screen's content does. Where the window shrinks for the keyboard instead
- * (an Android host that resizes), the keyboard covers nothing and the
- * padding stays 0.
+ * A view that keeps its content above the software keyboard, animated
+ * with the keyboard (see `behavior`). For content outside scroll views,
+ * such as a message bar at the bottom of a screen (inputs inside scroll
+ * views are kept visible natively). It assumes it reaches the bottom of
+ * the surface, as a screen's content does. Where the window shrinks for
+ * the keyboard instead (an Android host that resizes), the keyboard covers
+ * nothing and nothing moves.
  */
 export function KeyboardAvoidingView(props: KeyboardAvoidingViewProps): YNode {
-  const [local, others] = splitProps(props, ["enabled", "children"]);
+  const [local, others] = splitProps(props, [
+    "enabled",
+    "behavior",
+    "keyboardVerticalOffset",
+    "contentContainerStyle",
+    "children",
+  ]);
   const node = createElement("view");
-  const lift = createMemo(() => (local.enabled === false ? 0 : keyboard().height));
+  const lift = createMemo(() => {
+    const height = keyboard().height;
+    return local.enabled === false || height === 0 ? 0 : Math.max(0, height + (local.keyboardVerticalOffset ?? 0));
+  });
   let last = 0;
   effect(() => {
     const height = lift();
@@ -1203,16 +1538,36 @@ export function KeyboardAvoidingView(props: KeyboardAvoidingViewProps): YNode {
     }
     last = height;
   });
+  const behavior = () => local.behavior ?? "padding";
+  const bottom = (on: boolean) => ({ top: 0, right: 0, bottom: on ? lift() : 0, left: 0 });
   spread(
     node,
     mergeSolidProps(others, {
       get insetPadding() {
-        return { top: 0, right: 0, bottom: lift(), left: 0 };
+        return bottom(behavior() === "padding");
+      },
+      get insetMargin() {
+        return bottom(behavior() === "height");
       },
     }),
     true,
   );
-  insert(node, () => local.children);
+  const content = createMemo(() => {
+    if (behavior() !== "position") return local.children;
+    const inner = createElement("view");
+    spread(
+      inner,
+      {
+        get style() {
+          return [local.contentContainerStyle, { position: "relative", bottom: lift() }];
+        },
+      },
+      true,
+    );
+    insert(inner, () => local.children);
+    return inner;
+  });
+  insert(node, content);
   return node;
 }
 
@@ -1368,6 +1723,269 @@ export function Screen(props: ScreenProps): YNode {
   return node;
 }
 
+// --- Input accessories ------------------------------------------------------------
+
+export interface InputAccessoryViewProps {
+  /** Inputs with this `inputAccessoryViewID` show the view over the keyboard. */
+  nativeID: string;
+  backgroundColor?: ColorValue;
+  style?: StyleProp<ViewStyle>;
+  class?: string;
+  children?: JSX.Element;
+}
+
+/**
+ * A bar over the keyboard of the inputs whose `inputAccessoryViewID` is its
+ * `nativeID` (iOS's `inputAccessoryView`; React Native's
+ * `InputAccessoryView`): as wide as the window and as tall as its content,
+ * moving with the keyboard natively. It renders nothing where it is placed
+ * in the tree, and nothing at all on Android (as React Native).
+ */
+export function InputAccessoryView(props: InputAccessoryViewProps): YNode | null {
+  if (Platform.OS !== "ios") return null;
+  const node = createElement("inputaccessory");
+  spread(
+    node,
+    {
+      get nativeID() {
+        return props.nativeID;
+      },
+      get style() {
+        return [{ backgroundColor: props.backgroundColor }, props.style];
+      },
+      get class() {
+        return props.class;
+      },
+    },
+    true,
+  );
+  insert(node, () => props.children);
+  return node;
+}
+
+// --- Drawer ---------------------------------------------------------------------
+
+export type DrawerState = "Idle" | "Dragging" | "Settling";
+
+export interface DrawerLayoutHandle {
+  openDrawer(): void;
+  closeDrawer(): void;
+  /** 0 closed .. 1 open, natively: interpolate it for styles that follow
+   * the drawer (React Native's `onDrawerSlide` without a JS call per frame). */
+  readonly progress: NativeNode;
+}
+
+export interface DrawerLayoutProps {
+  /** The drawer's content. */
+  renderNavigationView: () => JSX.Element;
+  /** Default: the window's width less 56, at most 320. */
+  drawerWidth?: number;
+  drawerPosition?: "left" | "right";
+  /** Default white. */
+  drawerBackgroundColor?: ColorValue;
+  /** `locked-closed` / `locked-open` keep it so (the methods still work). */
+  drawerLockMode?: "unlocked" | "locked-closed" | "locked-open";
+  /** `on-drag`: dragging the drawer hides the keyboard. */
+  keyboardDismissMode?: "none" | "on-drag";
+  onDrawerOpen?: () => void;
+  onDrawerClose?: () => void;
+  onDrawerStateChanged?: (state: DrawerState) => void;
+  style?: StyleProp<ViewStyle>;
+  class?: string;
+  children?: JSX.Element;
+  ref?: (handle: DrawerLayoutHandle) => void;
+}
+
+/** Width of the strip along the edge that drags the closed drawer out. */
+const DRAWER_EDGE = 20;
+
+/**
+ * A drawer that slides over the content from the left or right edge, on
+ * both platforms (React Native's `DrawerLayoutAndroid`). Drags move it
+ * natively (`pan`); JS only decides where it settles when the finger
+ * lifts. Open it by dragging from the edge or with the `ref`'s
+ * `openDrawer()`; close it by dragging it back, tapping the dimmed
+ * content or `closeDrawer()`.
+ */
+export function DrawerLayout(props: DrawerLayoutProps): YNode {
+  const width = createMemo(() => props.drawerWidth ?? Math.min(windowSize().width - 56, 320));
+  const right = () => props.drawerPosition === "right";
+  // How far it is out: 0..width from the left edge, -width..0 from the
+  // right one, so a drag's translation moves it either way.
+  const offset = createNativeValue(0);
+  const [open, setOpen] = createSignal(false);
+  const [state, setState] = createSignal<DrawerState>("Idle");
+  const lock = () => props.drawerLockMode ?? "unlocked";
+  const out = (w: number) => (right() ? -w : w);
+  const shown = createMemo(() => {
+    const w = width();
+    return right()
+      ? offset.interpolate({ inputRange: [-w, 0], outputRange: [1, 0] })
+      : offset.interpolate({ inputRange: [0, w], outputRange: [0, 1] });
+  });
+  let generation = 0;
+  const settle = (to: boolean, velocity = 0) => {
+    const id = ++generation;
+    setState("Settling");
+    props.onDrawerStateChanged?.("Settling");
+    offset.spring(to ? out(width()) : 0, { velocity, stiffness: 500, damping: 50 }).then((finished) => {
+      if (!finished || id !== generation) return;
+      setState("Idle");
+      props.onDrawerStateChanged?.("Idle");
+      if (to !== untrack(open)) {
+        setOpen(to);
+        (to ? props.onDrawerOpen : props.onDrawerClose)?.();
+      }
+    });
+  };
+  let mounted = false;
+  createRenderEffect(() => {
+    const l = lock();
+    if (l === "unlocked") return;
+    const to = l === "locked-open";
+    if (mounted) {
+      settle(to);
+    } else {
+      // Starts there.
+      offset.set(to ? out(untrack(width)) : 0);
+      setOpen(to);
+    }
+  });
+  mounted = true;
+  // A new width or side: jump to where the drawer belongs.
+  createRenderEffect((first: boolean) => {
+    const w = width();
+    right();
+    if (!first && untrack(state) === "Idle") offset.set(untrack(open) ? out(w) : 0);
+    return false;
+  }, true);
+  const panStart = () => {
+    generation++;
+    setState("Dragging");
+    props.onDrawerStateChanged?.("Dragging");
+    if (props.keyboardDismissMode === "on-drag") Keyboard.dismiss();
+  };
+  const panEnd = (e: { velocityX: number; valueX?: number }) => {
+    const w = width();
+    const shownBy = Math.min(1, Math.max(0, (right() ? -(e.valueX ?? 0) : (e.valueX ?? 0)) / w));
+    const v = right() ? -e.velocityX : e.velocityX;
+    settle(v > 300 || (v > -300 && shownBy > 0.5), e.velocityX);
+  };
+  const draggable = () => lock() === "unlocked";
+  const pan = () => (draggable() ? { x: offset } : undefined);
+  const handle: DrawerLayoutHandle = {
+    openDrawer: () => settle(true),
+    closeDrawer: () => settle(false),
+    get progress() {
+      return shown();
+    },
+  };
+
+  const node = createElement("view");
+  spread(
+    node,
+    {
+      get style() {
+        return [{ flex: 1, overflow: "hidden" }, props.style];
+      },
+      get class() {
+        return props.class;
+      },
+    },
+    true,
+  );
+  insert(node, () => props.children, null);
+  // The dimmed content: taps close, drags too.
+  const scrim = createElement("view");
+  spread(
+    scrim,
+    {
+      get style() {
+        const w = width();
+        return [
+          absoluteFill,
+          {
+            backgroundColor: "black",
+            opacity: right()
+              ? offset.interpolate({ inputRange: [-w, 0], outputRange: [0.5, 0] })
+              : offset.interpolate({ inputRange: [0, w], outputRange: [0, 0.5] }),
+          },
+        ];
+      },
+      get pointerEvents() {
+        return open() || state() !== "Idle" ? "auto" : "none";
+      },
+      get onPress() {
+        return lock() === "locked-open" ? undefined : () => settle(false);
+      },
+      get pan() {
+        return open() ? pan() : undefined;
+      },
+      onPanStart: panStart,
+      onPanEnd: panEnd,
+    },
+    true,
+  );
+  insertNode(node, scrim);
+  const panel = createElement("view");
+  spread(
+    panel,
+    {
+      get style() {
+        const w = width();
+        return {
+          position: "absolute",
+          top: 0,
+          bottom: 0,
+          [right() ? "right" : "left"]: 0,
+          width: w,
+          backgroundColor: props.drawerBackgroundColor ?? "white",
+          transform: [
+            {
+              translateX: right()
+                ? offset.interpolate({ inputRange: [-w, 0], outputRange: [0, w] })
+                : offset.interpolate({ inputRange: [0, w], outputRange: [-w, 0] }),
+            },
+          ],
+        };
+      },
+      get pan() {
+        return pan();
+      },
+      onPanStart: panStart,
+      onPanEnd: panEnd,
+    },
+    true,
+  );
+  insert(panel, () => props.renderNavigationView());
+  insertNode(node, panel);
+  // Drags from the edge pull the closed drawer out.
+  const edge = createElement("view");
+  spread(
+    edge,
+    {
+      get style() {
+        return { position: "absolute", top: 0, bottom: 0, [right() ? "right" : "left"]: 0, width: DRAWER_EDGE };
+      },
+      get pointerEvents() {
+        return !open() && draggable() ? "auto" : "none";
+      },
+      get pan() {
+        return pan();
+      },
+      onPanStart: panStart,
+      onPanEnd: panEnd,
+    },
+    true,
+  );
+  insertNode(node, edge);
+  props.ref?.(handle);
+  return node;
+}
+
+/** React Native's name for {@link DrawerLayout} (yf's runs on iOS too). */
+export const DrawerLayoutAndroid: (props: DrawerLayoutProps) => YNode = DrawerLayout;
+
 export interface ModalProps {
   /** Shown while true (default). */
   visible?: boolean;
@@ -1376,6 +1994,10 @@ export interface ModalProps {
   presentationStyle?: "fullScreen" | "pageSheet" | "formSheet";
   /** The background shows what is behind. */
   transparent?: boolean;
+  /** Android: the content reaches under the status bar (default: it starts below). */
+  statusBarTranslucent?: boolean;
+  /** iOS: the orientations it allows (default: the presenter's). */
+  supportedOrientations?: ("portrait" | "portrait-upside-down" | "landscape" | "landscape-left" | "landscape-right")[];
   /** The user asked to close (Android back button, iOS sheet swipe): set
    * `visible` to false to close it. */
   onRequestClose?: () => void;
@@ -1417,47 +2039,6 @@ function hostComponent<P>(tag: string): (props: P) => YNode {
     return node;
   };
 }
-
-export interface SwitchProps extends Omit<ViewProps, "children" | "onLoad" | "onError"> {
-  /** Controlled: the switch shows this; flip it in `onValueChange`. */
-  value?: boolean;
-  onValueChange?: (value: boolean) => void;
-  disabled?: boolean;
-  trackColor?: { false?: string; true?: string };
-  thumbColor?: string;
-}
-
-/** The platform's on / off switch. */
-export const Switch: (props: SwitchProps) => YNode = hostComponent<SwitchProps>("switch");
-
-export interface SliderProps extends Omit<ViewProps, "children" | "onLoad" | "onError"> {
-  value?: number;
-  minimumValue?: number;
-  maximumValue?: number;
-  /** 0 is continuous. */
-  step?: number;
-  disabled?: boolean;
-  minimumTrackTintColor?: string;
-  maximumTrackTintColor?: string;
-  thumbTintColor?: string;
-  /** While sliding. */
-  onValueChange?: (value: number) => void;
-  /** When the user lets go. */
-  onSlidingComplete?: (value: number) => void;
-}
-
-/** The platform's slider. */
-export const Slider: (props: SliderProps) => YNode = hostComponent<SliderProps>("slider");
-
-export interface ActivityIndicatorProps extends Omit<ViewProps, "children" | "onLoad" | "onError"> {
-  animating?: boolean;
-  color?: string;
-  size?: "small" | "large";
-  hidesWhenStopped?: boolean;
-}
-
-/** The platform's spinner. */
-export const ActivityIndicator: (props: ActivityIndicatorProps) => YNode = hostComponent<ActivityIndicatorProps>("activityindicator");
 
 export interface WebViewNavigation {
   url: string;

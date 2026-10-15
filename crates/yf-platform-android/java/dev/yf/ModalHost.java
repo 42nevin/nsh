@@ -28,6 +28,8 @@ final class ModalHost {
     private Dialog dialog;
     int animation; // 0 slide, 1 fade, 2 none
     boolean transparent;
+    /** The content reaches under the status bar (else it starts below). */
+    private boolean translucent;
     private boolean closing;
 
     ModalHost(Context context, Mounter mounter, int id) {
@@ -35,13 +37,19 @@ final class ModalHost {
         this.id = id;
         root = new Box(context, mounter, id);
         container = new Container(context);
-        container.addView(root);
+        container.content.addView(root);
         mirror(mounter.rtl);
     }
 
     /** Lays the modal's widgets out right to left (or not). */
     void mirror(boolean rtl) {
         container.setLayoutDirection(rtl ? View.LAYOUT_DIRECTION_RTL : View.LAYOUT_DIRECTION_LTR);
+    }
+
+    void setStatusBarTranslucent(boolean on) {
+        if (translucent == on) return;
+        translucent = on;
+        container.requestLayout();
     }
 
     TouchTracker touches() {
@@ -85,6 +93,7 @@ final class ModalHost {
                     android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::requestClose);
         }
         dialog.show();
+        matchSystemBars(window);
         container.setAlpha(animation == 1 ? 0 : 1);
         container.post(() -> {
             if (animation == 2) {
@@ -102,6 +111,26 @@ final class ModalHost {
                         }
                     }).start();
         });
+    }
+
+    /** The dialog's bar icons as the activity's (`StatusBar` sets those). */
+    @SuppressWarnings("deprecation")
+    private void matchSystemBars(Window window) {
+        android.app.Activity activity = SystemUi.activity(mounter.context);
+        if (window == null || activity == null) return;
+        if (Build.VERSION.SDK_INT >= 30) {
+            android.view.WindowInsetsController from = activity.getWindow().getInsetsController();
+            android.view.WindowInsetsController to = window.getInsetsController();
+            if (from == null || to == null) return;
+            int mask = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                    | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+            to.setSystemBarsAppearance(from.getSystemBarsAppearance() & mask, mask);
+        } else {
+            int mask = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            View decor = window.getDecorView();
+            int own = activity.getWindow().getDecorView().getSystemUiVisibility() & mask;
+            decor.setSystemUiVisibility(decor.getSystemUiVisibility() & ~mask | own);
+        }
     }
 
     /** The back button: the app decides (`visible`). */
@@ -147,6 +176,23 @@ final class ModalHost {
             super(context);
             touches = new TouchTracker(mounter, this);
             mounter.touchTrackers.add(touches);
+            // The core places the root (`Box.place`) inside it.
+            content = new ViewGroup(context) {
+                @Override
+                protected void onMeasure(int widthSpec, int heightSpec) {
+                    setMeasuredDimension(MeasureSpec.getSize(widthSpec), MeasureSpec.getSize(heightSpec));
+                    Box.Frame f = Box.frame(root);
+                    root.measure(MeasureSpec.makeMeasureSpec(f.right - f.left, MeasureSpec.EXACTLY),
+                            MeasureSpec.makeMeasureSpec(f.bottom - f.top, MeasureSpec.EXACTLY));
+                }
+
+                @Override
+                protected void onLayout(boolean changed, int l, int t, int r, int b) {
+                    Box.Frame f = Box.frame(root);
+                    root.layout(f.left, f.top, f.right, f.bottom);
+                }
+            };
+            addView(content);
         }
 
         @Override
@@ -155,18 +201,29 @@ final class ModalHost {
             return super.dispatchTouchEvent(e) || tracking;
         }
 
+        /** Holds the root where the content starts (below the status bar unless translucent). */
+        final ViewGroup content;
+
         @Override
         protected void onMeasure(int widthSpec, int heightSpec) {
-            setMeasuredDimension(MeasureSpec.getSize(widthSpec), MeasureSpec.getSize(heightSpec));
-            Box.Frame f = Box.frame(root);
-            root.measure(MeasureSpec.makeMeasureSpec(f.right - f.left, MeasureSpec.EXACTLY),
-                    MeasureSpec.makeMeasureSpec(f.bottom - f.top, MeasureSpec.EXACTLY));
+            int w = MeasureSpec.getSize(widthSpec), h = MeasureSpec.getSize(heightSpec);
+            setMeasuredDimension(w, h);
+            content.measure(MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY),
+                    MeasureSpec.makeMeasureSpec(Math.max(0, h - statusBar()), MeasureSpec.EXACTLY));
+        }
+
+        /** The status bar's height when the content starts below it. */
+        private int statusBar() {
+            if (translucent) return 0;
+            WindowInsets insets = getRootWindowInsets();
+            if (insets == null) return 0;
+            return Build.VERSION.SDK_INT >= 30 ? insets.getInsets(WindowInsets.Type.statusBars()).top
+                    : insets.getSystemWindowInsetTop();
         }
 
         @Override
         protected void onLayout(boolean changed, int l, int t, int r, int b) {
-            Box.Frame f = Box.frame(root);
-            root.layout(f.left, f.top, f.right, f.bottom);
+            content.layout(0, statusBar(), r - l, b - t);
             report();
         }
 
@@ -204,7 +261,9 @@ final class ModalHost {
                     left = insets.getSystemWindowInsetLeft();
                 }
             }
-            int[] now = {getWidth(), getHeight(), top, right, bottom, left};
+            int below = statusBar();
+            top = Math.max(0, top - below);
+            int[] now = {getWidth(), getHeight() - below, top, right, bottom, left};
             if (now[0] == 0 || java.util.Arrays.equals(now, reported)) return;
             reported = now;
             float d = mounter.density;

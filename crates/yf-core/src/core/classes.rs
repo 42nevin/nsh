@@ -7,7 +7,7 @@ use super::{Core, Key, Kind, NO_KEY, dirty, pressable};
 use crate::{
     mount::MountItem,
     ops::NodeId,
-    style::Style,
+    style::{Color, Style, ViewStyle},
     tailwind::{ClassEnvironment, ClassProps, Context, Theme, deps, position, state},
     text::TextEngine,
 };
@@ -90,6 +90,9 @@ impl<M: TextEngine> Core<M> {
     /// Restyles `key` if its classes read its states, and the nodes inside
     /// it that read its group states.
     fn states_changed(&mut self, key: Key) {
+        if self.nodes[key as usize].underlay.is_some() {
+            self.mark_underlay(key);
+        }
         let Some(classes) = self.nodes[key as usize].classes.clone() else {
             return;
         };
@@ -99,6 +102,44 @@ impl<M: TextEngine> Core<M> {
         if !classes.groups().is_empty() {
             self.restyle_subtree(key, deps::GROUP);
         }
+    }
+
+    /// `underlayColor` / `underlayOpacity` of `key` changed.
+    pub(super) fn underlay_changed(&mut self, key: Key) {
+        self.update_tracking(key);
+        self.mark_underlay(key);
+    }
+
+    /// Restyles `key` and its children, which an underlay changes.
+    fn mark_underlay(&mut self, key: Key) {
+        self.mark(key, dirty::VIEW);
+        for i in 0..self.nodes[key as usize].children.len() {
+            let child = self.nodes[key as usize].children[i];
+            self.mark(child, dirty::VIEW);
+        }
+    }
+
+    /// The underlay of `key` while it shows: pressed and not disabled.
+    fn showing_underlay(&self, key: Key) -> Option<(Color, f32)> {
+        let node = &self.nodes[key as usize];
+        let u = node.underlay.as_deref()?;
+        (node.states & (state::PRESSED | state::DISABLED) == state::PRESSED).then_some(*u)
+    }
+
+    /// The view style of `key` as platforms take it: fractional
+    /// translations resolved, an underlay shown (`TouchableHighlight`).
+    pub(super) fn mounted_view_style(&self, key: Key) -> Box<ViewStyle> {
+        let node = &self.nodes[key as usize];
+        let mut style = node.mounted_view_style();
+        if let Some((color, _)) = self.showing_underlay(key) {
+            style.background_color = color;
+        }
+        if node.parent != NO_KEY
+            && let Some((_, opacity)) = self.showing_underlay(node.parent)
+        {
+            style.opacity *= opacity;
+        }
+        style
     }
 
     /// Sets `class` (`list == false`) or `classList` of `key`.
@@ -178,9 +219,14 @@ impl<M: TextEngine> Core<M> {
     }
 
     /// Tells the platform which states of `key` to report.
-    fn update_tracking(&mut self, key: Key) {
+    pub(super) fn update_tracking(&mut self, key: Key) {
         let node = &mut self.nodes[key as usize];
-        let tracked = node.classes.as_ref().map_or(0, |c| c.tracked_states());
+        let tracked = node.classes.as_ref().map_or(0, |c| c.tracked_states())
+            | if node.underlay.is_some() {
+                state::PRESSED
+            } else {
+                0
+            };
         if tracked != node.tracked {
             node.tracked = tracked;
             if node.created {
@@ -326,13 +372,17 @@ impl<M: TextEngine> Core<M> {
                 position: pos,
                 group: &group,
             };
-            classes.apply(&cx, self.tailwind.theme(), &mut style, &mut props);
+            let inline = &node.inline_style;
+            classes.apply(&cx, self.tailwind.theme(), &mut style, &mut props, |s| {
+                inline.apply(s)
+            });
             if positional {
                 let parent = self.nodes[key as usize].parent;
                 self.nodes[parent as usize].positional_children = true;
             }
+        } else {
+            node.inline_style.apply(&mut style);
         }
-        self.nodes[key as usize].inline_style.apply(&mut style);
         self.set_class_props(key, props);
         let id = self.nodes[key as usize].id;
         let _ = self.set_style(id, style);

@@ -39,117 +39,13 @@ pub enum ViewKind {
     /// A view shown in a screen's header (its slot is in the screen's
     /// [`ScreenConfig`]).
     HeaderItem,
-    /// An on / off switch.
-    Switch,
-    /// A slider.
-    Slider,
-    /// An activity indicator.
-    ActivityIndicator,
+    /// A bar over the keyboard ([`InputConfig::accessory`]); its frame's
+    /// size is its own, the platform places it.
+    InputAccessory,
     /// A web view.
     WebView,
     /// A video player.
     Video,
-}
-
-/// Natural sizes of the platform's controls, which the core lays them out
-/// at.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ControlSizes {
-    /// A switch.
-    pub switch: Size,
-    /// A small activity indicator.
-    pub activity_small: Size,
-    /// A large activity indicator.
-    pub activity_large: Size,
-    /// The height of a slider (its width follows the layout).
-    pub slider_height: f32,
-}
-
-impl Default for ControlSizes {
-    /// UIKit's sizes.
-    fn default() -> Self {
-        Self {
-            switch: Size::new(51.0, 31.0),
-            activity_small: Size::new(20.0, 20.0),
-            activity_large: Size::new(37.0, 37.0),
-            slider_height: 31.0,
-        }
-    }
-}
-
-/// A switch.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct SwitchProps {
-    /// On.
-    pub value: bool,
-    /// The user cannot toggle it.
-    pub disabled: bool,
-    /// Track color when on.
-    pub track_on: Option<Color>,
-    /// Track color when off.
-    pub track_off: Option<Color>,
-    /// Thumb color.
-    pub thumb: Option<Color>,
-}
-
-/// A slider.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SliderProps {
-    /// Current value.
-    pub value: f32,
-    /// Minimum.
-    pub min: f32,
-    /// Maximum.
-    pub max: f32,
-    /// Step between values; 0 is continuous.
-    pub step: f32,
-    /// The user cannot move it.
-    pub disabled: bool,
-    /// Track color below the thumb.
-    pub min_track: Option<Color>,
-    /// Track color above the thumb.
-    pub max_track: Option<Color>,
-    /// Thumb color.
-    pub thumb: Option<Color>,
-}
-
-impl Default for SliderProps {
-    fn default() -> Self {
-        Self {
-            value: 0.0,
-            min: 0.0,
-            max: 1.0,
-            step: 0.0,
-            disabled: false,
-            min_track: None,
-            max_track: None,
-            thumb: None,
-        }
-    }
-}
-
-/// An activity indicator.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ActivityProps {
-    /// Spinning.
-    pub animating: bool,
-    /// Color; the platform's default when `None`.
-    pub color: Option<Color>,
-    /// The large size.
-    pub large: bool,
-    /// Hidden while not animating.
-    pub hides_when_stopped: bool,
-}
-
-impl Default for ActivityProps {
-    fn default() -> Self {
-        Self {
-            animating: true,
-            color: None,
-            large: false,
-            hides_when_stopped: true,
-        }
-    }
 }
 
 /// A web view.
@@ -227,12 +123,6 @@ impl Default for VideoProps {
 /// The properties of a native control.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NativeProps {
-    /// A switch.
-    Switch(SwitchProps),
-    /// A slider.
-    Slider(SliderProps),
-    /// An activity indicator.
-    Activity(ActivityProps),
     /// A web view.
     WebView(Box<WebProps>),
     /// A video player.
@@ -435,6 +325,22 @@ pub struct ModalConfig {
     pub presentation: ModalPresentation,
     /// The background shows what is behind.
     pub transparent: bool,
+    /// Android: the content reaches under the status bar.
+    pub status_bar_translucent: bool,
+    /// iOS: the orientations it allows ([`ModalConfig::PORTRAIT`], ...);
+    /// 0 keeps the presenter's.
+    pub orientations: u8,
+}
+
+impl ModalConfig {
+    /// `portrait`.
+    pub const PORTRAIT: u8 = 1;
+    /// `portrait-upside-down`.
+    pub const PORTRAIT_UPSIDE_DOWN: u8 = 2;
+    /// `landscape-left`.
+    pub const LANDSCAPE_LEFT: u8 = 4;
+    /// `landscape-right`.
+    pub const LANDSCAPE_RIGHT: u8 = 8;
 }
 
 /// Everything about a text input except its text.
@@ -475,6 +381,10 @@ pub struct InputConfig {
     pub auto_fill: crate::ops::AutoFill,
     /// The text runs right to left.
     pub rtl: bool,
+    /// `inputAccessoryViewID` as set.
+    pub accessory_id: Option<Box<str>>,
+    /// The input accessory it names, if one is mounted.
+    pub accessory: Option<NodeId>,
 }
 
 impl Default for InputConfig {
@@ -497,6 +407,8 @@ impl Default for InputConfig {
             selection_color: None,
             auto_fill: crate::ops::AutoFill::Default,
             rtl: false,
+            accessory_id: None,
+            accessory: None,
         }
     }
 }
@@ -720,8 +632,7 @@ pub enum MountItem {
         /// The options.
         config: Box<ScreenConfig>,
     },
-    /// Configure a native control (switch, slider, activity indicator, web
-    /// view, video).
+    /// Configure a native control (web view, video).
     NativeProps {
         /// The control.
         id: NodeId,

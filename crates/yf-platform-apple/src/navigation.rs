@@ -17,9 +17,9 @@ use objc2_foundation::{NSArray, NSObject, NSObjectProtocol, NSString};
 use objc2_quartz_core::{CAMediaTiming, CATransition};
 use objc2_ui_kit::{
     NSForegroundColorAttributeName, UIAdaptivePresentationControllerDelegate, UIBarButtonItem,
-    UIColor, UIGestureRecognizer, UIGestureRecognizerDelegate, UIModalPresentationStyle,
-    UIModalTransitionStyle, UINavigationBarAppearance, UINavigationController,
-    UINavigationControllerDelegate, UINavigationItemLargeTitleDisplayMode,
+    UIColor, UIGestureRecognizer, UIGestureRecognizerDelegate, UIInterfaceOrientationMask,
+    UIModalPresentationStyle, UIModalTransitionStyle, UINavigationBarAppearance,
+    UINavigationController, UINavigationControllerDelegate, UINavigationItemLargeTitleDisplayMode,
     UIPresentationController, UIResponder, UIView, UIViewAutoresizing, UIViewController,
 };
 use yf_core::{
@@ -111,6 +111,8 @@ pub(crate) struct ModalIvars {
     id: NodeId,
     control: EngineControl,
     reported: Cell<Option<(CGSize, EdgeInsets)>>,
+    /// `supportedOrientations`; empty keeps the presenter's.
+    orientations: Cell<UIInterfaceOrientationMask>,
 }
 
 define_class!(
@@ -154,6 +156,16 @@ define_class!(
         fn preferred_status_bar_update_animation(&self) -> objc2_ui_kit::UIStatusBarAnimation {
             crate::system::status_bar_animation()
         }
+
+        #[unsafe(method(supportedInterfaceOrientations))]
+        fn supported_interface_orientations(&self) -> UIInterfaceOrientationMask {
+            let own = self.ivars().orientations.get();
+            if !own.is_empty() {
+                return own;
+            }
+            // SAFETY: calling the superclass implementation.
+            unsafe { msg_send![super(self), supportedInterfaceOrientations] }
+        }
     }
 
     unsafe impl UIAdaptivePresentationControllerDelegate for ModalController {
@@ -179,6 +191,7 @@ impl ModalController {
             id,
             control,
             reported: Cell::new(None),
+            orientations: Cell::new(UIInterfaceOrientationMask::empty()),
         });
         // SAFETY: UIViewController's designated initializer.
         unsafe {
@@ -512,6 +525,27 @@ impl ModalHost {
         }
         let c = self.config;
         let controller = &self.controller;
+        let mut mask = UIInterfaceOrientationMask::empty();
+        for (bit, m) in [
+            (ModalConfig::PORTRAIT, UIInterfaceOrientationMask::Portrait),
+            (
+                ModalConfig::PORTRAIT_UPSIDE_DOWN,
+                UIInterfaceOrientationMask::PortraitUpsideDown,
+            ),
+            (
+                ModalConfig::LANDSCAPE_LEFT,
+                UIInterfaceOrientationMask::LandscapeLeft,
+            ),
+            (
+                ModalConfig::LANDSCAPE_RIGHT,
+                UIInterfaceOrientationMask::LandscapeRight,
+            ),
+        ] {
+            if c.orientations & bit != 0 {
+                mask |= m;
+            }
+        }
+        controller.ivars().orientations.set(mask);
         controller.setModalPresentationStyle(match (c.presentation, c.transparent) {
             (_, true) => UIModalPresentationStyle::OverFullScreen,
             (ModalPresentation::FullScreen, false) => UIModalPresentationStyle::FullScreen,

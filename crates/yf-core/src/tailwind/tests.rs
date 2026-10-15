@@ -34,7 +34,7 @@ fn styled_with(
         position: 0,
         group: &group,
     };
-    list.apply(&context, &theme, &mut style, &mut props);
+    list.apply(&context, &theme, &mut style, &mut props, |_| {});
     (style, props)
 }
 
@@ -307,7 +307,7 @@ fn groups() {
         position: 0,
         group: &group,
     };
-    child.apply(&context, &theme, &mut style, &mut props);
+    child.apply(&context, &theme, &mut style, &mut props, |_| {});
     assert_eq!(style.view.opacity, 0.5);
 }
 

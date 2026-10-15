@@ -19,7 +19,7 @@ use jni::{
 };
 use yf_core::{EventKind, EventPayload, MountBatch, MountItem, NodeId, PayloadValue, Size};
 use yf_engine::{
-    Assets, Bundle, ColorScheme, Engine, EngineConfig, EngineControl, Environment, Insets,
+    Assets, Bundle, ColorScheme, Engine, EngineConfig, EngineControl, Environment, Idiom, Insets,
     MountSink,
 };
 
@@ -75,13 +75,6 @@ impl Host {
             environment: *self.environment.lock().expect("environment"),
             // Android's toolbar is 56dp; it has no large titles.
             header_heights: (56.0, 56.0),
-            // android.widget.Switch, ProgressBar (small / large), SeekBar.
-            control_sizes: yf_engine::ControlSizes {
-                switch: Size::new(52.0, 32.0),
-                activity_small: Size::new(24.0, 24.0),
-                activity_large: Size::new(48.0, 48.0),
-                slider_height: 32.0,
-            },
         };
         let density = self.density;
         let sink = Sink(self.clone());
@@ -403,7 +396,8 @@ extern "system" fn Java_dev_yf_Native_resize(
 }
 
 /// `values`: safe area top, right, bottom, left, keyboard height, keyboard
-/// animation duration, font scale, right to left (1), reduce motion (1).
+/// animation duration, font scale, right to left (1), reduce motion (1),
+/// density, screen reader (1), API level, idiom (0 phone, 1 pad, 3 TV).
 #[unsafe(no_mangle)]
 extern "system" fn Java_dev_yf_Native_environment(
     env: JNIEnv<'_>,
@@ -414,7 +408,7 @@ extern "system" fn Java_dev_yf_Native_environment(
 ) {
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
-    let mut v = [0f32; 9];
+    let mut v = [0f32; 13];
     if env.get_float_array_region(&values, 0, &mut v).is_err() {
         return;
     }
@@ -430,6 +424,14 @@ extern "system" fn Java_dev_yf_Native_environment(
     environment.font_scale = v[6];
     environment.rtl = v[7] != 0.0;
     environment.reduce_motion = v[8] != 0.0;
+    environment.pixel_ratio = v[9];
+    environment.screen_reader = v[10] != 0.0;
+    environment.os_version = (v[11] as u16, 0);
+    environment.idiom = match v[12] as u8 {
+        1 => Idiom::Pad,
+        3 => Idiom::Tv,
+        _ => Idiom::Phone,
+    };
     environment.color_scheme = if dark != 0 {
         ColorScheme::Dark
     } else {
@@ -769,28 +771,27 @@ extern "system" fn Java_dev_yf_Native_pan(
 ) -> jfloatArray {
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
+    let control = host.control();
+    let mut ui = host.ui.lock().expect("ui");
+    if state == 0 {
+        ui.pan_began(id as u32);
+    }
+    if state <= 1 {
+        ui.pan_moved(id as u32, tx, ty);
+    }
+    let (value_x, value_y) = ui.pan_values(id as u32);
     let payload = EventPayload::Pan {
         translation_x: tx,
         translation_y: ty,
         velocity_x: vx,
         velocity_y: vy,
+        value_x,
+        value_y,
     };
-    let control = host.control();
-    let mut ui = host.ui.lock().expect("ui");
-    match state {
-        0 => {
-            ui.pan_began(id as u32);
-            ui.pan_moved(id as u32, tx, ty);
-            if let Some(c) = &control {
-                c.dispatch_event(id as NodeId, EventKind::PanStart, payload);
-            }
-        }
-        1 => ui.pan_moved(id as u32, tx, ty),
-        _ => {
-            if let Some(c) = &control {
-                c.dispatch_event(id as NodeId, EventKind::PanEnd, payload);
-            }
-        }
+    match (state, &control) {
+        (0, Some(c)) => c.dispatch_event(id as NodeId, EventKind::PanStart, payload),
+        (1, _) | (_, None) => {}
+        (_, Some(c)) => c.dispatch_event(id as NodeId, EventKind::PanEnd, payload),
     }
     finish(host, &mut ui);
     floats(&env, &ui.outputs())

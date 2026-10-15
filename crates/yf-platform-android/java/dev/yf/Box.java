@@ -327,11 +327,19 @@ class Box extends ViewGroup implements Node {
         // Take over a drag that starts on a child (e.g. the card's label).
         if (pannable() && action == MotionEvent.ACTION_MOVE && !panning) {
             float slop = ViewConfiguration.get(getContext()).getScaledTouchSlop();
-            if (panStarts(e.getRawX() - downRawX, e.getRawY() - downRawY, slop)) {
-                // The DOWN went to the child: start tracking from here.
+            float dx = e.getRawX() - downRawX, dy = e.getRawY() - downRawY;
+            if (panStarts(dx, dy, slop)) {
+                // The DOWN went to the child: the pan starts with this move
+                // (which onTouchEvent never sees), so a quick flick still
+                // pans and ends.
                 tracking = false;
                 if (velocity != null) velocity.recycle();
                 velocity = VelocityTracker.obtain();
+                track(e);
+                panning = true;
+                getParent().requestDisallowInterceptTouchEvent(true);
+                float density = mounter.density;
+                mounter.pan(id, 0, dx / density, dy / density, 0, 0);
                 return true;
             }
         }

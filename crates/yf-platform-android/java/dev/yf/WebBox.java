@@ -18,7 +18,7 @@ import org.json.JSONObject;
  * the app's messages arrive as {@code message} events on {@code window}.
  */
 @SuppressLint({"ViewConstructor", "SetJavaScriptEnabled"})
-final class WebBox extends Controls.WidgetBox {
+final class WebBox extends WidgetBox {
     private final WebView web;
     /** Source kind (0 none, 1 uri, 2 html) and fields; null before the first load. */
     private Object[] source;

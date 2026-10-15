@@ -174,3 +174,26 @@ pub(crate) fn show_dialog(dialog: &Dialog, view: &UIView, control: &EngineContro
     }
     top.presentViewController_animated_completion(&alert, true, None);
 }
+
+/// `AccessibilityInfo.announceForAccessibility`: VoiceOver reads `text`.
+pub(crate) fn announce(text: &str) {
+    let text = NSString::from_str(text);
+    // SAFETY: announcements take the message as an NSString.
+    unsafe {
+        objc2_ui_kit::UIAccessibilityPostNotification(
+            objc2_ui_kit::UIAccessibilityAnnouncementNotification,
+            Some(&text),
+        )
+    };
+}
+
+/// `AccessibilityInfo.setAccessibilityFocus`: VoiceOver moves to `view`.
+pub(crate) fn accessibility_focus(view: &UIView) {
+    // SAFETY: layout changes take the element to focus.
+    unsafe {
+        objc2_ui_kit::UIAccessibilityPostNotification(
+            objc2_ui_kit::UIAccessibilityLayoutChangedNotification,
+            Some(view),
+        )
+    };
+}

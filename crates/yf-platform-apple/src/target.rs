@@ -83,24 +83,6 @@ define_class!(
             self.with_mounter(move |m| m.transform_gesture(id, true, state, angle, velocity));
         }
 
-        #[unsafe(method(handleSwitch:))]
-        fn handle_switch(&self, control: &objc2_ui_kit::UISwitch) {
-            let id = control.tag() as NodeId;
-            self.with_mounter(move |m| m.switch_changed(id));
-        }
-
-        #[unsafe(method(handleSlider:))]
-        fn handle_slider(&self, control: &objc2_ui_kit::UISlider) {
-            let id = control.tag() as NodeId;
-            self.with_mounter(move |m| m.slider_changed(id, false));
-        }
-
-        #[unsafe(method(handleSliderEnd:))]
-        fn handle_slider_end(&self, control: &objc2_ui_kit::UISlider) {
-            let id = control.tag() as NodeId;
-            self.with_mounter(move |m| m.slider_changed(id, true));
-        }
-
         #[unsafe(method(frame:))]
         fn frame(&self, _link: &CADisplayLink) {
             self.with_mounter(|m| m.frame());

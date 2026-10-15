@@ -32,7 +32,6 @@ fn start() -> (Engine, Receiver<MountBatch>) {
         assets: None,
         environment: Default::default(),
         header_heights: (44.0, 96.0),
-        control_sizes: Default::default(),
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),

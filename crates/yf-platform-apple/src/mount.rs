@@ -55,10 +55,8 @@ enum Native {
     Screen(Box<ScreenHost>),
     Modal(Box<ModalHost>),
     HeaderItem(Retained<YFView>),
-    Switch(Retained<objc2_ui_kit::UISwitch>),
-    /// With its step.
-    Slider(Retained<objc2_ui_kit::UISlider>, f32),
-    Activity(Retained<UIActivityIndicatorView>),
+    /// Shown over the keyboard by the inputs naming it; UIKit places it.
+    InputAccessory(Retained<YFView>),
     Web(Box<WebHost>),
     Video(Box<VideoHost>),
 }
@@ -76,10 +74,7 @@ impl Native {
             Native::Stack(s) => &s.container,
             Native::Screen(s) => &s.view,
             Native::Modal(m) => &m.view,
-            Native::HeaderItem(v) => v,
-            Native::Switch(s) => s,
-            Native::Slider(s, _) => s,
-            Native::Activity(a) => a,
+            Native::HeaderItem(v) | Native::InputAccessory(v) => v,
             Native::Web(w) => &w.view,
             Native::Video(v) => &v.view,
         }
@@ -89,7 +84,10 @@ impl Native {
     /// properties.
     fn yf(&self) -> Option<&YFView> {
         match self {
-            Native::View(v) | Native::Image(v) | Native::HeaderItem(v) => Some(v),
+            Native::View(v)
+            | Native::Image(v)
+            | Native::HeaderItem(v)
+            | Native::InputAccessory(v) => Some(v),
             Native::Text(t) => Some(t),
             Native::Stack(s) => Some(&s.container),
             Native::Screen(s) => Some(&s.view),
@@ -109,9 +107,7 @@ impl Native {
             | Native::Screen(_)
             | Native::Modal(_)
             | Native::HeaderItem(_)
-            | Native::Switch(_)
-            | Native::Slider(..)
-            | Native::Activity(_)
+            | Native::InputAccessory(_)
             | Native::Web(_)
             | Native::Video(_) => decor::Kind::View,
             Native::Text(_) => decor::Kind::Text,
@@ -458,15 +454,7 @@ impl Mounter {
                         Native::Modal(Box::new(ModalHost::new(self.mtm, id, self.control.clone())))
                     }
                     ViewKind::HeaderItem => Native::HeaderItem(YFView::new(self.mtm)),
-                    ViewKind::Switch => {
-                        Native::Switch(crate::controls::new_switch(self.mtm, &self.target))
-                    }
-                    ViewKind::Slider => {
-                        Native::Slider(crate::controls::new_slider(self.mtm, &self.target), 0.0)
-                    }
-                    ViewKind::ActivityIndicator => {
-                        Native::Activity(crate::controls::new_activity(self.mtm))
-                    }
+                    ViewKind::InputAccessory => Native::InputAccessory(YFView::new(self.mtm)),
                     ViewKind::WebView => {
                         Native::Web(Box::new(WebHost::new(self.mtm, id, self.control.clone())))
                     }
@@ -584,6 +572,30 @@ impl Mounter {
                         origin,
                         CGSize::new(frame.width as CGFloat, frame.height as CGFloat),
                     ));
+                    return false;
+                }
+                if let Some(Slot {
+                    native: Native::InputAccessory(view),
+                    ..
+                }) = self.slot(id)
+                {
+                    // The keyboard places it and sets its width.
+                    let old = view.frame();
+                    let height = frame.height as CGFloat;
+                    view.setFrame(CGRect::new(
+                        old.origin,
+                        CGSize::new(old.size.width.max(frame.width as CGFloat), height),
+                    ));
+                    if old.size.height != height {
+                        let view = Retained::into_super(view.clone());
+                        for slot in self.views.iter().flatten() {
+                            if let Native::Input(input) = &slot.native
+                                && input.accessory() == Some(id)
+                            {
+                                input.set_accessory(Some(&view), true);
+                            }
+                        }
+                    }
                     return false;
                 }
                 if let Some(s) = self.slot(id) {
@@ -842,12 +854,20 @@ impl Mounter {
             }
             MountItem::Input { id, config } => {
                 let (target, mtm) = (self.target.clone(), self.mtm);
+                let accessory = config.accessory.and_then(|a| match self.slot(a) {
+                    Some(Slot {
+                        native: Native::InputAccessory(v),
+                        ..
+                    }) => Some(Retained::into_super(v.clone())),
+                    _ => None,
+                });
                 if let Some(Slot {
                     native: Native::Input(input),
                     ..
                 }) = self.slot_mut(id)
                 {
                     input.configure(*config, &target, mtm);
+                    input.set_accessory(accessory.as_deref(), false);
                 }
             }
             MountItem::InputValue { id, text, count } => {
@@ -922,6 +942,10 @@ impl Mounter {
             (Command::ClearJsResponder, _) => self.clear_js_responder(),
             // Toasts are Android only.
             (Command::Toast { .. }, _) => {}
+            (Command::Announce(text), _) => crate::system::announce(&text),
+            (Command::AccessibilityFocus, native) => {
+                crate::system::accessibility_focus(native.view())
+            }
             (command, _) => log::warn!("{command:?} does not apply to view {id}"),
         }
     }
@@ -1821,6 +1845,8 @@ impl Mounter {
             }
             Native::HeaderItem(_) => self.dirty_headers.push(parent),
             Native::Modal(_) => self.dirty_modals.push(child),
+            // Inputs show it (`MountItem::Input`).
+            Native::InputAccessory(_) => {}
             _ => return false,
         }
         self.hosts.insert(child, parent);
@@ -2067,63 +2093,14 @@ impl Mounter {
             && top.unwrap_or(true)
     }
 
-    /// Properties of a switch, slider, activity indicator, web view or video.
+    /// Properties of a web view or video.
     fn set_native_props(&mut self, id: NodeId, props: yf_core::NativeProps) {
         use yf_core::NativeProps as P;
         let Some(s) = self.slot_mut(id) else { return };
         match (&mut s.native, props) {
-            (Native::Switch(v), P::Switch(p)) => crate::controls::configure_switch(v, &p),
-            (Native::Slider(v, step), P::Slider(p)) => {
-                *step = p.step;
-                crate::controls::configure_slider(v, &p);
-            }
-            (Native::Activity(v), P::Activity(p)) => crate::controls::configure_activity(v, &p),
             (Native::Web(v), P::WebView(p)) => v.configure(*p),
             (Native::Video(v), P::Video(p)) => v.configure(*p),
             _ => {}
-        }
-    }
-
-    /// The user flipped a switch.
-    pub(crate) fn switch_changed(&mut self, id: NodeId) {
-        if let Some(Slot {
-            native: Native::Switch(s),
-            events,
-            ..
-        }) = self.slot(id)
-            && events.contains(EventKind::ValueChange)
-        {
-            self.control.dispatch_event(
-                id,
-                EventKind::ValueChange,
-                EventPayload::Value(PayloadValue::Bool(s.isOn())),
-            );
-        }
-    }
-
-    /// A slider moved (`end`: the user let go).
-    pub(crate) fn slider_changed(&mut self, id: NodeId, end: bool) {
-        let Some(Slot {
-            native: Native::Slider(s, step),
-            events,
-            ..
-        }) = self.slot(id)
-        else {
-            return;
-        };
-        let value = crate::controls::snapped(s, *step);
-        let event = if end {
-            EventKind::SlidingComplete
-        } else {
-            EventKind::ValueChange
-        };
-        // The core keeps the value even without a listener.
-        if events.contains(event) || !end {
-            self.control.dispatch_event(
-                id,
-                event,
-                EventPayload::Value(PayloadValue::Number(value as f64)),
-            );
         }
     }
 
@@ -2238,11 +2215,13 @@ impl Mounter {
     ) {
         let Some(s) = self.slot(id) else { return };
         let (values, events) = (s.values, s.events);
-        let payload = EventPayload::Pan {
+        let payload = |m: &Self| EventPayload::Pan {
             translation_x: t.x as f32,
             translation_y: t.y as f32,
             velocity_x: v.x as f32,
             velocity_y: v.y as f32,
+            value_x: values.pan_x.map(|n| m.animator.value(n)),
+            value_y: values.pan_y.map(|n| m.animator.value(n)),
         };
         if state == UIGestureRecognizerState::Began {
             // Grabbing an animating value stops it where it is.
@@ -2253,7 +2232,7 @@ impl Mounter {
             }
             if events.contains(EventKind::PanStart) {
                 self.control
-                    .dispatch_event(id, EventKind::PanStart, payload.clone());
+                    .dispatch_event(id, EventKind::PanStart, payload(self));
             }
         }
         if matches!(
@@ -2274,7 +2253,8 @@ impl Mounter {
             UIGestureRecognizerState::Ended | UIGestureRecognizerState::Cancelled
         ) && events.contains(EventKind::PanEnd)
         {
-            self.control.dispatch_event(id, EventKind::PanEnd, payload);
+            self.control
+                .dispatch_event(id, EventKind::PanEnd, payload(self));
         }
         self.report_finished();
     }

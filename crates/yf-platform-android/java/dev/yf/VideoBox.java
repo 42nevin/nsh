@@ -17,7 +17,7 @@ import java.util.Objects;
  * `controls` attaches the platform's {@code MediaController}.
  */
 @SuppressLint("ViewConstructor")
-final class VideoBox extends Controls.WidgetBox implements TextureView.SurfaceTextureListener,
+final class VideoBox extends WidgetBox implements TextureView.SurfaceTextureListener,
         MediaController.MediaPlayerControl {
     private final TextureView texture;
     private final YfView host;

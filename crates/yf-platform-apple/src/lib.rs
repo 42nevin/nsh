@@ -16,7 +16,6 @@
 mod anim;
 mod app;
 mod blur;
-mod controls;
 mod decor;
 #[cfg(feature = "dev")]
 pub mod dev;

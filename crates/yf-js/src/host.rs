@@ -12,7 +12,7 @@ use yf_core::{EventKind, EventPayload, NodeId, Op, PayloadValue, TouchPhase};
 
 use crate::{
     console,
-    env::{ColorScheme, Environment},
+    env::{ColorScheme, Environment, Idiom},
     error::JsError,
     net::{HttpResponse, NetworkQueue, RequestId},
     protocol::{self, Warnings},
@@ -365,6 +365,32 @@ fn environment_object<'js>(ctx: &Ctx<'js>, env: &Environment) -> rquickjs::Resul
     obj.set("fontScale", env.font_scale)?;
     obj.set("rtl", env.rtl)?;
     obj.set("reduceMotion", env.reduce_motion)?;
+    obj.set("pixelRatio", env.pixel_ratio)?;
+    obj.set("screenReader", env.screen_reader)?;
+    obj.set(
+        "os",
+        if cfg!(target_os = "android") {
+            "android"
+        } else {
+            "ios"
+        },
+    )?;
+    // React Native: a string on iOS ("17.5"), the API level on Android.
+    let (major, minor) = env.os_version;
+    if cfg!(target_os = "android") {
+        obj.set("osVersion", major)?;
+    } else {
+        obj.set("osVersion", format!("{major}.{minor}"))?;
+    }
+    obj.set(
+        "idiom",
+        match env.idiom {
+            Idiom::Phone => "phone",
+            Idiom::Pad => "pad",
+            Idiom::Mac => "mac",
+            Idiom::Tv => "tv",
+        },
+    )?;
     Ok(obj.into_value())
 }
 
@@ -395,11 +421,19 @@ fn payload_object<'js>(ctx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resu
             translation_y,
             velocity_x,
             velocity_y,
+            value_x,
+            value_y,
         } => {
             obj.set("translationX", *translation_x)?;
             obj.set("translationY", *translation_y)?;
             obj.set("velocityX", *velocity_x)?;
             obj.set("velocityY", *velocity_y)?;
+            if let Some(v) = value_x {
+                obj.set("valueX", *v)?;
+            }
+            if let Some(v) = value_y {
+                obj.set("valueY", *v)?;
+            }
         }
         EventPayload::Scroll { x, y } => {
             obj.set("x", *x)?;
