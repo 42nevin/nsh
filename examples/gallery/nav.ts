@@ -1,5 +1,5 @@
 import { type JSX } from "nsh";
-import { createNavigator } from "nsh/navigation";
+import { createNavigator } from "nsh/ui/mobile";
 
 /** A demo of the index. */
 export interface DemoEntry {

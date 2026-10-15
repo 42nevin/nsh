@@ -38,14 +38,28 @@ pub(crate) fn dist() -> anyhow::Result<()> {
 
     // iOS runtimes: release runners, development hosts.
     for (triple, dir) in [(IOS, "iphoneos"), (IOS_SIM, "iphonesimulator")] {
-        cargo(&["build", "--release", "-p", "nsh-ios-app", "--target", triple])?;
+        cargo(&[
+            "build",
+            "--release",
+            "-p",
+            "nsh-ios-app",
+            "--target",
+            triple,
+        ])?;
         copy(
             &release.join(triple).join("release/nsh-ios-app"),
             &out.join("runtime/ios").join(dir).join("nsh-ios-app"),
         )?;
     }
     for (triple, dir) in [(IOS_SIM, "iphonesimulator"), (CATALYST, "maccatalyst")] {
-        cargo(&["build", "--release", "-p", "nsh-ios-host", "--target", triple])?;
+        cargo(&[
+            "build",
+            "--release",
+            "-p",
+            "nsh-ios-host",
+            "--target",
+            triple,
+        ])?;
         copy(
             &release.join(triple).join("release/nsh-ios-host"),
             &out.join("runtime/ios").join(dir).join("nsh-ios-host"),

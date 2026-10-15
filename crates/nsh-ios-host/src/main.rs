@@ -93,6 +93,8 @@ fn load_package(
 
 #[cfg(not(target_os = "ios"))]
 fn main() {
-    eprintln!("nsh-ios-host runs on UIKit targets; build it with --target aarch64-apple-ios-macabi");
+    eprintln!(
+        "nsh-ios-host runs on UIKit targets; build it with --target aarch64-apple-ios-macabi"
+    );
     std::process::exit(1);
 }

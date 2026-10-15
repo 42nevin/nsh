@@ -1,8 +1,7 @@
 import { createSignal, For, onCleanup } from "solid-js";
 import { Toast } from "nsh/android";
-import { colorScheme, fontScale, safeArea, windowSize } from "nsh/device";
-import { keyboard } from "nsh/keyboard";
-import { ActionSheet, Alert, StatusBar } from "nsh/system";
+import { colorScheme, fontScale, windowSize } from "nsh/device";
+import { ActionSheet, Alert, keyboard, safeArea, StatusBar } from "nsh/ui/mobile";
 import { Button, colors, Section } from "../ui";
 
 function Row(props: { label: string; value: string }) {

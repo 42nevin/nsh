@@ -1,8 +1,7 @@
 import { createSignal, For, Match, Switch } from "solid-js";
 import { type YNode } from "nsh";
-import { keyboard, KeyboardAvoidingView } from "nsh/keyboard";
 import { List } from "nsh/list";
-import { useSafeAreaInsets } from "nsh/safe-area";
+import { keyboard, KeyboardAvoidingView, useSafeAreaInsets } from "nsh/ui/mobile";
 import { colors } from "../ui";
 
 const tints = ["#fde2e4", "#e2ece9", "#dfe7fd", "#fff1e6", "#e8e8e4", "#cddafd"];

@@ -1,11 +1,10 @@
-// `nsh/device`: the surface and the device: sizes, safe area, appearance,
+// `nsh/device`: the surface and the device: sizes, appearance,
 // text size, the platform, pixel density and right-to-left layout.
 
 import { untrack } from "solid-js";
 import { environment, initialEnvironment, isRTL, setAllowRTL, setForceRTL } from "./_core";
 
-export type { Insets } from "./_core";
-export { colorScheme, fontScale, safeArea, windowSize } from "./_core";
+export { colorScheme, fontScale, windowSize } from "./_core";
 
 export interface PlatformSelectSpec<T> {
   ios?: T;

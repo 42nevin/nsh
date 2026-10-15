@@ -25,47 +25,46 @@ const SOLID_UNIVERSAL: Embedded = Embedded {
     typescript: false,
 };
 
-/// A file of the nsh runtime (`js/runtime/<file>.ts`) and the specifier
-/// apps import it by (`None`: internal, only imported by other runtime
-/// files).
-pub(crate) struct RuntimeFile {
+/// A file of nsh's JS (`js/<root>/<file>.ts`) and the specifier apps
+/// import it by (`None`: internal, imported by other embedded files only).
+pub(crate) struct EmbeddedFile {
+    /// Its directory under `js/` (`runtime`, `ui/mobile`).
+    pub(crate) root: &'static str,
     /// File name without `.ts`.
     pub(crate) file: &'static str,
-    /// `nsh` or `nsh/<module>`.
+    /// `nsh`, `nsh/<module>` or `nsh/ui/<set>`.
     pub(crate) specifier: Option<&'static str>,
     pub(crate) module: Embedded,
 }
 
-macro_rules! runtime {
-    ($($file:literal => $specifier:expr),* $(,)?) => {
-        &[$(RuntimeFile {
+macro_rules! embedded {
+    ($root:literal: $($file:literal => $specifier:expr),* $(,)?) => {
+        &[$(EmbeddedFile {
+            root: $root,
             file: $file,
             specifier: $specifier,
             module: Embedded {
-                id: concat!("\0nsh:runtime/", $file),
-                source: include_str!(concat!("../../../js/runtime/", $file, ".ts")),
+                id: concat!("\0nsh:", $root, "/", $file),
+                source: include_str!(concat!("../../../js/", $root, "/", $file, ".ts")),
                 typescript: true,
             },
         }),*]
     };
 }
 
-/// The runtime's files: one module per feature, platform-only features in
-/// `nsh/ios` and `nsh/android`.
-pub(crate) const RUNTIME: &[RuntimeFile] = runtime! {
+/// The runtime (`js/runtime`): the primitives every UI set builds on, one
+/// module per feature, platform-only features in `nsh/ios` and
+/// `nsh/android`.
+const RUNTIME: &[EmbeddedFile] = embedded! { "runtime":
     "index" => Some("nsh"),
     "renderer" => Some(RENDERER_SPECIFIER),
     "animated" => Some("nsh/animated"),
     "device" => Some("nsh/device"),
-    "keyboard" => Some("nsh/keyboard"),
-    "safe-area" => Some("nsh/safe-area"),
     "accessibility" => Some("nsh/accessibility"),
-    "navigation" => Some("nsh/navigation"),
     "list" => Some("nsh/list"),
     "canvas" => Some("nsh/canvas"),
     "image" => Some("nsh/image"),
     "gesture" => Some("nsh/gesture"),
-    "system" => Some("nsh/system"),
     "webview" => Some("nsh/webview"),
     "video" => Some("nsh/video"),
     "ios" => Some("nsh/ios"),
@@ -74,22 +73,56 @@ pub(crate) const RUNTIME: &[RuntimeFile] = runtime! {
     "types" => None,
 };
 
+/// The mobile UI (`js/ui/mobile`, `nsh/ui/mobile`).
+const UI_MOBILE: &[EmbeddedFile] = embedded! { "ui/mobile":
+    "index" => Some("nsh/ui/mobile"),
+    "keyboard" => None,
+    "navigation" => None,
+    "safe-area" => None,
+    "system" => None,
+};
+
+/// Every embedded file of nsh's JS.
+pub(crate) fn files() -> impl Iterator<Item = &'static EmbeddedFile> {
+    RUNTIME.iter().chain(UI_MOBILE)
+}
+
+/// The internals of the runtime, which the UI sets build on: importable by
+/// embedded files only, never by apps.
+const INTERNAL: &str = "nsh/_core";
+
+/// The root of an embedded file's virtual id (`ui/mobile` of
+/// `\0nsh:ui/mobile/navigation`).
+fn root_of(id: &str) -> Option<&str> {
+    id.strip_prefix("\0nsh:")?
+        .rsplit_once('/')
+        .map(|(root, _)| root)
+}
+
 /// Resolves a specifier to an embedded module: a bare one, or one relative
-/// to a runtime file (`./_core` from `\0nsh:runtime/list`).
+/// to an embedded file (`./_core` from `\0nsh:runtime/list`, within its root).
 pub(crate) fn resolve(specifier: &str, importer: Option<&str>) -> Option<&'static Embedded> {
     match specifier {
         "solid-js" => return Some(&SOLID),
         "solid-js/universal" => return Some(&SOLID_UNIVERSAL),
         _ => {}
     }
+    let embedded_root = importer.and_then(root_of);
     if let Some(file) = specifier.strip_prefix("./")
-        && importer.is_some_and(|i| i.starts_with("\0nsh:runtime/"))
+        && let Some(root) = embedded_root
     {
         let file = file.strip_suffix(".ts").unwrap_or(file);
-        return RUNTIME.iter().find(|f| f.file == file).map(|f| &f.module);
+        return files()
+            .find(|f| f.root == root && f.file == file)
+            .map(|f| &f.module);
     }
-    RUNTIME
-        .iter()
+    if specifier == INTERNAL && embedded_root.is_some() {
+        return RUNTIME
+            .iter()
+            .find(|f| f.file == "_core")
+            .map(|f| &f.module);
+    }
+    files()
         .find(|f| f.specifier == Some(specifier))
         .map(|f| &f.module)
 }
@@ -98,7 +131,7 @@ pub(crate) fn resolve(specifier: &str, importer: Option<&str>) -> Option<&'stati
 pub(crate) fn load(id: &str) -> Option<&'static Embedded> {
     [&SOLID, &SOLID_UNIVERSAL]
         .into_iter()
-        .chain(RUNTIME.iter().map(|f| &f.module))
+        .chain(files().map(|f| &f.module))
         .find(|m| m.id == id)
 }
 
@@ -116,12 +149,28 @@ mod tests {
             resolve("nsh/list", None).map(|m| m.id),
             Some("\0nsh:runtime/list")
         );
-        // Internal files are only reachable from the runtime itself.
+        // Internal files are only reachable from nsh's own files.
         assert!(resolve("nsh/_core", None).is_none());
+        assert!(resolve("nsh/_core", Some("/app/App.tsx")).is_none());
         assert!(resolve("./_core", Some("/app/App.tsx")).is_none());
         assert_eq!(
             resolve("./_core", Some("\0nsh:runtime/list")).map(|m| m.id),
             Some("\0nsh:runtime/_core")
         );
+        // The UI sets: their own files relatively, the runtime's internals.
+        assert_eq!(
+            resolve("nsh/ui/mobile", None).map(|m| m.id),
+            Some("\0nsh:ui/mobile/index")
+        );
+        assert_eq!(
+            resolve("./navigation", Some("\0nsh:ui/mobile/index")).map(|m| m.id),
+            Some("\0nsh:ui/mobile/navigation")
+        );
+        assert!(resolve("./navigation", Some("\0nsh:runtime/index")).is_none());
+        assert_eq!(
+            resolve("nsh/_core", Some("\0nsh:ui/mobile/navigation")).map(|m| m.id),
+            Some("\0nsh:runtime/_core")
+        );
+        assert!(resolve("nsh/navigation", None).is_none());
     }
 }

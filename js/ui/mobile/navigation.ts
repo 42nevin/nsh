@@ -1,4 +1,4 @@
-// `nsh/navigation`: native stacks of screens, and modals.
+// `nsh/ui/mobile`: native stacks of screens, and modals.
 
 import {
   type Accessor,
@@ -21,8 +21,8 @@ import {
   setProp,
   spread,
   YNode,
-} from "./_core";
-import type { JSX, StyleProp, ViewStyle } from "./types";
+} from "nsh/_core";
+import type { JSX, StyleProp, ViewStyle } from "nsh";
 
 // --- Navigation -------------------------------------------------------------
 

@@ -1,4 +1,4 @@
-// `nsh/system`: the status bar and native dialogs.
+// `nsh/ui/mobile`: the status bar and native dialogs.
 
 import { onCleanup } from "solid-js";
 import {
@@ -10,7 +10,7 @@ import {
   setStatusBar,
   startStatusBar,
   statusBarStack,
-} from "./_core";
+} from "nsh/_core";
 
 export type StatusBarStyle = "default" | "light-content" | "dark-content";
 

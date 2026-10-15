@@ -1,8 +1,11 @@
-// `nsh/safe-area`: content kept clear of system UI and headers.
+// `nsh/ui/mobile`: content kept clear of system UI and headers.
 
 import { type Accessor, mergeProps as mergeSolidProps, splitProps, useContext } from "solid-js";
-import { createElement, type Insets, insert, InsetsContext, spread, type YNode } from "./_core";
-import type { ViewProps } from "./types";
+import { createElement, type Insets, insert, InsetsContext, spread, type YNode } from "nsh/_core";
+import type { ViewProps } from "nsh";
+
+export type { Insets } from "nsh/_core";
+export { safeArea } from "nsh/_core";
 
 /** Insets not covered by system UI or headers where this component renders:
  * the surface's safe area, a modal's, or a screen's (below its header). */

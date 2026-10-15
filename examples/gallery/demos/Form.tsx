@@ -1,8 +1,6 @@
 import { createSignal, For, splitProps } from "solid-js";
 import { type InputProps, type YNode } from "nsh";
-import { Keyboard, keyboard, KeyboardAvoidingView } from "nsh/keyboard";
-import { Modal, Screen } from "nsh/navigation";
-import { SafeAreaView, useSafeAreaInsets } from "nsh/safe-area";
+import { Keyboard, keyboard, KeyboardAvoidingView, Modal, SafeAreaView, Screen, useSafeAreaInsets } from "nsh/ui/mobile";
 import { nav } from "../nav";
 import { Button, colors, Section } from "../ui";
 

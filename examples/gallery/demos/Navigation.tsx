@@ -1,9 +1,7 @@
 import { createSignal, For, onCleanup } from "solid-js";
 import { type JSX } from "nsh";
 import { BackHandler } from "nsh/android";
-import { Modal, Screen } from "nsh/navigation";
-import { Alert } from "nsh/system";
-import { SafeAreaView, useSafeAreaInsets } from "nsh/safe-area";
+import { Alert, Modal, SafeAreaView, Screen, useSafeAreaInsets } from "nsh/ui/mobile";
 import { nav } from "../nav";
 import { Button, colors, Section } from "../ui";
 

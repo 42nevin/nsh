@@ -3,9 +3,7 @@ import { AccessibilityInfo, reduceMotion, screenReaderEnabled } from "nsh/access
 import { LayoutAnimation } from "nsh/animated";
 import { PixelRatio, Platform } from "nsh/device";
 import { InputAccessoryView } from "nsh/ios";
-import { KeyboardAvoidingView } from "nsh/keyboard";
-import { Modal, Screen } from "nsh/navigation";
-import { SafeAreaView } from "nsh/safe-area";
+import { KeyboardAvoidingView, Modal, SafeAreaView, Screen } from "nsh/ui/mobile";
 import { nav } from "../nav";
 import { Button as UiButton, colors, Section } from "../ui";
 

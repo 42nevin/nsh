@@ -31,6 +31,8 @@ js/runtime/*.ts       The JS runtime, one file per module apps import (see **JS 
 js/runtime/types.ts   Style, element-prop and JSX types (types only; also the source of `.nsh/types/nsh/types.d.ts`)
 js/runtime/globals.d.ts  Declarations of the JS globals (console, timers, fetch, ...) and of asset imports
 js/runtime/hot.js     Hot module replacement runtime of development bundles (module registry, component proxies)
+js/ui/mobile/*.ts     The mobile UI, `nsh/ui/mobile` (`index.ts` re-exports the others): navigation, modals, safe areas,
+                      the software keyboard, the status bar, system dialogs (see **JS modules**)
 js/vendor/solid-js/   Embedded solid-js (version in VERSION) and its type declarations (`types/`, `jsx.d.ts` replaced by nsh's)
 examples/             Example apps (gallery: a demo index, one module per demo; counter) and embedding samples (embed-ios, embed-android)
 ```
@@ -109,28 +111,34 @@ The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distributi
 
 ## JS modules
 
-Apps import features from their own modules (`nsh-bundler/src/embedded.rs` maps the specifiers to the runtime's files;
-`.nsh/types/nsh/<module>.d.ts` declares each, found through the `nsh/*` path of the app's `tsconfig.json`). `nsh` itself
-only has rendering and the types; there is no catch-all module.
+Two layers. `nsh` and `nsh/<module>` (`js/runtime`) are the primitives and the environment that every UI set builds
+on. `nsh/ui/<set>` (`js/ui/<set>`) is a whole UI for one form factor: `nsh/ui/mobile` has everything that is mobile UI or
+interaction, natively backed (navigation stacks, modals, the status bar, system dialogs) or JS (the components, one
+look on iOS and Android); a desktop set will be a separate one (`nsh/ui/desktop`), not an abstraction over both.
+Shared vs one form factor decides the layer, not JS vs native.
+
+`nsh-bundler/src/embedded.rs` lists the embedded files per root (`runtime`, `ui/mobile`) with the specifiers apps import;
+files import their own root's files relatively (`./navigation`) and the runtime's internals as `nsh/_core` (embedded
+files only; apps cannot). `.nsh/types` has one declaration file per embedded file (`nsh/list.d.ts`,
+`nsh/ui/mobile/navigation.d.ts`) and `nsh/ui/mobile.d.ts` re-exporting its set, found through the `nsh/*` path of the
+app's `tsconfig.json`; files nsh no longer generates are removed. `nsh` itself only has rendering and the types; there
+is no catch-all module, and moved APIs get no compatibility re-exports.
 
 | Module | Exports |
 |---|---|
 | `nsh` | `render`, `root`, `YNode`; the types of styles, element props, events and `JSX` |
 | `nsh/animated` | `createNativeValue`, `NativeValue`, `NativeNode`, `Animated`, `Easing`, `LayoutAnimation` |
-| `nsh/device` | `windowSize()`, `safeArea()`, `colorScheme()`, `fontScale()`, `Platform`, `PixelRatio`, `I18nManager` |
-| `nsh/keyboard` | `keyboard()`, `Keyboard.dismiss`, `KeyboardAvoidingView` |
-| `nsh/safe-area` | `SafeAreaView`, `useSafeAreaInsets` |
+| `nsh/device` | `windowSize()`, `colorScheme()`, `fontScale()`, `Platform`, `PixelRatio`, `I18nManager` |
 | `nsh/accessibility` | `AccessibilityInfo`, `screenReaderEnabled()`, `reduceMotion()` |
-| `nsh/navigation` | `Stack`, `Screen`, `createNavigator`, `Modal` |
 | `nsh/list` | `List` |
 | `nsh/canvas` | `Canvas`, `Path2D`, `CanvasRenderingContext2D`, `CanvasGradient` |
 | `nsh/image` | `Image.getSize`, `Image.prefetch` |
 | `nsh/gesture` | `PanResponder` |
-| `nsh/system` | `StatusBar`, `Alert`, `ActionSheet` (a list dialog on Android) |
 | `nsh/webview`, `nsh/video` | `WebView`, `Video` |
 | `nsh/ios` | `isAvailable`, `InputAccessoryView` |
 | `nsh/android` | `isAvailable`, `Toast`, `BackHandler`, `setStatusBarBackgroundColor` |
 | `nsh/renderer` | what compiled JSX calls (`createElement`, `insert`, `spread`, ...; the Solid compiler's `moduleName`) |
+| `nsh/ui/mobile` | `Stack`, `Screen`, `createNavigator`, `Modal`; `SafeAreaView`, `useSafeAreaInsets`, `safeArea()`; `KeyboardAvoidingView`, `keyboard()`, `Keyboard.dismiss`; `StatusBar`, `Alert`, `ActionSheet` (a list dialog on Android) |
 
 - **Platform modules** are importable on both platforms (one bundle runs on both); on the other one their calls do
   nothing and their components render nothing. `isAvailable` tells which.
@@ -268,7 +276,7 @@ of that kind: with a listener the press is taken, and JS exits the app when no l
   negative offsets), starting at the right end and keeping their distance from it; horizontal lists are flipped natively
   (`ScrollConfig::mirrored`: the scroll view and each cell get scaleX −1, composed with their transforms), so the list's
   offset logic stays left to right.
-- **Environment** (reactive accessors from `"nsh"`): `windowSize()`, `safeArea()`, `keyboard()` (`{ height, duration }`: how
+- **Environment** (reactive accessors; `nsh/device`, and `nsh/ui/mobile` for the mobile ones): `windowSize()`, `safeArea()`, `keyboard()` (`{ height, duration }`: how
   far the keyboard reaches into the surface, the bottom safe area under it included, on every platform),
   `colorScheme()`, `fontScale()`. `KeyboardAvoidingView` pads its bottom by `keyboard().height`, animated with the keyboard,
   for content outside scroll views (message bars). Inputs inside a scroll view are kept clear of the keyboard natively (bottom inset + scroll to the

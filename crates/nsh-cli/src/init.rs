@@ -7,7 +7,7 @@ use anyhow::{Context as _, bail};
 
 const APP: &str = r##"import { createSignal } from "solid-js";
 import { render, root } from "nsh";
-import { SafeAreaView } from "nsh/safe-area";
+import { SafeAreaView } from "nsh/ui/mobile";
 
 function App() {
   const [count, setCount] = createSignal(0);
@@ -80,10 +80,13 @@ pub(crate) fn init(dir: &Path, name: Option<String>) -> anyhow::Result<()> {
 }
 
 /// Writes `.nsh/types` in the app directory `dir` (files whose contents did
-/// not change are left alone, so editors do not reload them).
+/// not change are left alone, so editors do not reload them). Files nsh no
+/// longer generates (a module that moved) are removed.
 pub(crate) fn write_types(dir: &Path) {
     let types = dir.join(".nsh/types");
-    for (path, contents) in nsh_bundler::type_definitions() {
+    let definitions = nsh_bundler::type_definitions();
+    remove_stale(&types, &types, &definitions);
+    for (path, contents) in definitions {
         let path = types.join(path);
         if fs::read(&path).is_ok_and(|old| old == contents.as_bytes()) {
             continue;
@@ -95,6 +98,26 @@ pub(crate) fn write_types(dir: &Path) {
         if let Err(err) = written {
             log::warn!("cannot write {}: {err}", path.display());
             return;
+        }
+    }
+}
+
+/// Removes the files under `dir` (inside `types`) that are not among
+/// `definitions`, and directories left empty.
+fn remove_stale(types: &Path, dir: &Path, definitions: &[(String, String)]) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            remove_stale(types, &path, definitions);
+            let _ = fs::remove_dir(&path);
+        } else if let Ok(relative) = path.strip_prefix(types) {
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            if !definitions.iter().any(|(p, _)| *p == relative) {
+                let _ = fs::remove_file(&path);
+            }
         }
     }
 }

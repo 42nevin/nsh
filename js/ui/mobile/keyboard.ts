@@ -1,11 +1,11 @@
-// `nsh/keyboard`: the software keyboard.
+// `nsh/ui/mobile`: the software keyboard.
 
 import { createMemo, mergeProps as mergeSolidProps, splitProps, untrack } from "solid-js";
-import { command, createElement, effect, insert, keyboard, spread, type YNode } from "./_core";
-import { LayoutAnimation } from "./animated";
-import type { StyleProp, ViewProps, ViewStyle } from "./types";
+import { command, createElement, effect, insert, keyboard, spread, type YNode } from "nsh/_core";
+import { LayoutAnimation } from "nsh/animated";
+import type { StyleProp, ViewProps, ViewStyle } from "nsh";
 
-export { keyboard } from "./_core";
+export { keyboard } from "nsh/_core";
 
 /** The software keyboard. */
 export const Keyboard = {

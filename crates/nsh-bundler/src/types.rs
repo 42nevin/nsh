@@ -113,18 +113,31 @@ fn declarations(source: &str) -> String {
 }
 
 /// The files of `.nsh/types`, as (path relative to it, contents): one
-/// declaration file per runtime file (`nsh/list.d.ts` for `nsh/list`; they
-/// import each other relatively, as the sources do).
+/// declaration file per embedded file, importing each other relatively as
+/// the sources do: `nsh/list.d.ts` for `nsh/list`; a UI set's files under
+/// its directory (`nsh/ui/mobile/navigation.d.ts`) and its module next to it
+/// (`nsh/ui/mobile.d.ts`, found through the `nsh/*` path of tsconfig).
 pub fn type_definitions() -> Vec<(String, String)> {
-    let mut files: Vec<(String, String)> = crate::embedded::RUNTIME
-        .iter()
-        .map(|f| {
-            (
-                format!("nsh/{}.d.ts", f.file),
-                declarations(f.module.source),
-            )
-        })
-        .collect();
+    let mut files: Vec<(String, String)> = Vec::new();
+    for f in crate::embedded::files() {
+        let dir = match f.root {
+            "runtime" => "nsh".to_owned(),
+            root => format!("nsh/{root}"),
+        };
+        files.push((
+            format!("{dir}/{}.d.ts", f.file),
+            declarations(f.module.source),
+        ));
+        if f.root != "runtime"
+            && f.file == "index"
+            && let Some((_, last)) = f.root.rsplit_once('/')
+        {
+            files.push((
+                format!("{dir}.d.ts"),
+                format!("export * from \"./{last}/index\";\n"),
+            ));
+        }
+    }
     files.extend(
         [
             (
@@ -150,7 +163,7 @@ pub fn type_definitions() -> Vec<(String, String)> {
 mod tests {
     #[test]
     fn runtime_declarations_need_no_inference() {
-        for source in crate::embedded::RUNTIME.iter().map(|f| f.module.source) {
+        for source in crate::embedded::files().map(|f| f.module.source) {
             let allocator = super::Allocator::default();
             let parsed = super::Parser::new(&allocator, source, super::SourceType::ts()).parse();
             let ret = super::IsolatedDeclarations::new(
@@ -167,6 +180,17 @@ mod tests {
             files
                 .iter()
                 .any(|(p, t)| p == "nsh/list.d.ts" && t.contains("export declare function List"))
+        );
+        assert!(
+            files
+                .iter()
+                .any(|(p, t)| p == "nsh/ui/mobile.d.ts" && t.contains("./mobile/index"))
+        );
+        assert!(
+            files
+                .iter()
+                .any(|(p, t)| p == "nsh/ui/mobile/navigation.d.ts"
+                    && t.contains("export declare function Stack"))
         );
     }
 }
