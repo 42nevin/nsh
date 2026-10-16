@@ -1,0 +1,37 @@
+//! The engine's integration tests, one test binary: every module links the
+//! bundler, QuickJS and the core, so separate binaries would each carry
+//! their own copy (about a gigabyte of objects apiece in debug builds).
+//!
+//! Benchmarks are `#[ignore]`d tests, run in release one at a time (in
+//! parallel they skew each other): `cargo test --release -p nsh-engine
+//! --test engine bench_components -- --ignored --nocapture
+//! --test-threads=1` (or `bench_gallery_scroll`).
+
+use crossbeam_channel::Sender;
+use nsh_core::MountBatch;
+use nsh_engine::MountSink;
+
+mod canvas;
+mod compiled;
+mod component_bench;
+mod components;
+mod counter;
+mod errors;
+mod fetch;
+mod hot;
+mod list;
+mod list_bench;
+mod native;
+mod package;
+mod platform;
+mod rust_app;
+mod shutdown;
+
+/// Hands the engine's batches to the test.
+struct ChannelSink(Sender<MountBatch>);
+
+impl MountSink for ChannelSink {
+    fn submit(&self, batch: MountBatch) {
+        let _ = self.0.send(batch);
+    }
+}

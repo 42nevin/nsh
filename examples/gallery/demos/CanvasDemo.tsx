@@ -1,5 +1,4 @@
-import { createSignal, For } from "solid-js";
-import { type GestureResponderEvent } from "nsh";
+import { type GestureResponderEvent, signal } from "nsh";
 import { createNativeValue, Easing } from "nsh/animated";
 import { Canvas, Path2D } from "nsh/canvas";
 import logo from "../logo@2x.png";
@@ -10,9 +9,9 @@ const TAU = Math.PI * 2;
 /** A ring whose sweep is a native value: animating it redraws natively. */
 function ProgressRing() {
   const progress = createNativeValue(0.3);
-  const [target, setTarget] = createSignal(0.3);
+  const target = signal(0.3);
   const go = (to: number) => {
-    setTarget(to);
+    target.set(to);
     progress.timing(to, { duration: 900, easing: Easing.inOut(Easing.cubic) });
   };
   return (
@@ -54,7 +53,7 @@ function ProgressRing() {
 
 /** A chart: gradient area, a line, labels measured with measureText. */
 function Chart() {
-  const [data, setData] = createSignal([12, 30, 22, 48, 36, 60, 52, 75, 64, 88]);
+  const data = signal([12, 30, 22, 48, 36, 60, 52, 75, 64, 88]);
   return (
     <Section title="Chart">
       <Canvas
@@ -106,7 +105,7 @@ function Chart() {
           });
         }}
       />
-      <Button label="New data" onPress={() => setData(data().map(() => Math.round(10 + Math.random() * 85)))} />
+      <Button label="New data" onPress={() => data.set(data().map(() => Math.round(10 + Math.random() * 85)))} />
     </Section>
   );
 }
@@ -193,8 +192,9 @@ function Icons() {
   return (
     <Section title="Path2D (SVG path data)">
       <view style={{ flexDirection: "row", gap: 16 }}>
-        <For each={icons}>
-          {([name, d], i) => {
+        <each of={icons}>
+          {(icon, i) => {
+            const [name, d] = icon();
             const path = new Path2D(d);
             return (
               <view style={{ alignItems: "center", gap: 4 }}>
@@ -219,7 +219,7 @@ function Icons() {
               </view>
             );
           }}
-        </For>
+        </each>
       </view>
     </Section>
   );
@@ -274,7 +274,7 @@ function Compositing() {
 
 /** Touch drawing: each move draws again from JS. */
 function Sketch() {
-  const [strokes, setStrokes] = createSignal<[number, number][][]>([]);
+  const strokes = signal<[number, number][][]>([]);
   const point = (e: GestureResponderEvent): [number, number] => [e.locationX, e.locationY];
   return (
     <Section title="Sketch (touch → draw)">
@@ -282,7 +282,7 @@ function Sketch() {
         style={{ height: 180, backgroundColor: "#f8fafc", borderRadius: 10 }}
         onStartShouldSetResponder={() => true}
         onResponderGrant={(e) => {
-          setStrokes([...strokes(), [point(e)]]);
+          strokes.set([...strokes(), [point(e)]]);
           // Keep the touches: the scroll view around must not take them.
           return true;
         }}
@@ -290,7 +290,7 @@ function Sketch() {
         onResponderMove={(e) => {
           const all = strokes();
           const last = all[all.length - 1];
-          setStrokes([...all.slice(0, -1), [...last, point(e)]]);
+          strokes.set([...all.slice(0, -1), [...last, point(e)]]);
         }}
         draw={(ctx) => {
           ctx.strokeStyle = "#0f172a";
@@ -304,7 +304,7 @@ function Sketch() {
           }
         }}
       />
-      <Button label="Clear" color="#57606a" onPress={() => setStrokes([])} />
+      <Button label="Clear" color="#57606a" onPress={() => strokes.set([])} />
     </Section>
   );
 }

@@ -52,16 +52,17 @@ pub(crate) fn trace(
         bundle.elapsed_ms,
         bundle.code.len()
     );
-    let bytecode = nsh_js::compile_bytecode(&bundle.code, false)?;
+    let bytecode =
+        nsh_js::compile_bytecode_with(&bundle.code, false, &[nsh_ui_mobile::registry()])?;
     // SAFETY: compiled just now by this runtime.
     let bytecode = unsafe { Bundle::bytecode(bytecode) };
 
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
-        bundle: match bundle.source_map {
+        app: nsh_engine::App::Js(match bundle.source_map {
             Some(map) => bytecode.with_source_map(map),
             None => bytecode,
-        },
+        }),
         viewport: Size::new(width, height),
         trace: true,
         network: Some(std::sync::Arc::new(crate::net::UreqNetwork::new())),
@@ -71,6 +72,8 @@ pub(crate) fn trace(
         environment: Default::default(),
         header_heights: (44.0, 96.0),
         limits: nsh_engine::Limits::default(),
+        components: nsh_ui_mobile::registry(),
+        runtime: None,
     };
     let control = Arc::new(OnceLock::new());
     let sink = ChannelSink {

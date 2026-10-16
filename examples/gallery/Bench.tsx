@@ -1,7 +1,7 @@
 // The Photos list on its own: the entry of the scroll benchmarks
 // (`nsh trace examples/gallery/Bench.tsx --scroll 3000`, the `list_bench`
 // test).
-import { render, root } from "nsh";
+import { mount } from "nsh";
 import { Photos } from "./demos/Photos";
 
-render(() => <Photos />, root);
+mount(Photos);

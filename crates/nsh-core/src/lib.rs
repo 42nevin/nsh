@@ -17,14 +17,21 @@ mod effects;
 mod fenwick;
 mod geometry;
 mod grid;
+pub mod js;
 mod mount;
 mod ops;
+pub mod platform;
 mod props;
+pub mod runtime;
 pub mod shape;
 mod style;
 pub mod tailwind;
 mod text;
 mod transform;
+pub mod ui;
+
+// The derive macros name `::nsh_core`, also in this crate's own tests.
+extern crate self as nsh_core;
 
 pub use nsh_anim;
 /// The values registered native components take and emit (props, events,
@@ -49,8 +56,8 @@ pub use crate::{
         KeyboardDismissMode, KeyboardTaps, KeyboardType, ListContentStyle, ModalAnimation,
         ModalPresentation, ModalProp, NativeProp, NodeId, Op, PayloadValue, Prop, ROOT_ID,
         ResizeMode, ReturnKeyType, ScreenAnimation, ScreenProp, ScrollProp, SnapAlignment,
-        StatusBarConfig, StatusBarStyle, Tag, TouchEvent, TouchPhase, TouchPoint, UNDERLAY_OPACITY,
-        Viewability, WebSource,
+        StatusBarConfig, StatusBarSetting, StatusBarStyle, Tag, TouchEvent, TouchPhase, TouchPoint,
+        UNDERLAY_OPACITY, Viewability, WebSource,
     },
     props::{
         Accessibility, AccessibilityActionDef, AccessibilityProp, AccessibilityRole,

@@ -3,14 +3,14 @@
 //!
 //! Development bundles keep one CommonJS chunk per module (rolldown
 //! `preserveModules`), each wrapped in a factory registered with the hot
-//! runtime (`js/runtime/hot.js`). An update redefines only the modules whose
+//! runtime (`nsh-js` `hot.rs`). An update redefines only the modules whose
 //! code changed; the runtime runs them again in the live JS context.
 //!
 //! The transform makes top-level components (functions with a capitalized
 //! name whose body contains JSX) hot: each is registered with
 //! `__nsh_hot.component(module, name, fn, signature)`, which returns a stable
 //! proxy. The signature changes when the component's own code, or the
-//! module's code outside components, changes. Top-level `createContext()`
+//! module's code outside components, changes. Top-level `context()`
 //! calls go through `__nsh_hot.context` so contexts keep their identity.
 
 use std::{
@@ -90,7 +90,7 @@ enum Target {
         name: String,
         span: Span,
     },
-    /// `const Name = createContext(…)`.
+    /// `const Name = context(…)`.
     Context {
         index: usize,
         declarator: usize,
@@ -116,7 +116,7 @@ fn variable_targets(index: usize, v: &VariableDeclaration<'_>, out: &mut Vec<Tar
                     span: decl.span,
                 });
             }
-            Expression::CallExpression(call) if matches!(&call.callee, Expression::Identifier(c) if c.name == "createContext") =>
+            Expression::CallExpression(call) if matches!(&call.callee, Expression::Identifier(c) if c.name == "context") =>
             {
                 out.push(Target::Context {
                     index,

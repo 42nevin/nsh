@@ -528,6 +528,7 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     }
                     // Turned into a mount item / `ScrollTo` by the core.
                     Command::LayoutAnimation(_)
+                    | Command::SetStatusBar(_)
                     | Command::ScrollToIndex { .. }
                     | Command::ScrollToEnd { .. } => e.int(-1),
                 }
@@ -1063,7 +1064,7 @@ fn input(e: &mut Encoded, c: &InputConfig) {
 // --- Canvas drawings (`CanvasBox.java`) -------------------------------------
 //
 // A word count, then the operations as 32-bit words: operation codes as in
-// `js/runtime/index.ts` (`CV_*`), numbers as float bits, native value
+// `nsh_core::js::canvas` (`CV_*`), numbers as float bits, native value
 // slots as `SLOT_BITS | slot` (a NaN no arithmetic produces), strings as
 // object indices.
 

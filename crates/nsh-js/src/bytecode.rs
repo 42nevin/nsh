@@ -21,9 +21,28 @@ pub const BUNDLE_NAME: &str = "bundle.js";
 /// `strip` removes source and debug info (smaller, but stacks lose line
 /// numbers): use it for release builds only.
 pub fn compile_bytecode(source: &str, strip: bool) -> Result<Vec<u8>, JsError> {
+    compile_bytecode_with(source, strip, &[])
+}
+
+/// [`compile_bytecode`] for a bundle that may import the native modules of
+/// `ui_sets` (as [`crate::HostOptions::ui_sets`]).
+pub fn compile_bytecode_with(
+    source: &str,
+    strip: bool,
+    ui_sets: &[nsh_core::ui::Registry],
+) -> Result<Vec<u8>, JsError> {
+    // Outlives the runtime (dropped after it).
+    let modules = crate::modules::ModuleTable::new(ui_sets);
     let rt = Runtime::new()?;
     let ctx = Context::full(&rt)?;
     ctx.with(|ctx| {
+        // Imports resolve while compiling: the native modules declare
+        // their exports.
+        // SAFETY: the context's own runtime.
+        crate::modules::set_loader(
+            unsafe { rquickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) },
+            &modules,
+        );
         let module = Module::declare(ctx.clone(), BUNDLE_NAME, source)
             .catch(&ctx)
             .map_err(JsError::caught)?;

@@ -602,7 +602,12 @@ impl Mounter {
                 self.remove_hosted(id);
                 self.sticky.remove(&id);
                 self.target.scroll_deleted(id);
-                if let Some(s) = self.views.get_mut(id as usize).and_then(Option::take) {
+                if let Some(mut s) = self.views.get_mut(id as usize).and_then(Option::take) {
+                    // A modal deleted while presented (its subtree released
+                    // without a remove) goes away too, as on Android.
+                    if let Native::Modal(modal) = &mut s.native {
+                        modal.dismiss(|| {});
+                    }
                     if s.events.contains(EventKind::Touch) {
                         self.touch_listener_changed(false);
                     }

@@ -1,64 +1,51 @@
-//! Decoder for the flat op buffer filled by `js/runtime/index.ts`.
-//!
-//! The buffer is a plain JS array of `[opcode, args...]` records. Keeping
-//! the JS side to `array.push` of raw values is deliberate: QuickJS is the
-//! slowest stage, so all parsing (tags, style objects, event names) happens
-//! here in Rust.
+//! Decoding of JS values into the core's types: props and styles
+//! ([`decode_prop`]), commands ([`decode_command`]), animation operations
+//! ([`decode_anim_op`], as `nsh/animated` encodes them) and JSON
+//! ([`to_json`]).
 
-use nsh_anim::{
-    AnimOp, AnimProp, Curve, Driver, EaseMode, Easing, Extrapolate, MathOp, Operand, Output,
-};
+use nsh_anim::{AnimOp, AnimProp, Driver, Easing, Extrapolate, MathOp, Operand, Output};
 use nsh_core::{
-    AccessibilityActionDef, AccessibilityProp, AccessibilityRole, AccessibilityState,
-    AccessibilityValue, AutoCapitalize, AutoFill, CellSlot, Checked, Color, Command, Dialog,
-    DialogButton, DialogButtonStyle, EdgeInsets, EllipsizeMode, EventKind, HeaderSlot, ImageProp,
-    ImageSource, KeyboardDismissMode, KeyboardTaps, KeyboardType, LayoutAnimation, LayoutCurve,
-    LayoutProperty, LayoutTransition, ListContentStyle, LiveRegion, ModalAnimation, ModalConfig,
-    ModalPresentation, ModalProp, NativeProp, NodeId, Op, PointerEvents, Prop, ResizeMode,
-    ReturnKeyType, ScreenAnimation, ScreenProp, ScrollProp, SnapAlignment, StatusBarConfig,
-    StatusBarStyle, Style, StyleDecl, StyleError, StylePatch, StyleValue, Tag, TransformKind,
-    Viewability, WebSource,
+    Color, Command, EventKind, LayoutAnimation, NodeId, Op, Prop, Style, StyleDecl, StyleError,
+    StylePatch, StyleValue, TransformKind,
+    js::{
+        host::{HostCx, HostInput, HostList, HostProps, HostValue},
+        protocol::*,
+    },
 };
 use rquickjs::{Array, Ctx, Exception, Object, Type, Value};
 use rustc_hash::FxHashSet;
-
-// Must match the constants in `js/runtime/index.ts`.
-const OP_CREATE: i32 = 0;
-const OP_CREATE_TEXT: i32 = 1;
-const OP_SET_TEXT: i32 = 2;
-const OP_SET_PROP: i32 = 3;
-const OP_INSERT: i32 = 4;
-const OP_REMOVE: i32 = 5;
-const OP_RELEASE: i32 = 6;
-const OP_ANIM: i32 = 7;
-const OP_COMMAND: i32 = 8;
-const OP_DRAW: i32 = 9;
-
-// Sub-opcodes of `OP_ANIM`.
-const ANIM_VALUE: i32 = 0;
-const ANIM_INTERPOLATE: i32 = 1;
-const ANIM_MATH: i32 = 2;
-const ANIM_SET: i32 = 3;
-const ANIM_START: i32 = 4;
-const ANIM_STOP: i32 = 5;
-const ANIM_RELEASE: i32 = 6;
-const ANIM_DIFF_CLAMP: i32 = 7;
-const ANIM_START_COMPOSITE: i32 = 8;
-const ANIM_STOP_ANIMATION: i32 = 9;
-const ANIM_RESET_COMPOSITE: i32 = 10;
-const ANIM_RELEASE_COMPOSITE: i32 = 11;
 
 /// Reports each distinct problem once, so a bad style in a list does not
 /// flood the log.
 #[derive(Default)]
 pub(crate) struct Warnings {
     seen: FxHashSet<String>,
+    /// Collecting for [`Warnings::merge`] instead of logging.
+    deferred: Option<Vec<String>>,
 }
 
 impl Warnings {
-    fn warn(&mut self, message: String) {
-        if self.seen.len() < 1024 && self.seen.insert(message.clone()) {
+    /// Warnings that are only collected, to be merged into the VM's
+    /// (when decoding runs JS that may itself decode).
+    pub(crate) fn deferred() -> Warnings {
+        Warnings {
+            seen: FxHashSet::default(),
+            deferred: Some(Vec::new()),
+        }
+    }
+
+    pub(crate) fn warn(&mut self, message: String) {
+        if let Some(pending) = &mut self.deferred {
+            pending.push(message);
+        } else if self.seen.len() < 1024 && self.seen.insert(message.clone()) {
             log::warn!("{message}");
+        }
+    }
+
+    /// Logs what `other` collected and was not reported yet.
+    pub(crate) fn merge(&mut self, other: Warnings) {
+        for message in other.deferred.unwrap_or_default() {
+            self.warn(message);
         }
     }
 }
@@ -82,12 +69,7 @@ impl<'js> Reader<'_, 'js> {
         let v = self.value()?;
         v.as_int()
             .or_else(|| v.as_float().map(|f| f as i32))
-            .ok_or_else(|| Exception::throw_type(self.ctx, "nsh op buffer: expected an integer"))
-    }
-
-    #[inline]
-    fn id(&mut self) -> rquickjs::Result<NodeId> {
-        Ok(self.int()? as NodeId)
+            .ok_or_else(|| Exception::throw_type(self.ctx, "nsh/animated: expected an integer"))
     }
 
     #[inline]
@@ -95,7 +77,7 @@ impl<'js> Reader<'_, 'js> {
         let v = self.value()?;
         v.as_number()
             .map(|n| n as f32)
-            .ok_or_else(|| Exception::throw_type(self.ctx, "nsh op buffer: expected a number"))
+            .ok_or_else(|| Exception::throw_type(self.ctx, "nsh/animated: expected a number"))
     }
 
     fn numbers(&mut self) -> rquickjs::Result<Vec<f32>> {
@@ -103,7 +85,7 @@ impl<'js> Reader<'_, 'js> {
         let Some(items) = v.as_array() else {
             return Err(Exception::throw_type(
                 self.ctx,
-                "nsh op buffer: expected an array",
+                "nsh/animated: expected an array",
             ));
         };
         items.iter::<f64>().map(|v| v.map(|v| v as f32)).collect()
@@ -117,7 +99,7 @@ impl<'js> Reader<'_, 'js> {
             (_, Some(node)) => Ok(Operand::Node(node)),
             _ => Err(Exception::throw_type(
                 self.ctx,
-                "nsh op buffer: expected a number or native value",
+                "nsh/animated: expected a number or native value",
             )),
         }
     }
@@ -129,250 +111,120 @@ impl<'js> Reader<'_, 'js> {
             Some(s) => s.to_string(),
             None => Err(Exception::throw_type(
                 self.ctx,
-                "nsh op buffer: expected a string",
+                "nsh/animated: expected a string",
             )),
         }
     }
 }
 
-/// Decodes the whole buffer into `out`.
-pub(crate) fn decode<'js>(
-    ctx: &Ctx<'js>,
-    buf: &Array<'js>,
-    out: &mut Vec<Op>,
-    warnings: &mut Warnings,
-    shared: &crate::host::Shared,
-) -> rquickjs::Result<()> {
-    let len = buf.len();
-    let mut r = Reader { ctx, buf, pos: 0 };
-    while r.pos < len {
-        let op = match r.int()? {
-            OP_CREATE => {
-                let id = r.id()?;
-                let name = r.string()?;
-                let tag = Tag::from_name(&name).unwrap_or_else(|| {
-                    warnings.warn(format!("unknown element <{name}>, rendering it as <view>"));
-                    Tag::View
-                });
-                Op::Create { id, tag }
+/// Decodes an animation operation, encoded as `nsh/animated` builds it
+/// (`ANIM_*`, the node, then the operation's values).
+pub(crate) fn decode_anim_op<'js>(ctx: &Ctx<'js>, buf: &Array<'js>) -> rquickjs::Result<AnimOp> {
+    decode_anim(&mut Reader { ctx, buf, pos: 0 })
+}
+
+/// The command `name` with argument `arg` sends to a node's view (`None`:
+/// an unknown command).
+pub(crate) fn decode_command<'js>(
+    name: &str,
+    arg: Value<'js>,
+) -> rquickjs::Result<Option<Command>> {
+    Ok(Some(match name {
+        "focus" => Command::Focus,
+        "blur" => Command::Blur,
+        "reload" => Command::Reload,
+        "goBack" => Command::GoBack,
+        "goForward" => Command::GoForward,
+        "stopLoading" => Command::StopLoading,
+        "injectJavaScript" => Command::InjectJavaScript(string(&arg)?),
+        "postMessage" => Command::PostMessage(string(&arg)?),
+        "seek" => Command::Seek(arg.as_number().unwrap_or(0.0)),
+        "native" => {
+            let o = arg.as_object();
+            let name = o
+                .and_then(|o| o.get::<_, Option<String>>("name").ok().flatten())
+                .unwrap_or_default();
+            let args = match o.map(|o| o.get::<_, Value>("args")).transpose()? {
+                Some(args) => to_json(&args)?,
+                None => nsh_core::JsonValue::Null,
+            };
+            Command::Native {
+                name: name.into(),
+                args,
             }
-            OP_CREATE_TEXT => Op::CreateText {
-                id: r.id()?,
-                text: r.string()?,
-            },
-            OP_SET_TEXT => Op::SetText {
-                id: r.id()?,
-                text: r.string()?,
-            },
-            OP_SET_PROP => {
-                let id = r.id()?;
-                let name = r.string()?;
-                let value = r.value()?;
-                match decode_prop(id, &name, value, warnings)? {
-                    Some(op) => op,
-                    None => continue,
-                }
+        }
+        "setJsResponder" => Command::SetJsResponder {
+            block: arg.as_bool().unwrap_or(true),
+        },
+        "clearJsResponder" => Command::ClearJsResponder,
+        "setSelection" => {
+            let field = |key: &str| {
+                arg.as_object()
+                    .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
+                    .unwrap_or(0.0)
+                    .max(0.0) as u32
+            };
+            Command::SetSelection {
+                start: field("start"),
+                end: field("end"),
             }
-            OP_INSERT => {
-                let parent = r.id()?;
-                let child = r.id()?;
-                let before = r.id()?;
-                Op::Insert {
-                    parent,
-                    child,
-                    before: (before != 0).then_some(before),
-                }
+        }
+        "scrollToIndex" => {
+            let o = arg.as_object();
+            let f = |key: &str| -> rquickjs::Result<Option<f32>> {
+                o.map_or(Ok(None), |o| field_f32(o, key))
+            };
+            Command::ScrollToIndex {
+                index: f("index")?.unwrap_or(0.0).max(0.0) as u32,
+                animated: o
+                    .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
+                    .unwrap_or(true),
+                view_position: f("viewPosition")?.unwrap_or(0.0),
+                view_offset: f("viewOffset")?.unwrap_or(0.0),
             }
-            OP_REMOVE => Op::Remove {
-                parent: r.id()?,
-                child: r.id()?,
-            },
-            OP_RELEASE => Op::Release { id: r.id()? },
-            OP_ANIM => Op::Anim(decode_anim(&mut r)?),
-            OP_DRAW => {
-                let id = r.id()?;
-                let list = r.value()?;
-                let drawing = match list.as_array() {
-                    Some(list) if list.len() > shared.limits.max_canvas_ops => {
-                        let reason = format!(
-                            "a canvas drawing recorded {} values (limit {}) and the app was stopped",
-                            list.len(),
-                            shared.limits.max_canvas_ops
-                        );
-                        shared.stop(reason.clone());
-                        return Err(rquickjs::Exception::throw_range(ctx, &reason));
-                    }
-                    Some(list) => crate::canvas::decode(ctx, list, 0, list.len())?,
-                    None => Default::default(),
-                };
-                Op::Draw {
-                    id,
-                    drawing: Box::new(drawing),
-                }
+        }
+        "scrollToEnd" => Command::ScrollToEnd {
+            animated: arg
+                .as_object()
+                .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
+                .unwrap_or(true),
+        },
+        "layoutAnimation" => Command::LayoutAnimation(
+            <LayoutAnimation as HostValue>::decode(&Js(arg), &mut HostCx::default())
+                .unwrap_or_default(),
+        ),
+        "zoomTo" => {
+            let field = |key: &str| {
+                arg.as_object()
+                    .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
+            };
+            Command::ZoomTo {
+                scale: field("scale").unwrap_or(1.0) as f32,
+                center: field("x")
+                    .zip(field("y"))
+                    .map(|(x, y)| (x as f32, y as f32)),
+                animated: arg
+                    .as_object()
+                    .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
+                    .unwrap_or(true),
             }
-            OP_COMMAND => {
-                let id = r.id()?;
-                let name = r.string()?;
-                let arg = r.value()?;
-                let command = match name.as_str() {
-                    "focus" => Command::Focus,
-                    "blur" => Command::Blur,
-                    "exitApp" => Command::ExitApp,
-                    "reload" => Command::Reload,
-                    "goBack" => Command::GoBack,
-                    "goForward" => Command::GoForward,
-                    "stopLoading" => Command::StopLoading,
-                    "injectJavaScript" => Command::InjectJavaScript(string(&arg)?),
-                    "postMessage" => Command::PostMessage(string(&arg)?),
-                    "seek" => Command::Seek(arg.as_number().unwrap_or(0.0)),
-                    "native" => {
-                        let o = arg.as_object();
-                        let name = o
-                            .and_then(|o| o.get::<_, Option<String>>("name").ok().flatten())
-                            .unwrap_or_default();
-                        let args = match o.map(|o| o.get::<_, Value>("args")).transpose()? {
-                            Some(args) => to_json(&args)?,
-                            None => nsh_core::JsonValue::Null,
-                        };
-                        Command::Native {
-                            name: name.into(),
-                            args,
-                        }
-                    }
-                    "statusBar" => {
-                        let o = arg.as_object();
-                        let flag = |key: &str| {
-                            o.and_then(|o| o.get::<_, Option<bool>>(key).ok().flatten())
-                                .unwrap_or(false)
-                        };
-                        let text = |key: &str| {
-                            o.and_then(|o| o.get::<_, Option<String>>(key).ok().flatten())
-                        };
-                        Command::StatusBar(StatusBarConfig {
-                            style: match text("barStyle").as_deref() {
-                                Some("light-content") => StatusBarStyle::Light,
-                                Some("dark-content") => StatusBarStyle::Dark,
-                                _ => StatusBarStyle::Default,
-                            },
-                            hidden: flag("hidden"),
-                            animated: flag("animated"),
-                            background: text("backgroundColor").and_then(|c| Color::parse(&c)),
-                        })
-                    }
-                    "dialog" => Command::Dialog(Box::new(decode_dialog(&arg)?)),
-                    "setJsResponder" => Command::SetJsResponder {
-                        block: arg.as_bool().unwrap_or(true),
-                    },
-                    "clearJsResponder" => Command::ClearJsResponder,
-                    "setSelection" => {
-                        let field = |key: &str| {
-                            arg.as_object()
-                                .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
-                                .unwrap_or(0.0)
-                                .max(0.0) as u32
-                        };
-                        Command::SetSelection {
-                            start: field("start"),
-                            end: field("end"),
-                        }
-                    }
-                    "announce" => Command::Announce(
-                        arg.as_string()
-                            .map(|s| s.to_string())
-                            .transpose()?
-                            .unwrap_or_default(),
-                    ),
-                    "accessibilityFocus" => Command::AccessibilityFocus,
-                    "imageInfo" => {
-                        let o = arg.as_object();
-                        Command::ImageInfo {
-                            id: o
-                                .and_then(|o| o.get::<_, Option<u32>>("id").ok().flatten())
-                                .unwrap_or(0),
-                            uri: o
-                                .and_then(|o| o.get::<_, Option<String>>("uri").ok().flatten())
-                                .unwrap_or_default(),
-                        }
-                    }
-                    "toast" => {
-                        let o = arg.as_object();
-                        Command::Toast {
-                            text: o
-                                .and_then(|o| o.get::<_, Option<String>>("text").ok().flatten())
-                                .unwrap_or_default(),
-                            long: o
-                                .and_then(|o| o.get::<_, Option<bool>>("long").ok().flatten())
-                                .unwrap_or(false),
-                        }
-                    }
-                    "scrollToIndex" => {
-                        let o = arg.as_object();
-                        let f = |key: &str| -> rquickjs::Result<Option<f32>> {
-                            o.map_or(Ok(None), |o| field_f32(o, key))
-                        };
-                        Command::ScrollToIndex {
-                            index: f("index")?.unwrap_or(0.0).max(0.0) as u32,
-                            animated: o
-                                .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
-                                .unwrap_or(true),
-                            view_position: f("viewPosition")?.unwrap_or(0.0),
-                            view_offset: f("viewOffset")?.unwrap_or(0.0),
-                        }
-                    }
-                    "scrollToEnd" => Command::ScrollToEnd {
-                        animated: arg
-                            .as_object()
-                            .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
-                            .unwrap_or(true),
-                    },
-                    "layoutAnimation" => Command::LayoutAnimation(decode_layout_animation(&arg)?),
-                    "zoomTo" => {
-                        let field = |key: &str| {
-                            arg.as_object()
-                                .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
-                        };
-                        Command::ZoomTo {
-                            scale: field("scale").unwrap_or(1.0) as f32,
-                            center: field("x")
-                                .zip(field("y"))
-                                .map(|(x, y)| (x as f32, y as f32)),
-                            animated: arg
-                                .as_object()
-                                .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
-                                .unwrap_or(true),
-                        }
-                    }
-                    "scrollTo" => {
-                        let field = |key: &str| {
-                            arg.as_object()
-                                .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
-                        };
-                        Command::ScrollTo {
-                            x: field("x").unwrap_or(0.0) as f32,
-                            y: field("y").unwrap_or(0.0) as f32,
-                            animated: arg
-                                .as_object()
-                                .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
-                                .unwrap_or(true),
-                        }
-                    }
-                    other => {
-                        warnings.warn(format!("unknown command `{other}`"));
-                        continue;
-                    }
-                };
-                Op::Command { id, command }
+        }
+        "scrollTo" => {
+            let field = |key: &str| {
+                arg.as_object()
+                    .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
+            };
+            Command::ScrollTo {
+                x: field("x").unwrap_or(0.0) as f32,
+                y: field("y").unwrap_or(0.0) as f32,
+                animated: arg
+                    .as_object()
+                    .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
+                    .unwrap_or(true),
             }
-            other => {
-                return Err(Exception::throw_type(
-                    ctx,
-                    &format!("nsh op buffer: unknown opcode {other}"),
-                ));
-            }
-        };
-        out.push(op);
-    }
-    Ok(())
+        }
+        _ => return Ok(None),
+    }))
 }
 
 /// Reads the node id of a native value object (`{ __nv: id }`).
@@ -396,184 +248,88 @@ fn string(value: &Value<'_>) -> rquickjs::Result<String> {
     }
 }
 
-/// A string prop; `null` / `undefined` / `""` are `None`.
-fn opt_string(value: &Value<'_>) -> rquickjs::Result<Option<std::sync::Arc<str>>> {
-    Ok(match value.as_string() {
-        Some(s) => {
-            let s = s.to_string()?;
-            (!s.is_empty()).then(|| s.into())
-        }
-        None => None,
-    })
-}
-
-/// The native value in field `key` of an object prop (`pinch={{ scale }}`).
-fn field_value(value: &Value<'_>, key: &str) -> Option<nsh_anim::NodeId> {
-    value
-        .as_object()
-        .and_then(|o| o.get::<_, Value>(key).ok())
-        .and_then(|v| native_value(&v))
-}
-
 fn field_f32(obj: &Object<'_>, key: &str) -> rquickjs::Result<Option<f32>> {
     Ok(obj.get::<_, Option<f64>>(key)?.map(|v| v as f32))
 }
 
-/// A list's `contentContainerStyle`: the padding properties (numbers) and
-/// `gap` / `rowGap` / `columnGap`.
-fn list_content(value: &Value<'_>) -> rquickjs::Result<ListContentStyle> {
-    let Some(o) = value.as_object() else {
-        return Ok(ListContentStyle::default());
-    };
-    let all = field_f32(o, "padding")?.unwrap_or(0.0);
-    let horizontal = field_f32(o, "paddingHorizontal")?.unwrap_or(all);
-    let vertical = field_f32(o, "paddingVertical")?.unwrap_or(all);
-    let gap = field_f32(o, "gap")?.unwrap_or(0.0);
-    Ok(ListContentStyle {
-        padding: EdgeInsets {
-            top: field_f32(o, "paddingTop")?.unwrap_or(vertical),
-            right: field_f32(o, "paddingRight")?.unwrap_or(horizontal),
-            bottom: field_f32(o, "paddingBottom")?.unwrap_or(vertical),
-            left: field_f32(o, "paddingLeft")?.unwrap_or(horizontal),
-        },
-        row_gap: field_f32(o, "rowGap")?.unwrap_or(gap),
-        column_gap: field_f32(o, "columnGap")?.unwrap_or(gap),
-    })
+/// A QuickJS value as host props read it.
+struct Js<'js>(Value<'js>);
+
+/// A QuickJS array, read by index.
+struct JsList<'js>(Array<'js>);
+
+impl<'js> HostList for JsList<'js> {
+    type Item = Js<'js>;
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[inline]
+    fn item(&self, index: usize) -> Option<Js<'js>> {
+        self.0.get::<Value>(index).ok().map(Js)
+    }
 }
 
-/// `{ top, right, bottom, left }` (missing edges are 0).
-fn insets(value: &Value<'_>) -> rquickjs::Result<EdgeInsets> {
-    let Some(o) = value.as_object() else {
-        return Ok(EdgeInsets::default());
-    };
-    Ok(EdgeInsets {
-        top: field_f32(o, "top")?.unwrap_or(0.0),
-        right: field_f32(o, "right")?.unwrap_or(0.0),
-        bottom: field_f32(o, "bottom")?.unwrap_or(0.0),
-        left: field_f32(o, "left")?.unwrap_or(0.0),
-    })
-}
+impl<'js> HostInput for Js<'js> {
+    #[inline]
+    fn is_nullish(&self) -> bool {
+        self.0.is_null() || self.0.is_undefined()
+    }
 
-fn a11y_state(value: &Value<'_>) -> rquickjs::Result<AccessibilityState> {
-    let Some(o) = value.as_object() else {
-        return Ok(AccessibilityState::default());
-    };
-    let flag = |key: &str| -> rquickjs::Result<bool> {
-        Ok(o.get::<_, Option<bool>>(key)
-            .ok()
-            .flatten()
-            .unwrap_or(false))
-    };
-    let checked: Value = o.get("checked")?;
-    Ok(AccessibilityState {
-        disabled: flag("disabled")?,
-        selected: flag("selected")?,
-        checked: match checked.as_bool() {
-            Some(true) => Some(Checked::True),
-            Some(false) => Some(Checked::False),
-            None if checked
-                .as_string()
-                .and_then(|s| s.to_string().ok())
-                .as_deref()
-                == Some("mixed") =>
-            {
-                Some(Checked::Mixed)
-            }
-            None => None,
-        },
-        busy: flag("busy")?,
-        expanded: o.get::<_, Option<bool>>("expanded").ok().flatten(),
-    })
-}
+    #[inline]
+    fn is_object(&self) -> bool {
+        self.0.is_object()
+    }
 
-fn a11y_value(value: &Value<'_>) -> rquickjs::Result<Option<AccessibilityValue>> {
-    let Some(o) = value.as_object() else {
-        return Ok(None);
-    };
-    let text: Value = o.get("text")?;
-    Ok(Some(AccessibilityValue {
-        min: field_f32(o, "min")?,
-        max: field_f32(o, "max")?,
-        now: field_f32(o, "now")?,
-        text: opt_string(&text)?,
-    }))
-}
+    #[inline]
+    fn as_bool(&self) -> Option<bool> {
+        self.0.as_bool()
+    }
 
-fn a11y_actions(value: &Value<'_>) -> rquickjs::Result<Vec<AccessibilityActionDef>> {
-    let Some(items) = value.as_array() else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::with_capacity(items.len());
-    for item in items.iter::<Object>() {
-        let item = item?;
-        let name: Value = item.get("name")?;
-        let label: Value = item.get("label")?;
-        if let Some(name) = opt_string(&name)? {
-            out.push(AccessibilityActionDef {
-                name,
-                label: opt_string(&label)?,
-            });
+    #[inline]
+    fn as_number(&self) -> Option<f64> {
+        self.0.as_number()
+    }
+
+    #[inline]
+    fn as_string(&self) -> Option<String> {
+        self.0.as_string().and_then(|s| s.to_string().ok())
+    }
+
+    fn field(&self, key: &str) -> Option<Self> {
+        let value: Value = self.0.as_object()?.get(key).ok()?;
+        (!value.is_undefined()).then_some(Js(value))
+    }
+
+    type List = JsList<'js>;
+
+    #[inline]
+    fn as_list(&self) -> Option<JsList<'js>> {
+        self.0.as_array().cloned().map(JsList)
+    }
+
+    fn entries(&self) -> Vec<(String, Self)> {
+        match self.0.as_object() {
+            Some(o) => o
+                .props::<String, Value>()
+                .filter_map(|e| e.ok())
+                .map(|(k, v)| (k, Js(v)))
+                .collect(),
+            None => Vec::new(),
         }
     }
-    Ok(out)
+
+    #[inline]
+    fn truthy(&self) -> bool {
+        truthy(&self.0)
+    }
 }
 
-/// `LayoutAnimation.configureNext(config)`: `{ duration, create, update,
-/// delete }`, each part `{ type, property, duration, delay, springDamping }`.
-fn decode_layout_animation(config: &Value<'_>) -> rquickjs::Result<LayoutAnimation> {
-    let Some(c) = config.as_object() else {
-        return Ok(LayoutAnimation {
-            create: None,
-            update: None,
-            delete: None,
-        });
-    };
-    let duration = field_f32(c, "duration")?.unwrap_or(300.0);
-    let part = |key: &str,
-                default_property: LayoutProperty|
-     -> rquickjs::Result<Option<LayoutTransition>> {
-        let Some(p) = c.get::<_, Option<Object>>(key)? else {
-            return Ok(None);
-        };
-        let kind: Option<String> = p.get("type")?;
-        let property: Option<String> = p.get("property")?;
-        Ok(Some(LayoutTransition {
-            curve: match kind.as_deref() {
-                Some("linear") => LayoutCurve::Linear,
-                Some("easeIn") => LayoutCurve::EaseIn,
-                Some("easeOut") => LayoutCurve::EaseOut,
-                Some("spring") => LayoutCurve::Spring {
-                    damping: field_f32(&p, "springDamping")?
-                        .unwrap_or(0.7)
-                        .clamp(0.01, 1.0),
-                },
-                _ => LayoutCurve::EaseInEaseOut,
-            },
-            property: match property.as_deref() {
-                Some("scaleXY") | Some("scale") => LayoutProperty::Scale,
-                Some("opacity") => LayoutProperty::Opacity,
-                _ => default_property,
-            },
-            duration_ms: field_f32(&p, "duration")?.unwrap_or(duration),
-            delay_ms: field_f32(&p, "delay")?.unwrap_or(0.0),
-        }))
-    };
-    Ok(LayoutAnimation {
-        create: part("create", LayoutProperty::Opacity)?,
-        update: part("update", LayoutProperty::Opacity)?,
-        delete: part("delete", LayoutProperty::Opacity)?,
-    })
-}
-
-fn prop_color(value: &Value<'_>) -> rquickjs::Result<Option<Color>> {
-    Ok(value
-        .as_string()
-        .map(|s| s.to_string())
-        .transpose()?
-        .and_then(|s| Color::parse(&s)))
-}
-
-fn decode_prop<'js>(
+/// The op setting prop `name` to `value`: a style, a registered native
+/// component's prop, one of the core's host props or an event listener.
+pub(crate) fn decode_prop<'js>(
     id: NodeId,
     name: &str,
     value: Value<'js>,
@@ -591,538 +347,32 @@ fn decode_prop<'js>(
             prop: Prop::ComponentProp(key.into(), value),
         }));
     }
-    let prop = match name {
-        "component" => Prop::Component(string(&value)?.into()),
-        "style" => {
-            let mut entries = Vec::new();
-            style_entries(&value, &mut entries)?;
-            let (style, patch) = decode_style(entries, warnings)?;
-            return Ok(Some(Op::SetStyle { id, style, patch }));
-        }
-        "src" => Prop::Source(decode_source(&value)?),
-        "defaultSource" => Prop::Image(ImageProp::DefaultSource(decode_source(&value)?)),
-        "blurRadius" => Prop::Image(ImageProp::BlurRadius(number(&value).unwrap_or(0.0))),
-        "fadeDuration" => Prop::Image(ImageProp::FadeDuration(
-            number(&value).map(|ms| ms.max(0.0)),
-        )),
-        "resizeMode" => Prop::ResizeMode(
-            match value
-                .as_string()
-                .map(|s| s.to_string())
-                .transpose()?
-                .as_deref()
-            {
-                Some("contain") => ResizeMode::Contain,
-                Some("stretch") => ResizeMode::Stretch,
-                Some("center") => ResizeMode::Center,
-                _ => ResizeMode::Cover,
-            },
-        ),
-        "horizontal" => Prop::Horizontal(value.as_bool().unwrap_or(false)),
-        "showsIndicator" => Prop::ShowsIndicator(value.as_bool().unwrap_or(true)),
-        "refreshing" => Prop::Refreshing(value.as_bool().unwrap_or(false)),
-        "count" => Prop::Count(number(&value).unwrap_or(0.0).max(0.0) as u32),
-        "estimatedItemSize" => Prop::EstimatedItemSize(number(&value).unwrap_or(50.0)),
-        "slot" => Prop::Slot(match value.as_string() {
-            Some(role) => match role.to_string()?.as_str() {
-                "header" => CellSlot::Header,
-                "footer" => CellSlot::Footer,
-                _ => CellSlot::Empty,
-            },
-            None => CellSlot::Item(number(&value).unwrap_or(0.0) as u32),
-        }),
-        "splice" => {
-            let at = |i: u32| {
-                value
-                    .as_array()
-                    .and_then(|a| a.get::<f64>(i as usize).ok())
-                    .unwrap_or(0.0)
-                    .max(0.0) as u32
-            };
-            Prop::Splice(at(0), at(1), at(2))
-        }
-        "numColumns" => Prop::Columns(number(&value).unwrap_or(1.0).max(1.0) as u32),
-        "inverted" => Prop::Inverted(value.as_bool().unwrap_or(false)),
-        "stickyHeaderIndices" => Prop::StickyIndices(match value.as_array() {
-            Some(a) => a
-                .iter::<f64>()
-                .filter_map(|v| v.ok())
-                .filter(|v| *v >= 0.0)
-                .map(|v| v as u32)
-                .collect(),
-            None => Vec::new(),
-        }),
-        "contentContainerStyle" => Prop::ListContent(list_content(&value)?),
-        "viewabilityConfig" => Prop::Viewability(match value.as_object() {
-            Some(o) => Viewability {
-                view_area_percent: field_f32(o, "viewAreaCoveragePercentThreshold")?,
-                item_visible_percent: field_f32(o, "itemVisiblePercentThreshold")?,
-            },
-            None => Viewability::default(),
-        }),
-        "endReachedThreshold" => Prop::EndReachedThreshold(number(&value).unwrap_or(1.0)),
-        "value" => Prop::Value(string(&value)?),
-        "disabled" => Prop::Native(NativeProp::Disabled(value.as_bool().unwrap_or(false))),
-        "source" => Prop::Native(NativeProp::Source(web_source(&value)?)),
-        "injectedJavaScript" => Prop::Native(NativeProp::InjectedJavaScript(opt_string(&value)?)),
-        "injectedJavaScriptBeforeContentLoaded" => {
-            Prop::Native(NativeProp::InjectedJavaScriptBefore(opt_string(&value)?))
-        }
-        "userAgent" => Prop::Native(NativeProp::UserAgent(opt_string(&value)?)),
-        "scrollEnabled" => Prop::Native(NativeProp::ScrollEnabled(value.as_bool().unwrap_or(true))),
-        "javaScriptEnabled" => Prop::Native(NativeProp::JavaScriptEnabled(
-            value.as_bool().unwrap_or(true),
-        )),
-        "allowsBackForwardNavigationGestures" => Prop::Native(NativeProp::BackForwardGestures(
-            value.as_bool().unwrap_or(false),
-        )),
-        "paused" => Prop::Native(NativeProp::Paused(value.as_bool().unwrap_or(false))),
-        "muted" => Prop::Native(NativeProp::Muted(value.as_bool().unwrap_or(false))),
-        "volume" => Prop::Native(NativeProp::Volume(number(&value).unwrap_or(1.0))),
-        "rate" => Prop::Native(NativeProp::Rate(number(&value).unwrap_or(1.0))),
-        "repeat" => Prop::Native(NativeProp::Repeat(value.as_bool().unwrap_or(false))),
-        "controls" => Prop::Native(NativeProp::Controls(value.as_bool().unwrap_or(false))),
-        "progressUpdateInterval" => Prop::Native(NativeProp::ProgressInterval(
-            number(&value).unwrap_or(250.0),
-        )),
-        "defaultValue" => Prop::DefaultValue(string(&value)?),
-        "placeholder" => Prop::Placeholder(string(&value)?),
-        "placeholderTextColor" => Prop::PlaceholderColor(prop_color(&value)?),
-        "selectionColor" => Prop::SelectionColor(prop_color(&value)?),
-        "autoComplete" | "textContentType" => match value.as_string() {
-            Some(s) => {
-                let text = s.to_string()?;
-                match AutoFill::parse(&text) {
-                    Some(fill) => Prop::AutoFill(fill),
-                    None => {
-                        log::warn!("{text:?} is not a supported {name} value");
-                        Prop::AutoFill(AutoFill::Default)
-                    }
-                }
-            }
-            None => Prop::AutoFill(AutoFill::Default),
-        },
-        "selection" => {
-            let field = |key: &str| {
-                value
-                    .as_object()
-                    .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
-            };
-            match field("start") {
-                Some(start) => {
-                    let start = start.max(0.0) as u32;
-                    Prop::Selection(start, field("end").map_or(start, |e| e.max(0.0) as u32))
-                }
-                None => return Ok(None),
-            }
-        }
-        "secureTextEntry" => Prop::Secure(value.as_bool().unwrap_or(false)),
-        "autoCorrect" => Prop::AutoCorrect(value.as_bool().unwrap_or(true)),
-        "multiline" => Prop::Multiline(value.as_bool().unwrap_or(false)),
-        "editable" => Prop::Editable(value.as_bool().unwrap_or(true)),
-        "blurOnSubmit" => Prop::BlurOnSubmit(value.as_bool().unwrap_or(true)),
-        "autoFocus" => Prop::AutoFocus(value.as_bool().unwrap_or(false)),
-        "caretHidden" => Prop::CaretHidden(value.as_bool().unwrap_or(false)),
-        "inputAccessoryViewID" => {
-            Prop::InputAccessoryViewId(opt_string(&value)?.map(|s| (*s).into()))
-        }
-        "nativeID" => Prop::NativeId(opt_string(&value)?.map(|s| (*s).into())),
-        "maxLength" => Prop::MaxLength(number(&value).map(|n| n.max(0.0) as u32)),
-        "keyboardType" => Prop::KeyboardType(match string(&value)?.as_str() {
-            "number-pad" | "numeric" => KeyboardType::Number,
-            "decimal-pad" => KeyboardType::Decimal,
-            "email-address" => KeyboardType::Email,
-            "phone-pad" => KeyboardType::Phone,
-            "url" => KeyboardType::Url,
-            _ => KeyboardType::Default,
-        }),
-        "returnKeyType" => Prop::ReturnKeyType(match string(&value)?.as_str() {
-            "done" => ReturnKeyType::Done,
-            "go" => ReturnKeyType::Go,
-            "next" => ReturnKeyType::Next,
-            "search" => ReturnKeyType::Search,
-            "send" => ReturnKeyType::Send,
-            _ => ReturnKeyType::Default,
-        }),
-        "autoCapitalize" => Prop::AutoCapitalize(match string(&value)?.as_str() {
-            "none" => AutoCapitalize::None,
-            "words" => AutoCapitalize::Words,
-            "characters" => AutoCapitalize::Characters,
-            _ => AutoCapitalize::Sentences,
-        }),
-        "keyboardDismissMode" => Prop::KeyboardDismissMode(match string(&value)?.as_str() {
-            "on-drag" => KeyboardDismissMode::OnDrag,
-            "interactive" => KeyboardDismissMode::Interactive,
-            _ => KeyboardDismissMode::None,
-        }),
-        "selectable" => Prop::Selectable(value.as_bool().unwrap_or(false)),
-        "adjustsFontSizeToFit" => Prop::AdjustsFontSizeToFit(value.as_bool().unwrap_or(false)),
-        "minimumFontScale" => Prop::MinimumFontScale(number(&value).unwrap_or(0.0).clamp(0.0, 1.0)),
-        "numberOfLines" => Prop::NumberOfLines(number(&value).unwrap_or(0.0).max(0.0) as u32),
-        "ellipsizeMode" => Prop::EllipsizeMode(
-            match value
-                .as_string()
-                .map(|s| s.to_string())
-                .transpose()?
-                .as_deref()
-            {
-                Some("head") => EllipsizeMode::Head,
-                Some("middle") => EllipsizeMode::Middle,
-                Some("clip") => EllipsizeMode::Clip,
-                _ => EllipsizeMode::Tail,
-            },
-        ),
-        "cellIndex" => Prop::CellIndex(number(&value).unwrap_or(0.0) as u32),
-        "title" => Prop::Screen(ScreenProp::Title(opt_string(&value)?)),
-        "headerShown" => Prop::Screen(ScreenProp::HeaderShown(value.as_bool().unwrap_or(true))),
-        "headerLargeTitle" => Prop::Screen(ScreenProp::HeaderLargeTitle(
-            value.as_bool().unwrap_or(false),
-        )),
-        "headerTransparent" => Prop::Screen(ScreenProp::HeaderTransparent(
-            value.as_bool().unwrap_or(false),
-        )),
-        "headerTintColor" => Prop::Screen(ScreenProp::HeaderTintColor(prop_color(&value)?)),
-        "headerBackgroundColor" => {
-            Prop::Screen(ScreenProp::HeaderBackgroundColor(prop_color(&value)?))
-        }
-        "headerTitleColor" => Prop::Screen(ScreenProp::HeaderTitleColor(prop_color(&value)?)),
-        "headerBackTitle" => Prop::Screen(ScreenProp::HeaderBackTitle(opt_string(&value)?)),
-        "headerBackVisible" => Prop::Screen(ScreenProp::HeaderBackVisible(
-            value.as_bool().unwrap_or(true),
-        )),
-        "gestureEnabled" => {
-            Prop::Screen(ScreenProp::GestureEnabled(value.as_bool().unwrap_or(true)))
-        }
-        "preventBack" => Prop::Screen(ScreenProp::PreventBack(value.as_bool().unwrap_or(false))),
-        "dismissible" => Prop::Modal(ModalProp::Dismissible(value.as_bool().unwrap_or(false))),
-        "animation" => Prop::Screen(ScreenProp::Animation(match string(&value)?.as_str() {
-            "fade" => ScreenAnimation::Fade,
-            "none" => ScreenAnimation::None,
-            _ => ScreenAnimation::Default,
-        })),
-        "animationType" => Prop::Modal(ModalProp::Animation(match string(&value)?.as_str() {
-            "fade" => ModalAnimation::Fade,
-            "none" => ModalAnimation::None,
-            _ => ModalAnimation::Slide,
-        })),
-        "presentationStyle" => {
-            Prop::Modal(ModalProp::Presentation(match string(&value)?.as_str() {
-                "pageSheet" => ModalPresentation::PageSheet,
-                "formSheet" => ModalPresentation::FormSheet,
-                _ => ModalPresentation::FullScreen,
-            }))
-        }
-        "transparent" => Prop::Modal(ModalProp::Transparent(value.as_bool().unwrap_or(false))),
-        "statusBarTranslucent" => Prop::Modal(ModalProp::StatusBarTranslucent(
-            value.as_bool().unwrap_or(false),
-        )),
-        "supportedOrientations" => Prop::Modal(ModalProp::Orientations({
-            let mut bits = 0;
-            if let Some(list) = value.as_array() {
-                for name in list.iter::<String>() {
-                    bits |= match name?.as_str() {
-                        "portrait" => ModalConfig::PORTRAIT,
-                        "portrait-upside-down" => ModalConfig::PORTRAIT_UPSIDE_DOWN,
-                        "landscape" => ModalConfig::LANDSCAPE_LEFT | ModalConfig::LANDSCAPE_RIGHT,
-                        "landscape-left" => ModalConfig::LANDSCAPE_LEFT,
-                        "landscape-right" => ModalConfig::LANDSCAPE_RIGHT,
-                        _ => 0,
-                    };
-                }
-            }
-            bits
-        })),
-        "headerSlot" => Prop::HeaderSlot(match string(&value)?.as_str() {
-            "right" => HeaderSlot::Right,
-            "title" => HeaderSlot::Title,
-            _ => HeaderSlot::Left,
-        }),
-        "pointerEvents" => Prop::PointerEvents(match string(&value)?.as_str() {
-            "none" => PointerEvents::None,
-            "box-none" => PointerEvents::BoxNone,
-            "box-only" => PointerEvents::BoxOnly,
-            _ => PointerEvents::Auto,
-        }),
-        "hitSlop" => Prop::HitSlop(match number(&value) {
-            Some(n) => EdgeInsets::all(n),
-            None => insets(&value)?,
-        }),
-        "activeOpacity" => Prop::ActiveOpacity(number(&value).map(|n| n.clamp(0.0, 1.0))),
-        "underlayColor" => Prop::UnderlayColor(prop_color(&value)?),
-        "underlayOpacity" => Prop::UnderlayOpacity(
-            number(&value).map_or(nsh_core::UNDERLAY_OPACITY, |n| n.clamp(0.0, 1.0)),
-        ),
-        "insetPadding" => Prop::InsetPadding(insets(&value)?),
-        "insetMargin" => Prop::InsetMargin(insets(&value)?),
-        "layoutDirectionRtl" => Prop::LayoutDirection(value.as_bool().unwrap_or(false)),
-        "class" => Prop::Class(match value.as_string() {
-            Some(s) => s.to_string()?.into(),
-            None => "".into(),
-        }),
-        // `{ "bg-red-500": hasError() }`: the names whose value is truthy.
-        "classList" => Prop::ClassList(match value.as_object() {
-            Some(o) => {
-                let mut names = Vec::new();
-                for entry in o.props::<String, Value>() {
-                    let (name, on) = entry?;
-                    if truthy(&on) {
-                        names.push(name.into());
-                    }
-                }
-                names
-            }
-            None => Vec::new(),
-        }),
-        "tailwindTheme" => match value.as_string() {
-            Some(s) => Prop::TailwindTheme(s.to_string()?.into()),
-            None => return Ok(None),
-        },
-        "elevation" => Prop::Elevation(number(&value).unwrap_or(0.0)),
-        "delayLongPress" => Prop::LongPressDelay(number(&value).map(|n| n.max(0.0))),
-        "ripple" => Prop::Ripple(match value.as_object() {
-            Some(o) => {
-                let flag = |key: &str| {
-                    o.get::<_, Option<bool>>(key)
-                        .ok()
-                        .flatten()
-                        .unwrap_or(false)
-                };
-                Some(nsh_core::Ripple {
-                    color: match o.get::<_, Option<String>>("color").ok().flatten() {
-                        Some(c) => Some(Color::parse(&c).ok_or_else(|| {
-                            rquickjs::Error::new_from_js_message(
-                                "value",
-                                "color",
-                                format!("invalid color {c:?}"),
-                            )
-                        })?),
-                        None => None,
-                    },
-                    borderless: flag("borderless"),
-                    radius: o
-                        .get::<_, Option<f64>>("radius")
-                        .ok()
-                        .flatten()
-                        .map(|r| r as f32),
-                    foreground: flag("foreground"),
-                })
-            }
-            None => None,
-        }),
-        "testID" => Prop::TestId(opt_string(&value)?),
-        "allowFontScaling" => Prop::AllowFontScaling(value.as_bool().unwrap_or(true)),
-        "maxFontSizeMultiplier" => {
-            Prop::MaxFontSizeMultiplier(number(&value).unwrap_or(0.0).max(0.0))
-        }
-        "pinch" => Prop::PinchValue(field_value(&value, "scale")),
-        "rotation" => Prop::RotationValue(field_value(&value, "angle")),
-        "accessible" => Prop::Accessibility(AccessibilityProp::Accessible(value.as_bool())),
-        "accessibilityLabel" => Prop::Accessibility(AccessibilityProp::Label(opt_string(&value)?)),
-        "accessibilityHint" => Prop::Accessibility(AccessibilityProp::Hint(opt_string(&value)?)),
-        "accessibilityRole" | "role" => {
-            let name = string(&value)?;
-            Prop::Accessibility(AccessibilityProp::Role(
-                AccessibilityRole::parse(&name).unwrap_or_else(|| {
-                    if !name.is_empty() {
-                        warnings.warn(format!("unknown accessibilityRole `{name}`"));
-                    }
-                    AccessibilityRole::None
-                }),
-            ))
-        }
-        "accessibilityState" => Prop::Accessibility(AccessibilityProp::State(a11y_state(&value)?)),
-        "accessibilityValue" => Prop::Accessibility(AccessibilityProp::Value(a11y_value(&value)?)),
-        "accessibilityElementsHidden" => {
-            Prop::Accessibility(AccessibilityProp::Hidden(value.as_bool().unwrap_or(false)))
-        }
-        "importantForAccessibility" => Prop::Accessibility(match string(&value)?.as_str() {
-            "yes" => AccessibilityProp::Important(Some(true), false),
-            "no" => AccessibilityProp::Important(Some(false), false),
-            "no-hide-descendants" => AccessibilityProp::Important(Some(false), true),
-            _ => AccessibilityProp::Important(None, false),
-        }),
-        "accessibilityLiveRegion" => Prop::Accessibility(AccessibilityProp::LiveRegion(
-            match string(&value)?.as_str() {
-                "polite" => LiveRegion::Polite,
-                "assertive" => LiveRegion::Assertive,
-                _ => LiveRegion::None,
-            },
-        )),
-        "accessibilityActions" => {
-            Prop::Accessibility(AccessibilityProp::Actions(a11y_actions(&value)?))
-        }
-        "scrollValue" => Prop::ScrollValue(native_value(&value)),
-        "pagingEnabled" => Prop::Scroll(ScrollProp::Paging(value.as_bool().unwrap_or(false))),
-        "snapToInterval" => Prop::Scroll(ScrollProp::SnapInterval(number(&value).unwrap_or(0.0))),
-        "snapToOffsets" => Prop::Scroll(ScrollProp::SnapOffsets(match value.as_array() {
-            Some(a) => a
-                .iter::<f64>()
-                .filter_map(|v| v.ok())
-                .map(|v| v as f32)
-                .collect(),
-            None => Vec::new(),
-        })),
-        "snapToAlignment" => {
-            Prop::Scroll(ScrollProp::SnapAlignment(match string(&value)?.as_str() {
-                "center" => SnapAlignment::Center,
-                "end" => SnapAlignment::End,
-                _ => SnapAlignment::Start,
-            }))
-        }
-        // React Native's iOS rates: velocity kept per millisecond.
-        "decelerationRate" => Prop::Scroll(ScrollProp::Deceleration(match value.as_string() {
-            Some(s) => match s.to_string()?.as_str() {
-                "fast" => 0.99,
-                "normal" => 0.998,
-                _ => 0.0,
-            },
-            None => number(&value).unwrap_or(0.0),
-        })),
-        "bounces" => Prop::Scroll(ScrollProp::Bounces(value.as_bool().unwrap_or(true))),
-        "disableIntervalMomentum" => Prop::Scroll(ScrollProp::DisableIntervalMomentum(
-            value.as_bool().unwrap_or(false),
-        )),
-        "minimumZoomScale" => Prop::Scroll(ScrollProp::MinZoom(number(&value).unwrap_or(1.0))),
-        "maximumZoomScale" => Prop::Scroll(ScrollProp::MaxZoom(number(&value).unwrap_or(1.0))),
-        "zoomScale" => Prop::Scroll(ScrollProp::Zoom(number(&value).unwrap_or(1.0))),
-        "bouncesZoom" => Prop::Scroll(ScrollProp::BouncesZoom(value.as_bool().unwrap_or(true))),
-        "pinchGestureEnabled" => Prop::Scroll(ScrollProp::Pinch(value.as_bool().unwrap_or(true))),
-        "centerContent" => {
-            Prop::Scroll(ScrollProp::CenterContent(value.as_bool().unwrap_or(false)))
-        }
-        "contentInset" => Prop::Scroll(ScrollProp::ContentInset(insets(&value)?)),
-        "contentOffset" => {
-            let field = |key: &str| {
-                value
-                    .as_object()
-                    .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
-                    .unwrap_or(0.0) as f32
-            };
-            Prop::Scroll(ScrollProp::ContentOffset(field("x"), field("y")))
-        }
-        "keyboardShouldPersistTaps" => {
-            Prop::Scroll(ScrollProp::KeyboardTaps(match value.as_bool() {
-                Some(true) => KeyboardTaps::Always,
-                Some(false) => KeyboardTaps::Never,
-                None => match string(&value)?.as_str() {
-                    "always" => KeyboardTaps::Always,
-                    "handled" => KeyboardTaps::Handled,
-                    _ => KeyboardTaps::Never,
-                },
-            }))
-        }
-        "scrollEventThrottle" => {
-            Prop::Scroll(ScrollProp::EventThrottle(number(&value).unwrap_or(0.0)))
-        }
-        "pan" => {
-            let axis = |key: &str| {
-                value
-                    .as_object()
-                    .and_then(|o| o.get::<_, Value>(key).ok())
-                    .and_then(|v| native_value(&v))
-            };
-            Prop::PanValues(axis("x"), axis("y"))
-        }
-        _ => {
+    if name == "style" {
+        let mut entries = Vec::new();
+        style_entries(&value, &mut entries)?;
+        let (style, patch) = decode_style(entries, warnings)?;
+        return Ok(Some(Op::SetStyle { id, style, patch }));
+    }
+    let mut cx = HostCx::default();
+    let input = Js(value);
+    let decoded = <Prop as HostProps>::decode(name, &input, &mut cx);
+    for message in cx.warnings {
+        warnings.warn(message);
+    }
+    match decoded {
+        Some(prop) => Ok(prop.map(|prop| Op::SetProp { id, prop })),
+        None => {
             if let Some(event) = EventKind::from_prop(name) {
                 return Ok(Some(Op::Listen {
                     id,
                     event,
-                    enabled: value.as_bool().unwrap_or(false),
+                    enabled: input.0.as_bool().unwrap_or(false),
                 }));
             }
             warnings.warn(format!("unsupported prop `{name}`"));
-            return Ok(None);
-        }
-    };
-    Ok(Some(Op::SetProp { id, prop }))
-}
-
-/// A web view / video `source`: `"https://…"`, `{ uri }` or
-/// `{ html, baseUrl }`.
-fn web_source(value: &Value<'_>) -> rquickjs::Result<WebSource> {
-    if let Some(s) = value.as_string() {
-        return Ok(WebSource::Uri(s.to_string()?.into()));
-    }
-    let Some(o) = value.as_object() else {
-        return Ok(WebSource::None);
-    };
-    if let Some(html) = o.get::<_, Option<String>>("html")? {
-        let base: Value = o.get("baseUrl")?;
-        return Ok(WebSource::Html {
-            html: html.into(),
-            base_url: opt_string(&base)?,
-        });
-    }
-    Ok(match o.get::<_, Option<String>>("uri")? {
-        Some(uri) => WebSource::Uri(uri.into()),
-        None => WebSource::None,
-    })
-}
-
-/// `"https://…"` or a bundled asset `{ uri, width, height }`.
-fn decode_source(value: &Value<'_>) -> rquickjs::Result<Option<ImageSource>> {
-    if let Some(s) = value.as_string() {
-        let uri = s.to_string()?;
-        return Ok((!uri.is_empty()).then(|| ImageSource {
-            uri: uri.into(),
-            size: None,
-        }));
-    }
-    let Some(obj) = value.as_object() else {
-        return Ok(None);
-    };
-    let Some(uri) = obj.get::<_, Option<String>>("uri")? else {
-        return Ok(None);
-    };
-    let size = match (
-        obj.get::<_, Option<f64>>("width")?,
-        obj.get::<_, Option<f64>>("height")?,
-    ) {
-        (Some(w), Some(h)) => Some((w as f32, h as f32)),
-        _ => None,
-    };
-    Ok(Some(ImageSource {
-        uri: uri.into(),
-        size,
-    }))
-}
-
-/// `{ id, title, message, buttons: [{ text, style }], cancelable, sheet }`.
-fn decode_dialog(arg: &Value<'_>) -> rquickjs::Result<Dialog> {
-    let Some(o) = arg.as_object() else {
-        return Ok(Dialog {
-            id: 0,
-            title: None,
-            message: None,
-            buttons: Vec::new(),
-            cancelable: true,
-            sheet: false,
-        });
-    };
-    let text = |key: &str| o.get::<_, Option<String>>(key).ok().flatten();
-    let mut buttons = Vec::new();
-    if let Some(items) = o.get::<_, Option<rquickjs::Array>>("buttons")? {
-        for item in items.iter::<Object>() {
-            let item = item?;
-            buttons.push(DialogButton {
-                text: item.get::<_, Option<String>>("text")?.unwrap_or_default(),
-                style: match item.get::<_, Option<String>>("style")?.as_deref() {
-                    Some("cancel") => DialogButtonStyle::Cancel,
-                    Some("destructive") => DialogButtonStyle::Destructive,
-                    _ => DialogButtonStyle::Default,
-                },
-            });
+            Ok(None)
         }
     }
-    Ok(Dialog {
-        id: o.get::<_, Option<f64>>("id")?.unwrap_or(0.0) as u32,
-        title: text("title"),
-        message: text("message"),
-        buttons,
-        cancelable: o.get::<_, Option<bool>>("cancelable")?.unwrap_or(true),
-        sheet: o.get::<_, Option<bool>>("sheet")?.unwrap_or(false),
-    })
 }
 
 /// The properties of a style: an object, or (React Native style) an array
@@ -1344,7 +594,7 @@ fn decode_anim(r: &mut Reader<'_, '_>) -> rquickjs::Result<AnimOp> {
                 output,
                 extrapolate_left,
                 extrapolate_right,
-                easing: decode_easing(&easing, Easing::Linear)?,
+                easing: nsh_core::js::anim::easing(&Js(easing)).unwrap_or(Easing::Linear),
             }
         }
         ANIM_DIFF_CLAMP => AnimOp::CreateDiffClamp {
@@ -1397,7 +647,7 @@ fn decode_anim(r: &mut Reader<'_, '_>) -> rquickjs::Result<AnimOp> {
         other => {
             return Err(Exception::throw_type(
                 r.ctx,
-                &format!("nsh op buffer: unknown anim op {other}"),
+                &format!("nsh/animated: unknown operation {other}"),
             ));
         }
     })
@@ -1466,7 +716,8 @@ fn decode_driver(r: &Reader<'_, '_>, config: &Value<'_>) -> rquickjs::Result<Dri
         "timing" => Driver::Timing {
             to: num("to")?.unwrap_or(0.0),
             duration_ms: num("duration")?.unwrap_or(300.0),
-            easing: decode_easing(&c.get::<_, Value>("easing")?, Easing::EaseInOut)?,
+            easing: nsh_core::js::anim::easing(&Js(c.get::<_, Value>("easing")?))
+                .unwrap_or(Easing::EaseInOut),
             delay_ms: num("delay")?.unwrap_or(0.0),
         },
         "spring" => Driver::Spring {
@@ -1487,53 +738,6 @@ fn decode_driver(r: &Reader<'_, '_>, config: &Value<'_>) -> rquickjs::Result<Dri
             ));
         }
     })
-}
-
-/// An easing: a name (`linear`, `easeIn`, ...), a Bézier `[x1, y1, x2, y2]`
-/// or a curve `{ curve, param?, mode }` (the runtime's `Easing`).
-fn decode_easing(value: &Value<'_>, default: Easing) -> rquickjs::Result<Easing> {
-    if let Some(a) = value.as_array() {
-        let p = |i| a.get::<f64>(i).map(|v| v as f32).unwrap_or(0.0);
-        return Ok(Easing::Bezier(p(0), p(1), p(2), p(3)));
-    }
-    if let Some(o) = value.as_object() {
-        let curve = o.get::<_, Option<String>>("curve")?.unwrap_or_default();
-        let param = o.get::<_, Option<f64>>("param")?.map(|v| v as f32);
-        let curve = match curve.as_str() {
-            "quad" => Curve::Quad,
-            "cubic" => Curve::Cubic,
-            "poly" => Curve::Poly(param.unwrap_or(2.0)),
-            "sin" => Curve::Sin,
-            "circle" => Curve::Circle,
-            "exp" => Curve::Exp,
-            "elastic" => Curve::Elastic(param.unwrap_or(1.0)),
-            "back" => Curve::Back(param.unwrap_or(1.70158)),
-            "bounce" => Curve::Bounce,
-            _ => return Ok(default),
-        };
-        let mode = match o.get::<_, Option<String>>("mode")?.as_deref() {
-            Some("out") => EaseMode::Out,
-            Some("inOut") => EaseMode::InOut,
-            _ => EaseMode::In,
-        };
-        return Ok(Easing::Curve(curve, mode));
-    }
-    Ok(
-        match value
-            .as_string()
-            .map(|s| s.to_string())
-            .transpose()?
-            .as_deref()
-        {
-            Some("linear") => Easing::Linear,
-            Some("easeIn") => Easing::EaseIn,
-            Some("easeOut") => Easing::EaseOut,
-            Some("easeInOut") => Easing::EaseInOut,
-            // CSS / React Native `ease`.
-            Some("ease") => Easing::Bezier(0.25, 0.1, 0.25, 1.0),
-            _ => default,
-        },
-    )
 }
 
 /// A composite animation: `{ type, ... }` with `node` on the runs.
@@ -1660,4 +864,118 @@ fn json<'js>(
         }
         _ => J::Null,
     })
+}
+
+#[cfg(test)]
+mod decode_bench {
+    use rquickjs::{Array, Context, Runtime};
+
+    /// The drawing of `docs/dev/performance.md`'s canvas recording (17 500
+    /// calls), decoded.
+    #[test]
+    #[ignore]
+    fn bench_canvas_decode() {
+        let rt = Runtime::new().unwrap();
+        let ctx = Context::full(&rt).unwrap();
+        ctx.with(|ctx| {
+            // beginPath, moveTo, lineTo, lineWidth =, strokeStyle =, stroke,
+            // fillRect.
+            let list: Array = ctx
+                .eval(
+                    "const out = []; for (let i = 0; i < 2500; i++) { out.push(7, 8, i, 2, 9, i + 1, 3, 26, 2, \
+                     25, '#ff0000', 19, null, 21, 0, i, 4, 4); } out",
+                )
+                .unwrap();
+            let mut best = std::time::Duration::MAX;
+            for _ in 0..200 {
+                let t = std::time::Instant::now();
+                let drawing =
+                    nsh_core::js::canvas::decode(&super::JsList(list.clone()), 0, list.len()).unwrap();
+                std::hint::black_box(drawing);
+                best = best.min(t.elapsed());
+            }
+            eprintln!("decode 17500 calls: best {best:?}");
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nsh_anim::{Curve, EaseMode};
+    use nsh_core::{LayoutCurve, LayoutProperty, LayoutTransition};
+    use rquickjs::{Context, Runtime};
+
+    use super::*;
+
+    fn with_value<R>(source: &str, f: impl FnOnce(Js<'_>) -> R) -> R {
+        let rt = Runtime::new().unwrap();
+        let ctx = Context::full(&rt).unwrap();
+        ctx.with(|ctx| f(Js(ctx.eval(format!("({source})")).unwrap())))
+    }
+
+    fn layout(source: &str) -> LayoutAnimation {
+        with_value(source, |v| {
+            <LayoutAnimation as HostValue>::decode(&v, &mut HostCx::default()).unwrap()
+        })
+    }
+
+    #[test]
+    fn easings_decode_by_name_curve_and_bezier() {
+        let easing = |s: &str| with_value(s, |v| nsh_core::js::anim::easing(&v));
+        assert_eq!(easing("'easeOut'"), Some(Easing::EaseOut));
+        assert_eq!(easing("'ease'"), Some(Easing::Bezier(0.25, 0.1, 0.25, 1.0)));
+        assert_eq!(
+            easing("[0.1, 'x', 0.3]"),
+            Some(Easing::Bezier(0.1, 0.0, 0.3, 0.0))
+        );
+        // The curve's default parameter, and its mode.
+        assert_eq!(
+            easing("{ curve: 'back', mode: 'inOut' }"),
+            Some(Easing::Curve(Curve::Back(1.70158), EaseMode::InOut))
+        );
+        assert_eq!(
+            easing("{ curve: 'poly', param: 4, mode: 'out' }"),
+            Some(Easing::Curve(Curve::Poly(4.0), EaseMode::Out))
+        );
+        assert_eq!(easing("{ curve: 'nope' }"), None);
+        assert_eq!(easing("'bogus'"), None);
+    }
+
+    #[test]
+    fn layout_animations_decode_with_defaults() {
+        // A phase without a duration takes the config's; unknown names are
+        // the defaults; `scale` is `scaleXY`.
+        let a = layout(
+            "{ duration: 250, create: { type: 'bogus', property: 'scale', delay: 20 }, update: { type: 'spring' } }",
+        );
+        assert_eq!(
+            a.create,
+            Some(LayoutTransition {
+                curve: LayoutCurve::EaseInEaseOut,
+                property: LayoutProperty::Scale,
+                duration_ms: 250.0,
+                delay_ms: 20.0,
+            })
+        );
+        assert_eq!(
+            a.update.map(|u| u.curve),
+            Some(LayoutCurve::Spring { damping: 0.7 })
+        );
+        assert_eq!(a.delete, None);
+        // Damping is held to 0.01..1; without a duration, 300 ms.
+        let b = layout("{ update: { type: 'spring', springDamping: 5 } }");
+        assert_eq!(
+            b.update,
+            Some(LayoutTransition {
+                curve: LayoutCurve::Spring { damping: 1.0 },
+                property: LayoutProperty::Opacity,
+                duration_ms: 300.0,
+                delay_ms: 0.0,
+            })
+        );
+        // The presets `nsh/animated` serves decode to the core's.
+        let tables = nsh_core::js::anim::tables();
+        let spring = tables["presets"]["spring"].to_string();
+        assert_eq!(layout(&spring), LayoutAnimation::SPRING);
+    }
 }

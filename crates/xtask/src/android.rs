@@ -138,24 +138,27 @@ fn ndk_cargo(sdk: &Sdk, triple: &str) -> Command {
     cmd
 }
 
-/// Clippy on the Android crate (it is empty on other targets).
+/// Clippy on the Android crate (it is empty on other targets): with every
+/// feature, and as a Rust app's library (no JS).
 pub(crate) fn clippy() -> anyhow::Result<()> {
     let sdk = Sdk::find()?;
-    let status = ndk_cargo(&sdk, "aarch64-linux-android")
-        .args([
-            "clippy",
-            "-p",
-            "nsh-platform-android",
-            "--target",
-            "aarch64-linux-android",
-            "--all-features",
-            "--",
-            "-D",
-            "warnings",
-        ])
-        .status()?;
-    if !status.success() {
-        bail!("clippy found problems");
+    for features in ["--all-features", "--no-default-features"] {
+        let status = ndk_cargo(&sdk, "aarch64-linux-android")
+            .args([
+                "clippy",
+                "-p",
+                "nsh-platform-android",
+                "--target",
+                "aarch64-linux-android",
+                features,
+                "--",
+                "-D",
+                "warnings",
+            ])
+            .status()?;
+        if !status.success() {
+            bail!("clippy found problems ({features})");
+        }
     }
     Ok(())
 }

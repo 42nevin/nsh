@@ -6,12 +6,25 @@ use rquickjs::{CaughtError, Ctx};
 pub struct JsError {
     /// Message, including the JS stack when available.
     pub message: String,
+    /// The exception was `null`: what QuickJS leaves when it could not
+    /// even make its "out of memory" error.
+    pub(crate) null: bool,
 }
 
 impl JsError {
     pub(crate) fn caught(err: CaughtError<'_>) -> Self {
+        let null = matches!(&err, CaughtError::Value(v) if v.is_null());
         Self {
             message: err.to_string(),
+            null,
+        }
+    }
+
+    /// An error with `message`.
+    pub(crate) fn new(message: String) -> Self {
+        Self {
+            message,
+            null: false,
         }
     }
 
@@ -22,8 +35,6 @@ impl JsError {
 
 impl From<rquickjs::Error> for JsError {
     fn from(err: rquickjs::Error) -> Self {
-        Self {
-            message: err.to_string(),
-        }
+        Self::new(err.to_string())
     }
 }

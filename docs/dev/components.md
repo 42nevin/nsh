@@ -1,0 +1,287 @@
+# Components
+
+The components of a UI set (`Button`, `Card`, ... of `nsh/ui/mobile`) are written in Rust and run by the core on the
+engine thread. JS only describes the UI: a component is one node in the JSX tree, its props go to Rust, its events come
+back. One implementation draws the same on iOS and Android, is laid out in the same Taffy pass as everything else
+(no measuring round trip) and keeps its interaction native.
+
+| Where | What |
+|---|---|
+| `crates/nsh-core/src/ui/` | The API (`nsh_core::ui`, `prelude`): `Component`, `Module`, elements, `Styled`, `Theme`, `Registry`, the status bar's layers (`status_bar.rs`), the declarations generator `typescript` |
+| `crates/nsh-macros` | `#[derive(Props)]`, `#[derive(PropEnum)]`, `#[derive(Event)]`, `#[derive(JsObject)]`; `#[methods]`, `#[module]`; `style_helpers!` (the spacing methods of `Styled`) |
+| `crates/nsh-core/src/core/components.rs` | The core side: instances, expansion, diffing, children and slots, events |
+| `crates/nsh-ui-mobile` | The mobile set's components, one file each (`README.md`: how to write one) |
+| `crates/nsh-js/src/components.rs` | The JS face of components and modules, made from their specs when a bundle imports the set |
+| `crates/nsh-js/src/declarations.rs` | `nsh/ui/mobile.d.ts`: the declarations generated from `nsh_ui_mobile::registry()` (`nsh_core::ui::declarations`) with the re-exports and the navigation |
+| `nsh_engine::EngineConfig::components` | The registry a surface renders from (the platforms and `nsh trace` pass `nsh_ui_mobile::registry()`) |
+
+A desktop set will be a crate of its own (`nsh-ui-desktop`, on GPUI), not an abstraction over both.
+
+## The API
+
+```rust
+#[derive(Default)]
+pub struct Button;                       // the component's state
+
+/// A press target with a label.         // the TypeScript doc of `Button`
+#[derive(Clone, PartialEq, Props)]
+pub struct ButtonProps {
+    /// The label.
+    pub title: SharedString,             // required in TS
+    #[prop(default)]
+    pub variant: ButtonVariant,          // #[derive(PropEnum)]: "primary" | "secondary" | ...
+    pub accessibility_label: Option<SharedString>,   // `accessibilityLabel?`
+}
+
+#[derive(Event)]
+pub enum ButtonEvent {
+    /// The button was pressed.
+    Press,                               // `onPress?: () => void`
+}
+
+impl Component for Button {
+    const NAME: &'static str = "nsh.button";       // JS export: `Button`
+    type Props = ButtonProps;
+    type Event = ButtonEvent;
+
+    fn render(&self, props: &ButtonProps, cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        view()
+            .px_4()
+            .py_3()
+            .rounded(px(theme.radius))
+            .bg(theme.primary)
+            .active(|s| s.bg(theme.primary_active))
+            .on_press(cx.listener(|_this, _, cx| cx.emit(ButtonEvent::Press)))
+            .child(text(props.title.clone()).text_color(theme.primary_foreground))
+    }
+}
+```
+
+- **Props** are a struct, **events** an enum; the derives produce the decoding of `$name` values from JS, defaults,
+  and the TypeScript types (doc comments included). Field and variant names become camel case in JS. Value types
+  implement `JsValue` (numbers, `bool`, strings, `Color`, `Option`, `Vec`, `JsonValue`, `ui::Style` (an inline
+  `StyleProp<ViewStyle>`), `PropEnum`s, `JsObject` structs). A prop JS sends with the wrong type is refused with a
+  warning and nothing renders; clearing a prop restores its default. Platform-only props are an `android` / `ios`
+  prop of a `JsObject` struct (`StatusBar`'s `android={{ backgroundColor }}`), as for host elements.
+- **The app's content is props too, placed by closures**: the component never creates or touches the app's elements,
+  it only lays them out.
+  - `header: Option<Slot>` is `Some` while the app passes non-empty JSX for it: `.slot(props.header, |h| h.px_4())`
+    places it (the closure styles the slot's own node).
+  - `children: Children`: `.child(props.children)` puts them all at one place among the render's own children;
+    `.children_each(props.children, |child, at| view().py_3().child(child))` wraps each one (it runs again when
+    the children change; `at` is a `Position`: `index`, `count`, `is_first()`, `is_last()`, what an `<each>` row knows
+    from its index and the data).
+  - `items: Items`: virtualized rows. In JS the component takes `List`'s data props (`each`, the row renderer as
+    children, `keyExtractor`, `onEndReached`, `ListHeaderComponent`, ... : `ListItemsProps<T>`, so the component is
+    generic over the row type). `.list(props.items, |l| l.flex_1().estimated_item_size(48.0), |row, at|
+    view().px_4().when(at.is_last(), |v| v.rounded_b(px(16.0))).child(row))` places the list, lays it out (size, columns, padding, gaps, direction) and wraps each
+    row; only rows near the viewport exist and cells are recycled as with `List`.
+- **Elements** are `view()`, `text(..)`, `image(..)`, the other host elements (`input()`, `scroll()`, `modal()`,
+  `canvas(drawing)`, `web_view(url)`, `video(url)`, `native(name)` for the embedder's components; `ui/host.rs`),
+  strings (as texts) and other components (`Button::element(props)`, whose `.on_event(cx.listener(..))` handles their
+  typed events instead of the app). Their abilities are traits: `Styled`, `Accessible`, `Interactive` (`active` /
+  `hover` / `focus` styles, `disabled`, `hit_slop`, and the typed events every element has: `on_press`,
+  `on_long_press`, `on_layout(Rect)`, `on_touch(TouchEvent)`, `on_pan_start`, ...), `ParentElement`, `FluentBuilder`
+  (`when`, `when_some`, `map`). Each host element has its own props and typed events (`input().value(..)
+  .on_change_text(cx.listener(|this, text: &str, cx| ..))`, `scroll().on_scroll(..)`, `modal().on_request_close(..)`);
+  `on(kind, listener)` takes any native event with its raw payload. Host props are the core's `Prop`s, kept one per
+  property and diffed by kind: one a render stops setting goes back to its default, as when JS clears it. A modal
+  is presented while it is in the render. Canvases draw a `Drawing`, recorded with `Painter` (the Canvas 2D
+  operations); a new drawing replaces the old one. Props that take a plain color (an input's placeholder color)
+  take `cx.color(theme.muted_foreground)`: the theme color for the appearance now.
+- **State** is `Self`, written like a TSX component where Rust allows:
+
+  | TS | Rust component |
+  |---|---|
+  | the component's body (runs once) | `fn setup(&mut self, props, cx)` |
+  | an `effect` reading a prop | `fn props_changed(&mut self, old, new, cx)` (before the next render) |
+  | event handlers | `cx.listener(|this, event, cx| ..)`: `&mut Self`, `cx.emit(..)`, `cx.notify()` renders again |
+  | `setTimeout` / `setInterval`, `clear*` | `cx.set_timeout(d, ..)` / `cx.set_interval(d, ..)` return a `Task`; dropping it clears it |
+  | async work | `cx.spawn(|this, cx| async move { .. this.update(..).await })`; the component's tasks end with it |
+  | `cleanup` | `fn cleanup(&mut self, props, cx)` (with a `Context`: it can still use the platform's services), and `Drop` |
+  | `windowSize()`, `safeArea()`, `keyboard()`, `colorScheme()`, ... | `cx.window()`, `cx.safe_area()`, `cx.keyboard_height()`, `cx.dark()`, ... in the render: reading subscribes |
+  | an effect on the environment | `fn environment_changed(&mut self, props, old, new, cx)` |
+  | `useSafeAreaInsets()` | `cx.insets()` in the render: the insets where the component renders (the nearest screen's or modal's, else the surface's safe area) |
+  | a signal or store at module level | `cx.global::<G>()` in the render (subscribes); `cx.update_global::<G, _>(..)` in listeners, tasks' updates and modules renders the readers again |
+  | `context(default)` / `<Ctx.Provider value>` / `Ctx()` | `cx.provide(value)` in the render; `cx.context::<T>()` below it (the nearest provider up the node tree, through the app's elements too; subscribes) |
+  | `createNativeValue`, `Animated.spring`, `interpolate` | `cx.native_value(0.0)` (in `setup`, kept in a field); `.bind_translate_y(&v)` / `.bind_opacity(..)` / `.bind_background(..)` / `.bind_scale(..)` / `.bind_rotate(..)`, `.pan_values(..)` (drags move it natively), `scroll().scroll_value(&v)`, canvas arguments (`Painter::new().fill_rect(0.0, 0.0, &v, 4.0)`); `v.spring(to, Spring::default())` / `.timing(..)` / `.decay(..)` return an `AnimationEnd` to await; `v.interpolate(..)`, `.add(..)`, `.diff_clamp(..)` derive nodes |
+  | an error boundary (TS has none) | `fn catch_error(&mut self, error, cx) -> bool`: the nearest component above one whose code panicked (render, listener, method, task) handles it, typically keeping `error`, rendering a fallback and clearing it to try again; the failed one renders nothing until it renders again; unhandled errors are logged (`js` target) |
+  | a portal | none (TS has none either); overlays are `modal().transparent(true)` |
+  | `ref={el}`, `el.focus()` | `cx.element_ref()` (in `setup`, kept in a field), `.element_ref(&self.field)` on the element each render, `self.field.focus()` / `.scroll_to(..)` / `.seek(..)` / `.command(..)` from listeners and tasks |
+
+  `render(&self)` cannot change state. Timers are tasks: a `tokio::time` sleep, then an update.
+- **Platform services** are on `Context` (setup, listeners, updates, methods), `ModuleCx` and `AsyncCx`:
+  `cx.dialog(Dialog)` shows an alert or action sheet and returns a future of the index chosen (-1: dismissed; the
+  answer is the root's `Dialog` event, which the core resolves; JS never sees it);
+  `dismiss_keyboard()`, `animate_layout(..)`, and the status bar (below). `cx.update_global::<G, _>(|g, cx| ..)` is
+  state the surface's components and modules share.
+- **Native values** (`ui/animated.rs`) are nodes of the platform's animation graph with odd ids (JS's are even,
+  like node ids: the graph indexes nodes by id, so both must stay dense; ids from 2^31 are the graph's own
+  composite steps); the last handle released frees the node. Deriving the same node again (a render calling
+  `interpolate` each time) gets the live one, so bindings stay as they are. Bound style properties go into the
+  element's inline style, before the app's `style` on a host (the core keeps the app's and composes the two). The
+  animations' ends come back through `Core::animations_finished` (the engine hands JS the rest).
+- **Element refs** (`ui/element_ref.rs`) hold the node of the element that carries them, set when the render is
+  applied and cleared when the element goes; their commands go out through the executor, and an event's handling
+  applies them right after its own changes, so they keep their order.
+- **Element attributes for system UI**: `.inset_padding(insets)` / `.inset_margin(insets)` add to the padding /
+  margin the styles resolve to (what `SafeAreaView` and `KeyboardAvoidingView` use, so the app's own padding stays),
+  `.inline_style(&style)` applies a `ui::Style` prop (`KeyboardAvoidingView`'s `contentContainerStyle`).
+
+## Methods
+
+`#[methods]` on an `impl` block makes its functions methods of the component's ref in JS, with no TS written:
+`const METHODS: &'static [Method<Self>] = Self::JS_METHODS;` lists them, the JS face builds the ref (`StepperRef`: `node`
+and the methods, typed from the Rust signatures and docs). A call is a `Command::Native { name, args: { c, a } }` op,
+so it runs in order with the props JS set before it. A method returning nothing is called and forgotten (`c` 0); one
+returning a `JsValue` gives JS a `Promise`, answered by a `$return` event (`{ c, v }` or `{ c, e }` for a refused
+argument) in the same frame's commit rounds. Methods (like listeners, timers and tasks' updates) read the current props
+with `cx.props()`.
+
+## Modules
+
+Functions a UI set exports without a component (`Alert.alert`, `Keyboard.dismiss`, `StatusBar.setHidden`) are a
+`#[module]` `impl` block of a unit struct: `pub fn`s are the functions, typed from their signatures (`Option`
+parameters at the end may be left out), with an optional last `cx: &mut ModuleCx` parameter. One returning a
+`JsValue` returns a `Promise` in JS; an `async fn` runs as a root task with an `AsyncCx` (`Alert.alert` awaits
+`cx.dialog(..)`). `Registry::module::<M>()` registers it. A call is a root `Command::Native { name: "Alert.alert", args:
+{ c, a } }` op (in order with the ops before it), answered like methods by a root `$return` event; `components.rs`
+builds the object. A module with a component's name is merged into it (`StatusBar` is a component with static
+functions). `Registry::reexport` re-exports runtime values (`safeArea`, `keyboard`, `useSafeAreaInsets`: `nsh-js`
+`env.rs`) under the set's module, and `Registry::native_values` names the values `nsh-js` makes for the set (the
+mobile UI's navigation: `navigation.rs`).
+
+The runtime has modules of its own the same way (`crates/nsh-core/src/runtime/`, `runtime::registries()`): one
+`Registry` per JS module (`Registry::runtime("nsh/android")`), whose functions JS calls as `nsh/android:Toast.show` so
+they never clash with a UI set's; the core looks a call up in the set's registry, then the runtime's. Runtime modules
+use the core's internal actions (toasts, announcements, `ImageInfo` requests) instead of public context methods.
+`#[module(flat)]` exports functions one by one (`setStatusBarBackgroundColor`); a function returning `Result` rejects
+the promise with the error; a `NodeRef` parameter is a `YNode` in TS (sent as `{ $node: id }`).
+
+## The status bar
+
+`ui/status_bar.rs` layers the surface's settings (`StatusBarSetting`: style, hidden, animated, background, each
+optional). At the bottom is what functions set: `ModuleCx::set_status_bar(patch)`, `AsyncCx::set_status_bar`, and JS's
+root `statusBar` command (`nsh/android`'s `setStatusBarBackgroundColor`) all become `Command::SetStatusBar(patch)`.
+Over it, the settings components add (`cx.add_status_bar(setting)` → `StatusBarEntry`, `update_status_bar`,
+`remove_status_bar`); the most recently added wins, field by field. Each change only marks the layers; `commit` sends
+one `Command::StatusBar` with the merged result when it differs from the last one sent.
+
+## Tasks
+
+`ui/task.rs`: a small executor of the core runs components' futures on the engine thread, so they may hold the
+component's `!Send` state. Each poll runs inside a tokio runtime's context (`Core::set_task_runtime`; the engine's
+`EngineConfig::runtime`, else one runtime of two threads shared by the process), so the tokio ecosystem works in a
+task: `tokio::time` timers, network and file IO, channels; `cx.background(fut)` / `cx.blocking(f)` run `Send` work on
+the runtime's threads. A waker may fire on any thread: it sends the engine a `Wake` message, and the loop runs the woken
+tasks (`Core::run_component_tasks`). `this.update(f)` does not touch the component during the poll: the core applies
+the queued updates after it (with a `Context`, so they can `notify`, emit, spawn), then the tasks waiting for their
+results run on; it resolves to `None` when the component is gone. A `Task` dropped cancels its future; a released
+component cancels all of its own.
+
+## Environment
+
+The engine hands the core what components may read (`ui::Environment`: window, safe area, keyboard height, appearance,
+font scale, reduced motion, screen reader, direction). A render records what it read (`RenderCx::window()` and the
+like); when the environment changes, only the components that read a changed part render again.
+
+## Styles
+
+`Styled` methods are named as in GPUI and Tailwind (`.flex_row()`, `.items_center()`, `.p_4()` = 16pt, `.gap(px(6.0))`,
+`.rounded_xl()`, `.border_1()`, `.shadow_md()`, `.text_sm()`, `.font_weight(FontWeight::SEMIBOLD)`, ...); spacing steps
+follow Tailwind's default scale, independent of the app's Tailwind theme. A render records declarations
+(`StyleRefinement`); the core lowers them into the same rules Tailwind classes compile to (`ClassList`), cached and
+shared between elements with the same styles, and only when an element's styles changed. There is no string to
+parse and no `.class()`.
+
+- Theme colors are `AdaptiveColor`s (a light and a dark value) and lower into one declaration that picks by
+  appearance (`Decl::Adaptive`): the platform's appearance switch restyles natively, without a render, and the app's
+  plain classes still win over it.
+- `.active(|s| ..)`, `.hover(..)`, `.focus(..)` lower into rules on the view's interaction states (Tailwind's ranks):
+  press feedback is native.
+- What a render knows (a variant, `disabled`) is plain Rust: `.when(props.disabled, |v| v.opacity(0.5))`.
+- The app's `class` / `classList` on a component (Tailwind) is merged after the root's rules; at equal rank it wins.
+  The styles of a nested component element merge the same way.
+
+## The theme
+
+`Theme` (`ui/theme.rs`) has gpui-kit's semantic colors (`primary`, `primary_active`, `primary_foreground`,
+`secondary`, `danger`, `muted`, `border`, `group_box`, `list_*`, `switch*`, `tab*`, ...: the fields mobile components
+use) plus `radius`, `radius_lg` and `font_size`, and derefs to its colors (`theme.primary`). The default
+(`default-theme.json`) is gpui-kit's default theme with mobile radii. An app sets its own in `nsh.json`: `"theme":
+"brand.json"` (a gpui-kit theme file, relative to `nsh.json`) or the same JSON inline. Keys only desktop components
+use are ignored; a pressed color the theme leaves out is derived from its base; colors are CSS colors or Tailwind
+palette names. The bundler checks the theme; the entry hands it to the renderer (`nsh:rt` `setup`), which
+sends it to the root (`uiTheme`) before anything renders; a new theme renders every component again.
+
+## The host node and ids
+
+In JS a component is a `<view>` with a `component` prop naming it (`nsh.button`): its **host**. `Core::apply` sees the
+prop, creates an instance and from then on intercepts the ops on the host (`intercept`): the host is the root of the
+component's expansion, the elements its render returns below the root become nodes the core creates itself. Apps
+without components pay one check per op.
+
+JS allocates even node ids (from 2), the core odd ones (from 3), so both id spaces stay dense and never collide. JS
+never sees the expanded nodes; their events are the component's (below).
+
+## Renders and diffing
+
+- A prop change marks the instance; **renders run at the start of `commit`**, so props set in one JS turn render once.
+  A component that keeps asking for renders is cut off after 16 per commit.
+- The render is diffed against the previous one: keyed elements match by key; unkeyed ones take the next unused old
+  element of the same kind in order, so an element that comes and goes (`.children(option)`) does not move its
+  siblings onto new nodes. Attributes are compared field by field (`Attrs`), styles as a whole; native children are
+  moved only when their order changed.
+- An unknown name logs a denial and renders nothing.
+
+## Children, slots and rows
+
+- JS inserts a component's children into the host; the core places them where the render's `Children` is, before the
+  rendered node that follows it (or keeps them out of the tree while the render has none). With `children_each`, a
+  change of the children renders the component again: one wrapper per child, keyed by the child's node, so a child
+  added or removed leaves the others' wrappers in place.
+- Rows: the JS face makes a `List` of the app's data and row renderer and hands it to the host as the slot of the
+  `Items` prop. The render places it like a slot and sends its layout (`ListConfig`: estimated size, columns,
+  direction, padding, gaps). Each item cell of that list becomes a small instance whose render is the component's row
+  function (`Inner::Row`): the wrapper goes into the cell, the row the app rendered into the wrapper. When the list
+  rebinds a cell to another row (`cellIndex`), its wrapper renders again with the new position; so do all live cells
+  when the number of rows changes (the last row moves), and when the component renders again. Binding, recycling, measuring and positioning stay the list's: a rebinding frame
+  of `ListView` costs what one of `List` does (5 ops / 4 mount items in the gallery's Mobile UI demo).
+- The component's own rows (`virtual_list(count, |index, at| row)`, layout from `ListLayout`, `.keys(ids)` for
+  splices): the core creates the list and binds its cells itself, within the commit that needs them (`Core::commit`
+  binds and lays out again; JS is not involved); each cell is a small instance (`Inner::VirtualRow`) rendering the
+  row function, which runs again when the cell shows another row and when the component renders. With keys, rows
+  removed or inserted before others leave their cells and sizes alone. Rows' handlers run with the component's
+  state (also for the wrappers of the app's rows); a row passes its index with `listener.map(move |_: &()| index)`.
+- Named slots: the JS face creates one holder view per slot **the app passes** (`componentSlot`), filled with that prop's
+  JSX. The render's `Slot` element *is* that holder: its styles and handlers apply to it, the core places it but never
+  releases it (it is JS's). Filling or emptying a holder renders the component again.
+
+## Events
+
+- Handlers sit on the elements; the native event of an expanded node, or of the host, goes to the component first
+  (`Core::component_event`, called by the engine before JS). Events of expanded nodes never reach JS.
+- `cx.emit(event)` sends a `NativeEvent` on the host (`{ name, data }`, from the `Event` derive); the JS face calls
+  the app's `on<Name>(data)`. A nested component's events go to the `on_event` listener of the component that rendered it,
+  typed, instead.
+
+## The JS face and the declarations
+
+`nsh-js` `components.rs` makes each component's and module's JS from its spec (`ComponentSpec`, `ModuleSpec`) when a
+bundle first imports the set. `nsh_core::ui::declarations(registry, omit)` writes their declarations (into the set's
+module file, `nsh/ui/mobile.d.ts`; `nsh-js` `declarations.rs` adds the re-exports and native values it makes): the
+named types the props, events, methods and functions use (`export type
+BarStyle = ...` for a `PropEnum`, `export interface AlertButton` for a `JsObject`, each once, with its doc comment;
+`JsValue::ts_type(&mut TsTypes)` declares them), the props interfaces, the components and the module objects (each
+of type `<Name>Module`). The JS face runs for every instance, so it is kept minimal: **one render effect reading every prop
+directly** and sending the ones that changed, no `split` / `merge` / `spread` (their proxies made the first version, in
+the former JS runtime, cost more JS than the TSX component it replaced), no node for an absent slot, no event listener
+when no handler is passed. Benchmarks against the same Button in TSX: `docs/dev/performance.md` (`examples/bench`,
+`component_bench`).
+
+## Native components of the embedder
+
+`nsh/native`'s `nativeComponent` is the other kind: a platform view the embedding app registered (Swift / Java
+`NshComponent`, `docs/dev/embedding.md`). Those are views of their own on the main thread; Rust components are
+compositions of primitives in the core.

@@ -7,7 +7,11 @@
 
 use std::sync::Arc;
 
-use crate::style::Color;
+use crate::{
+    js::{canvas::*, ops::JsOps},
+    style::Color,
+    ui::PropEnum,
+};
 
 /// A number of a drawing: a constant or the value of native value slot
 /// `n` of the drawing ([`Drawing::slots`]).
@@ -37,20 +41,36 @@ impl Default for Num {
 }
 
 /// One element of a path (`beginPath` … `closePath`, `Path2D`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, JsOps)]
+#[ops(cx = Drawing)]
 pub enum PathOp {
-    /// `moveTo(x, y)`.
+    /// `moveTo(x, y)`: starts a subpath at (`x`, `y`).
+    #[op(code = CV_MOVE_TO, method = "moveTo", params = "x, y")]
     MoveTo(Num, Num),
-    /// `lineTo(x, y)`.
+    /// `lineTo(x, y)`: a straight line to (`x`, `y`).
+    #[op(code = CV_LINE_TO, method = "lineTo", params = "x, y")]
     LineTo(Num, Num),
-    /// `quadraticCurveTo(cpx, cpy, x, y)`.
+    /// `quadraticCurveTo(cpx, cpy, x, y)`: a quadratic Bézier curve to (`x`,
+    /// `y`).
+    #[op(code = CV_QUAD_TO, method = "quadraticCurveTo", params = "cpx, cpy, x, y")]
     QuadTo([Num; 4]),
-    /// `bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y)`.
+    /// `bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y)`: a cubic Bézier curve to
+    /// (`x`, `y`).
+    #[op(
+        code = CV_CUBIC_TO,
+        method = "bezierCurveTo",
+        params = "cp1x, cp1y, cp2x, cp2y, x, y"
+    )]
     CubicTo([Num; 6]),
-    /// `arc(x, y, radius, startAngle, endAngle, counterclockwise)`
-    /// (radians).
+    /// `arc(x, y, radius, startAngle, endAngle, counterclockwise)`: a
+    /// circular arc; angles in radians, clockwise from the x axis.
+    #[op(
+        code = CV_ARC,
+        method = "arc",
+        params = "x, y, radius, startAngle, endAngle, counterclockwise = false"
+    )]
     Arc {
-        /// Center and radius.
+        /// Center x.
         x: Num,
         /// Center y.
         y: Num,
@@ -63,10 +83,17 @@ pub enum PathOp {
         /// Counterclockwise.
         ccw: bool,
     },
-    /// `arcTo(x1, y1, x2, y2, radius)`.
+    /// `arcTo(x1, y1, x2, y2, radius)`: an arc tangent to the lines to (`x1`,
+    /// `y1`) and on to (`x2`, `y2`).
+    #[op(code = CV_ARC_TO, method = "arcTo", params = "x1, y1, x2, y2, radius")]
     ArcTo([Num; 5]),
     /// `ellipse(x, y, radiusX, radiusY, rotation, startAngle, endAngle,
-    /// counterclockwise)`.
+    /// counterclockwise)`: an elliptical arc; angles in radians, clockwise.
+    #[op(
+        code = CV_ELLIPSE,
+        method = "ellipse",
+        params = "x, y, radiusX, radiusY, rotation, startAngle, endAngle, counterclockwise = false"
+    )]
     Ellipse {
         /// Center and radii, rotation (radians).
         geometry: [Num; 5],
@@ -77,30 +104,35 @@ pub enum PathOp {
         /// Counterclockwise.
         ccw: bool,
     },
-    /// `rect(x, y, w, h)`.
+    /// `rect(x, y, w, h)`: a closed rectangle subpath.
+    #[op(code = CV_RECT, method = "rect", params = "x, y, w, h")]
     Rect([Num; 4]),
     /// `roundRect(x, y, w, h, radii)`: corner radii top-left, top-right,
-    /// bottom-right, bottom-left.
+    /// bottom-right, bottom-left (`canvas.ts` spreads `radii`).
+    #[op(code = CV_ROUND_RECT)]
     RoundRect([Num; 4], [Num; 4]),
-    /// `closePath()`.
+    /// `closePath()`: a straight line back to the subpath's start.
+    #[op(code = CV_CLOSE, method = "closePath")]
     Close,
 }
 
 /// A path to fill, stroke or clip instead of the current one.
 pub type Path = Arc<[PathOp]>;
 
-/// `fill` / `clip` rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Which areas a path fills (`fill` / `clip`'s rule).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum FillRule {
     /// `nonzero`.
     #[default]
+    #[prop(rename = "nonzero")]
     NonZero,
     /// `evenodd`.
+    #[prop(rename = "evenodd")]
     EvenOdd,
 }
 
-/// `lineCap`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// How strokes end (`lineCap`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum LineCap {
     /// `butt`.
     #[default]
@@ -111,8 +143,8 @@ pub enum LineCap {
     Square,
 }
 
-/// `lineJoin`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// How stroke segments join (`lineJoin`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum LineJoin {
     /// `miter`.
     #[default]
@@ -342,8 +374,8 @@ pub fn measure_line(engine: &impl crate::text::TextEngine, font: &CanvasFont, te
     engine.measure(&prepared, None).width
 }
 
-/// `textAlign`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Where text sits horizontally relative to its x (`textAlign`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum CanvasTextAlign {
     /// `start` (left, or right right to left).
     #[default]
@@ -358,8 +390,8 @@ pub enum CanvasTextAlign {
     Center,
 }
 
-/// `textBaseline`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Where text sits vertically relative to its y (`textBaseline`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum CanvasTextBaseline {
     /// `alphabetic`.
     #[default]
@@ -383,65 +415,149 @@ pub struct CanvasImage {
     pub uri: Arc<str>,
 }
 
-/// One recorded operation.
-#[derive(Debug, Clone, PartialEq)]
-#[allow(missing_docs)]
+/// One recorded operation. The methods and properties without `method` /
+/// `property` are written in `canvas.ts` (overloads, the state stack,
+/// gradients, images).
+#[derive(Debug, Clone, PartialEq, JsOps)]
+#[ops(cx = Drawing)]
 pub enum CanvasOp {
+    /// `save()`.
+    #[op(code = CV_SAVE)]
     Save,
+    /// `restore()`.
+    #[op(code = CV_RESTORE)]
     Restore,
+    /// `translate(x, y)`: moves the origin.
+    #[op(code = CV_TRANSLATE, method = "translate", params = "x, y")]
     Translate(Num, Num),
+    /// `scale(x, y)`: scales the axes.
+    #[op(code = CV_SCALE, method = "scale", params = "x, y")]
     Scale(Num, Num),
-    /// Radians.
+    /// `rotate(angle)`: rotates the axes; radians, clockwise.
+    #[op(code = CV_ROTATE, method = "rotate", params = "angle")]
     Rotate(Num),
-    /// `transform(a, b, c, d, e, f)`.
+    /// `transform(a, b, c, d, e, f)`: multiplies the transform by the matrix
+    /// [a c e; b d f].
+    #[op(code = CV_TRANSFORM, method = "transform", params = "a, b, c, d, e, f")]
     Transform([Num; 6]),
-    /// `setTransform(a, b, c, d, e, f)` (relative to the view, not the
-    /// device).
+    /// `setTransform(a, b, c, d, e, f)`: replaces the transform by the matrix
+    /// [a c e; b d f].
+    ///
+    /// Relative to the view, not the device.
+    #[op(code = CV_SET_TRANSFORM, method = "setTransform", params = "a, b, c, d, e, f")]
     SetTransform([Num; 6]),
+    /// `beginPath()`: starts a new current path.
+    #[op(code = CV_BEGIN_PATH, method = "beginPath")]
     BeginPath,
     /// Adds to the current path.
+    #[op(nested)]
     Path(PathOp),
     /// `fill(path?, rule)`: the current path when `None`.
+    #[op(code = CV_FILL)]
     Fill(Option<Path>, FillRule),
+    /// `stroke(path?)`.
+    #[op(code = CV_STROKE)]
     Stroke(Option<Path>),
+    /// `clip(path?, rule)`.
+    #[op(code = CV_CLIP)]
     Clip(Option<Path>, FillRule),
+    /// `fillRect(x, y, w, h)`: fills a rectangle with `fillStyle` (the
+    /// current path stays).
+    #[op(code = CV_FILL_RECT, method = "fillRect", params = "x, y, w, h")]
     FillRect([Num; 4]),
+    /// `strokeRect(x, y, w, h)`: strokes a rectangle with `strokeStyle`.
+    #[op(code = CV_STROKE_RECT, method = "strokeRect", params = "x, y, w, h")]
     StrokeRect([Num; 4]),
+    /// `clearRect(x, y, w, h)`: makes a rectangle transparent.
+    #[op(code = CV_CLEAR_RECT, method = "clearRect", params = "x, y, w, h")]
     ClearRect([Num; 4]),
+    /// `fillStyle`.
+    #[op(code = CV_FILL_STYLE)]
     FillStyle(Paint),
+    /// `strokeStyle`.
+    #[op(code = CV_STROKE_STYLE)]
     StrokeStyle(Paint),
+    /// `lineWidth`: stroke width in points.
+    #[op(code = CV_LINE_WIDTH, property = "lineWidth", initial = "1")]
     LineWidth(Num),
+    /// `lineCap`: how strokes end.
+    #[op(code = CV_LINE_CAP, property = "lineCap", initial = "\"butt\"")]
     LineCap(LineCap),
+    /// `lineJoin`: how stroke segments join.
+    #[op(code = CV_LINE_JOIN, property = "lineJoin", initial = "\"miter\"")]
     LineJoin(LineJoin),
+    /// `miterLimit`: miter joins longer than this (in line widths) are
+    /// beveled.
+    #[op(code = CV_MITER_LIMIT, property = "miterLimit", initial = "10", min = 1.0)]
     MiterLimit(f32),
-    /// `setLineDash` (an odd count is repeated, as in canvas).
+    /// `setLineDash(segments)`: an odd count is repeated, as in canvas.
+    #[op(code = CV_LINE_DASH, with = crate::js::canvas::line_dash)]
     LineDash(Arc<[f32]>),
+    /// `lineDashOffset`: where the dash pattern starts.
+    #[op(code = CV_LINE_DASH_OFFSET, property = "lineDashOffset", initial = "0")]
     LineDashOffset(Num),
+    /// `globalAlpha`: opacity of what is drawn next, 0..1.
+    #[op(code = CV_GLOBAL_ALPHA, property = "globalAlpha", initial = "1")]
     GlobalAlpha(Num),
+    /// `globalCompositeOperation`: how what is drawn next combines with the
+    /// canvas (`source-over`, `multiply`, ...).
+    #[op(
+        code = CV_COMPOSITE,
+        property = "globalCompositeOperation",
+        initial = "\"source-over\""
+    )]
     Composite(Composite),
+    /// `shadowColor`: the color of shadows (transparent: none).
+    #[op(code = CV_SHADOW_COLOR, property = "shadowColor", initial = "\"rgba(0,0,0,0)\"")]
     ShadowColor(Color),
+    /// `shadowBlur`: shadow blur in points.
+    #[op(code = CV_SHADOW_BLUR, property = "shadowBlur", initial = "0", min = 0.0)]
     ShadowBlur(f32),
+    /// `shadowOffsetX` / `shadowOffsetY`.
+    #[op(code = CV_SHADOW_OFFSET)]
     ShadowOffset(f32, f32),
+    /// `font`: CSS `font` shorthand, e.g. `"600 14px Inter"` (sizes in px, pt
+    /// or rem).
+    #[op(code = CV_FONT, property = "font", initial = "\"10px sans-serif\"")]
     Font(CanvasFont),
+    /// `textAlign`: where text sits horizontally relative to its x.
+    #[op(code = CV_TEXT_ALIGN, property = "textAlign", initial = "\"start\"")]
     TextAlign(CanvasTextAlign),
+    /// `textBaseline`: where text sits vertically relative to its y.
+    #[op(code = CV_TEXT_BASELINE, property = "textBaseline", initial = "\"alphabetic\"")]
     TextBaseline(CanvasTextBaseline),
     /// `fillText(text, x, y, maxWidth?)`.
+    #[op(code = CV_FILL_TEXT)]
     FillText {
+        /// The text.
         text: Arc<str>,
+        /// Where it starts.
         x: Num,
+        /// Its baseline.
         y: Num,
+        /// Narrowed to fit.
         max_width: Option<f32>,
     },
+    /// `strokeText(text, x, y, maxWidth?)`.
+    #[op(code = CV_STROKE_TEXT)]
     StrokeText {
+        /// The text.
         text: Arc<str>,
+        /// Where it starts.
         x: Num,
+        /// Its baseline.
         y: Num,
+        /// Narrowed to fit.
         max_width: Option<f32>,
     },
     /// `drawImage(image, [sx, sy, sw, sh,] dx, dy, dw, dh)`.
+    #[op(code = CV_DRAW_IMAGE)]
     DrawImage {
+        /// The image.
         image: CanvasImage,
+        /// The part of it, in image pixels.
         source: Option<[f32; 4]>,
+        /// Where it goes.
         dest: [Num; 4],
     },
 }

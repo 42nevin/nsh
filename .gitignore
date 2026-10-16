@@ -1,5 +1,7 @@
 /target
-/out
+out/
 .nsh/
 .DS_Store
 /dist
+/target-*
+/.claude/worktrees

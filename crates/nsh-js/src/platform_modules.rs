@@ -1,0 +1,580 @@
+//! The small runtime modules: `nsh/android`
+//! (`isAvailable`, `BackHandler`'s listeners over the registry's module),
+//! `nsh/ios` (`isAvailable`, `InputAccessoryView`), `nsh/webview` and
+//! `nsh/video` (their host elements as components; also the built-ins
+//! `<web-view>` / `<video>`), and `nsh/native` (`nativeComponent`: the
+//! JS face of components the embedding app registers natively).
+
+use std::{
+    cell::RefCell,
+    ffi::{CStr, CString, c_int},
+    ptr,
+};
+
+use nsh_core::{EventKind, Tag, platform::Os};
+use rquickjs::qjs;
+
+use crate::{
+    dom,
+    modules::{Export, Item, Ts},
+    reactive::{self, arg},
+};
+
+type JsValue = qjs::JSValue;
+type JsContext = qjs::JSContext;
+
+const UNDEFINED: JsValue = qjs::JS_UNDEFINED;
+
+/// The modules' part of a context's state.
+#[derive(Default)]
+pub(crate) struct PlatformModules {
+    /// `BackHandler.addEventListener` listeners, in order (id, owned
+    /// function).
+    back: RefCell<Vec<(u32, JsValue)>>,
+    next: std::cell::Cell<u32>,
+}
+
+impl PlatformModules {
+    /// Frees the values held (the state is unregistered).
+    pub(crate) fn free_all(&mut self, raw: *mut JsContext) {
+        for (_, f) in self.back.borrow_mut().drain(..) {
+            // SAFETY: owned values; no JS runs from here on.
+            unsafe { qjs::JS_FreeValue(raw, f) };
+        }
+    }
+}
+
+fn modules<'a>(ctx: *mut JsContext) -> &'a PlatformModules {
+    // SAFETY: a projection of the state's field, by shared reference.
+    unsafe { &(*crate::state::state(ctx)).platform }
+}
+
+fn os(ctx: *mut JsContext) -> Os {
+    // SAFETY: the state's renderer, by shared reference.
+    unsafe { &(*crate::state::state(ctx)).dom }.os()
+}
+
+fn boolean(v: bool) -> JsValue {
+    if v { qjs::JS_TRUE } else { qjs::JS_FALSE }
+}
+
+type DataFn = unsafe extern "C" fn(
+    *mut JsContext,
+    JsValue,
+    c_int,
+    *mut JsValue,
+    c_int,
+    *mut JsValue,
+) -> JsValue;
+
+fn native(ctx: *mut JsContext, f: DataFn, length: c_int, data: &mut [JsValue]) -> JsValue {
+    // SAFETY: the function keeps dups of `data`.
+    unsafe {
+        qjs::JS_NewCFunctionData(
+            ctx,
+            Some(f),
+            length,
+            0,
+            data.len() as c_int,
+            data.as_mut_ptr(),
+        )
+    }
+}
+
+fn new_string(ctx: *mut JsContext, s: &str) -> JsValue {
+    // SAFETY: a new string.
+    unsafe { qjs::JS_NewStringLen(ctx, s.as_ptr().cast(), s.len() as _) }
+}
+
+// --- Host components ------------------------------------------------------------------
+
+/// A component rendering host element `tag` with its props (children too
+/// when `children`).
+fn host_component(ctx: *mut JsContext, tag: &str, children: bool) -> JsValue {
+    let name = new_string(ctx, tag);
+    let mut data = [name, boolean(children)];
+    let f = native(ctx, render_host, 1, &mut data);
+    // SAFETY: ours.
+    unsafe { qjs::JS_FreeValue(ctx, name) };
+    f
+}
+
+unsafe extern "C" fn render_host(
+    ctx: *mut JsContext,
+    _this: JsValue,
+    argc: c_int,
+    argv: *mut JsValue,
+    _magic: c_int,
+    data: *mut JsValue,
+) -> JsValue {
+    let props = arg(argc, argv, 0);
+    // SAFETY: two data values (`host_component`).
+    let (tag, children) = unsafe { (*data, qjs::JS_ToBool(ctx, *data.add(1)) == 1) };
+    let Some(tag) = dom::string_arg(ctx, tag).and_then(|t| Tag::from_name(&t)) else {
+        return UNDEFINED;
+    };
+    let node = match dom::create_element(ctx, tag) {
+        Ok(node) => node,
+        Err(e) => return e,
+    };
+    let skip: &[&str] = if children { &[] } else { &["children"] };
+    let r = dom::spread_except(ctx, node, props, skip).and_then(|()| {
+        if !children {
+            return Ok(());
+        }
+        let reader = reader(ctx, props, "children");
+        let r = dom::insert_value_at(ctx, node, reader, None);
+        // SAFETY: ours.
+        unsafe { qjs::JS_FreeValue(ctx, reader) };
+        r
+    });
+    match r {
+        Ok(()) => reactive::finish_value(ctx, node),
+        Err(e) => {
+            // SAFETY: ours.
+            unsafe { qjs::JS_FreeValue(ctx, node) };
+            e
+        }
+    }
+}
+
+/// A getter of `props[key]`.
+fn reader(ctx: *mut JsContext, props: JsValue, key: &str) -> JsValue {
+    let k = new_string(ctx, key);
+    let f = native(ctx, read_prop, 0, &mut [props, k]);
+    // SAFETY: ours.
+    unsafe { qjs::JS_FreeValue(ctx, k) };
+    f
+}
+
+unsafe extern "C" fn read_prop(
+    ctx: *mut JsContext,
+    _this: JsValue,
+    _argc: c_int,
+    _argv: *mut JsValue,
+    _magic: c_int,
+    data: *mut JsValue,
+) -> JsValue {
+    // SAFETY: two data values (props, key).
+    unsafe {
+        let Some(key) = dom::string_arg(ctx, *data.add(1)) else {
+            return qjs::JS_EXCEPTION;
+        };
+        let k = CString::new(key).unwrap_or_default();
+        if !qjs::JS_IsObject(*data) {
+            return UNDEFINED;
+        }
+        qjs::JS_GetPropertyStr(ctx, *data, k.as_ptr())
+    }
+}
+
+/// A component that renders nothing (`InputAccessoryView` off iOS).
+unsafe extern "C" fn nothing(
+    _ctx: *mut JsContext,
+    _this: JsValue,
+    _argc: c_int,
+    _argv: *mut JsValue,
+) -> JsValue {
+    qjs::JS_NULL
+}
+
+// --- nsh/android ------------------------------------------------------------------------
+
+/// `BackHandler`: the registry's module (`exitApp`) with listeners of the
+/// hardware back button.
+fn back_handler(ctx: *mut JsContext) -> JsValue {
+    let handler = crate::components::runtime_module(ctx, "nsh/android", "BackHandler")
+        // SAFETY: a new object when the runtime has none.
+        .unwrap_or_else(|| unsafe { qjs::JS_NewObject(ctx) });
+    let add = reactive::new_function(ctx, c"addEventListener", add_back_listener, 2);
+    // SAFETY: the object takes the function.
+    unsafe { qjs::JS_SetPropertyStr(ctx, handler, c"addEventListener".as_ptr(), add) };
+    handler
+}
+
+/// `BackHandler.addEventListener("hardwareBackPress", f)`: `{ remove() }`.
+unsafe extern "C" fn add_back_listener(
+    ctx: *mut JsContext,
+    _this: JsValue,
+    argc: c_int,
+    argv: *mut JsValue,
+) -> JsValue {
+    let f = arg(argc, argv, 1);
+    // SAFETY: an inline check.
+    if !unsafe { qjs::JS_IsFunction(ctx, f) } {
+        return unsafe { qjs::JS_ThrowTypeError(ctx, c"addEventListener: a function".as_ptr()) };
+    }
+    let m = modules(ctx);
+    let id = m.next.get() + 1;
+    m.next.set(id);
+    // SAFETY: a dup the listeners own.
+    let first = {
+        let mut back = m.back.borrow_mut();
+        back.push((id, unsafe { qjs::JS_DupValue(ctx, f) }));
+        back.len() == 1
+    };
+    if first {
+        let on = reactive::new_function(ctx, c"onBackPress", on_back_press, 0);
+        let r = dom::set_handler(ctx, 1, EventKind::BackPress, on);
+        // SAFETY: ours.
+        unsafe { qjs::JS_FreeValue(ctx, on) };
+        if let Err(e) = r {
+            return e;
+        }
+    }
+    let remove = native(
+        ctx,
+        remove_back_listener,
+        0,
+        &mut [qjs::JS_NewFloat64(id as f64)],
+    );
+    // SAFETY: a new object taking the function.
+    unsafe {
+        let o = qjs::JS_NewObject(ctx);
+        qjs::JS_SetPropertyStr(ctx, o, c"remove".as_ptr(), remove);
+        o
+    }
+}
+
+unsafe extern "C" fn remove_back_listener(
+    ctx: *mut JsContext,
+    _this: JsValue,
+    _argc: c_int,
+    _argv: *mut JsValue,
+    _magic: c_int,
+    data: *mut JsValue,
+) -> JsValue {
+    let mut id = 0f64;
+    // SAFETY: one data value, the listener's id.
+    unsafe { qjs::JS_ToFloat64(ctx, &mut id, *data) };
+    let (gone, empty) = {
+        let mut back = modules(ctx).back.borrow_mut();
+        let i = back.iter().position(|(i, _)| *i == id as u32);
+        (i.map(|i| back.remove(i).1), back.is_empty())
+    };
+    if let Some(f) = gone {
+        // SAFETY: owned.
+        unsafe { qjs::JS_FreeValue(ctx, f) };
+        if empty {
+            let _ = dom::set_handler(ctx, 1, EventKind::BackPress, UNDEFINED);
+        }
+    }
+    UNDEFINED
+}
+
+/// The back button: the newest listener first; when none handles it (`true`
+/// handles), the app exits.
+unsafe extern "C" fn on_back_press(
+    ctx: *mut JsContext,
+    _this: JsValue,
+    _argc: c_int,
+    _argv: *mut JsValue,
+) -> JsValue {
+    let listeners: Vec<JsValue> = modules(ctx)
+        .back
+        .borrow()
+        .iter()
+        .rev()
+        // SAFETY: dups for the calls.
+        .map(|&(_, f)| unsafe { qjs::JS_DupValue(ctx, f) })
+        .collect();
+    let mut handled = false;
+    let mut failed = None;
+    for f in listeners {
+        if !handled && failed.is_none() {
+            // SAFETY: a call of an owned function, then its result.
+            unsafe {
+                let r = qjs::JS_Call(ctx, f, UNDEFINED, 0, ptr::null_mut());
+                if qjs::JS_IsException(r) {
+                    failed = Some(r);
+                } else {
+                    handled = qjs::JS_ToBool(ctx, r) == 1;
+                    qjs::JS_FreeValue(ctx, r);
+                }
+            }
+        }
+        // SAFETY: ours.
+        unsafe { qjs::JS_FreeValue(ctx, f) };
+    }
+    if let Some(e) = failed {
+        return e;
+    }
+    if handled {
+        return UNDEFINED;
+    }
+    let exit = crate::components::runtime_function(ctx, "nsh/android", "BackHandler", "exitApp");
+    match exit {
+        Some(f) => {
+            // SAFETY: calls and frees the function.
+            unsafe {
+                let r = qjs::JS_Call(ctx, f, UNDEFINED, 0, ptr::null_mut());
+                qjs::JS_FreeValue(ctx, f);
+                r
+            }
+        }
+        None => UNDEFINED,
+    }
+}
+
+/// The hand-written exports of `nsh/android` (with the registry's).
+pub(crate) const ANDROID_EXPORTS: &[Item] = &[
+    (
+        "isAvailable",
+        Export::Value(|ctx| boolean(os(ctx) == Os::Android)),
+        Ts::Const("True on Android.", "boolean"),
+    ),
+    (
+        "BackHandler",
+        Export::Value(back_handler),
+        Ts::Const(
+            "The back button, after modals and stacks had their turn.",
+            "BackHandlerModule & BackListeners",
+        ),
+    ),
+];
+
+/// `nsh/android`'s types (with the runtime registry's modules).
+pub(crate) const ANDROID_TYPES: &str = r#"/** The back button's listeners. */
+export interface BackListeners {
+  /** `listener` returns true when it handled the press; the most recently
+   * added listener runs first. Without a listener that handles it, the app
+   * exits. */
+  addEventListener(event: "hardwareBackPress", listener: () => boolean | void): { remove(): void };
+}
+"#;
+
+/// `nsh/ios`.
+pub(crate) const IOS_EXPORTS: &[Item] = &[
+    (
+        "isAvailable",
+        Export::Value(|ctx| boolean(os(ctx) == Os::Ios)),
+        Ts::Const("True on iOS (and Mac Catalyst).", "boolean"),
+    ),
+    (
+        "InputAccessoryView",
+        Export::Value(|ctx| {
+            if os(ctx) == Os::Ios {
+                host_component(ctx, "inputaccessory", true)
+            } else {
+                reactive::new_function(ctx, c"InputAccessoryView", nothing, 1)
+            }
+        }),
+        Ts::Function(
+            "A bar over the keyboard of the inputs whose `inputAccessoryViewID` is its\n`nativeID` (iOS's `inputAccessoryView`): as wide as the window and as tall\nas its content, moving with the keyboard natively. It renders nothing where\nit is placed in the tree, and nothing at all on Android.",
+            &["(props: InputAccessoryViewProps): YNode | null"],
+        ),
+    ),
+];
+
+/// `nsh/ios`'s types.
+pub(crate) const IOS_TYPES: &str = r#"export interface InputAccessoryViewProps {
+  /** Inputs with this `inputAccessoryViewID` show the view over the keyboard. */
+  nativeID: string;
+  style?: StyleProp<ViewStyle>;
+  class?: string;
+  children?: JSX.Element;
+}
+"#;
+
+/// `nsh/webview`.
+pub(crate) const WEBVIEW_EXPORTS: &[Item] = &[(
+    "WebView",
+    Export::Value(|ctx| host_component(ctx, "webview", false)),
+    Ts::Const(
+        "A web page (WKWebView / android.webkit.WebView); its `ref` has\n`reload()`, `goBack()`, `goForward()`, `stopLoading()`,\n`injectJavaScript(script)` and `postMessage(data)`.",
+        "(props: WebViewProps) => YNode",
+    ),
+)];
+
+/// `nsh/webview`'s types.
+pub(crate) const WEBVIEW_TYPES: &str = r#"export type { WebViewNavigation };
+
+export interface WebViewProps extends Omit<ViewProps, "children" | "ios">, WebViewHostProps {
+  source: string | { uri: string } | { html: string; baseUrl?: string };
+  ios?: IOSWebViewHostProps;
+}
+"#;
+
+/// `nsh/video`.
+pub(crate) const VIDEO_EXPORTS: &[Item] = &[(
+    "Video",
+    Export::Value(|ctx| host_component(ctx, "video", false)),
+    Ts::Const(
+        "A video player (AVPlayer / MediaPlayer); its `ref` has `seek(seconds)`.",
+        "(props: VideoProps) => YNode",
+    ),
+)];
+
+/// `nsh/video`'s types.
+pub(crate) const VIDEO_TYPES: &str = r#"export interface VideoProps extends Omit<ViewProps, "children">, VideoHostProps {
+  source: string | { uri: string };
+}
+"#;
+
+// --- nsh/native ---------------------------------------------------------------------------
+
+/// `nativeComponent(name, { props, events })`: the component of native
+/// component `name` the embedding app registers: its own props go as
+/// `$name`, its events to `on<Event>` handlers, the rest as on a view.
+unsafe extern "C" fn native_component(
+    ctx: *mut JsContext,
+    _this: JsValue,
+    argc: c_int,
+    argv: *mut JsValue,
+) -> JsValue {
+    let mut data = [arg(argc, argv, 0), arg(argc, argv, 1)];
+    native(ctx, render_native, 1, &mut data)
+}
+
+/// The strings of array `spec[key]`.
+fn names(ctx: *mut JsContext, spec: JsValue, key: &CStr) -> Vec<String> {
+    let mut out = Vec::new();
+    // SAFETY: reads of live values; every value got is freed.
+    unsafe {
+        if !qjs::JS_IsObject(spec) {
+            return out;
+        }
+        let list = qjs::JS_GetPropertyStr(ctx, spec, key.as_ptr());
+        let mut len: i64 = 0;
+        if qjs::JS_IsArray(list) && qjs::JS_GetLength(ctx, list, &mut len) == 0 {
+            for i in 0..len.max(0) {
+                let v = qjs::JS_GetPropertyInt64(ctx, list, i);
+                if let Some(s) = dom::string_arg(ctx, v) {
+                    out.push(s);
+                }
+                qjs::JS_FreeValue(ctx, v);
+            }
+        }
+        qjs::JS_FreeValue(ctx, list);
+    }
+    out
+}
+
+fn handler_name(event: &str) -> String {
+    let mut c = event.chars();
+    match c.next() {
+        Some(first) => format!("on{}{}", first.to_ascii_uppercase(), c.as_str()),
+        None => "on".to_owned(),
+    }
+}
+
+unsafe extern "C" fn render_native(
+    ctx: *mut JsContext,
+    _this: JsValue,
+    argc: c_int,
+    argv: *mut JsValue,
+    _magic: c_int,
+    data: *mut JsValue,
+) -> JsValue {
+    // SAFETY: two data values (name, spec).
+    let (name, spec) = unsafe { (*data, *data.add(1)) };
+    let props = arg(argc, argv, 0);
+    let own = names(ctx, spec, c"props");
+    let events = names(ctx, spec, c"events");
+    let node = match dom::create_element(ctx, Tag::Native) {
+        Ok(node) => node,
+        Err(e) => return e,
+    };
+    let result = (|| -> Result<(), JsValue> {
+        dom::set_prop_value(ctx, node, "component", name)?;
+        let mut skip: Vec<String> = own.clone();
+        skip.extend(events.iter().map(|e| handler_name(e)));
+        skip.push("children".into());
+        let skip_refs: Vec<&str> = skip.iter().map(String::as_str).collect();
+        dom::spread_except(ctx, node, props, &skip_refs)?;
+        // Its own props, as the component's (`$name`), followed.
+        for key in &own {
+            let get = reader(ctx, props, key);
+            let wire = format!("${key}");
+            let r = dom::bind_prop_with(ctx, node, &wire, get);
+            // SAFETY: ours.
+            unsafe { qjs::JS_FreeValue(ctx, get) };
+            r?;
+        }
+        if !events.is_empty() {
+            let on = native(ctx, native_event, 1, &mut [props]);
+            let r = dom::set_handler(
+                ctx,
+                dom::node_id(ctx, node).unwrap_or(0),
+                EventKind::NativeEvent,
+                on,
+            );
+            // SAFETY: ours.
+            unsafe { qjs::JS_FreeValue(ctx, on) };
+            r?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => reactive::finish_value(ctx, node),
+        Err(e) => {
+            // SAFETY: ours.
+            unsafe { qjs::JS_FreeValue(ctx, node) };
+            e
+        }
+    }
+}
+
+/// A native component's event: to its `on<Event>` handler.
+unsafe extern "C" fn native_event(
+    ctx: *mut JsContext,
+    _this: JsValue,
+    argc: c_int,
+    argv: *mut JsValue,
+    _magic: c_int,
+    data: *mut JsValue,
+) -> JsValue {
+    // SAFETY: one data value (the props); values got are freed.
+    unsafe {
+        let props = *data;
+        let e = arg(argc, argv, 0);
+        let name = qjs::JS_GetPropertyStr(ctx, e, c"name".as_ptr());
+        let handler = dom::string_arg(ctx, name).map(|n| {
+            let k = CString::new(handler_name(&n)).unwrap_or_default();
+            qjs::JS_GetPropertyStr(ctx, props, k.as_ptr())
+        });
+        qjs::JS_FreeValue(ctx, name);
+        let Some(handler) = handler else {
+            return qjs::JS_EXCEPTION;
+        };
+        if !qjs::JS_IsFunction(ctx, handler) {
+            qjs::JS_FreeValue(ctx, handler);
+            return UNDEFINED;
+        }
+        let mut args = [qjs::JS_GetPropertyStr(ctx, e, c"data".as_ptr())];
+        let r = qjs::JS_Call(ctx, handler, UNDEFINED, 1, args.as_mut_ptr());
+        qjs::JS_FreeValue(ctx, args[0]);
+        qjs::JS_FreeValue(ctx, handler);
+        r
+    }
+}
+
+/// `nsh/native`.
+pub(crate) const NATIVE_EXPORTS: &[Item] = &[(
+    "nativeComponent",
+    Export::Function(native_component, 2),
+    Ts::Function(
+        "A component for the native component the embedding app registered as\n`name` (Swift `NshAppView.register(component:)`, Java\n`NshView.registerComponent`). It is laid out like a view, at the size its\nstyle gives it, else at the size the component reports. Its `ref` calls\ncommands: `ref.command(\"zoomTo\", { level: 3 })`. Where nothing is\nregistered under `name`, it renders an empty view.",
+        &[
+            "<P extends object = {}, E extends object = {}>(name: string, spec: NativeComponentSpec<P, E>): (props: NativeComponentProps<P, E>) => YNode",
+        ],
+    ),
+)];
+
+/// `nsh/native`'s types.
+pub(crate) const NATIVE_TYPES: &str = r#"/** Handlers of a native component's events: `regionChange` -> `onRegionChange`. */
+export type NativeEventHandlers<E> = { [K in keyof E & string as `on${Capitalize<K>}`]?: (data: E[K]) => void };
+
+/** The props of a native component: a view's (style, classes, layout,
+ * accessibility, `ref`), its own `P` and handlers of its events `E`. */
+export type NativeComponentProps<P, E> = Omit<ViewProps, "children"> & P & NativeEventHandlers<E>;
+
+/** What a native component takes and emits. */
+export interface NativeComponentSpec<P, E> {
+  /** Its own props: sent to the component (any JSON value), each when it
+   * changes. */
+  props: readonly (keyof P & string)[];
+  /** The events it emits. */
+  events?: readonly (keyof E & string)[];
+}
+"#;

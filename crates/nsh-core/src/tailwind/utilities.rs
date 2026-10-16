@@ -110,10 +110,19 @@ pub(crate) enum Decl {
     /// A length relative to the window (`w-screen`): `(key, fraction of
     /// width, fraction of height)`.
     Screen(StyleKey, f32, f32),
+    /// One value in light appearance, another in dark (a theme color of a
+    /// Rust component): one declaration, so a later plain one still wins.
+    Adaptive(StyleKey, [PatchValue; 2]),
 }
 
 impl Decl {
-    pub(crate) fn apply(&self, style: &mut Style, props: &mut ClassProps, parts: &mut Parts) {
+    pub(crate) fn apply(
+        &self,
+        dark: bool,
+        style: &mut Style,
+        props: &mut ClassProps,
+        parts: &mut Parts,
+    ) {
         match self {
             Decl::Set(key, value) => {
                 let _ = style.set_key(*key, value.as_value());
@@ -137,6 +146,9 @@ impl Decl {
                 parts.screen.push((*key, *fw, *fh));
                 parts.touched |= touched::SCREEN;
             }
+            Decl::Adaptive(key, values) => {
+                let _ = style.set_key(*key, values[usize::from(dark)].as_value());
+            }
         }
     }
 
@@ -144,6 +156,7 @@ impl Decl {
     pub(crate) fn text_color(&self) -> Option<Color> {
         match self {
             Decl::Set(StyleKey::Color, PatchValue::Str(s)) => Color::parse(s),
+            // `placeholder:` rules are Tailwind's: never adaptive.
             _ => None,
         }
     }
@@ -154,6 +167,7 @@ impl Decl {
                 (if *w != 0.0 { deps::WIDTH } else { 0 })
                     | (if *h != 0.0 { deps::HEIGHT } else { 0 })
             }
+            Decl::Adaptive(..) => deps::DARK,
             _ => 0,
         }
     }

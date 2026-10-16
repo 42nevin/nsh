@@ -19,19 +19,35 @@
 On Android the same elements map to `Box` (ViewGroup), `TextBox`, `ImageBox`, `ScrollBox` (ScrollView), `InputBox` (EditText),
 `StackBox` (screens with a Toolbar, predictive back), `ModalHost` (a Dialog), `WebBox` (android.webkit.WebView) and `VideoBox`
 (MediaPlayer on a TextureView, MediaController); both are `WidgetBox`es. Every host element and runtime component is typed in
-`js/runtime/types.ts` and the runtime's modules.
+`.nsh/types/nsh/types.d.ts` and the declarations of the runtime's modules (made from the Rust tables: `tooling.md`).
+
+**Host props are one definition.** A host prop is a variant of `nsh_core::Prop` (or of the enum it nests: `ScrollProp`,
+`NativeProp`, `AccessibilityProp`, ...) with `#[prop(js = "name", ...)]`: `#[derive(HostProps)]` (`nsh_core::js::host`)
+derives from it how `nsh-js` decodes the JS value (straight from QuickJS values, no JSON), the default clearing the
+prop sets (`HostProps::reset`, also used when a Rust component's render stops setting it) and its declaration: one
+interface per element group and platform (`InputHostProps`, `IOSInputHostProps`, ...) that the element types of
+`types.d.ts` and the runtime's components extend. The payload's type decodes itself (`HostValue`;
+`#[derive(PropEnum)]` for string unions); `default`, `min` / `max`, `on` (the element groups), `ios` / `android`
+(names inside `ios={{…}}` / `android={{…}}`), `with` (a decoder of the whole variant, `js/host_values.rs`), `once`
+(not reset) and `internal` (set by the runtime, untyped) cover the rest. **Events** are a table next to it
+(`host::EVENTS`): the event, the element groups whose props declare it and its handler's type, one row per payload
+(`onLoad` gives an image its size and a video its duration); the handlers join the same interfaces. An event no
+element declares (the root's, the runtime's own) is listed in `INTERNAL_EVENTS`; a test checks every `EventKind` is
+in one of them.
 
 ## Primitives only
 
-nsh's runtime provides the basic capabilities. Components are the UI sets' (`js/ui/mobile/components`, see its
-README), drawn with views, classes, canvases and native animations so they look the same on iOS and Android. Do not
+nsh's runtime provides the basic capabilities. Components are the UI sets' (Rust, `crates/nsh-ui-mobile`,
+`docs/dev/components.md`), drawn with views, classes, canvases and native animations so they look the same on iOS and Android. Do not
 add platform-styled widgets (UISwitch / SeekBar wrappers and the like), and do not add compositions of existing
 primitives to the runtime (section lists, touchables, drawers, ...): they belong to a UI set. React Native is a
 reference for which capabilities exist, not an API to be compatible with. Components that need core or native support
 are primitives of their own (`List`, `Canvas`, `WebView`, `Video`; in the mobile set `Stack`, `Modal`, `SafeAreaView`,
-`KeyboardAvoidingView`; `InputAccessoryView` in `nsh/ios`). Lowercase JSX names are host elements (`Tag::from_name`),
-capitalized ones are components: a component is imported (`import { Button } from "nsh/ui/mobile"`), never a host
-element of the same name.
+`KeyboardAvoidingView`; `InputAccessoryView` in `nsh/ios`). Lowercase JSX names are built-ins (host elements, `Tag::from_name`;
+`<list>`, `<if>`, `<each>`), capitalized ones are components: a component is imported (`import { Button } from
+"nsh/ui/mobile"`) and may be written in kebab case (`<button>`); an imported or local binding of a built-in's name
+replaces it (`Modal` from `nsh/ui/mobile` makes `<modal>` that component), except objects of functions of nsh's modules
+(`Image` from `nsh/image` leaves `<image>` the element; `native-pipeline.md`).
 
 ## The main thread never waits for JS
 
@@ -51,13 +67,13 @@ of that kind: with a listener the press is taken, and JS exits the app when no l
 
 - **Press feedback primitives** (native, no JS round trip): `activeOpacity`; `underlayColor` + `underlayOpacity` (default 0.85)
   on any view — the core shows the underlay as the background and fades the children while the platform reports the view
-  pressed; `active:` classes. `KeyboardAvoidingView` (`behavior`: `padding` → `insetPadding`, `height` → `insetMargin`,
+  pressed; `active:` classes. `KeyboardAvoidingView` (Rust; `behavior`: `padding` → inset padding, `height` → inset margin,
   `position` → an inner view moved up; `keyboardVerticalOffset`).
 - **Platform modules**: `Platform` (`OS`: `ios` / `android` / `macos` / `windows` / `linux`, from the platform's
   `Environment::os` (`nsh_engine::Os`; the default is the build's mobile OS, so `nsh trace` is iOS); `isDesktop`,
   `Version`, `isPad`, `isTV`, `isMacCatalyst`, `select` (the OS, then `mobile` / `desktop`, `native`, `default`)), `PixelRatio`, `AccessibilityInfo` (`isScreenReaderEnabled`,
   `isReduceMotionEnabled`, `addEventListener("screenReaderChanged" | "reduceMotionChanged")`, `announceForAccessibility`,
-  `setAccessibilityFocus(ref)`), reactive `screenReaderEnabled()` / `reduceMotion()`. The environment carries `pixelRatio`,
+  `setAccessibilityFocus(ref)`: Rust, the node passed as `{ $node: id }`), reactive `screenReaderEnabled()` / `reduceMotion()`. The environment carries `pixelRatio`,
   `screenReader`, `osVersion` and `idiom` (VoiceOver / TalkBack changes are observed natively).
 - **`disabled`** on any element applies `disabled:` classes and removes its press listeners from what is mounted (no press,
   no feedback).
@@ -76,7 +92,8 @@ of that kind: with a listener the press is taken, and JS exits the app when no l
   `PanResponder.create` on top. A node with any of them listens to `onTouch` natively; one tracker per root view (surface,
   modals: `touch.rs`, `TouchTracker.java`) observes without recognizing and reports touches whose target or an ancestor
   listens, with the path of listening nodes (`EventPayload::Touch`, sent to the root; moves are merged per engine turn). The
-  negotiation runs in JS as in React Native. A grant returning true (PanResponder's default) sends `setJsResponder`: scroll
+  negotiation runs as in React Native, natively (`nsh-js` `touch.rs`), asking the app's handlers. A grant returning true
+  (PanResponder's default) sends `SetJsResponder`: scroll
   views around stop taking the touches (UIKit: their pan recognizer is disabled; Android: `ScrollBox.jsBlocked`); a native
   scroll view that starts dragging first cancels the JS touches.
 - **Accessibility**: `accessible`, `accessibilityLabel` / `Hint` / `Role` (`role`) / `State` / `Value` / `Actions` +
@@ -85,9 +102,10 @@ of that kind: with a listener the press is taken, and JS exits the app when no l
 - **Frames**: `requestAnimationFrame` / `cancelAnimationFrame` follow the display (CADisplayLink / Choreographer).
 - **Back button** (`nsh/android`): `BackHandler.addEventListener("hardwareBackPress", ...)`, after modals and stacks; the app exits
   when nothing handles it.
-- **System UI**: `StatusBar` (component and static methods; the last mounted wins, prop by prop), `Alert.alert`,
-  `ActionSheet.show` (a list dialog on Android), `Toast` (`nsh/android`). Answers come back as the root's
-  `onDialog` event. Embedding apps forward their controller's status bar to `nsh_status_bar_style()` / `_hidden()` / `_animation()`.
+- **System UI**: `StatusBar` (component and static functions; the last mounted wins, prop by prop, over what the
+  functions set: the core layers them, `docs/dev/components.md`), `Alert.alert` and `ActionSheet.show` (promises of
+  the index chosen, -1 when dismissed; a list dialog on Android), `Toast` (`nsh/android`). Answers come back as the
+  root's `Dialog` event, which the core resolves. Embedding apps forward their controller's status bar to `nsh_status_bar_style()` / `_hidden()` / `_animation()`.
 - **Right to left**: `I18nManager` (`isRTL`, reactive; `allowRTL`, `forceRTL`, applied at once) sets the root's direction;
   `direction` (`inherit` / `ltr` / `rtl`) overrides it per view. The core resolves each node's direction (inherited, also for
   subtrees built detached), sets taffy's `direction` (rows run from the right) and, right to left, swaps the left and right

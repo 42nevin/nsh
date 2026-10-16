@@ -17,4 +17,4 @@ path = "src/main.rs"
 log.workspace = true
 
 [target.'cfg(target_os = "ios")'.dependencies]
-nsh-platform-ios.workspace = true
+nsh-platform-ios = { workspace = true, features = ["js"] }

@@ -11,7 +11,8 @@
   divisor) played by a discrete `CAKeyframeAnimation` on `contents` (a tinted animated image shows its first frame); Android
   (API 28+) uses `ImageDecoder` → `AnimatedImageDrawable`, not cached (each view plays its own copy; no blur). `onLoad` reports the
   source's size in pixels on both platforms, whatever size the view decodes at. Downloads are shared per URI (also between
-  views decoding at different sizes) and report `onProgress` at most every 100ms; `Image.getSize` / `Image.prefetch` answer
-  through the root's `onImageInfo` (`Command::ImageInfo`) and keep the downloaded bytes in a data cache (32 MB) until a view
+  views decoding at different sizes) and report `onProgress` at most every 100ms; `Image.getSize` / `Image.prefetch` (Rust,
+  `nsh_core::runtime`) ask with `Command::ImageInfo`, are answered by the root's `ImageInfo` event (which the core
+  resolves, never JS) and keep the downloaded bytes in a data cache (32 MB) until a view
   decodes them. Android `ImageBox` draws its borders above the
   image (as Core Animation's layer border).

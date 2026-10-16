@@ -1,5 +1,4 @@
-import { createSignal, For } from "solid-js";
-import { type GestureResponderEvent } from "nsh";
+import { type GestureResponderEvent, signal } from "nsh";
 import { createNativeValue } from "nsh/animated";
 import { PanResponder } from "nsh/gesture";
 import { Button, colors, Section } from "../ui";
@@ -43,18 +42,18 @@ function Card() {
 /** A ball dragged with a PanResponder (positions go through JS). Its
  * responder blocks the page from scrolling while it is dragged. */
 function Ball() {
-  const [pos, setPos] = createSignal({ x: 0, y: 0 });
-  const [state, setState] = createSignal("idle");
+  const pos = signal({ x: 0, y: 0 });
+  const state = signal("idle");
   let start = { x: 0, y: 0 };
   const pan = PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onPanResponderGrant: () => {
       start = pos();
-      setState("dragging");
+      state.set("dragging");
     },
-    onPanResponderMove: (_, g) => setPos({ x: start.x + g.dx, y: start.y + g.dy }),
-    onPanResponderRelease: (_, g) => setState(`released at ${g.vx.toFixed(2)}, ${g.vy.toFixed(2)} pt/ms`),
-    onPanResponderTerminate: () => setState("taken over"),
+    onPanResponderMove: (_, g) => pos.set({ x: start.x + g.dx, y: start.y + g.dy }),
+    onPanResponderRelease: (_, g) => state.set(`released at ${g.vx.toFixed(2)}, ${g.vy.toFixed(2)} pt/ms`),
+    onPanResponderTerminate: () => state.set("taken over"),
   });
   return (
     <view style={{ gap: 8 }}>
@@ -74,16 +73,16 @@ function Ball() {
         />
       </view>
       <text style={{ color: colors.muted, fontSize: 13 }}>{state()}</text>
-      <Button label="Reset" color="#57606a" onPress={() => setPos({ x: 0, y: 0 })} />
+      <Button label="Reset" color="#57606a" onPress={() => pos.set({ x: 0, y: 0 })} />
     </view>
   );
 }
 
 /** Raw touch events, with every finger. */
 function TouchLog() {
-  const [log, setLog] = createSignal<string[]>([]);
+  const log = signal<string[]>([]);
   const note = (name: string) => (e: GestureResponderEvent) =>
-    setLog((l) =>
+    log.update((l) =>
       [
         `${name} at ${Math.round(e.locationX)},${Math.round(e.locationY)} (page ${Math.round(e.pageX)},${Math.round(e.pageY)}), ${e.touches.length} down`,
         ...l,
@@ -106,10 +105,10 @@ function TouchLog() {
 }
 
 export function Gestures() {
-  const [log, setLog] = createSignal<string[]>([]);
-  const add = (e: string) => setLog((l) => [e, ...l].slice(0, 6));
-  const [slop, setSlop] = createSignal(0);
-  const [through, setThrough] = createSignal(0);
+  const log = signal<string[]>([]);
+  const add = (e: string) => log.update((l) => [e, ...l].slice(0, 6));
+  const slop = signal(0);
+  const through = signal(0);
   return (
     <scroll style={{ flex: 1, backgroundColor: colors.background }}>
       <view style={{ padding: 16, gap: 20 }}>
@@ -160,7 +159,7 @@ export function Gestures() {
           <view style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
             <view
               hitSlop={30}
-              onPress={() => setSlop(slop() + 1)}
+              onPress={() => slop.set(slop() + 1)}
               style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: "#cf222e", margin: 20 }}
             />
             <text style={{ flex: 1 }}>The dot takes taps 30 pt around it: {slop()}</text>
@@ -169,7 +168,7 @@ export function Gestures() {
         <Section title="Pointer events">
           <view style={{ height: 70 }}>
             <view
-              onPress={() => setThrough(through() + 1)}
+              onPress={() => through.set(through() + 1)}
               style={{ flex: 1, borderRadius: 10, backgroundColor: "#1a7f37", alignItems: "center", justifyContent: "center" }}
             >
               <text style={{ color: "#ffffff" }}>Button under an overlay: {through()}</text>
@@ -182,20 +181,20 @@ export function Gestures() {
           <text style={{ color: colors.muted, fontSize: 13 }}>The dashed overlay has pointerEvents="none": taps reach the button.</text>
         </Section>
         <Section title="Accessibility">
-          <For each={[{ label: "Play", hint: "Starts the song" }, { label: "Like", hint: "Adds to favorites" }]}>
+          <each of={[{ label: "Play", hint: "Starts the song" }, { label: "Like", hint: "Adds to favorites" }]}>
             {(item) => (
               <view
                 accessible
                 accessibilityRole="button"
-                accessibilityLabel={item.label}
-                accessibilityHint={item.hint}
-                onPress={() => add(item.label)}
+                accessibilityLabel={item().label}
+                accessibilityHint={item().hint}
+                onPress={() => add(item().label)}
                 style={{ padding: 12, borderRadius: 10, backgroundColor: "#eaeef2" }}
               >
-                <text>{`${item.label} (labelled for VoiceOver / TalkBack)`}</text>
+                <text>{`${item().label} (labelled for VoiceOver / TalkBack)`}</text>
               </view>
             )}
-          </For>
+          </each>
         </Section>
       </view>
     </scroll>

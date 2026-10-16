@@ -153,11 +153,13 @@ final class InputBox extends FrameLayout implements Node {
             type |= InputType.TYPE_NUMBER_VARIATION_PASSWORD;
         }
         int selection = edit.getSelectionEnd();
+        // Before the input type: setSingleLine replaces a password's
+        // transformation (the text would show).
+        edit.setSingleLine(!multiline);
+        if (multiline) edit.setMaxLines(Integer.MAX_VALUE);
         edit.setInputType(type);
         // After the input type: password types reset the typeface to monospace.
         edit.setTypeface(TextLayouts.typeface(family, weight, italic));
-        edit.setSingleLine(!multiline);
-        if (multiline) edit.setMaxLines(Integer.MAX_VALUE);
         if (selection >= 0 && selection <= edit.length()) edit.setSelection(selection);
         int ime;
         switch (returnKey) {

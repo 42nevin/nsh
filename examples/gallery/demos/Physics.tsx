@@ -1,14 +1,14 @@
-import { createSignal } from "solid-js";
+import { signal } from "nsh";
 import { createNativeValue } from "nsh/animated";
 
 export function Physics() {
   const x = createNativeValue(0);
   const y = createNativeValue(0);
   const pressed = createNativeValue(0);
-  const [releases, setReleases] = createSignal(0);
+  const releases = signal(0);
 
   const release = (e: { velocityX: number; velocityY: number }) => {
-    setReleases(releases() + 1);
+    releases.set(releases() + 1);
     x.spring(0, { velocity: e.velocityX, stiffness: 180, damping: 14 });
     y.spring(0, { velocity: e.velocityY, stiffness: 180, damping: 14 });
   };
@@ -24,7 +24,7 @@ export function Physics() {
         pan={{ x, y }}
         onPanEnd={release}
         onPress={pulse}
-        onLongPress={() => setReleases(0)}
+        onLongPress={() => releases.set(0)}
         style={{
           width: 160,
           height: 160,

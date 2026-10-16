@@ -5,17 +5,16 @@ use std::{fs, path::Path};
 
 use anyhow::{Context as _, bail};
 
-const APP: &str = r##"import { createSignal } from "solid-js";
-import { render, root } from "nsh";
+const APP: &str = r##"import { mount, signal } from "nsh";
 import { SafeAreaView } from "nsh/ui/mobile";
 
 function App() {
-  const [count, setCount] = createSignal(0);
+  const count = signal(0);
   return (
     <SafeAreaView style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 16 }}>
       <text style={{ fontSize: 28, fontWeight: "600" }}>{count()}</text>
       <view
-        onPress={() => setCount(count() + 1)}
+        onPress={() => count.update((c) => c + 1)}
         activeOpacity={0.6}
         accessibilityRole="button"
         style={{ paddingHorizontal: 20, paddingVertical: 12, borderRadius: 10, backgroundColor: "#0969da" }}
@@ -26,7 +25,7 @@ function App() {
   );
 }
 
-render(() => <App />, root);
+mount(App);
 "##;
 
 const GITIGNORE: &str = ".nsh/\nout/\n";
@@ -83,8 +82,15 @@ pub(crate) fn init(dir: &Path, name: Option<String>) -> anyhow::Result<()> {
 /// not change are left alone, so editors do not reload them). Files nsh no
 /// longer generates (a module that moved) are removed.
 pub(crate) fn write_types(dir: &Path) {
+    write_types_with(dir, &[]);
+}
+
+/// [`write_types`] with the components the app names in kebab case (known
+/// after a build).
+pub(crate) fn write_types_with(dir: &Path, elements: &[nsh_bundler::AppElement]) {
     let types = dir.join(".nsh/types");
-    let definitions = nsh_bundler::type_definitions();
+    let mut definitions = nsh_js::type_definitions(&[nsh_ui_mobile::registry()]);
+    definitions.extend(nsh_bundler::type_definitions(elements));
     remove_stale(&types, &types, &definitions);
     for (path, contents) in definitions {
         let path = types.join(path);

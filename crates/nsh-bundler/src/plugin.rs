@@ -5,7 +5,6 @@ use std::{
 };
 
 use anyhow::anyhow;
-use dom_expressions_compiler::{CompileOptions, Generate, compile};
 use oxc::{
     allocator::Allocator,
     codegen::{Codegen, CodegenOptions},
@@ -24,10 +23,8 @@ use rolldown::{
     },
 };
 
-use crate::embedded::{self, RENDERER_SPECIFIER};
-
-/// Serves embedded packages and compiles JSX with the Solid universal
-/// compiler.
+/// Compiles the app's modules with nsh's JSX compiler against the native
+/// modules (kept as imports) and loads its assets.
 #[derive(Debug)]
 pub(crate) struct NshPlugin {
     /// Paths in error messages are shown relative to this directory.
@@ -40,28 +37,32 @@ pub(crate) struct NshPlugin {
     /// Development bundle with hot module replacement: components and
     /// contexts of app modules are registered with the hot runtime.
     pub(crate) hot: bool,
-    /// The app's Tailwind theme (`nsh.json`).
-    pub(crate) tailwind: Arc<TailwindSetup>,
+    /// The app's themes (`nsh.json`).
+    pub(crate) tailwind: Arc<ThemeSetup>,
+    /// The entry module (it sets up the themes).
+    pub(crate) entry: PathBuf,
+    /// The components the app names in kebab case.
+    pub(crate) elements: Arc<Mutex<Vec<crate::AppElement>>>,
+    /// The native modules the app imports.
+    pub(crate) natives: Arc<Mutex<std::collections::BTreeSet<String>>>,
 }
 
-/// The `"tailwind"` object of the app's `nsh.json`.
+/// The `"tailwind"` and `"theme"` of the app's `nsh.json`.
 #[derive(Debug, Default)]
-pub(crate) struct TailwindSetup {
-    /// As JSON, for the runtime (`None`: the default theme).
+pub(crate) struct ThemeSetup {
+    /// The Tailwind theme as JSON, for the runtime (`None`: the default).
     pub(crate) json: Option<String>,
     /// Parsed, to check classes at build time.
     pub(crate) theme: nsh_core::tailwind::Theme,
+    /// The theme of the Rust components (a gpui-kit theme file), checked.
+    pub(crate) ui: Option<String>,
 }
 
-/// Virtual module with the app's theme, imported by the runtime.
-const THEME_SPECIFIER: &str = "nsh:tailwind-theme";
-const THEME_ID: &str = "\0nsh:tailwind-theme";
-
 /// File types imported as image assets.
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "heic"];
+pub(crate) const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "heic"];
 
 /// File types imported as fonts.
-const FONT_EXTENSIONS: &[&str] = &["ttf", "otf"];
+pub(crate) const FONT_EXTENSIONS: &[&str] = &["ttf", "otf"];
 
 fn has_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
@@ -96,7 +97,63 @@ fn density(path: &Path) -> f64 {
     }
 }
 
+/// Whether `spec` is a native module: nsh's own,
+/// the mobile UI's or a runtime registry's.
+fn native_module(spec: &str) -> bool {
+    nsh_core::js::NATIVE_MODULES.contains(&spec)
+        || spec == nsh_ui_mobile::SPECIFIER
+        || nsh_core::runtime::registries()
+            .iter()
+            .any(|r| r.specifier() == Some(spec))
+}
+
+/// Whether export `name` of `spec` is one of nsh's objects of functions
+/// (`Image` of `nsh/image`), not a component.
+pub(crate) fn native_object(spec: &str, name: &str) -> bool {
+    static UI: std::sync::OnceLock<nsh_core::ui::Registry> = std::sync::OnceLock::new();
+    std::iter::once(UI.get_or_init(nsh_ui_mobile::registry))
+        .chain(nsh_core::runtime::registries())
+        .filter(|r| r.specifier() == Some(spec))
+        .any(|r| r.module_specs().iter().any(|m| !m.flat && m.name == name))
+}
+
+/// The components of the mobile UI, for hints about tags they would be.
+fn ui_components() -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        nsh_ui_mobile::registry()
+            .specs()
+            .iter()
+            .map(|s| s.export.clone())
+            .collect()
+    })
+}
+
 impl NshPlugin {
+    /// The entry's first statement, giving the renderer the app's themes.
+    fn prologue(&self) -> Option<String> {
+        let json = |v: &Option<String>| match v {
+            Some(json) => serde_json::Value::String(json.clone()).to_string(),
+            None => "null".to_owned(),
+        };
+        (self.tailwind.json.is_some() || self.tailwind.ui.is_some()).then(|| {
+            format!(
+                "_$setup({}, {});",
+                json(&self.tailwind.json),
+                json(&self.tailwind.ui)
+            )
+        })
+    }
+
+    /// Records `message` as the build's error (shown as it is).
+    fn refuse(&self, message: String) -> anyhow::Error {
+        self.error
+            .lock()
+            .expect("error lock")
+            .get_or_insert_with(|| message.clone());
+        anyhow!(message)
+    }
+
     fn fail(&self, path: &Path, detail: &str) -> anyhow::Error {
         let rel = path.strip_prefix(&self.root).unwrap_or(path);
         let message = format!("{}\n{detail}", rel.display());
@@ -122,39 +179,36 @@ impl Plugin for NshPlugin {
         _ctx: &PluginContext,
         args: &HookResolveIdArgs<'_>,
     ) -> HookResolveIdReturn {
-        if args.specifier == THEME_SPECIFIER {
-            return Ok(Some(HookResolveIdOutput::from_id(THEME_ID)));
+        let spec = args.specifier;
+        if native_module(spec) {
+            self.natives
+                .lock()
+                .expect("natives lock")
+                .insert(spec.to_owned());
+            return Ok(Some(HookResolveIdOutput {
+                external: Some(true.into()),
+                ..HookResolveIdOutput::from_id(spec)
+            }));
         }
-        Ok(embedded::resolve(args.specifier, args.importer)
-            .map(|m| HookResolveIdOutput::from_id(m.id)))
+        let from = args
+            .importer
+            .map(|i| {
+                let p = Path::new(i);
+                format!("{}: ", p.strip_prefix(&self.root).unwrap_or(p).display())
+            })
+            .unwrap_or_default();
+        if spec == "solid-js" || spec.starts_with("solid-js/") {
+            return Err(self.refuse(format!(
+                "{from}`{spec}` is not part of nsh apps: import signal, computed, effect, batch, untracked, cleanup, context and mount from \"nsh\""
+            )));
+        }
+        if spec.starts_with("nsh/") || spec.starts_with("nsh:") {
+            return Err(self.refuse(format!("{from}nsh has no module `{spec}`")));
+        }
+        Ok(None)
     }
 
     async fn load(&self, _ctx: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> HookLoadReturn {
-        if args.id == THEME_ID {
-            let code = match &self.tailwind.json {
-                Some(json) => format!(
-                    "export default {};",
-                    serde_json::Value::String(json.clone())
-                ),
-                None => "export default null;".to_owned(),
-            };
-            return Ok(Some(HookLoadOutput {
-                code: code.into(),
-                module_type: Some(ModuleType::Js),
-                ..Default::default()
-            }));
-        }
-        if let Some(m) = embedded::load(args.id) {
-            return Ok(Some(HookLoadOutput {
-                code: m.source.into(),
-                module_type: Some(match m.lang {
-                    embedded::Lang::Js => ModuleType::Js,
-                    embedded::Lang::Ts => ModuleType::Ts,
-                    embedded::Lang::Tsx => ModuleType::Tsx,
-                }),
-                ..Default::default()
-            }));
-        }
         let path = Path::new(args.id);
         let rel = path
             .strip_prefix(&self.root)
@@ -172,7 +226,7 @@ impl Plugin for NshPlugin {
                 .expect("assets lock")
                 .push(path.to_path_buf());
             let code = format!(
-                "export default __nsh_font({uri:?}, {family:?});",
+                "import {{ font }} from \"nsh:rt\";\nexport default font({uri:?}, {family:?});",
                 uri = format!("asset:/{rel}"),
             );
             return Ok(Some(HookLoadOutput {
@@ -212,13 +266,17 @@ impl Plugin for NshPlugin {
         args: &HookTransformArgs<'_>,
     ) -> HookTransformReturn {
         let jsx_module = matches!(args.module_type, ModuleType::Tsx | ModuleType::Jsx);
-        let app_module = !args.id.starts_with('\0');
-        let script = matches!(args.module_type, ModuleType::Ts | ModuleType::Js);
-        if !(jsx_module || self.hot && app_module && script) {
+        // Rolldown's own helpers.
+        if args.id.starts_with('\0') {
             return Ok(None);
         }
         let path = Path::new(args.id);
-        let hot_key = (self.hot && app_module).then(|| {
+        let entry = path == self.entry;
+        let script = matches!(args.module_type, ModuleType::Ts | ModuleType::Js);
+        if !(jsx_module || entry || self.hot && script) {
+            return Ok(None);
+        }
+        let hot_key = self.hot.then(|| {
             path.strip_prefix(&self.root)
                 .unwrap_or(path)
                 .to_string_lossy()
@@ -231,7 +289,7 @@ impl Plugin for NshPlugin {
             ModuleType::Ts => SourceType::ts(),
             _ => SourceType::mjs(),
         };
-        if jsx_module && app_module {
+        if jsx_module {
             let rel = path
                 .strip_prefix(&self.root)
                 .unwrap_or(path)
@@ -241,53 +299,83 @@ impl Plugin for NshPlugin {
                 log::warn!(target: "nsh::build", "{rel}:{}:{}: unknown class `{}`", u.line, u.column, u.class);
             }
         }
-        let (jsx, jsx_map) = strip_types(path, source_type, args.code, hot_key.as_deref())
-            .map_err(|detail| self.fail(path, &detail))?;
-        if !jsx_module {
-            // A hot TS / JS module: contexts only, no JSX to compile.
-            return Ok(Some(HookTransformOutput {
-                code: Some(jsx),
-                map: jsx_map.into(),
-                module_type: Some(ModuleType::Js),
-                ..Default::default()
-            }));
-        }
-        let out = compile(
-            &jsx,
-            &CompileOptions {
-                filename: Some(args.id.to_owned()),
-                module_name: RENDERER_SPECIFIER.into(),
-                generate: Generate::Universal,
-                source_map: true,
-                ..CompileOptions::default()
-            },
+        let prologue = if entry { self.prologue() } else { None };
+        let (code, map, uses) = compile_native(
+            path,
+            source_type,
+            args.code,
+            prologue.as_deref(),
+            hot_key.as_deref(),
         )
-        .map_err(|e| self.fail(path, &e.to_string()))?;
-        // Two steps (TSX -> JSX -> JS), one map for rolldown.
-        let map = out
-            .source_map
-            .as_deref()
-            .and_then(|json| SourceMap::from_json_string(json).ok())
-            .map(|solid_map| rolldown_sourcemap::collapse_sourcemaps(&[&jsx_map, &solid_map]));
+        .map_err(|detail| self.fail(path, &detail))?;
+        let module = path
+            .strip_prefix(&self.root)
+            .unwrap_or(path)
+            .with_extension("");
+        let mut elements = self.elements.lock().expect("elements lock");
+        for u in uses {
+            elements.retain(|e| e.tag != u.tag);
+            elements.push(crate::AppElement {
+                tag: u.tag,
+                source: u.source.map(|(specifier, export)| {
+                    (type_module(&module, specifier.as_deref()), export)
+                }),
+            });
+        }
+        drop(elements);
         Ok(Some(HookTransformOutput {
-            code: Some(out.code),
-            map: map.map(Into::into).unwrap_or_default(),
+            code: Some(code),
+            map: map.into(),
             module_type: Some(ModuleType::Js),
             ..Default::default()
         }))
     }
 }
 
-/// TSX -> JSX: removes TypeScript syntax and keeps JSX for the Solid
-/// compiler, which only accepts JavaScript, and with `hot_key` makes the
-/// module's components hot ([`crate::hot`]). Errors are rendered with a
-/// code frame.
-fn strip_types(
+/// The module a component's type is imported from, as the app's types
+/// name it: `./`-relative to the app directory, or a package. `module` is
+/// the importing module (relative to the app, without extension);
+/// `specifier` what it imported (`None`: the module itself).
+fn type_module(module: &Path, specifier: Option<&str>) -> String {
+    let rel = |p: &Path| {
+        let mut parts: Vec<String> = Vec::new();
+        for c in p.components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    parts.pop();
+                }
+                std::path::Component::Normal(n) => parts.push(n.to_string_lossy().into_owned()),
+                _ => {}
+            }
+        }
+        format!("./{}", parts.join("/"))
+    };
+    match specifier {
+        None => rel(module),
+        Some(spec) if spec.starts_with('.') => {
+            let dir = module.parent().unwrap_or(Path::new(""));
+            let target = dir.join(spec);
+            let target = match target.extension().and_then(|e| e.to_str()) {
+                Some("ts" | "tsx" | "js" | "jsx") => target.with_extension(""),
+                _ => target,
+            };
+            rel(&target)
+        }
+        Some(spec) => spec.to_owned(),
+    }
+}
+
+/// TSX -> JS with nsh's JSX compiler ([`crate::jsx`]), TypeScript removed
+/// in the same pass; `prologue` runs first; with `hot_key` the module's
+/// components are hot ([`crate::hot`]). Returns the components named in
+/// kebab case too. Errors are rendered with a code frame.
+pub(crate) fn compile_native(
     path: &Path,
     source_type: SourceType,
     source: &str,
+    prologue: Option<&str>,
     hot_key: Option<&str>,
-) -> Result<(String, SourceMap<'static>), String> {
+) -> Result<(String, SourceMap<'static>, Vec<crate::jsx::KebabUse>), String> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
     if let Some(err) = parsed.diagnostics.into_iter().next() {
@@ -300,6 +388,12 @@ fn strip_types(
         .into_scoping();
     let options = TransformOptions {
         jsx: JsxOptions::disable(),
+        // Imports only kebab tags use (`<card>` for `Card`) look unused to
+        // TypeScript: only type imports go.
+        typescript: oxc::transformer::TypeScriptOptions {
+            only_remove_type_imports: true,
+            ..Default::default()
+        },
         ..TransformOptions::default()
     };
     let ret =
@@ -308,8 +402,19 @@ fn strip_types(
         return Err(err.render_with_source_code(source.to_owned()));
     }
     if let Some(key) = hot_key {
+        // Before the JSX goes: components are the functions with JSX.
         crate::hot::transform(&allocator, &mut program, source, key);
     }
+    let components: Vec<&str> = ui_components().iter().map(String::as_str).collect();
+    let uses = crate::jsx::transform(
+        &allocator,
+        &mut program,
+        &ret.scoping,
+        source,
+        prologue,
+        &components,
+    )?;
+    elide_unused_imports(&mut program);
     let out = Codegen::new()
         .with_options(CodegenOptions {
             source_map_path: Some(path.to_path_buf()),
@@ -319,5 +424,42 @@ fn strip_types(
     Ok((
         out.code,
         out.map.expect("source map requested").into_owned(),
+        uses,
     ))
+}
+
+/// TypeScript's import elision, once the JSX is compiled (kebab tags now
+/// reference what they name): import specifiers nothing references go (an
+/// import of types only, without `type`), and declarations left without
+/// any.
+fn elide_unused_imports(program: &mut oxc::ast::ast::Program<'_>) {
+    use oxc::ast::ast::{ImportDeclarationSpecifier as S, Statement};
+    let scoping = SemanticBuilder::new()
+        .build(program)
+        .semantic
+        .into_scoping();
+    let used = |local: &oxc::ast::ast::BindingIdentifier<'_>| {
+        local
+            .symbol_id
+            .get()
+            .is_none_or(|id| !scoping.get_resolved_reference_ids(id).is_empty())
+    };
+    program.body.retain_mut(|statement| {
+        let Statement::ImportDeclaration(import) = statement else {
+            return true;
+        };
+        let Some(specifiers) = &mut import.specifiers else {
+            // `import "x"`: for its effects.
+            return true;
+        };
+        if specifiers.is_empty() {
+            return true;
+        }
+        specifiers.retain(|s| match s {
+            S::ImportSpecifier(s) => used(&s.local),
+            S::ImportDefaultSpecifier(s) => used(&s.local),
+            S::ImportNamespaceSpecifier(s) => used(&s.local),
+        });
+        !specifiers.is_empty()
+    });
 }

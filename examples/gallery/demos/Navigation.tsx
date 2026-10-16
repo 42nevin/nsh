@@ -1,5 +1,4 @@
-import { createSignal, For, onCleanup } from "solid-js";
-import { type JSX } from "nsh";
+import { cleanup, type JSX, signal } from "nsh";
 import { BackHandler } from "nsh/android";
 import { Alert, Modal, SafeAreaView, Screen, useSafeAreaInsets } from "nsh/ui/mobile";
 import { nav } from "../nav";
@@ -17,13 +16,13 @@ function Insets() {
 
 function Filler(props: { count: number }) {
   return (
-    <For each={Array.from({ length: props.count }, (_, i) => i + 1)}>
+    <each of={Array.from({ length: props.count }, (_, i) => i + 1)}>
       {(i) => (
         <view style={{ padding: 14, backgroundColor: colors.surface, borderRadius: 10 }}>
-          <text>Row {i}</text>
+          <text>Row {i()}</text>
         </view>
       )}
-    </For>
+    </each>
   );
 }
 
@@ -61,7 +60,7 @@ function Transparent() {
 }
 
 function CustomHeader() {
-  const [likes, setLikes] = createSignal(0);
+  const likes = signal(0);
   return (
     <Screen
       title="Custom"
@@ -81,7 +80,7 @@ function CustomHeader() {
         </view>
       }
       headerRight={
-        <text onPress={() => setLikes(likes() + 1)} style={{ color: "#ffffff", fontSize: 17 }}>
+        <text onPress={() => likes.set(likes() + 1)} style={{ color: "#ffffff", fontSize: 17 }}>
           ♥ {likes()}
         </text>
       }
@@ -105,19 +104,21 @@ function Locked() {
 
 /** `preventBack`: leaving with unsaved text asks first. */
 function Unsaved() {
-  const [text, setText] = createSignal("");
-  const confirm = () =>
-    Alert.alert("Discard your changes?", undefined, [
+  const text = signal("");
+  const confirm = async () => {
+    const i = await Alert.alert("Discard your changes?", undefined, [
       { text: "Keep editing", style: "cancel" },
-      { text: "Discard", style: "destructive", onPress: () => nav.pop() },
+      { text: "Discard", style: "destructive" },
     ]);
+    if (i === 1) nav.pop();
+  };
   return (
     <Screen title="Unsaved changes" preventBack={text().length > 0} onBackRequest={confirm}>
       <Page>
         <text>Type something, then go back (header button, swipe, Android back): the screen asks first.</text>
         <input
           value={text()}
-          onChangeText={setText}
+          onChangeText={(v) => text.set(v)}
           placeholder="A draft"
           style={{ borderWidth: 1, borderColor: "#d0d7de", borderRadius: 8, padding: 10, fontSize: 16 }}
         />
@@ -173,16 +174,16 @@ function Deep(props: { depth: number }) {
 type Sheet = "fullScreen" | "pageSheet" | "formSheet" | "fade" | "dialog" | "dismissible" | null;
 
 export function Navigation() {
-  const [sheet, setSheet] = createSignal<Sheet>(null);
-  const [intercept, setIntercept] = createSignal(false);
-  const [backs, setBacks] = createSignal(0);
-  const close = () => setSheet(null);
+  const sheet = signal<Sheet>(null);
+  const intercept = signal(false);
+  const backs = signal(0);
+  const close = () => sheet.set(null);
   const back = BackHandler.addEventListener("hardwareBackPress", () => {
     if (!intercept()) return false;
-    setBacks(backs() + 1);
+    backs.set(backs() + 1);
     return true;
   });
-  onCleanup(() => back.remove());
+  cleanup(() => back.remove());
   const push = (page: () => JSX.Element) => () => nav.push({ name: "page", page });
 
   return (
@@ -201,17 +202,17 @@ export function Navigation() {
           <Button label="A deep stack" onPress={push(() => <Deep depth={1} />)} />
         </Section>
         <Section title="Modals">
-          <Button label="Full screen (slide)" color="#8250df" onPress={() => setSheet("fullScreen")} />
-          <Button label="Page sheet (iOS)" color="#8250df" onPress={() => setSheet("pageSheet")} />
-          <Button label="Form sheet (iOS)" color="#8250df" onPress={() => setSheet("formSheet")} />
-          <Button label="Fade" color="#8250df" onPress={() => setSheet("fade")} />
-          <Button label="Transparent dialog" color="#8250df" onPress={() => setSheet("dialog")} />
-          <Button label="Dismissible sheet (swipe / back closes)" color="#8250df" onPress={() => setSheet("dismissible")} />
+          <Button label="Full screen (slide)" color="#8250df" onPress={() => sheet.set("fullScreen")} />
+          <Button label="Page sheet (iOS)" color="#8250df" onPress={() => sheet.set("pageSheet")} />
+          <Button label="Form sheet (iOS)" color="#8250df" onPress={() => sheet.set("formSheet")} />
+          <Button label="Fade" color="#8250df" onPress={() => sheet.set("fade")} />
+          <Button label="Transparent dialog" color="#8250df" onPress={() => sheet.set("dialog")} />
+          <Button label="Dismissible sheet (swipe / back closes)" color="#8250df" onPress={() => sheet.set("dismissible")} />
         </Section>
         <Section title="Back button (Android)">
           <view style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
             <text style={{ flex: 1 }}>{intercept() ? `Intercepted ${backs()} times` : "Back pops this screen"}</text>
-            <Button label={intercept() ? "Release" : "Intercept"} color="#57606a" onPress={() => setIntercept(!intercept())} />
+            <Button label={intercept() ? "Release" : "Intercept"} color="#57606a" onPress={() => intercept.set(!intercept())} />
           </view>
         </Section>
       </view>

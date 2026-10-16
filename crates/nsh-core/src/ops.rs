@@ -3,8 +3,10 @@ use std::sync::Arc;
 use nsh_anim::AnimOp;
 
 use crate::{
+    js::host::HostProps,
     props::{AccessibilityProp, EdgeInsets, LayoutAnimation, PointerEvents},
     style::{Color, EllipsizeMode, Style, StylePatch},
+    ui::PropEnum,
 };
 
 /// Identifier of a node, assigned by the JS renderer.
@@ -322,6 +324,15 @@ pub struct TouchEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EventMask(u64);
 
+impl std::ops::BitOr for EventMask {
+    type Output = EventMask;
+
+    #[inline]
+    fn bitor(self, other: EventMask) -> EventMask {
+        EventMask(self.0 | other.0)
+    }
+}
+
 impl EventMask {
     /// Returns true if `event` is in the set.
     #[inline]
@@ -457,7 +468,7 @@ impl TouchEvent {
 }
 
 /// How an image fits its box.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum ResizeMode {
     /// Fill the box, cropping (default).
     #[default]
@@ -481,25 +492,29 @@ pub struct ImageSource {
 }
 
 /// Keyboard layout of an input (`keyboardType`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum KeyboardType {
     /// Full keyboard.
     #[default]
     Default,
     /// Digits only (`number-pad`).
+    #[prop(rename = "number-pad", alias = "numeric")]
     Number,
     /// Digits and a decimal separator (`decimal-pad`).
+    #[prop(rename = "decimal-pad")]
     Decimal,
     /// E-mail addresses (`email-address`).
+    #[prop(rename = "email-address")]
     Email,
     /// Phone numbers (`phone-pad`).
+    #[prop(rename = "phone-pad")]
     Phone,
     /// URLs (`url`).
     Url,
 }
 
 /// Label of the return key (`returnKeyType`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum ReturnKeyType {
     /// Return / new line.
     #[default]
@@ -517,7 +532,7 @@ pub enum ReturnKeyType {
 }
 
 /// Automatic capitalization (`autoCapitalize`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum AutoCapitalize {
     /// Never.
     None,
@@ -531,19 +546,20 @@ pub enum AutoCapitalize {
 }
 
 /// When a scroll view dismisses the keyboard (`keyboardDismissMode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum KeyboardDismissMode {
     /// Never (default).
     #[default]
     None,
     /// As soon as a drag starts.
+    #[prop(rename = "on-drag")]
     OnDrag,
     /// Follows the finger while dragging down (iOS).
     Interactive,
 }
 
 /// Which point of a page a snapping scroll view aligns to its start.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum SnapAlignment {
     /// The snap point at the viewport's start.
     #[default]
@@ -568,53 +584,84 @@ pub enum KeyboardTaps {
 }
 
 /// How an `<image>` is shown, besides its source.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, HostProps)]
 pub enum ImageProp {
-    /// `defaultSource`: a placeholder until the image loads.
+    /// `defaultSource`: shown until `src` has loaded (best a local asset).
+    #[prop(js = "defaultSource", on = IMAGE)]
     DefaultSource(Option<ImageSource>),
-    /// `blurRadius` in points.
+    /// `blurRadius`: blurs the image by this radius in points (decoded once, off
+    /// the main thread).
+    #[prop(js = "blurRadius", on = IMAGE)]
     BlurRadius(f32),
-    /// `fadeDuration` in milliseconds (`None`: the platform's default).
+    /// `fadeDuration`: how long a loaded image fades in, in milliseconds
+    /// (default: the platform's, 0 on iOS and 300 on Android, like React
+    /// Native).
+    #[prop(js = "fadeDuration", min = 0, on = IMAGE)]
     FadeDuration(Option<f32>),
 }
 
 /// A behavior property of a scroll view or list.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, HostProps)]
 pub enum ScrollProp {
     /// `pagingEnabled`: stops at multiples of the viewport.
+    #[prop(js = "pagingEnabled", on = SCROLLING)]
     Paging(bool),
     /// `snapToInterval`: stops at multiples of this length (0: off).
+    #[prop(js = "snapToInterval", on = SCROLLING)]
     SnapInterval(f32),
     /// `snapToOffsets`: stops at these offsets.
+    #[prop(js = "snapToOffsets", on = SCROLLING)]
     SnapOffsets(Vec<f32>),
-    /// `snapToAlignment`.
+    /// `snapToAlignment`: which point of an item aligns with the viewport with
+    /// `snapToInterval`.
+    #[prop(js = "snapToAlignment", on = SCROLLING)]
     SnapAlignment(SnapAlignment),
-    /// `decelerationRate`: the velocity kept per millisecond after a fling
-    /// (0.998 normal, 0.99 fast; 0 is the platform's default).
+    /// `decelerationRate`: how fast a fling slows down: `"normal"`, `"fast"`, or
+    /// the velocity kept per millisecond (0.998 / 0.99; 0 is the platform's
+    /// default).
+    #[prop(js = "decelerationRate", with = crate::js::host_values::deceleration, reset = ScrollProp::Deceleration(0.0), ts = "\"normal\" | \"fast\" | number", on = SCROLLING)]
     Deceleration(f32),
-    /// `bounces`: overscroll past the edges.
+    /// `bounces`: overscroll past the edges (default true).
+    #[prop(js = "bounces", default = true, on = SCROLLING)]
     Bounces(bool),
     /// `contentInset`: room around the content.
+    #[prop(js = "contentInset", on = SCROLLING)]
     ContentInset(EdgeInsets),
-    /// `contentOffset`: the initial offset.
+    /// `contentOffset`: where it starts.
+    #[prop(js = "contentOffset", with = crate::js::host_values::content_offset, once, ts = "{ x?: number; y?: number }", on = SCROLLING)]
     ContentOffset(f32, f32),
-    /// `keyboardShouldPersistTaps`.
+    /// `keyboardShouldPersistTaps`: whether a tap dismisses the keyboard: `"never"`
+    /// (default: the tap only dismisses it), `"always"` (never dismisses),
+    /// `"handled"` (unless something handles the tap).
+    #[prop(js = "keyboardShouldPersistTaps", with = crate::js::host_values::keyboard_taps, reset = ScrollProp::KeyboardTaps(KeyboardTaps::Never), ts = "\"never\" | \"always\" | \"handled\" | boolean", on = SCROLLING)]
     KeyboardTaps(KeyboardTaps),
-    /// `scrollEventThrottle`: minimum milliseconds between `onScroll`.
+    /// `scrollEventThrottle`: minimum milliseconds between `onScroll` events (at
+    /// most one per frame anyway).
+    #[prop(js = "scrollEventThrottle", on = SCROLLING)]
     EventThrottle(f32),
     /// `disableIntervalMomentum`: a fling moves one snap point at most.
+    #[prop(js = "disableIntervalMomentum", on = SCROLLING)]
     DisableIntervalMomentum(bool),
-    /// `minimumZoomScale`.
+    /// `minimumZoomScale`: the smallest zoom (default 1).
+    #[prop(js = "minimumZoomScale", default = 1.0, on = SCROLL)]
     MinZoom(f32),
-    /// `maximumZoomScale`.
+    /// `maximumZoomScale`: pinching zooms the content when it is above
+    /// `minimumZoomScale` (default 1 both); zoomed in, it scrolls both ways.
+    #[prop(js = "maximumZoomScale", default = 1.0, on = SCROLL)]
     MaxZoom(f32),
-    /// `zoomScale`: zooms there when it changes.
+    /// `zoomScale`: zooms to this scale when it changes (the user's zoom is kept
+    /// otherwise).
+    #[prop(js = "zoomScale", default = 1.0, on = SCROLL)]
     Zoom(f32),
-    /// `bouncesZoom`.
+    /// `bouncesZoom`: pinching may go past the limits and springs back (default
+    /// true).
+    #[prop(js = "bouncesZoom", default = true, on = SCROLL)]
     BouncesZoom(bool),
-    /// `pinchGestureEnabled`.
+    /// `pinchGestureEnabled`: the user can pinch to zoom (default true).
+    #[prop(js = "pinchGestureEnabled", default = true, on = SCROLL)]
     Pinch(bool),
-    /// `centerContent`.
+    /// `centerContent`: content smaller than the viewport (zoomed out) is centered.
+    #[prop(js = "centerContent", on = SCROLL)]
     CenterContent(bool),
 }
 
@@ -654,7 +701,7 @@ pub struct Viewability {
 }
 
 /// Where a header item goes (`<headeritem slot>`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum HeaderSlot {
     /// Leading, after the back button.
     #[default]
@@ -666,7 +713,7 @@ pub enum HeaderSlot {
 }
 
 /// How a screen enters and leaves (`animation`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum ScreenAnimation {
     /// The platform's push / pop transition.
     #[default]
@@ -678,37 +725,55 @@ pub enum ScreenAnimation {
 }
 
 /// A screen option (`<screen title headerShown ...>`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, HostProps)]
 pub enum ScreenProp {
-    /// `title`.
+    /// `title`: the header's title.
+    #[prop(js = "title", on = SCREEN)]
     Title(Option<Arc<str>>),
-    /// `headerShown`.
+    /// `headerShown`: the header shows (default true).
+    #[prop(js = "headerShown", default = true, on = SCREEN)]
     HeaderShown(bool),
-    /// `headerLargeTitle` (iOS).
+    /// `headerLargeTitle` (iOS): a large title; the content scrolls under the
+    /// header.
+    #[prop(ios = "headerLargeTitle", on = SCREEN)]
     HeaderLargeTitle(bool),
-    /// `headerTransparent`: content extends under the header.
+    /// `headerTransparent`: the content extends under the header.
+    #[prop(js = "headerTransparent", on = SCREEN)]
     HeaderTransparent(bool),
-    /// `headerTintColor`: back button and bar buttons.
+    /// `headerTintColor`: the back button and bar buttons.
+    #[prop(js = "headerTintColor", on = SCREEN)]
     HeaderTintColor(Option<Color>),
     /// `headerBackgroundColor`.
+    #[prop(js = "headerBackgroundColor", on = SCREEN)]
     HeaderBackgroundColor(Option<Color>),
     /// `headerTitleColor`.
+    #[prop(js = "headerTitleColor", on = SCREEN)]
     HeaderTitleColor(Option<Color>),
-    /// `headerBackTitle`: label of the back button leading back here.
+    /// `headerBackTitle` (iOS): the label of the back button leading back to this
+    /// screen.
+    #[prop(ios = "headerBackTitle", on = SCREEN)]
     HeaderBackTitle(Option<Arc<str>>),
-    /// `headerBackVisible`.
+    /// `headerBackVisible`: the back button shows (default true).
+    #[prop(js = "headerBackVisible", default = true, on = SCREEN)]
     HeaderBackVisible(bool),
-    /// `gestureEnabled`: the interactive back gesture.
+    /// `gestureEnabled`: the interactive back gesture (iOS swipe back, Android
+    /// predictive back following the finger); the back buttons pop either way
+    /// (default true).
+    #[prop(js = "gestureEnabled", default = true, on = SCREEN)]
     GestureEnabled(bool),
-    /// `preventBack`: the user cannot leave the screen; back sends
-    /// `onBackRequest`.
+    /// `preventBack`: the user cannot leave the screen: no swipe back, and the back
+    /// buttons (header, Android back) call `onBackRequest` instead of popping, e.g.
+    /// to confirm discarding changes and then `pop()`. Decided natively when the
+    /// system asks, so set it before the user acts.
+    #[prop(js = "preventBack", on = SCREEN)]
     PreventBack(bool),
-    /// `animation`.
+    /// `animation`: how the screen enters and leaves.
+    #[prop(js = "animation", on = SCREEN)]
     Animation(ScreenAnimation),
 }
 
 /// How a modal appears (`animationType`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum ModalAnimation {
     /// Slides up from the bottom (default).
     #[default]
@@ -720,7 +785,7 @@ pub enum ModalAnimation {
 }
 
 /// How a modal covers the screen (`presentationStyle`, iOS).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum ModalPresentation {
     /// Covers the whole screen (default).
     #[default]
@@ -732,19 +797,32 @@ pub enum ModalPresentation {
 }
 
 /// A modal option.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, HostProps)]
 pub enum ModalProp {
-    /// `animationType`.
+    /// `animationType`: how the modal appears.
+    #[prop(js = "animationType", on = MODAL)]
     Animation(ModalAnimation),
-    /// `presentationStyle`.
+    /// `presentationStyle` (iOS): `"pageSheet"` / `"formSheet"` keep what is behind
+    /// visible.
+    #[prop(ios = "presentationStyle", on = MODAL)]
     Presentation(ModalPresentation),
-    /// `transparent`: what is behind shows through the modal's background.
+    /// `transparent`: the background shows what is behind.
+    #[prop(js = "transparent", on = MODAL)]
     Transparent(bool),
-    /// `statusBarTranslucent` (Android).
+    /// `statusBarTranslucent` (Android): the content reaches under the status bar
+    /// (default: it starts below).
+    #[prop(android = "statusBarTranslucent", on = MODAL)]
     StatusBarTranslucent(bool),
-    /// `supportedOrientations` (iOS): [`crate::ModalConfig::PORTRAIT`] bits.
+    /// `supportedOrientations` (iOS): the orientations it allows (default: the
+    /// presenter's).
+    ///
+    /// [`crate::ModalConfig::PORTRAIT`] bits.
+    #[prop(ios = "supportedOrientations", with = crate::js::host_values::orientations, reset = ModalProp::Orientations(0), ts = "(\"portrait\" | \"portrait-upside-down\" | \"landscape\" | \"landscape-left\" | \"landscape-right\")[]", on = MODAL)]
     Orientations(u8),
-    /// `dismissible`: the user can close it natively.
+    /// `dismissible`: the user closes it natively (iOS sheet swiped down, Android
+    /// back button), then `onRequestClose` and `onDismiss` follow. Without it
+    /// (default) those only ask to close.
+    #[prop(js = "dismissible", on = MODAL)]
     Dismissible(bool),
 }
 
@@ -810,8 +888,12 @@ pub enum Command {
         /// Animate the change.
         animated: bool,
     },
-    /// Set the status bar (on the root).
+    /// Set the status bar (on the root): what the platform shows.
     StatusBar(StatusBarConfig),
+    /// Change what functions set for the status bar (on the root): the
+    /// core merges it under the settings components render and sends
+    /// [`Command::StatusBar`] when the result changes.
+    SetStatusBar(StatusBarSetting),
     /// Show an alert or action sheet (on the root); the answer comes back
     /// as [`EventKind::Dialog`].
     Dialog(Box<Dialog>),
@@ -887,6 +969,32 @@ pub struct StatusBarConfig {
     pub background: Option<Color>,
 }
 
+/// A status bar setting: what it sets; the fields it leaves out keep the
+/// settings below it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct StatusBarSetting {
+    /// Content color.
+    pub style: Option<StatusBarStyle>,
+    /// Hidden.
+    pub hidden: Option<bool>,
+    /// Animate the change.
+    pub animated: Option<bool>,
+    /// Background (Android before edge-to-edge only).
+    pub background: Option<Color>,
+}
+
+impl StatusBarSetting {
+    /// This setting over `below`.
+    pub fn over(self, below: Self) -> Self {
+        Self {
+            style: self.style.or(below.style),
+            hidden: self.hidden.or(below.hidden),
+            animated: self.animated.or(below.animated),
+            background: self.background.or(below.background),
+        }
+    }
+}
+
 /// How a dialog button looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DialogButtonStyle {
@@ -926,161 +1034,257 @@ pub struct Dialog {
 }
 
 /// A non-style property of a host node.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, HostProps)]
 pub enum Prop {
     /// `component`: which registered native component a `<native>`
     /// element is (set once, before it is mounted).
+    #[prop(js = "component", internal)]
     Component(Arc<str>),
+    /// `componentSlot`: this view holds the JSX a Rust component's host got
+    /// for slot `name` (created by the generated glue).
+    #[prop(js = "componentSlot", internal)]
+    ComponentSlot(Arc<str>),
     /// A property of a registered native component (`$name` from JS):
     /// any JSON value, `None` to remove it.
     ComponentProp(Arc<str>, Option<crate::JsonValue>),
-    /// `<image src>`.
+    /// `src`: a URL, `asset:/path`, or an imported asset.
+    #[prop(js = "src", on = IMAGE)]
     Source(Option<ImageSource>),
-    /// `<image resizeMode>`.
+    /// `resizeMode`: how an image (or a video) fits its box.
+    #[prop(js = "resizeMode", on = IMAGE | VIDEO)]
     ResizeMode(ResizeMode),
-    /// `<scroll horizontal>` / `<list horizontal>`.
+    /// `horizontal`: scrolls sideways.
+    #[prop(js = "horizontal", on = SCROLL | LIST)]
     Horizontal(bool),
     /// Scrolling behavior of a scroll view or list.
+    #[prop(nested)]
     Scroll(ScrollProp),
-    /// Whether the scroll indicator is shown.
+    /// `showsIndicator`: the scroll indicator shows (default true).
+    #[prop(js = "showsIndicator", default = true, on = SCROLL | LIST)]
     ShowsIndicator(bool),
-    /// Pull-to-refresh spinner state.
+    /// `refreshing`: the pull-to-refresh spinner shows.
+    #[prop(js = "refreshing", on = SCROLL | LIST)]
     Refreshing(bool),
     /// Number of items of a list.
+    #[prop(js = "count", internal)]
     Count(u32),
-    /// Size used for list items not measured yet.
+    /// `estimatedItemSize`: the size of items not measured yet, in points (default
+    /// 50).
+    #[prop(js = "estimatedItemSize", default = 50.0, on = LIST)]
     EstimatedItemSize(f32),
     /// The recycling slot (or the role) of a list cell, set once by the
     /// runtime.
+    #[prop(js = "slot", with = crate::js::host_values::slot, internal)]
     Slot(CellSlot),
-    /// Items per row of a list (`numColumns`).
+    /// `numColumns`: items per row (vertical lists).
+    #[prop(js = "numColumns", default = 1, min = 1, on = LIST)]
     Columns(u32),
     /// The items of a list changed: `removed` at `at` became `inserted`
     /// (precedes the new `Count`).
+    #[prop(js = "splice", with = crate::js::host_values::splice, internal)]
     Splice(u32, u32, u32),
-    /// A list laid out from the end (chat style).
+    /// `inverted`: laid out from the end, item 0 last (chat style); starts scrolled
+    /// to the end and keeps its distance from the end as content changes.
+    #[prop(js = "inverted", on = LIST)]
     Inverted(bool),
-    /// Items of a list that stick to its start while scrolled past.
+    /// `stickyHeaderIndices`: items that stick to the start while scrolled past
+    /// (one column, not inverted).
+    #[prop(js = "stickyHeaderIndices", with = crate::js::host_values::sticky, reset = Prop::StickyIndices(Vec::new()), on = LIST)]
     StickyIndices(Vec<u32>),
-    /// A list's `contentContainerStyle`.
+    /// `contentContainerStyle`: padding and gaps of the content.
+    #[prop(js = "contentContainerStyle", on = LIST)]
     ListContent(ListContentStyle),
-    /// A list's `viewabilityConfig`.
+    /// `viewabilityConfig`: when items count as viewable.
+    #[prop(js = "viewabilityConfig", on = LIST)]
     Viewability(Viewability),
     /// How close to the end `onEndReached` fires, in viewports.
+    #[prop(js = "endReachedThreshold", default = 1.0, internal)]
     EndReachedThreshold(f32),
     /// The item index a list cell now renders (set by the runtime after
     /// each bind, in the same batch as the cell's new content).
+    #[prop(js = "cellIndex", internal)]
     CellIndex(u32),
-    /// Native animation value driven by the scroll offset (main axis).
+    /// `scrollValue`: a native value fed with the scroll offset (main axis), for
+    /// scroll-linked effects.
+    #[prop(js = "scrollValue", with = crate::js::host_values::scroll_value, reset = Prop::ScrollValue(None), ts = "NativeValue", on = SCROLL | LIST)]
     ScrollValue(Option<nsh_anim::NodeId>),
-    /// Native animation values driven by a drag (x, y).
+    /// `pan`: drags drive these native values (points) on the UI thread.
+    #[prop(js = "pan", with = crate::js::host_values::pan, reset = Prop::PanValues(None, None), ts = "{ x?: NativeValue; y?: NativeValue }")]
     PanValues(Option<nsh_anim::NodeId>, Option<nsh_anim::NodeId>),
-    /// `<text numberOfLines>`: 0 means no limit.
+    /// `numberOfLines`: the most lines shown; 0 (default) is unlimited.
+    #[prop(js = "numberOfLines", on = TEXT)]
     NumberOfLines(u32),
-    /// `<text ellipsizeMode>`.
+    /// `ellipsizeMode`: where text that does not fit `numberOfLines` is cut.
+    #[prop(js = "ellipsizeMode", on = TEXT)]
     EllipsizeMode(EllipsizeMode),
-    /// `<input value>`: the text, controlled by JS.
+    /// `value`: the text, controlled by JS.
+    #[prop(js = "value", on = INPUT)]
     Value(String),
-    /// `<input defaultValue>`: the initial text.
+    /// `defaultValue`: the initial text.
+    #[prop(js = "defaultValue", once, on = INPUT)]
     DefaultValue(String),
-    /// `<input placeholder>`.
+    /// `placeholder`: shown while the input is empty.
+    #[prop(js = "placeholder", on = INPUT)]
     Placeholder(String),
-    /// `<input placeholderTextColor>`.
+    /// `placeholderTextColor`.
+    #[prop(js = "placeholderTextColor", on = INPUT)]
     PlaceholderColor(Option<Color>),
-    /// `<input secureTextEntry>`.
+    /// `secureTextEntry`: the text is hidden (passwords).
+    #[prop(js = "secureTextEntry", on = INPUT)]
     Secure(bool),
-    /// `<input keyboardType>`.
+    /// `keyboardType`: the keyboard layout.
+    #[prop(js = "keyboardType", on = INPUT)]
     KeyboardType(KeyboardType),
-    /// `<input returnKeyType>`.
+    /// `returnKeyType`: the label of the return key.
+    #[prop(js = "returnKeyType", on = INPUT)]
     ReturnKeyType(ReturnKeyType),
-    /// `<input autoCapitalize>`.
+    /// `autoCapitalize`: automatic capitalization (default `"sentences"`).
+    #[prop(js = "autoCapitalize", on = INPUT)]
     AutoCapitalize(AutoCapitalize),
-    /// `<input autoCorrect>`.
+    /// `autoCorrect`: the system's corrections (default true).
+    #[prop(js = "autoCorrect", default = true, on = INPUT)]
     AutoCorrect(bool),
-    /// `<input multiline>`.
+    /// `multiline`: several lines; return inserts a line break.
+    #[prop(js = "multiline", on = INPUT)]
     Multiline(bool),
-    /// `<input maxLength>`.
+    /// `maxLength`: the most characters the user can enter.
+    #[prop(js = "maxLength", on = INPUT)]
     MaxLength(Option<u32>),
-    /// `<input editable>`.
+    /// `editable`: the user can change the text (default true).
+    #[prop(js = "editable", default = true, on = INPUT)]
     Editable(bool),
-    /// `<input blurOnSubmit>`.
+    /// `blurOnSubmit`: return unfocuses a single-line input (default true); false
+    /// keeps the keyboard up, e.g. to send several messages.
+    #[prop(js = "blurOnSubmit", default = true, on = INPUT)]
     BlurOnSubmit(bool),
-    /// `<input autoFocus>`.
+    /// `autoFocus`: focused when it appears.
+    #[prop(js = "autoFocus", on = INPUT)]
     AutoFocus(bool),
-    /// `<input caretHidden>`.
+    /// `caretHidden`: no caret is drawn.
+    #[prop(js = "caretHidden", on = INPUT)]
     CaretHidden(bool),
-    /// `<input inputAccessoryViewID>`: the `nativeID` of an input
-    /// accessory.
+    /// `inputAccessoryViewID`: the `nativeID` of an `InputAccessoryView`
+    /// (`nsh/ios`) shown over the keyboard while the input has focus.
+    #[prop(ios = "inputAccessoryViewID", on = INPUT)]
     InputAccessoryViewId(Option<Box<str>>),
-    /// `nativeID` of an input accessory.
+    /// `nativeID`: names the view for others (an input accessory's for
+    /// `inputAccessoryViewID`).
+    #[prop(js = "nativeID")]
     NativeId(Option<Box<str>>),
-    /// `<input selectionColor>` (caret and selection).
+    /// `selectionColor`: the caret and the selection.
+    #[prop(js = "selectionColor", on = INPUT)]
     SelectionColor(Option<Color>),
-    /// `<input autoComplete>` / `textContentType`.
+    /// `autoComplete` (iOS: also `textContentType`): what an input holds, for
+    /// autofill (React Native's values, e.g. "username", "current-password",
+    /// "new-password", "one-time-code", "email", "tel", "postal-code", "cc-number",
+    /// "off").
+    #[prop(js = "autoComplete", ios = "textContentType", on = INPUT)]
     AutoFill(AutoFill),
-    /// `<input selection>`: start and end (UTF-16 units).
+    /// `selection`: the controlled selection (UTF-16 units; `end` defaults to
+    /// `start`, a caret).
+    #[prop(js = "selection", with = crate::js::host_values::selection, once, ts = "{ start: number; end?: number }", on = INPUT)]
     Selection(u32, u32),
-    /// `<scroll keyboardDismissMode>` / `<List keyboardDismissMode>`.
+    /// `keyboardDismissMode`: whether dragging dismisses the keyboard.
+    #[prop(js = "keyboardDismissMode", on = SCROLL | LIST)]
     KeyboardDismissMode(KeyboardDismissMode),
-    /// `pointerEvents`.
+    /// `pointerEvents`: touch handling of the view and its children (React Native
+    /// semantics).
+    #[prop(js = "pointerEvents")]
     PointerEvents(PointerEvents),
-    /// `hitSlop`.
+    /// `hitSlop`: extends the touch area beyond the bounds.
+    #[prop(js = "hitSlop", with = crate::js::host_values::hit_slop, reset = Prop::HitSlop(EdgeInsets::default()), ts = "number | { top?: number; right?: number; bottom?: number; left?: number }")]
     HitSlop(EdgeInsets),
-    /// `activeOpacity`: native press feedback.
+    /// `activeOpacity`: the opacity while pressed (native, no JS round trip).
+    #[prop(js = "activeOpacity", min = 0, max = 1)]
     ActiveOpacity(Option<f32>),
-    /// `underlayColor`: the background while pressed.
+    /// `underlayColor`: the background while pressed; the children fade to
+    /// `underlayOpacity` (native, no JS round trip).
+    #[prop(js = "underlayColor")]
     UnderlayColor(Option<Color>),
-    /// `underlayOpacity`: the children's opacity while the underlay shows.
+    /// `underlayOpacity`: the children's opacity while `underlayColor` shows
+    /// (default 0.85).
+    #[prop(js = "underlayOpacity", default = UNDERLAY_OPACITY, min = 0, max = 1)]
     UnderlayOpacity(f32),
     /// The surface lays out right to left (on the root, from
     /// `I18nManager`).
+    #[prop(js = "layoutDirectionRtl", internal)]
     LayoutDirection(bool),
     /// Padding added to the style's own (safe areas, the keyboard), in
-    /// points on the physical edges.
+    /// points on the physical edges; set by components
+    /// (`Element::inset_padding`), never by JS.
     InsetPadding(EdgeInsets),
     /// Margin added to the style's own (`KeyboardAvoidingView`'s
-    /// `height` behavior), in points on the physical edges.
+    /// `height` behavior), in points on the physical edges; set by
+    /// components.
     InsetMargin(EdgeInsets),
-    /// `class`: Tailwind classes.
+    /// `class`: Tailwind CSS classes (`"flex-row gap-2 p-4 bg-white
+    /// dark:bg-zinc-900"`), resolved natively. Later classes win over earlier ones;
+    /// `style` wins over both.
+    #[prop(js = "class")]
     Class(Box<str>),
-    /// `classList`: the names whose value is truthy.
+    /// `classList`: classes applied while their value is truthy (`{ "opacity-50":
+    /// busy() }`).
+    #[prop(js = "classList", with = crate::js::host_values::class_list, reset = Prop::ClassList(Vec::new()), ts = "Record<string, boolean | null | undefined>")]
     ClassList(Vec<Box<str>>),
     /// The app's Tailwind theme (JSON, on the root).
+    #[prop(js = "tailwindTheme", with = crate::js::host_values::tailwind_theme, internal)]
     TailwindTheme(Box<str>),
+    /// The theme of Rust components (`nsh.json` `theme`, JSON), on the
+    /// root.
+    #[prop(js = "uiTheme", with = crate::js::host_values::ui_theme, internal)]
+    UiTheme(Box<str>),
     /// An image option.
+    #[prop(nested)]
     Image(ImageProp),
-    /// `delayLongPress`: milliseconds before a press becomes a long press.
+    /// `delayLongPress`: milliseconds before a press becomes a long press (default
+    /// 500).
+    #[prop(js = "delayLongPress", min = 0)]
     LongPressDelay(Option<f32>),
-    /// `android={{ ripple }}`: Android's press ripple.
+    /// `ripple` (Android): the material ripple while pressed.
+    #[prop(android = "ripple")]
     Ripple(Option<crate::props::Ripple>),
-    /// `android={{ elevation }}`: Android's material shadow (points).
+    /// `elevation` (Android): the material shadow (points), from the view's shape.
+    #[prop(android = "elevation")]
     Elevation(f32),
     /// An accessibility property.
+    #[prop(nested)]
     Accessibility(AccessibilityProp),
-    /// `testID`.
+    /// `testID`: an identifier for UI tests.
+    #[prop(js = "testID")]
     TestId(Option<Arc<str>>),
-    /// `<text allowFontScaling>`: follow the user's text size setting.
+    /// `allowFontScaling`: follow the system text size (default true).
+    #[prop(js = "allowFontScaling", default = true, on = TEXT | INPUT)]
     AllowFontScaling(bool),
-    /// `<text maxFontSizeMultiplier>`: 0 means no limit.
+    /// `maxFontSizeMultiplier`: the upper bound of the system scale (0 is none).
+    #[prop(js = "maxFontSizeMultiplier", min = 0, on = TEXT | INPUT)]
     MaxFontSizeMultiplier(f32),
-    /// `<text selectable>`: a long press offers to copy the text.
+    /// `selectable`: a long press offers to copy the text.
+    #[prop(js = "selectable", on = TEXT)]
     Selectable(bool),
-    /// `adjustsFontSizeToFit`: text shrinks to fit its lines and box.
+    /// `adjustsFontSizeToFit`: shrink the font until the text fits its lines
+    /// (`numberOfLines`) and box.
+    #[prop(js = "adjustsFontSizeToFit", on = TEXT)]
     AdjustsFontSizeToFit(bool),
-    /// `minimumFontScale`: how far it shrinks at most (0..1).
+    /// `minimumFontScale`: how far `adjustsFontSizeToFit` shrinks at most (0..1).
+    #[prop(js = "minimumFontScale", min = 0, max = 1, on = TEXT)]
     MinimumFontScale(f32),
-    /// Native animation value driven by pinching the view (`pinch={{ scale }}`).
+    /// `pinch`: two-finger pinches drive `scale` natively.
+    #[prop(js = "pinch", with = crate::js::host_values::pinch, reset = Prop::PinchValue(None), ts = "{ scale?: NativeValue }")]
     PinchValue(Option<nsh_anim::NodeId>),
-    /// Native animation value driven by rotating the view with two fingers
-    /// (`rotation={{ angle }}`).
+    /// `rotation`: two-finger rotations drive `angle` (degrees) natively.
+    #[prop(js = "rotation", with = crate::js::host_values::rotation, reset = Prop::RotationValue(None), ts = "{ angle?: NativeValue }")]
     RotationValue(Option<nsh_anim::NodeId>),
     /// A screen option.
+    #[prop(nested)]
     Screen(ScreenProp),
     /// A modal option.
+    #[prop(nested)]
     Modal(ModalProp),
     /// `<headeritem slot>`.
+    #[prop(js = "headerSlot", internal)]
     HeaderSlot(HeaderSlot),
     /// A property of a native control (web view, video), or `disabled`.
+    #[prop(nested)]
     Native(NativeProp),
 }
 
@@ -1101,39 +1305,60 @@ pub enum WebSource {
 }
 
 /// A property of a native control.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, HostProps)]
 pub enum NativeProp {
-    /// `disabled` (any element): no presses, `disabled:` classes.
+    /// `disabled` (any element): ignores presses (no press feedback either),
+    /// applies `disabled:` classes and disables controls.
+    #[prop(js = "disabled")]
     Disabled(bool),
-    /// Web view / video `source`.
+    /// `source` of a web view or video: a URL, `{ uri }`, or (web views) `{ html,
+    /// baseUrl }`.
+    #[prop(js = "source", default = WebSource::None, on = WEBVIEW | VIDEO)]
     Source(WebSource),
-    /// Web view `injectedJavaScript` (after the page loads).
+    /// `injectedJavaScript` (web views): runs after each page loads.
+    #[prop(js = "injectedJavaScript", on = WEBVIEW)]
     InjectedJavaScript(Option<Arc<str>>),
-    /// Web view `injectedJavaScriptBeforeContentLoaded`.
+    /// `injectedJavaScriptBeforeContentLoaded` (web views): runs before each page's
+    /// own scripts.
+    #[prop(js = "injectedJavaScriptBeforeContentLoaded", on = WEBVIEW)]
     InjectedJavaScriptBefore(Option<Arc<str>>),
-    /// Web view `userAgent`.
+    /// `userAgent` (web views): the browser's user agent string.
+    #[prop(js = "userAgent", on = WEBVIEW)]
     UserAgent(Option<Arc<str>>),
-    /// Web view `scrollEnabled`.
+    /// `scrollEnabled`: the user can scroll it (default true).
+    #[prop(js = "scrollEnabled", default = true, on = WEBVIEW | SCROLLING)]
     ScrollEnabled(bool),
-    /// Web view `javaScriptEnabled`.
+    /// `javaScriptEnabled` (web views): pages run scripts (default true).
+    #[prop(js = "javaScriptEnabled", default = true, on = WEBVIEW)]
     JavaScriptEnabled(bool),
-    /// Web view `allowsBackForwardNavigationGestures` (iOS).
+    /// `allowsBackForwardNavigationGestures` (iOS web views): swipe back and
+    /// forward.
+    #[prop(ios = "allowsBackForwardNavigationGestures", on = WEBVIEW)]
     BackForwardGestures(bool),
-    /// Video `paused`.
+    /// `paused` (videos): playback is paused.
+    #[prop(js = "paused", on = VIDEO)]
     Paused(bool),
-    /// Video `muted`.
+    /// `muted` (videos): no sound.
+    #[prop(js = "muted", on = VIDEO)]
     Muted(bool),
-    /// Video `volume` (0..1).
+    /// `volume` (videos): 0..1.
+    #[prop(js = "volume", default = 1.0, on = VIDEO)]
     Volume(f32),
-    /// Video `rate`.
+    /// `rate` (videos): the playback speed.
+    #[prop(js = "rate", default = 1.0, on = VIDEO)]
     Rate(f32),
-    /// Video `repeat`.
+    /// `repeat` (videos): plays again from the start at the end.
+    #[prop(js = "repeat", on = VIDEO)]
     Repeat(bool),
     /// Video `resizeMode`.
+    #[prop(reset = NativeProp::VideoResizeMode(ResizeMode::Contain))]
     VideoResizeMode(ResizeMode),
-    /// Video `controls`: the platform's playback controls.
+    /// `controls` (videos): the platform's playback controls.
+    #[prop(js = "controls", on = VIDEO)]
     Controls(bool),
-    /// Video `progressUpdateInterval` (ms).
+    /// `progressUpdateInterval` (videos): milliseconds between `onProgress` events
+    /// (250 by default).
+    #[prop(js = "progressUpdateInterval", default = 250.0, on = VIDEO)]
     ProgressInterval(f32),
 }
 

@@ -1,4 +1,4 @@
-import { createSignal, For } from "solid-js";
+import { signal } from "nsh";
 import { createNativeValue } from "nsh/animated";
 import { I18nManager } from "nsh/device";
 import { List } from "nsh/list";
@@ -56,7 +56,7 @@ function RightToLeft() {
         </text>
       </view>
       <view style={{ flexDirection: "row", gap: 8 }}>
-        <For each={["1", "2", "3"]}>
+        <each of={["1", "2", "3"]}>
           {(n, i) => (
             <view
               style={{
@@ -70,22 +70,22 @@ function RightToLeft() {
                 borderTopStartRadius: 22,
               }}
             >
-              <text style={{ color: "#ffffff", fontWeight: "700" }}>{n}</text>
+              <text style={{ color: "#ffffff", fontWeight: "700" }}>{n()}</text>
             </view>
           )}
-        </For>
+        </each>
       </view>
       <text>Text aligns to the start side; the first box has marginStart 16 and a round top-start corner.</text>
       <text style={{ fontSize: 13, color: "#6e7781" }}>A horizontal scroll view and a horizontal list start at the start side:</text>
       <scroll horizontal showsIndicator={false} style={{ height: 40 }}>
         <view style={{ flexDirection: "row", gap: 6, paddingHorizontal: 4 }}>
-          <For each={Array.from({ length: 12 }, (_, i) => i + 1)}>
+          <each of={Array.from({ length: 12 }, (_, i) => i + 1)}>
             {(n) => (
               <view style={{ width: 40, height: 40, borderRadius: 6, backgroundColor: "#ddf4ff", alignItems: "center", justifyContent: "center" }}>
-                <text>{String(n)}</text>
+                <text>{String(n())}</text>
               </view>
             )}
-          </For>
+          </each>
         </view>
       </scroll>
       <List each={Array.from({ length: 30 }, (_, i) => i + 1)} horizontal estimatedItemSize={46} showsIndicator={false} style={{ height: 40 }}>
@@ -102,8 +102,8 @@ function RightToLeft() {
 }
 
 export function Styles() {
-  const [clip, setClip] = createSignal(true);
-  const [front, setFront] = createSignal(0);
+  const clip = signal(true);
+  const front = signal(0);
   return (
     <scroll style={{ flex: 1 }}>
     <view style={{ flexDirection: "row", flexWrap: "wrap", gap: 24, padding: 24, justifyContent: "center" }}>
@@ -139,7 +139,7 @@ export function Styles() {
         <Label>Mixed radii</Label>
       </view>
       <view
-        onPress={() => setClip(!clip())}
+        onPress={() => clip.set(!clip())}
         style={{
           ...card,
           backgroundColor: "#fff8c5",
@@ -206,7 +206,7 @@ export function Styles() {
         <view style={{ width: 120, height: 30, borderRadius: 8, borderWidth: 3, borderColor: "#bf3989", borderStyle: "dotted" }} />
         <Label>Dashed / dotted</Label>
       </view>
-      <view style={{ ...card, gap: 8 }}>
+      <view style={{ ...card, width: 324, gap: 8 }}>
         <view style={{ flexDirection: "row", gap: 12 }}>
           <view style={{ width: 64, height: 64, borderRadius: 20, backgroundColor: "#8250df" }} />
           <view style={{ width: 64, height: 64, borderRadius: 20, borderCurve: "continuous", backgroundColor: "#8250df" }} />
@@ -217,8 +217,8 @@ export function Styles() {
         </view>
         <Label>Circular / continuous corners</Label>
       </view>
-      <view onPress={() => setFront((front() + 1) % 3)} style={{ ...card, backgroundColor: "transparent" }}>
-        <For each={["#fd8c73", "#54aeff", "#4ac26b"]}>
+      <view onPress={() => front.set((front() + 1) % 3)} style={{ ...card, backgroundColor: "transparent" }}>
+        <each of={["#fd8c73", "#54aeff", "#4ac26b"]}>
           {(color, i) => (
             <view
               style={{
@@ -228,7 +228,7 @@ export function Styles() {
                 width: 70,
                 height: 56,
                 borderRadius: 10,
-                backgroundColor: color,
+                backgroundColor: color(),
                 zIndex: front() === i() ? 10 : 0,
                 shadowOpacity: 0.2,
                 shadowRadius: 4,
@@ -236,7 +236,7 @@ export function Styles() {
               }}
             />
           )}
-        </For>
+        </each>
         <view style={{ position: "absolute", bottom: -18 }}>
           <Label>zIndex (tap)</Label>
         </view>

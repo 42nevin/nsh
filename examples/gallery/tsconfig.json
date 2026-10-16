@@ -13,10 +13,8 @@
     "types": [],
     "paths": {
       "nsh": ["./.nsh/types/nsh/index.d.ts"],
-      "nsh/*": ["./.nsh/types/nsh/*.d.ts"],
-      "solid-js": ["./.nsh/types/solid-js/types/index.d.ts"],
-      "solid-js/universal": ["./.nsh/types/solid-js/types/universal/index.d.ts"]
+      "nsh/*": ["./.nsh/types/nsh/*.d.ts"]
     }
   },
-  "include": ["**/*.ts", "**/*.tsx", ".nsh/types/nsh/globals.d.ts"]
+  "include": ["**/*.ts", "**/*.tsx", ".nsh/types/nsh/globals.d.ts", ".nsh/types/nsh/assets.d.ts"]
 }

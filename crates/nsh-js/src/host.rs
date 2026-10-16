@@ -4,19 +4,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-use nsh_core::{EventKind, EventPayload, NodeId, Op, PayloadValue, TouchPhase};
+use nsh_core::{
+    EventKind, EventPayload, NodeId, Op, PayloadValue, TouchPhase, js::Limits,
+    platform::Environment,
+};
 use rquickjs::{
-    Array, CatchResultExt, Context, Ctx, Function, Module, Persistent, Runtime, Value,
-    function::Opt,
+    CatchResultExt, Context, Ctx, Function, Module, Persistent, Runtime, Value, function::Opt, qjs,
 };
 
 use crate::{
     console,
-    env::{ColorScheme, Environment, Idiom},
     error::JsError,
-    net::{HttpResponse, NetworkQueue, RequestId},
-    protocol::{self, Warnings},
-    sandbox::{self, Budget, Limits, Phase},
+    net::{FetchEvent, NetworkQueue, RequestId},
+    protocol::Warnings,
+    sandbox::{self, Budget, Phase},
     timers::Timers,
     web,
 };
@@ -28,18 +29,26 @@ pub type ErrorHandler = Box<dyn Fn(&JsError)>;
 /// Only touched on the JS thread.
 #[derive(Default)]
 pub(crate) struct Shared {
-    ops: RefCell<Vec<Op>>,
+    pub(crate) ops: RefCell<Vec<Op>>,
+    /// Native nodes collected since the last [`Host::take_ops`] (their
+    /// finalizers queue here: the op queue may be borrowed meanwhile).
+    pub(crate) releases: RefCell<Vec<NodeId>>,
+    /// Native animation nodes and composites collected meanwhile.
+    pub(crate) anim_releases: RefCell<Vec<nsh_anim::AnimOp>>,
     timers: RefCell<Timers>,
-    warnings: RefCell<Warnings>,
+    pub(crate) warnings: RefCell<Warnings>,
     pub(crate) net: RefCell<NetworkQueue>,
+    /// Requests whose response bodies were collected unread (finalizers
+    /// queue them here; the next [`Host::take_network`] cancels them).
+    pub(crate) dropped_fetches: RefCell<Vec<RequestId>>,
     /// Font assets imported by the app, not yet registered.
-    fonts: RefCell<Vec<String>>,
+    pub(crate) fonts: RefCell<Vec<String>>,
     /// `requestAnimationFrame` callbacks waiting for the next frame.
     frames: RefCell<Vec<(u32, Persistent<Function<'static>>)>>,
     next_frame_id: std::cell::Cell<u32>,
     /// Measures one line of text for `measureText` (the engine's text
     /// engine).
-    measurer: RefCell<Option<TextMeasurer>>,
+    pub(crate) measurer: RefCell<Option<TextMeasurer>>,
     /// The VM's limits.
     pub(crate) limits: Limits,
     /// Why the VM was stopped (out of memory, over a quota): no JS runs
@@ -68,13 +77,16 @@ pub struct Host {
 }
 
 /// How a VM is set up.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct HostOptions {
     /// Resource limits.
     pub limits: Limits,
     /// Removes `eval` and the function constructors and freezes the shared
     /// prototypes (see `sandbox`). Off for development bundles.
     pub harden: bool,
+    /// The UI sets apps import as native modules
+    /// (`nsh_ui_mobile::registry()`, served as `nsh/ui/mobile`).
+    pub ui_sets: Vec<nsh_core::ui::Registry>,
 }
 
 impl Host {
@@ -102,6 +114,7 @@ impl Host {
             ..Shared::default()
         });
         ctx.with(|ctx| {
+            crate::state::install(&ctx, shared.clone(), &options.ui_sets);
             install(&ctx, &shared)?;
             if options.harden {
                 sandbox::harden(&ctx)?;
@@ -158,7 +171,7 @@ impl Host {
     fn classify(&self, mut err: JsError) -> JsError {
         if let Some(trip) = self.budget.take_trip() {
             err.message = format!("{trip}\n{}", err.message);
-        } else if err.message.contains("out of memory") {
+        } else if err.message.contains("out of memory") || (err.null && self.at_memory_limit()) {
             let reason = format!(
                 "the script ran out of memory (limit {} MB) and was stopped",
                 self.budget.limits().memory_bytes >> 20
@@ -169,11 +182,15 @@ impl Host {
         err
     }
 
+    /// Whether the heap is (all but) full.
+    fn at_memory_limit(&self) -> bool {
+        let limit = self.budget.limits().memory_bytes as i64;
+        limit > 0 && self.rt.memory_usage().malloc_size + (1 << 20) >= limit
+    }
+
     /// The error for a call refused because the VM was stopped.
     fn stopped(&self) -> JsError {
-        JsError {
-            message: self.fatal().unwrap_or_default(),
-        }
+        JsError::new(self.fatal().unwrap_or_default())
     }
 
     /// Sets what canvas `measureText` measures with.
@@ -254,6 +271,13 @@ impl Host {
     pub fn dispatch_event(&self, id: NodeId, event: EventKind, payload: &EventPayload) {
         self.guarded(Phase::Call, || {
             self.ctx.with(|ctx| {
+                // Touches: the responder system is native.
+                if let (EventKind::Touch, EventPayload::Touch(touch)) = (event, payload) {
+                    if crate::touch::dispatch(ctx.as_raw().as_ptr(), touch).is_err() {
+                        self.report::<()>(&ctx, Err(rquickjs::Error::Exception));
+                    }
+                    return;
+                }
                 let payload = match (event, payload) {
                     // `onChangeText` receives the text itself, as in React Native.
                     (EventKind::ChangeText, EventPayload::Text { text, .. }) => {
@@ -262,10 +286,18 @@ impl Host {
                     (_, EventPayload::Value(value)) => payload_value(&ctx, value),
                     _ => payload_object(&ctx, payload),
                 };
+                let raw = ctx.as_raw().as_ptr();
                 let result = payload.and_then(|payload| {
-                    ctx.globals()
-                        .get::<_, Function>("__nsh_dispatch")?
-                        .call::<_, ()>((id, event.prop_name(), payload))
+                    // Nodes hold their handlers natively.
+                    let Some(handler) = crate::dom::handler(raw, id, event) else {
+                        return Ok(());
+                    };
+                    // SAFETY: an owned function value of this context.
+                    let handler = unsafe { Value::from_raw(ctx.clone(), handler) };
+                    match handler.into_function() {
+                        Some(f) => f.call::<_, ()>((payload,)),
+                        None => Ok(()),
+                    }
                 });
                 self.report(&ctx, result);
             });
@@ -273,22 +305,14 @@ impl Host {
         });
     }
 
-    /// Asks the runtime's `List` to render items into cells:
-    /// `(slot, item index)` pairs.
+    /// Asks a `List` to render items into cells: `(slot, item index)`
+    /// pairs.
     pub fn bind_list(&self, list: NodeId, binds: &[(u32, u32)]) {
         self.guarded(Phase::Call, || {
             self.ctx.with(|ctx| {
-                let result = (|| {
-                    let flat = rquickjs::Array::new(ctx.clone())?;
-                    for (i, &(slot, index)) in binds.iter().enumerate() {
-                        flat.set(i * 2, slot)?;
-                        flat.set(i * 2 + 1, index)?;
-                    }
-                    ctx.globals()
-                        .get::<_, Function>("__nsh_list")?
-                        .call::<_, ()>((list, flat))
-                })();
-                self.report(&ctx, result);
+                if let Some(Err(_)) = crate::list::bind(ctx.as_raw().as_ptr(), list, binds) {
+                    self.report::<()>(&ctx, Err(rquickjs::Error::Exception));
+                }
             });
             self.run_jobs();
         });
@@ -301,14 +325,12 @@ impl Host {
                 return;
             }
             self.ctx.with(|ctx| {
-                let result = (|| {
-                    let callback = ctx.globals().get::<_, Function>("__nsh_anim_end")?;
-                    for f in finished {
-                        callback.call::<_, ()>((f.animation, f.finished))?;
+                let raw = ctx.as_raw().as_ptr();
+                for f in finished {
+                    if crate::animated::finished(raw, f.animation, f.finished).is_err() {
+                        self.report::<()>(&ctx, Err(rquickjs::Error::Exception));
                     }
-                    Ok(())
-                })();
-                self.report(&ctx, result);
+                }
             });
             self.run_jobs();
         });
@@ -322,6 +344,17 @@ impl Host {
         } else {
             out.append(&mut ops);
         }
+        drop(ops);
+        let mut releases = self.shared.releases.borrow_mut();
+        out.extend(releases.drain(..).map(|id| Op::Release { id }));
+        drop(releases);
+        out.extend(
+            self.shared
+                .anim_releases
+                .borrow_mut()
+                .drain(..)
+                .map(Op::Anim),
+        );
     }
 
     /// Earliest timer deadline, if any timer is pending.
@@ -355,8 +388,11 @@ impl Host {
         self.guarded(Phase::Call, || {
             while self.rt.is_job_pending() {
                 if let Err(err) = self.rt.execute_pending_job() {
-                    let err = err.0.with(|ctx| JsError {
-                        message: describe(ctx.catch()),
+                    let err = err.0.with(|ctx| {
+                        let caught = ctx.catch();
+                        let mut err = JsError::new(describe(caught.clone()));
+                        err.null = caught.is_null();
+                        err
                     });
                     self.uncaught(&err);
                 }
@@ -367,9 +403,11 @@ impl Host {
     /// Moves the network requests and cancellations made since the last
     /// call into `out`.
     pub fn take_network(&self, out: &mut NetworkQueue) {
-        let mut net = self.shared.net.borrow_mut();
-        out.requests.append(&mut net.requests);
-        out.cancels.append(&mut net.cancels);
+        if !self.shared.dropped_fetches.borrow().is_empty() {
+            self.ctx
+                .with(|ctx| crate::web::forget_dropped_fetches(ctx.as_raw().as_ptr()));
+        }
+        out.ops.append(&mut self.shared.net.borrow_mut().ops);
     }
 
     /// Publishes the surface's environment to JS. Call once before
@@ -379,11 +417,11 @@ impl Host {
         self.guarded(Phase::Call, || {
             self.ctx.with(|ctx| {
                 let result = (|| {
-                    let value = environment_object(&ctx, env)?;
-                    let globals = ctx.globals();
-                    globals.set("__nsh_env_value", value.clone())?;
-                    if let Ok(update) = globals.get::<_, Function>("__nsh_env") {
-                        update.call::<_, ()>((value,))?;
+                    let raw = ctx.as_raw().as_ptr();
+                    // SAFETY: the state of this host's context.
+                    unsafe { &(*crate::state::state(raw)).dom }.set_os(env.os);
+                    if crate::env::set_environment(raw, env).is_err() {
+                        return Err(rquickjs::Error::Exception);
                     }
                     Ok(())
                 })();
@@ -428,15 +466,22 @@ impl Host {
         out.append(&mut self.shared.fonts.borrow_mut());
     }
 
-    /// Settles the `fetch` promise of request `id`.
-    pub fn finish_fetch(&self, id: RequestId, result: Result<HttpResponse, String>) {
+    /// Delivers an event of request `id` (what the network stack reported).
+    pub fn fetch_event(&self, id: RequestId, event: FetchEvent) {
         self.guarded(Phase::Call, || {
             self.ctx.with(|ctx| {
-                let result = web::finish_fetch(&ctx, id, result);
+                let raw = ctx.as_raw().as_ptr();
+                let result =
+                    crate::web::fetch_event(raw, id, event).map_err(|_| rquickjs::Error::Exception);
                 self.report(&ctx, result);
             });
             self.run_jobs();
         });
+    }
+
+    /// The number of live JS objects (diagnostics: leak checks).
+    pub fn object_count(&self) -> i64 {
+        self.rt.memory_usage().obj_count
     }
 
     /// Runs the cycle collector. Call when idle so released nodes are
@@ -470,70 +515,8 @@ impl Drop for Host {
         // Persistent JS values must be freed before the runtime.
         self.shared.timers.borrow_mut().clear();
         self.shared.frames.borrow_mut().clear();
+        self.ctx.with(|ctx| crate::state::uninstall(&ctx));
     }
-}
-
-fn environment_object<'js>(ctx: &Ctx<'js>, env: &Environment) -> rquickjs::Result<Value<'js>> {
-    let object = |pairs: &[(&str, f32)]| -> rquickjs::Result<rquickjs::Object<'js>> {
-        let o = rquickjs::Object::new(ctx.clone())?;
-        for (k, v) in pairs {
-            o.set(*k, *v)?;
-        }
-        Ok(o)
-    };
-    let obj = rquickjs::Object::new(ctx.clone())?;
-    obj.set(
-        "window",
-        object(&[("width", env.window.0), ("height", env.window.1)])?,
-    )?;
-    let a = env.safe_area;
-    obj.set(
-        "safeArea",
-        object(&[
-            ("top", a.top),
-            ("right", a.right),
-            ("bottom", a.bottom),
-            ("left", a.left),
-        ])?,
-    )?;
-    obj.set(
-        "keyboard",
-        object(&[
-            ("height", env.keyboard_height),
-            ("duration", env.keyboard_duration),
-        ])?,
-    )?;
-    obj.set(
-        "colorScheme",
-        match env.color_scheme {
-            ColorScheme::Light => "light",
-            ColorScheme::Dark => "dark",
-        },
-    )?;
-    obj.set("fontScale", env.font_scale)?;
-    obj.set("rtl", env.rtl)?;
-    obj.set("reduceMotion", env.reduce_motion)?;
-    obj.set("pixelRatio", env.pixel_ratio)?;
-    obj.set("screenReader", env.screen_reader)?;
-    obj.set("os", env.os.name())?;
-    // React Native: a string on iOS ("17.5"), the API level on Android.
-    let (major, minor) = env.os_version;
-    if env.os == crate::Os::Android {
-        obj.set("osVersion", major)?;
-    } else {
-        obj.set("osVersion", format!("{major}.{minor}"))?;
-    }
-    obj.set(
-        "idiom",
-        match env.idiom {
-            Idiom::Phone => "phone",
-            Idiom::Pad => "pad",
-            Idiom::Mac => "mac",
-            Idiom::Tv => "tv",
-            Idiom::Desktop => "desktop",
-        },
-    )?;
-    Ok(obj.into_value())
 }
 
 /// The JS object handed to event handlers.
@@ -643,6 +626,17 @@ fn payload_object<'js>(ctx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resu
     Ok(obj.into_value())
 }
 
+/// JSON as a JS value (owned), for natives.
+pub(crate) fn json_to_js(raw: *mut qjs::JSContext, json: &nsh_core::JsonValue) -> qjs::JSValue {
+    // SAFETY: a context reference; the value's ownership moves out.
+    let cx = unsafe { Ctx::from_raw(std::ptr::NonNull::new_unchecked(raw)) };
+    match json_value(&cx, json) {
+        // A value of our own; the wrapper (and its context reference) go.
+        Ok(v) => unsafe { qjs::JS_DupValue(raw, v.as_raw()) },
+        Err(_) => qjs::JS_UNDEFINED,
+    }
+}
+
 /// JSON (a native component's event data) as a JS value.
 fn json_value<'js>(ctx: &Ctx<'js>, value: &nsh_core::JsonValue) -> rquickjs::Result<Value<'js>> {
     use nsh_core::JsonValue as J;
@@ -684,53 +678,46 @@ fn describe(value: Value<'_>) -> String {
     }
 }
 
+/// The declarations of the globals besides the web classes and functions
+/// (`web/`): the host's (console, timers, frames, below) and QuickJS-NG's
+/// that apps use. A test checks that each exists, and that every global
+/// the host adds is declared.
+pub(crate) const GLOBALS: &str = r#"declare var console: {
+  log(...data: unknown[]): void;
+  info(...data: unknown[]): void;
+  debug(...data: unknown[]): void;
+  warn(...data: unknown[]): void;
+  error(...data: unknown[]): void;
+};
+
+declare var performance: {
+  /** Milliseconds since the JS context started, with sub-millisecond precision. */
+  now(): number;
+};
+
+declare function setTimeout(handler: (...args: any[]) => void, timeout?: number, ...args: any[]): number;
+declare function setInterval(handler: (...args: any[]) => void, timeout?: number, ...args: any[]): number;
+declare function clearTimeout(id: number | undefined): void;
+declare function clearInterval(id: number | undefined): void;
+declare function queueMicrotask(callback: () => void): void;
+/** Runs `callback` at the next display frame with its time in milliseconds. */
+declare function requestAnimationFrame(callback: (time: number) => void): number;
+declare function cancelAnimationFrame(id: number): void;
+declare function atob(data: string): string;
+declare function btoa(data: string): string;
+
+declare class DOMException extends Error {
+  constructor(message?: string, name?: string);
+  readonly name: string;
+  readonly message: string;
+  readonly code: number;
+}
+"#;
+
 fn install(ctx: &Ctx<'_>, shared: &Rc<Shared>) -> rquickjs::Result<()> {
     let globals = ctx.globals();
     console::install(ctx)?;
-    web::install(ctx, shared)?;
-
-    let s = shared.clone();
-    globals.set(
-        "__nsh_commit",
-        Function::new(ctx.clone(), move |buf: Array<'_>| -> rquickjs::Result<()> {
-            // Decoding allocates in Rust, outside the heap limit.
-            if buf.len() > s.limits.max_op_values {
-                let reason = format!(
-                    "the app committed {} values at once (limit {}) and was stopped",
-                    buf.len(),
-                    s.limits.max_op_values
-                );
-                s.stop(reason.clone());
-                return Err(rquickjs::Exception::throw_range(buf.ctx(), &reason));
-            }
-            let mut ops = s.ops.borrow_mut();
-            protocol::decode(buf.ctx(), &buf, &mut ops, &mut s.warnings.borrow_mut(), &s)
-        })?,
-    )?;
-
-    // Canvas `measureText`: the width of one line, measured by the text
-    // engine (0 without one, e.g. in tests).
-    let s = shared.clone();
-    globals.set(
-        "__nsh_measure_text",
-        Function::new(ctx.clone(), move |font: String, text: String| -> f64 {
-            let font = nsh_core::canvas::CanvasFont::parse(&font).unwrap_or_default();
-            s.measurer
-                .borrow()
-                .as_ref()
-                .map_or(0.0, |m| m(&font, &text) as f64)
-        })?,
-    )?;
-
-    // `import Inter from "./Inter.ttf"` compiles to `__nsh_font(uri, family)`.
-    let s = shared.clone();
-    globals.set(
-        "__nsh_font",
-        Function::new(ctx.clone(), move |uri: String, family: String| {
-            s.fonts.borrow_mut().push(uri);
-            family
-        })?,
-    )?;
+    web::install(ctx.as_raw().as_ptr())?;
 
     for (name, repeat) in [("setTimeout", false), ("setInterval", true)] {
         let s = shared.clone();
@@ -789,7 +776,7 @@ fn install(ctx: &Ctx<'_>, shared: &Rc<Shared>) -> rquickjs::Result<()> {
 mod tests {
     use std::time::Duration;
 
-    use nsh_core::{EventKind, Op, Tag};
+    use nsh_core::{EventKind, Op};
 
     use super::*;
 
@@ -799,97 +786,52 @@ mod tests {
         out
     }
 
-    #[test]
-    fn decodes_op_buffer() {
-        let host = Host::new().unwrap();
-        host.eval_source(
-            r##"__nsh_commit([
-                0, 2, "view",
-                3, 2, "style", { flexDirection: "row", padding: 8, backgroundColor: "#ff0000", bogus: 1 },
-                3, 2, "onPress", true,
-                1, 3, "hi",
-                4, 2, 3, 0,
-                4, 1, 2, 0,
-                2, 3, "bye",
-                5, 2, 3,
-                6, 3,
-            ]);"##)
-        .unwrap();
-        let ops = ops(&host);
-        assert_eq!(ops.len(), 9);
-        assert!(matches!(
-            ops[0],
-            Op::Create {
-                id: 2,
-                tag: Tag::View
-            }
-        ));
-        let Op::SetStyle { id: 2, style, .. } = &ops[1] else {
-            panic!("{:?}", ops[1])
-        };
-        assert_eq!(format!("{:?}", style.layout.flex_direction), "Row");
-        assert_eq!(style.view.background_color, nsh_core::Color(0xff00_00ff));
-        assert!(matches!(
-            ops[2],
-            Op::Listen {
-                id: 2,
-                event: EventKind::Press,
-                enabled: true
-            }
-        ));
-        assert!(matches!(&ops[3], Op::CreateText { id: 3, text } if text == "hi"));
-        assert!(matches!(
-            ops[4],
-            Op::Insert {
-                parent: 2,
-                child: 3,
-                before: None
-            }
-        ));
-        assert!(matches!(&ops[6], Op::SetText { id: 3, text } if text == "bye"));
-        assert!(matches!(
-            ops[7],
-            Op::Remove {
-                parent: 2,
-                child: 3
-            }
-        ));
-        assert!(matches!(ops[8], Op::Release { id: 3 }));
+    /// Reports `v` as a text node (`report(v)`; the native renderer's ops
+    /// are what tests observe).
+    const REPORT: &str = r#"import { text } from "nsh:rt";
+const report = (v) => text(String(v));
+"#;
+
+    /// The text nodes created since the last call.
+    fn reported(host: &Host) -> Vec<String> {
+        ops(host)
+            .into_iter()
+            .filter_map(|op| match op {
+                Op::CreateText { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
-    fn decodes_shadow_and_corner_styles() {
+    fn styles_decode_shadows_and_corners() {
         let host = Host::new().unwrap();
         host.eval_source(
-            r##"__nsh_commit([
-                3, 2, "style", {
-                    shadowColor: "#000", shadowOffset: { width: 2, height: 6 },
-                    shadowOpacity: 0.25, shadowRadius: 10,
-                    borderRadius: 12, borderBottomLeftRadius: 0,
-                },
-                3, 3, "style", { shadowOffset: null },
-            ]);"##,
+            r##"import { element, prop } from "nsh:rt";
+            prop(element("view"), "style", {
+                flexDirection: "row", backgroundColor: "#ff0000", bogus: 1,
+                shadowColor: "#000", shadowOffset: { width: 2, height: 6 },
+                shadowOpacity: 0.25, shadowRadius: 10,
+                borderRadius: 12, borderBottomLeftRadius: 0,
+            });
+            prop(element("view"), "style", { shadowOffset: null });"##,
         )
         .unwrap();
-        let ops = ops(&host);
-        let Op::SetStyle { style, .. } = &ops[0] else {
-            panic!("{:?}", ops[0])
-        };
+        let styles: Vec<_> = ops(&host)
+            .into_iter()
+            .filter_map(|op| match op {
+                Op::SetStyle { style, .. } => Some(style),
+                _ => None,
+            })
+            .collect();
+        let style = &styles[0];
+        assert_eq!(format!("{:?}", style.layout.flex_direction), "Row");
+        assert_eq!(style.view.background_color, nsh_core::Color(0xff00_00ff));
         let shadow = style.view.shadow;
         assert_eq!((shadow.offset_x, shadow.offset_y), (2.0, 6.0));
         assert_eq!((shadow.opacity, shadow.radius), (0.25, 10.0));
         assert_eq!(style.view.radii().to_array(), [12.0, 12.0, 12.0, 0.0]);
-        let Op::SetStyle { style, .. } = &ops[1] else {
-            panic!("{:?}", ops[1])
-        };
-        assert_eq!(style.view.shadow, nsh_core::Shadow::DEFAULT);
-    }
-
-    #[test]
-    fn bad_buffer_throws_in_js() {
-        let host = Host::new().unwrap();
-        let err = host.eval_source(r#"__nsh_commit([42]);"#).unwrap_err();
-        assert!(err.message.contains("unknown opcode 42"), "{err}");
+        assert_eq!(styles[1].view.shadow, nsh_core::Shadow::DEFAULT);
     }
 
     #[test]
@@ -912,19 +854,16 @@ mod tests {
             host.run_timers(Instant::now());
             assert!(Instant::now() < deadline + Duration::from_secs(1));
         }
-        host.eval_source(r#"__nsh_commit([1, 9, log.join(",")]);"#)
+        host.eval_source(&format!("{REPORT}report(log.join(\",\"));"))
             .unwrap();
-        let ops = ops(&host);
-        assert!(
-            matches!(&ops[0], Op::CreateText { text, .. } if text == "micro,a,b"),
-            "{ops:?}"
-        );
+        assert_eq!(reported(&host), ["micro,a,b"]);
     }
 
     fn sandboxed(limits: Limits) -> Host {
         Host::with_options(HostOptions {
             limits,
             harden: true,
+            ..HostOptions::default()
         })
         .unwrap()
     }
@@ -938,26 +877,35 @@ mod tests {
         let errors = Rc::new(RefCell::new(Vec::new()));
         let seen = errors.clone();
         host.set_error_handler(Box::new(move |e| seen.borrow_mut().push(e.message.clone())));
+        // Views 2 and 4: the first loops when pressed.
         host.eval_source(
-            r#"
-            globalThis.__nsh_dispatch = (id) => {
-                // try/catch cannot swallow the interrupt.
-                try { if (id === 1) for (;;) {} } catch (e) {}
-                __nsh_commit([0, id + 10, "view"]);
-            };
-            "#,
+            r#"import { element, prop } from "nsh:rt";
+            globalThis.views = [true, false].map((loops) => {
+                const view = element("view");
+                prop(view, "onPress", () => {
+                    // try/catch cannot swallow the interrupt.
+                    try { if (loops) for (;;) {} } catch (e) {}
+                    element("view");
+                });
+                return view;
+            });"#,
         )
         .unwrap();
+        ops(&host);
         let start = Instant::now();
-        host.dispatch_event(1, EventKind::Press, &EventPayload::None);
+        host.dispatch_event(2, EventKind::Press, &EventPayload::None);
         assert!(start.elapsed() < Duration::from_secs(2));
         let errors = errors.borrow().clone();
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("budget of 50 ms"), "{}", errors[0]);
         assert!(ops(&host).is_empty());
         // The next call runs normally.
-        host.dispatch_event(2, EventKind::Press, &EventPayload::None);
-        assert_eq!(ops(&host).len(), 1);
+        host.dispatch_event(4, EventKind::Press, &EventPayload::None);
+        let created = ops(&host)
+            .into_iter()
+            .filter(|op| matches!(op, Op::Create { .. }))
+            .count();
+        assert_eq!(created, 1);
         assert!(host.fatal().is_none());
     }
 
@@ -977,28 +925,33 @@ mod tests {
         );
         assert!(host.fatal().is_some());
         // Nothing runs any more.
-        assert!(host.eval_source("__nsh_commit([0, 2, 'view']);").is_err());
+        assert!(
+            host.eval_source(r#"import { element } from "nsh:rt"; element("view");"#)
+                .is_err()
+        );
         assert!(ops(&host).is_empty());
     }
 
     #[test]
-    fn huge_op_buffers_stop_the_vm() {
+    fn too_many_changes_at_once_stop_the_vm() {
         let host = sandboxed(Limits {
             max_op_values: 1000,
             ..Limits::default()
         });
         assert!(
-            host.eval_source("__nsh_commit(new Array(2000).fill(0));")
-                .is_err()
+            host.eval_source(
+                r#"import { element } from "nsh:rt"; for (let i = 0; i < 2000; i++) element("view");"#
+            )
+            .is_err()
         );
-        assert!(host.fatal().unwrap().contains("limit 1000"));
+        assert!(host.fatal().unwrap().contains("more than 1000 changes"));
     }
 
     #[test]
     fn hardened_vms_run_no_code_from_strings() {
         let host = sandboxed(Limits::default());
-        host.eval_source(
-            r#"
+        host.eval_source(&(REPORT.to_owned()
+            + r#"
             const results = [];
             const attempt = (f) => { try { f(); results.push("ran"); } catch (e) { results.push(e.constructor.name); } };
             attempt(() => eval("1"));
@@ -1012,25 +965,37 @@ mod tests {
             class MyError extends Error { constructor() { super("x"); this.name = "MyError"; } }
             attempt(() => { const e = new MyError(); if (e.name !== "MyError") throw new Error(); });
             attempt(() => [1, 2].map((x) => x * 2));
-            __nsh_commit([1, 1, results.join(",")]);
-            "#,
-        )
+            // Members of the frozen prototypes can still be overridden on
+            // other objects (no override mistake), not on the prototypes.
+            attempt(() => {
+                "use strict";
+                function A() {}
+                A.prototype = Object.create(Object.prototype);
+                A.prototype.constructor = A;
+                const o = { toString: undefined };
+                o.toString = () => "mine";
+                const d = new Date(0);
+                d.toJSON = () => "j";
+                if (new A().constructor !== A || String(o) !== "mine" || JSON.stringify(d) !== '"j"') throw new Error();
+                if (({}).constructor !== Object || [].toString() !== "") throw new Error();
+            });
+            attempt(() => { "use strict"; Object.prototype.toString = null; });
+            report(results.join(","));
+            "#))
         .unwrap();
-        let ops = ops(&host);
-        let Op::CreateText { text, .. } = &ops[0] else {
-            panic!("{ops:?}")
-        };
         assert_eq!(
-            text,
-            "ReferenceError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,ran,ran"
+            reported(&host),
+            [
+                "ReferenceError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,ran,ran,ran,TypeError"
+            ]
         );
     }
 
     #[test]
     fn development_vms_keep_eval() {
         let host = Host::new().unwrap();
-        host.eval_source(r#"__nsh_commit([1, 1, String(eval("1 + 1"))]);"#)
+        host.eval_source(&format!("{REPORT}report(eval(\"1 + 1\"));"))
             .unwrap();
-        assert!(matches!(&ops(&host)[0], Op::CreateText { text, .. } if text == "2"));
+        assert_eq!(reported(&host), ["2"]);
     }
 }

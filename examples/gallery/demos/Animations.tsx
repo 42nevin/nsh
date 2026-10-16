@@ -1,4 +1,4 @@
-import { createSignal, For, Index } from "solid-js";
+import { signal } from "nsh";
 import { Animated, createNativeValue, Easing, LayoutAnimation } from "nsh/animated";
 import { Button, colors, Section } from "../ui";
 
@@ -28,7 +28,7 @@ function Curves() {
   };
   return (
     <view style={{ gap: 6 }}>
-      <Index each={curves}>
+      <each of={curves}>
         {(c, i) => (
           <view style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
             <text style={{ width: 84, fontSize: 12, color: colors.muted }}>{c()[0]}</text>
@@ -39,13 +39,13 @@ function Curves() {
                   height: 14,
                   borderRadius: 7,
                   backgroundColor: colors.accent,
-                  transform: [{ translateX: dots[i] }],
+                  transform: [{ translateX: dots[i()] }],
                 }}
               />
             </view>
           </view>
         )}
-      </Index>
+      </each>
       <Button label="Play" onPress={play} />
     </view>
   );
@@ -58,8 +58,8 @@ function Composition() {
   const ys = palette.map(() => createNativeValue(0));
   const spin = createNativeValue(0);
   const fade = createNativeValue(1);
-  const [state, setState] = createSignal("idle");
-  const report = (name: string) => (finished: boolean) => setState(`${name}: ${finished ? "finished" : "stopped"}`);
+  const state = signal("idle");
+  const report = (name: string) => (finished: boolean) => state.set(`${name}: ${finished ? "finished" : "stopped"}`);
 
   const stagger = Animated.stagger(
     80,
@@ -86,13 +86,13 @@ function Composition() {
     ]),
   );
   const run = (name: string, a: typeof stagger) => () => {
-    setState(`${name}…`);
+    state.set(`${name}…`);
     a.start().then(report(name));
   };
   return (
     <view style={{ gap: 12 }}>
       <view style={{ flexDirection: "row", justifyContent: "center", alignItems: "flex-end", gap: 10, height: 80 }}>
-        <Index each={palette}>
+        <each of={palette}>
           {(color, i) => (
             <view
               style={{
@@ -102,13 +102,13 @@ function Composition() {
                 backgroundColor: color(),
                 opacity: fade,
                 transform: [
-                  { translateY: ys[i] },
-                  { rotate: spin.interpolate({ inputRange: [0, 1], outputRange: ["0deg", `${(i + 1) * 36}deg`] }) },
+                  { translateY: ys[i()] },
+                  { rotate: spin.interpolate({ inputRange: [0, 1], outputRange: ["0deg", `${(i() + 1) * 36}deg`] }) },
                 ],
               }}
             />
           )}
-        </Index>
+        </each>
       </view>
       <text style={{ fontSize: 13, color: colors.muted, textAlign: "center" }}>{state()}</text>
       <view style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
@@ -156,10 +156,10 @@ function Springs() {
   };
   return (
     <view style={{ gap: 6 }}>
-      <For each={settings}>
+      <each of={settings}>
         {(s, i) => (
           <view style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <text style={{ width: 84, fontSize: 12, color: colors.muted }}>{s.label}</text>
+            <text style={{ width: 84, fontSize: 12, color: colors.muted }}>{s().label}</text>
             <view style={{ width: TRACK + 20, height: 20 }}>
               <view
                 style={{ width: 20, height: 20, borderRadius: 4, backgroundColor: "#8250df", transform: [{ translateX: xs[i()] }] }}
@@ -167,7 +167,7 @@ function Springs() {
             </view>
           </view>
         )}
-      </For>
+      </each>
       <Button label="Release" color="#8250df" onPress={play} />
     </view>
   );
@@ -182,13 +182,13 @@ function HidingHeader() {
     <view style={{ height: 260, borderRadius: 10, overflow: "hidden", backgroundColor: "#f6f8fa" }}>
       <scroll style={{ flex: 1 }} scrollValue={scroll}>
         <view style={{ paddingTop: 52, paddingHorizontal: 12, paddingBottom: 12, gap: 8 }}>
-          <For each={Array.from({ length: 30 }, (_, i) => i + 1)}>
+          <each of={Array.from({ length: 30 }, (_, i) => i + 1)}>
             {(n) => (
               <view style={{ padding: 10, borderRadius: 8, backgroundColor: colors.surface }}>
-                <text>Row {n}</text>
+                <text>Row {n()}</text>
               </view>
             )}
-          </For>
+          </each>
         </view>
       </scroll>
       <view
@@ -215,9 +215,9 @@ function HidingHeader() {
  * right only. */
 function Interpolations() {
   const t = createNativeValue(0);
-  const [at, setAt] = createSignal(0);
+  const at = signal(0);
   const go = (to: number) => {
-    setAt(to);
+    at.set(to);
     t.timing(to, { duration: 700, easing: Easing.inOut(Easing.cubic) });
   };
   return (
@@ -243,9 +243,9 @@ function Interpolations() {
         />
       </view>
       <view style={{ flexDirection: "row", gap: 8 }}>
-        <Index each={[0, 1, 2]}>
+        <each of={[0, 1, 2]}>
           {(n) => <Chip label={`t = ${n()}${at() === n() ? " ●" : ""}`} onPress={() => go(n())} />}
-        </Index>
+        </each>
       </view>
       <text style={{ fontSize: 12, color: colors.muted }}>
         Color through three stops; rotation extends past 1 (to 360° at 2); scale clamps at 1.2.
@@ -256,20 +256,20 @@ function Interpolations() {
 
 /** Layout changes animated natively by the next commit. */
 function Layout() {
-  const [open, setOpen] = createSignal(false);
+  const open = signal(false);
   return (
     <view style={{ gap: 10 }}>
       <view style={{ flexDirection: open() ? "column" : "row", gap: 8 }}>
-        <Index each={palette}>
+        <each of={palette}>
           {(color) => <view style={{ height: open() ? 24 : 44, flex: open() ? undefined : 1, borderRadius: 8, backgroundColor: color() }} />}
-        </Index>
+        </each>
       </view>
       <Button
         label={open() ? "Row" : "Column"}
         color="#57606a"
         onPress={() => {
           LayoutAnimation.configureNext(LayoutAnimation.Presets.spring);
-          setOpen(!open());
+          open.set(!open());
         }}
       />
     </view>

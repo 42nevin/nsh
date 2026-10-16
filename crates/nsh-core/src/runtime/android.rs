@@ -1,0 +1,65 @@
+//! `nsh/android`: what only Android has (nothing happens elsewhere).
+
+use crate::{
+    Command, ROOT_ID, StatusBarSetting,
+    ui::{Color, ModuleCx, PropEnum, module, task::Action},
+};
+
+/// Short messages at the bottom of the screen.
+pub(crate) struct Toast;
+
+/// How long a toast shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PropEnum)]
+pub(crate) enum ToastDuration {
+    /// About 2 seconds.
+    Short,
+    /// About 3.5 seconds.
+    Long,
+}
+
+/// Short messages at the bottom of the screen (Android's toasts).
+#[module]
+impl Toast {
+    /// Shows `message` (`"short"` by default).
+    pub(crate) fn show(message: String, duration: Option<ToastDuration>, cx: &mut ModuleCx) {
+        cx.act(Action::Command(
+            ROOT_ID,
+            Command::Toast {
+                text: message,
+                long: duration == Some(ToastDuration::Long),
+            },
+        ));
+    }
+}
+
+/// The back button's functions (its listeners are JS's).
+pub(crate) struct BackHandler;
+
+/// The back button, after modals and stacks had their turn.
+#[module]
+impl BackHandler {
+    /// Leaves the app.
+    pub(crate) fn exit_app(cx: &mut ModuleCx) {
+        cx.act(Action::Command(ROOT_ID, Command::ExitApp));
+    }
+}
+
+/// `nsh/android`'s functions of their own.
+pub(crate) struct Android;
+
+#[module(flat)]
+impl Android {
+    /// The status bar's color (before edge-to-edge, API 35), under the
+    /// rendered `<StatusBar android={{ backgroundColor }}>`s.
+    pub(crate) fn set_status_bar_background_color(
+        background_color: Color,
+        animated: Option<bool>,
+        cx: &mut ModuleCx,
+    ) {
+        cx.set_status_bar(StatusBarSetting {
+            background: Some(background_color),
+            animated,
+            ..Default::default()
+        });
+    }
+}

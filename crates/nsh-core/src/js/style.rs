@@ -1,0 +1,81 @@
+//! The declarations of the style interfaces (`LayoutStyle`, `ViewStyle`,
+//! `TextStyle`, `ImageStyle`) from the core's table of style properties,
+//! each with the TypeScript type of what its parser takes.
+
+use crate::style::{OBJECT_STYLE_TYPES, STYLE_TYPES, StyleGroup};
+
+/// The value types the properties' types are written in.
+const PRELUDE: &str = r#"/** A CSS-like color: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`,
+ * `rgba()` or a named color (`black`, `white`, `transparent`, …). */
+export type ColorValue = string;
+
+/** Points, a percentage of the parent, or `"auto"`. */
+export type DimensionValue = number | `${number}%` | "auto";
+
+/** Points or a percentage of the parent. */
+export type LengthValue = number | `${number}%`;
+
+/** One transform step; angles are degrees (`"45deg"`, `"0.5rad"` or a
+ * number). Native values (and nodes derived from them) animate a step
+ * natively. */
+export type TransformStep =
+  | { translateX: number | NativeNode }
+  | { translateY: number | NativeNode }
+  | { scale: number | NativeNode }
+  | { scaleX: number | NativeNode }
+  | { scaleY: number | NativeNode }
+  | { rotate: number | string | NativeNode }
+  | { rotateZ: number | string | NativeNode }
+  | { rotateX: number | string | NativeNode }
+  | { rotateY: number | string | NativeNode }
+  | { skewX: number | string }
+  | { skewY: number | string }
+  | { perspective: number };
+
+type Align = "flex-start" | "flex-end" | "center" | "stretch" | "baseline";
+type Distribute = "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
+"#;
+
+/// The interfaces, in the order they extend each other.
+const INTERFACES: &[(StyleGroup, &str, &str)] = &[
+    (
+        StyleGroup::Layout,
+        "LayoutStyle",
+        "Layout (flexbox with React Native's defaults: `column`, no shrinking; CSS grid).",
+    ),
+    (
+        StyleGroup::View,
+        "ViewStyle extends LayoutStyle",
+        "Styles of views (and of text, images and inputs, which are views).",
+    ),
+    (
+        StyleGroup::Text,
+        "TextStyle extends ViewStyle",
+        "Styles of text (inherited by nested `<text>` spans) and inputs.",
+    ),
+    (
+        StyleGroup::Image,
+        "ImageStyle extends ViewStyle",
+        "Styles of images.",
+    ),
+];
+
+/// The declarations of the style types.
+pub fn declarations() -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from(PRELUDE);
+    for (group, head, doc) in INTERFACES {
+        let _ = write!(out, "\n/** {doc} */\nexport interface {head} {{\n");
+        for t in STYLE_TYPES.iter().chain(OBJECT_STYLE_TYPES) {
+            if t.group != *group {
+                continue;
+            }
+            if let Some(doc) = t.doc {
+                let _ = writeln!(out, "  /** {doc} */");
+            }
+            let _ = writeln!(out, "  {}?: {};", t.name, t.ts);
+        }
+        out.push_str("}\n");
+    }
+    out
+}

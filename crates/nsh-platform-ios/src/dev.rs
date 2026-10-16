@@ -139,7 +139,7 @@ impl DevSession {
             .and_then(|d| d.ui.borrow().latest.clone());
         if let Some(bundle) = latest {
             log::info!("reloading after an update that could not be applied in place");
-            Inner::load(view, bundle);
+            Inner::load(view, bundle.into());
         }
     }
 }
@@ -244,7 +244,7 @@ fn handle(view: &Rc<Inner>, ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
             }
             log::info!("loading build {version}");
             hide_error(ui);
-            Inner::load(view, bundle);
+            Inner::load(view, bundle.into());
         }
         DevEvent::Patch {
             version,

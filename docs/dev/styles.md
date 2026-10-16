@@ -13,14 +13,17 @@
   `odd:` / `even:` / `only:`, `placeholder:`, `!` (important). `disabled` (any element) applies `disabled:` and drops
   the node's press listeners from what is mounted, so it shows no press feedback either. The theme is Tailwind 4's
   extended by `nsh.json` `"tailwind"` (`colors`, `spacing`, `breakpoints`, `fontSize`, `radius`, `shadow`, ...; unknown
-  keys are build errors). `nsh build` / `nsh dev` warn about unknown static classes in app code (`file:line:col:
+  keys are build errors). Rust components do not use classes: their typed styles lower into the same rules and their
+  colors come from the component theme, `nsh.json` `"theme"` (`docs/dev/components.md`); the Tailwind theme only
+  shapes the app's own classes. `nsh build` / `nsh dev` warn about unknown static classes in app code (`file:line:col:
   unknown class '...'`, target `nsh::build`); the core logs each unknown class once at run time. Class-only settings
   that are props in React Native (`line-clamp-*`, `truncate`, `whitespace-nowrap`, `pointer-events-*`, `object-*`,
   `placeholder:text-*`, `caret-*`) lose to explicit props. Not supported: `peer-*`, pseudo-elements, arbitrary CSS
   properties; `space-x/y-*` are gaps.
 - **Text style inheritance** (CSS-like): a view's text properties (color, font, size, alignment, ...) pass to the texts and inputs
-  inside it, so `class="text-white"` on a button styles its label. `insetPadding` (runtime only: `SafeAreaView`,
-  `KeyboardAvoidingView`) is added to the resolved padding, so classes and styles keep their own padding.
+  inside it, so `class="text-white"` on a button styles its label. Inset padding / margin (set by Rust
+  components: `SafeAreaView`, `KeyboardAvoidingView`) are added to the resolved padding / margin, so classes and
+  styles keep their own.
 - **Effects** (styles and classes; `effects.rs`): `boxShadow` (CSS syntax, several, `inset`; also `shadow-*` / `ring-*`),
   `experimental_backgroundImage` / `backgroundImage` (linear / radial / conic gradients), `filter` (`brightness`, `contrast`,
   `grayscale`, `hue-rotate`, `invert`, `saturate`, `sepia`, `opacity`, `blur`, `drop-shadow`; color filters are composed into one

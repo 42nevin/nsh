@@ -3,8 +3,10 @@
 //! engine (not by the platform's stack) so that every hop is checked again.
 //! Hops are issued on the engine thread, like the first request.
 
-use nsh_core::access::Access;
-use nsh_js::{HttpRequest, HttpResponse};
+use nsh_core::{
+    access::Access,
+    platform::{HttpBody, HttpHead, HttpRequest},
+};
 
 /// Redirects followed at most (as browsers).
 const MAX_REDIRECTS: usize = 20;
@@ -25,38 +27,33 @@ pub(crate) struct Followed {
 }
 
 /// What to do with a hop's response.
+#[derive(Debug)]
 pub(crate) enum Next {
     /// The response is the answer.
-    Done(Result<HttpResponse, String>),
+    Done(HttpHead),
+    /// The request fails.
+    Fail(String),
     /// Send this request next (checked against the capabilities).
     Hop(HttpRequest),
 }
 
-/// After a hop of `followed` answered `result`: the final result, or the
-/// next hop.
-pub(crate) fn next(
-    access: &Access,
-    followed: &mut Followed,
-    result: Result<HttpResponse, String>,
-) -> Next {
-    let response = match result {
-        Ok(response) if is_redirect(response.status) => response,
-        Ok(mut response) => {
-            response.redirected |= followed.hops > 0;
-            return Next::Done(Ok(response));
-        }
-        err => return Next::Done(err),
-    };
+/// After a hop of `followed` answered with `response`'s head: the final
+/// response, or the next hop.
+pub(crate) fn next(access: &Access, followed: &mut Followed, mut response: HttpHead) -> Next {
+    if !is_redirect(response.status) {
+        response.redirected |= followed.hops > 0;
+        return Next::Done(response);
+    }
     let location = response
         .headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("location"))
         .map(|(_, v)| v.clone());
     let Some(location) = location else {
-        return Next::Done(Ok(response));
+        return Next::Done(response);
     };
     if followed.hops >= MAX_REDIRECTS {
-        return Next::Done(Err("too many redirects".to_owned()));
+        return Next::Fail("too many redirects".to_owned());
     }
     let request = &mut followed.request;
     let base = if response.url.is_empty() {
@@ -69,13 +66,16 @@ pub(crate) fn next(
     if response.status == 303 || (matches!(response.status, 301 | 302) && request.method == "POST")
     {
         request.method = "GET".to_owned();
-        request.body.clear();
+        request.body = HttpBody::Empty;
         request.headers.retain(|(k, _)| {
             !k.eq_ignore_ascii_case("content-type") && !k.eq_ignore_ascii_case("content-length")
         });
+    } else if request.body == HttpBody::Stream {
+        // Fetch: a streamed body cannot be sent again.
+        return Next::Fail("cannot follow a redirect with a streamed request body".to_owned());
     }
     if !access.allows_http(&request.method, &url) {
-        return Next::Done(Err(refused(&request.method, &url)));
+        return Next::Fail(refused(&request.method, &url));
     }
     request.url = url;
     followed.hops += 1;
@@ -148,17 +148,15 @@ mod tests {
             method: "POST".into(),
             url: "https://a.com/start".into(),
             headers: vec![("Content-Type".into(), "text/plain".into())],
-            body: b"x".to_vec(),
+            body: HttpBody::Bytes(b"x".to_vec()),
             follow_redirects: true,
         };
         let mut followed = Followed { request, hops: 0 };
-        let redirect = |status, location: &str| {
-            Ok(HttpResponse {
-                status,
-                url: String::new(),
-                headers: vec![("Location".into(), location.into())],
-                ..HttpResponse::default()
-            })
+        let redirect = |status, location: &str| HttpHead {
+            status,
+            url: String::new(),
+            headers: vec![("Location".into(), location.into())],
+            ..HttpHead::default()
         };
         // Within the grant: the next hop, as a GET after a 302 POST.
         let Next::Hop(hop) = next(&access, &mut followed, redirect(302, "/next")) else {
@@ -170,10 +168,18 @@ mod tests {
         );
         assert!(!hop.follow_redirects && hop.body.is_empty() && hop.headers.is_empty());
         // Out of it: refused.
-        let Next::Done(Err(err)) = next(&access, &mut followed, redirect(307, "https://evil.io/"))
+        let Next::Fail(err) = next(&access, &mut followed, redirect(307, "https://evil.io/"))
         else {
             panic!("expected a refusal")
         };
         assert!(err.contains("`evil.io`"));
+        // A streamed body is not sent again.
+        followed.request.body = HttpBody::Stream;
+        followed.request.method = "PUT".into();
+        let r = next(&access, &mut followed, redirect(307, "/again"));
+        assert!(
+            matches!(&r, Next::Fail(e) if e.contains("streamed")),
+            "{r:?}"
+        );
     }
 }

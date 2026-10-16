@@ -1,4 +1,5 @@
 mod classes;
+mod components;
 mod list;
 #[cfg(test)]
 mod tests;
@@ -25,6 +26,7 @@ use crate::{
     style::{EllipsizeMode, Style, StylePatch, TextAlign, TextStyle, ViewStyle},
     tailwind::{ClassEnvironment, ClassList, ClassProps, Tailwind},
     text::{AttributedText, MeasureCache, ResolvedTextStyle, TextEngine, TextLayout},
+    ui::status_bar::StatusBars,
 };
 
 /// Slab index of a node. Internal links use keys, never ids, to avoid the
@@ -33,6 +35,8 @@ type Key = u32;
 
 const NO_KEY: Key = Key::MAX;
 
+/// Rounds of binding the components' own lists per commit, at most.
+const MAX_VIRTUAL_ROUNDS: u32 = 8;
 /// Dirty flags, processed once per commit.
 mod dirty {
     /// Emit [`crate::MountItem::ViewStyle`].
@@ -315,7 +319,7 @@ struct Node {
     underlay: Option<Box<(crate::Color, f32)>>,
     /// A child's classes read their position among siblings.
     positional_children: bool,
-    /// `insetPadding` and `insetMargin`: added to the style's.
+    /// The inset padding and margin components set: added to the style's.
     insets: Option<Box<[EdgeInsets; 2]>>,
     events: EventMask,
     /// `zIndex`: native views are ordered by it (stable) among siblings.
@@ -579,6 +583,8 @@ pub struct Core<M: TextEngine> {
     access: Arc<crate::access::Access>,
     /// Denials already logged (each once).
     denied: rustc_hash::FxHashSet<String>,
+    /// Rust components and what they rendered.
+    components: components::Components,
 }
 
 impl<M: TextEngine> Core<M> {
@@ -605,6 +611,7 @@ impl<M: TextEngine> Core<M> {
             max_nodes: usize::MAX,
             access: Arc::default(),
             denied: Default::default(),
+            components: components::Components::for_viewport(viewport),
             lists: Vec::new(),
             roots: Vec::new(),
             accessories: Default::default(),
@@ -718,6 +725,7 @@ impl<M: TextEngine> Core<M> {
                 .expect("taffy root");
             self.needs_layout = true;
             self.restyle_where(crate::tailwind::deps::WIDTH | crate::tailwind::deps::HEIGHT);
+            self.components_viewport(viewport);
         }
     }
 
@@ -834,8 +842,29 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
-    /// Applies one op.
+    /// Applies one op from JS.
     pub fn apply(&mut self, op: Op) -> Result<(), ApplyError> {
+        // Ops on a component's host go to its component, calls of a UI
+        // set's modules to the module.
+        if self.components.instances.is_empty()
+            && !matches!(
+                op,
+                Op::Command {
+                    command: Command::Native { .. },
+                    ..
+                }
+            )
+        {
+            return self.apply_op(op);
+        }
+        match self.intercept(op)? {
+            Some(op) => self.apply_op(op),
+            None => Ok(()),
+        }
+    }
+
+    /// Applies one op as is (also for the nodes components expand).
+    fn apply_op(&mut self, op: Op) -> Result<(), ApplyError> {
         match op {
             Op::Create { id, tag } => self.create(id, tag),
             Op::CreateText { id, text } => {
@@ -947,6 +976,13 @@ impl<M: TextEngine> Core<M> {
                 self.layout_animation = Some(animation);
                 Ok(())
             }
+            Op::Command {
+                id: crate::ROOT_ID,
+                command: Command::SetStatusBar(patch),
+            } => {
+                StatusBars::update(&self.components.globals, |bars| bars.set_base(patch));
+                Ok(())
+            }
             Op::Command { id, command } => {
                 self.key(id)?;
                 self.commands.push((id, command));
@@ -958,6 +994,30 @@ impl<M: TextEngine> Core<M> {
     /// Finishes a turn: rebuilds text, runs layout, updates lists and
     /// returns the mount items, or `None` when nothing changed.
     pub fn commit(&mut self) -> Option<MountBatch> {
+        self.commit_round();
+        // The components' own lists bind the cells the layout asked for
+        // here, and lay out again (JS's lists ask JS, through the engine).
+        for _ in 0..MAX_VIRTUAL_ROUNDS {
+            if !self.bind_virtual_lists() {
+                break;
+            }
+            self.commit_round();
+        }
+        if self.mount.is_empty() || matches!(self.mount[..], [MountItem::LayoutAnimation(_)]) {
+            self.mount.clear();
+            None
+        } else {
+            Some(MountBatch {
+                items: std::mem::take(&mut self.mount),
+            })
+        }
+    }
+
+    /// One round of a commit: renders, layout, lists, commands, into the
+    /// mount items.
+    fn commit_round(&mut self) {
+        // Components whose props or state changed render first.
+        self.render_components();
         // Platforms animate the frames, insertions and removals that follow
         // in the batch; ops may already have queued some.
         if let Some(animation) = self.layout_animation.take() {
@@ -985,6 +1045,11 @@ impl<M: TextEngine> Core<M> {
         }
         self.update_lists(relayout);
         self.flush_text();
+        // What this turn's status bar settings add up to, once.
+        if let Some(config) = StatusBars::take_changed(&self.components.globals) {
+            self.commands
+                .push((crate::ROOT_ID, Command::StatusBar(config)));
+        }
         // On laid out views; dropped for views that were never shown.
         for (id, mut command) in std::mem::take(&mut self.commands) {
             let Ok(key) = self.key(id) else { continue };
@@ -997,14 +1062,7 @@ impl<M: TextEngine> Core<M> {
             match &command {
                 Command::ImageInfo { id: request, uri } if !self.access.allows_media(uri) => {
                     let message = not_granted("Image.getSize / prefetch of", uri, "network");
-                    self.events.push((
-                        crate::ROOT_ID,
-                        EventKind::ImageInfo,
-                        EventPayload::Map(vec![
-                            ("id", crate::PayloadValue::Number(*request as f64)),
-                            ("error", crate::PayloadValue::Str(message.clone())),
-                        ]),
-                    ));
+                    self.answer_image_info(*request, Err(message.clone()));
                     self.deny(message);
                     continue;
                 }
@@ -1033,14 +1091,6 @@ impl<M: TextEngine> Core<M> {
                 _ => {}
             }
             self.mount.push(MountItem::Command { id, command });
-        }
-        if self.mount.is_empty() || matches!(self.mount[..], [MountItem::LayoutAnimation(_)]) {
-            self.mount.clear();
-            None
-        } else {
-            Some(MountBatch {
-                items: std::mem::take(&mut self.mount),
-            })
         }
     }
 
@@ -1485,6 +1535,23 @@ impl<M: TextEngine> Core<M> {
 
     fn set_prop(&mut self, id: NodeId, prop: Prop) -> Result<(), ApplyError> {
         let key = self.key(id)?;
+        // Rust components: `component` makes a view a host, `$name` props
+        // are its component's.
+        let prop = match prop {
+            Prop::Component(name) if self.nodes[key as usize].kind == Kind::View => {
+                self.create_instance(id, name);
+                return Ok(());
+            }
+            Prop::ComponentSlot(name) => {
+                self.set_slot_name(id, name);
+                return Ok(());
+            }
+            Prop::ComponentProp(name, value) if self.components.instances.contains_key(&id) => {
+                self.set_component_prop(id, name, value);
+                return Ok(());
+            }
+            prop => prop,
+        };
         let prop = self.check_prop(key, prop);
         let node = &mut self.nodes[key as usize];
         let mut flags = 0;
@@ -1772,6 +1839,10 @@ impl<M: TextEngine> Core<M> {
             }
             Prop::TailwindTheme(json) => {
                 self.set_tailwind_theme(&json);
+                return Ok(());
+            }
+            Prop::UiTheme(json) => {
+                self.set_ui_theme(&json);
                 return Ok(());
             }
             Prop::LayoutDirection(rtl) => {

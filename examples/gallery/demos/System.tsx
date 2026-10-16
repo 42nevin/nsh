@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup } from "solid-js";
+import { cleanup, signal } from "nsh";
 import { Toast } from "nsh/android";
 import { colorScheme, fontScale, windowSize } from "nsh/device";
 import { ActionSheet, Alert, keyboard, safeArea, StatusBar } from "nsh/ui/mobile";
@@ -16,14 +16,14 @@ function Row(props: { label: string; value: string }) {
 type Post = { id: number; title: string };
 
 export function System() {
-  const [fps, setFps] = createSignal(0);
-  const [running, setRunning] = createSignal(false);
-  const [ticks, setTicks] = createSignal(0);
-  const [posts, setPosts] = createSignal<Post[]>([]);
-  const [status, setStatus] = createSignal("");
-  const [answer, setAnswer] = createSignal("");
-  const [barStyle, setBarStyle] = createSignal<"default" | "light-content" | "dark-content">("default");
-  const [barHidden, setBarHidden] = createSignal(false);
+  const fps = signal(0);
+  const running = signal(false);
+  const ticks = signal(0);
+  const posts = signal<Post[]>([]);
+  const status = signal("");
+  const answer = signal("");
+  const barStyle = signal<"default" | "light-content" | "dark-content">("default");
+  const barHidden = signal(false);
 
   // Frames per second, counted with requestAnimationFrame.
   let frame = 0;
@@ -32,7 +32,7 @@ export function System() {
   const loop = (time: number) => {
     frames++;
     if (time - since >= 1000) {
-      setFps(Math.round((frames * 1000) / (time - since)));
+      fps.set(Math.round((frames * 1000) / (time - since)));
       frames = 0;
       since = time;
     }
@@ -45,23 +45,23 @@ export function System() {
       since = performance.now();
       frame = requestAnimationFrame(loop);
     }
-    setRunning(!running());
+    running.set(!running());
   };
-  const timer = setInterval(() => setTicks(ticks() + 1), 1000);
-  onCleanup(() => {
+  const timer = setInterval(() => ticks.set(ticks() + 1), 1000);
+  cleanup(() => {
     clearInterval(timer);
     cancelAnimationFrame(frame);
   });
 
   const load = async () => {
-    setStatus("loading…");
+    status.set("loading…");
     const started = performance.now();
     try {
       const response = await fetch("https://jsonplaceholder.typicode.com/posts?_limit=3");
-      setPosts(await response.json());
-      setStatus(`HTTP ${response.status} in ${Math.round(performance.now() - started)} ms`);
+      posts.set(await response.json());
+      status.set(`HTTP ${response.status} in ${Math.round(performance.now() - started)} ms`);
     } catch (e) {
-      setStatus(String(e));
+      status.set(String(e));
     }
   };
 
@@ -80,47 +80,60 @@ export function System() {
           <Row label="Style" value={barStyle()} />
           <view style={{ flexDirection: "row", gap: 8 }}>
             <view style={{ flex: 1 }}>
-              <Button label="Next style" onPress={() => setBarStyle(barStyle() === "default" ? "light-content" : barStyle() === "light-content" ? "dark-content" : "default")} />
+              <Button label="Next style" onPress={() => barStyle.set(barStyle() === "default" ? "light-content" : barStyle() === "light-content" ? "dark-content" : "default")} />
             </view>
             <view style={{ flex: 1 }}>
-              <Button label={barHidden() ? "Show" : "Hide"} color="#57606a" onPress={() => setBarHidden(!barHidden())} />
+              <Button label={barHidden() ? "Show" : "Hide"} color="#57606a" onPress={() => barHidden.set(!barHidden())} />
             </view>
           </view>
         </Section>
         <Section title="Alerts">
-          <Button label="Alert with one button" onPress={() => Alert.alert("Saved", "Your changes were saved.", [{ text: "OK", onPress: () => setAnswer("OK") }])} />
+          <Button
+            label="Alert with one button"
+            onPress={async () => {
+              await Alert.alert("Saved", "Your changes were saved.");
+              answer.set("OK");
+            }}
+          />
           <Button
             label="Confirm (cancel / destructive)"
             color="#cf222e"
-            onPress={() =>
-              Alert.alert("Delete the photo?", "This cannot be undone.", [
-                { text: "Cancel", style: "cancel", onPress: () => setAnswer("Cancel") },
-                { text: "Delete", style: "destructive", onPress: () => setAnswer("Delete") },
-              ], { onDismiss: () => setAnswer("dismissed"), android: { cancelable: true } })
-            }
+            onPress={async () => {
+              const i = await Alert.alert(
+                "Delete the photo?",
+                "This cannot be undone.",
+                [
+                  { text: "Cancel", style: "cancel" },
+                  { text: "Delete", style: "destructive" },
+                ],
+                { cancelable: true },
+              );
+              answer.set(["Cancel", "Delete"][i] ?? "dismissed");
+            }}
           />
           <Button
             label="Three buttons"
             color="#8250df"
-            onPress={() =>
-              Alert.alert("Update available", "Install it now?", [
-                { text: "Later", onPress: () => setAnswer("Later") },
-                { text: "Never", style: "cancel", onPress: () => setAnswer("Never") },
-                { text: "Install", onPress: () => setAnswer("Install") },
-              ])
-            }
+            onPress={async () => {
+              const buttons = ["Later", "Never", "Install"];
+              const i = await Alert.alert("Update available", "Install it now?", [
+                { text: "Later" },
+                { text: "Never", style: "cancel" },
+                { text: "Install" },
+              ]);
+              answer.set(buttons[i] ?? "dismissed");
+            }}
           />
           <Button
             label="Action sheet"
             color="#1a7f37"
-            onPress={() =>
-              ActionSheet.show(
-                { title: "Share the photo", options: ["Cancel", "Copy link", "Save", "Delete"], cancelButtonIndex: 0, destructiveButtonIndex: 3 },
-                (i) => setAnswer(["Cancel", "Copy link", "Save", "Delete"][i] ?? String(i)),
-              )
-            }
+            onPress={async () => {
+              const options = ["Cancel", "Copy link", "Save", "Delete"];
+              const i = await ActionSheet.show({ title: "Share the photo", options, cancelButtonIndex: 0, destructiveButtonIndexes: [3] });
+              answer.set(options[i] ?? "dismissed");
+            }}
           />
-          <Button label="Toast (Android)" color="#57606a" onPress={() => Toast.show("Hello from a toast", Toast.SHORT)} />
+          <Button label="Toast (Android)" color="#57606a" onPress={() => Toast.show("Hello from a toast", "long")} />
           <Row label="Answer" value={answer() || "–"} />
         </Section>
         <Section title="Frames and timers">
@@ -131,14 +144,14 @@ export function System() {
         <Section title="Network and logs">
           <Button label="fetch() three posts" onPress={load} />
           <text style={{ color: colors.muted }}>{status()}</text>
-          <For each={posts()}>
+          <each of={posts()}>
             {(post) => (
               <text numberOfLines={1}>
-                <text style={{ fontWeight: "bold" }}>{`#${post.id} `}</text>
-                {post.title}
+                <text style={{ fontWeight: "bold" }}>{`#${post().id} `}</text>
+                {post().title}
               </text>
             )}
-          </For>
+          </each>
           <Button label="console.log (shown by nsh run)" color="#57606a" onPress={() => console.log("hello from the gallery", { at: new Date().toISOString() })} />
         </Section>
       </view>

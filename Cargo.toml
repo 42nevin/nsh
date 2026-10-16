@@ -18,11 +18,13 @@ private_interfaces = "deny"
 nsh-anim = { path = "crates/nsh-anim" }
 nsh-core = { path = "crates/nsh-core" }
 nsh-package = { path = "crates/nsh-package" }
+nsh-ui-mobile = { path = "crates/nsh-ui-mobile" }
+nsh-macros = { path = "crates/nsh-macros" }
 nsh-js = { path = "crates/nsh-js" }
-nsh-engine = { path = "crates/nsh-engine" }
+nsh-engine = { path = "crates/nsh-engine", default-features = false }
 nsh-bundler = { path = "crates/nsh-bundler" }
-nsh-platform-ios = { path = "crates/nsh-platform-ios" }
-nsh-platform-android = { path = "crates/nsh-platform-android" }
+nsh-platform-ios = { path = "crates/nsh-platform-ios", default-features = false }
+nsh-platform-android = { path = "crates/nsh-platform-android", default-features = false }
 nsh-dev = { path = "crates/nsh-dev" }
 
 anyhow = "1"
@@ -43,25 +45,28 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 rustc-hash = "2.1"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "fast", "zeroize"] }
 sha2 = "0.10"
 base64 = "0.22"
 getrandom = "0.3"
 slab = "0.4"
+percent-encoding = "2.3"
 url = "2.5"
 ureq = "3.1"
 jni = "0.21"
 taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "content_size"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "fs"] }
+# Features per crate: the runtime's binaries get only what they use.
+tokio = { version = "1", default-features = false }
 
 # `full` is avoided on purpose: it enables `dyn-load` (dlopen2), which does not build for iOS / Catalyst.
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "bindgen"] }
 
 rolldown = "=1.2.13"
 rolldown_common = "=1.2.13"
-oxc = { version = "=0.153.0", features = ["transformer", "codegen", "semantic", "isolated_declarations"] }
-# Solid universal-mode JSX compiler (Oxc port). Pinned to a commit: the published tag predates the `compile` API.
-dom-expressions-compiler = { git = "https://github.com/yumemi-thomas/solid-1x-compiler", rev = "e03fc5d9494ac83c718cee701dbac104dbeee540", default-features = false }
+oxc = { version = "=0.153.0", features = ["transformer", "codegen", "semantic"] }
 
 # Apple bindings: default features off. The defaults pull in every header
 # and link frameworks we never use (CloudKit, CoreData, Metal, ...), which
@@ -85,6 +90,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSRange",
   "NSRunLoop",
   "NSSet",
+  "NSStream",
   "NSString",
   "NSURL",
   "NSURLRequest",

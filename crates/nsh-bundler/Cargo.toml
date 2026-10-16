@@ -11,7 +11,7 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-dom-expressions-compiler.workspace = true
+nsh-ui-mobile.workspace = true
 oxc.workspace = true
 rolldown.workspace = true
 rolldown_common.workspace = true
@@ -20,7 +20,7 @@ rolldown_sourcemap = "=1.2.13"
 oxc_sourcemap.workspace = true
 imagesize.workspace = true
 ttf-parser.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "sync", "fs"] }
 nsh-core.workspace = true
 serde_json.workspace = true
 log.workspace = true

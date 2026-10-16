@@ -1,9 +1,9 @@
-import { createSignal, For, Show } from "solid-js";
+import { signal } from "nsh";
 import { AccessibilityInfo, reduceMotion, screenReaderEnabled } from "nsh/accessibility";
 import { LayoutAnimation } from "nsh/animated";
 import { PixelRatio, Platform } from "nsh/device";
 import { InputAccessoryView } from "nsh/ios";
-import { Button, KeyboardAvoidingView, Modal, SafeAreaView, Screen } from "nsh/ui/mobile";
+import { Button, Card, KeyboardAvoidingView, Modal, SafeAreaView, Screen } from "nsh/ui/mobile";
 import { nav } from "../nav";
 import { Button as UiButton, colors, Section } from "../ui";
 
@@ -17,7 +17,7 @@ const styles = {
 } as const;
 
 function LayoutAnimations() {
-  const [items, setItems] = createSignal([1, 2, 3]);
+  const items = signal([1, 2, 3]);
   let next = 4;
   const animate = (change: () => void) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.spring);
@@ -26,38 +26,38 @@ function LayoutAnimations() {
   return (
     <Section title="Layout animation">
       <view style={styles.row}>
-        <UiButton label="Add" onPress={() => animate(() => setItems([next++, ...items()]))} />
-        <UiButton label="Shuffle" color="#8250df" onPress={() => animate(() => setItems([...items()].sort(() => Math.random() - 0.5)))} />
-        <UiButton label="Remove" color="#cf222e" onPress={() => animate(() => setItems(items().slice(1)))} />
+        <UiButton label="Add" onPress={() => animate(() => items.set([next++, ...items()]))} />
+        <UiButton label="Shuffle" color="#8250df" onPress={() => animate(() => items.set([...items()].sort(() => Math.random() - 0.5)))} />
+        <UiButton label="Remove" color="#cf222e" onPress={() => animate(() => items.set(items().slice(1)))} />
       </view>
       <view style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-        <For each={items()}>
+        <each of={items()}>
           {(n) => (
             <view style={{ width: 56, height: 56, borderRadius: 12, backgroundColor: "#ddf4ff", alignItems: "center", justifyContent: "center" }}>
-              <text style={{ fontWeight: "600" }}>{n}</text>
+              <text style={{ fontWeight: "600" }}>{n()}</text>
             </view>
           )}
-        </For>
+        </each>
       </view>
     </Section>
   );
 }
 
 function PressableSheet() {
-  const [sheet, setSheet] = createSignal(false);
+  const sheet = signal(false);
   return (
     <Section title="Sheet">
       <view
-        onPress={() => setSheet(true)}
+        onPress={() => sheet.set(true)}
         class="rounded-[10px] bg-[#8250df] p-3.5 transition active:scale-[0.97] active:bg-[#bf3989]"
       >
         <text style={{ color: "#ffffff", fontWeight: "600" }}>Open a sheet</text>
       </view>
-      <Modal visible={sheet()} ios={{ presentationStyle: "pageSheet" }} animationType="slide" onRequestClose={() => setSheet(false)}>
+      <Modal visible={sheet()} ios={{ presentationStyle: "pageSheet" }} animationType="slide" onRequestClose={() => sheet.set(false)}>
         <SafeAreaView style={{ flex: 1, backgroundColor: colors.surface, padding: 20, gap: 16 }}>
           <text style={{ fontSize: 24, fontWeight: "700" }}>A sheet</text>
           <text style={{ color: colors.muted }}>Swipe down (iOS) or press back (Android) to close.</text>
-          <UiButton label="Close" onPress={() => setSheet(false)} />
+          <UiButton label="Close" onPress={() => sheet.set(false)} />
         </SafeAreaView>
       </Modal>
     </Section>
@@ -66,14 +66,14 @@ function PressableSheet() {
 
 /** Press feedback is native: opacity, an underlay, classes; `disabled` takes no presses. */
 function PressFeedback() {
-  const [last, setLast] = createSignal("nothing yet");
-  const [disabled, setDisabled] = createSignal(false);
+  const last = signal("nothing yet");
+  const disabled = signal(false);
   return (
     <Section title="Press feedback">
-      <view style={styles.card} activeOpacity={0.4} onPress={() => setLast("activeOpacity")}>
+      <view style={styles.card} activeOpacity={0.4} onPress={() => last.set("activeOpacity")}>
         <text style={styles.label}>activeOpacity: fades while pressed</text>
       </view>
-      <view style={styles.card} underlayColor="#dbeafe" onPress={() => setLast("underlayColor")}>
+      <view style={styles.card} underlayColor="#dbeafe" onPress={() => last.set("underlayColor")}>
         <text style={styles.label}>underlayColor: the background while pressed</text>
       </view>
       <view
@@ -81,12 +81,12 @@ function PressFeedback() {
         disabled={disabled()}
         underlayColor="#fee2e2"
         class="disabled:opacity-40"
-        onPress={() => setLast("disabled view")}
+        onPress={() => last.set("disabled view")}
       >
         <text style={styles.label}>{disabled() ? "disabled: takes no presses" : "enabled"}</text>
       </view>
       <view style={styles.row}>
-        <UiButton label={disabled() ? "Enable" : "Disable"} color="#57606a" onPress={() => setDisabled(!disabled())} />
+        <UiButton label={disabled() ? "Enable" : "Disable"} color="#57606a" onPress={() => disabled.set(!disabled())} />
         <text style={styles.muted}>Last pressed: {last()}</text>
       </view>
     </Section>
@@ -94,25 +94,25 @@ function PressFeedback() {
 }
 
 function Accessory() {
-  const [text, setText] = createSignal("");
+  const text = signal("");
   let input: any;
   return (
     <Section title="InputAccessoryView">
       <input
         ref={input}
         value={text()}
-        onChangeText={setText}
+        onChangeText={(v) => text.set(v)}
         placeholder="Focus me (iOS shows a bar over the keyboard)"
         ios={{ inputAccessoryViewID: "counter" }}
         style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8, fontSize: 16 }}
       />
-      <Show when={Platform.OS === "android"}>
+      <if when={Platform.OS === "android"}>
         <text style={styles.muted}>Android has no input accessories.</text>
-      </Show>
-      <InputAccessoryView nativeID="counter" backgroundColor="#f6f8fa">
+      </if>
+      <InputAccessoryView nativeID="counter" style={{ backgroundColor: "#f6f8fa" }}>
         <view style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 8, borderTopWidth: hairline, borderTopColor: colors.border }}>
           <text style={[styles.muted, { flex: 1 }]}>{text().length} characters</text>
-          <UiButton label="Clear" color="#57606a" onPress={() => setText("")} />
+          <UiButton label="Clear" color="#57606a" onPress={() => text.set("")} />
           <view style={{ width: 8 }} />
           <UiButton label="Done" onPress={() => input?.blur()} />
         </view>
@@ -122,16 +122,16 @@ function Accessory() {
 }
 
 function AvoidingPage() {
-  const [behavior, setBehavior] = createSignal<"padding" | "height" | "position">("padding");
+  const behavior = signal<"padding" | "height" | "position">("padding");
   return (
     <Screen title="KeyboardAvoidingView">
       <KeyboardAvoidingView behavior={behavior()} style={{ flex: 1, backgroundColor: "#ddf4ff" }} contentContainerStyle={{ flex: 1 }}>
         <view style={{ flex: 1, padding: 16, gap: 12 }}>
           <text style={styles.label}>behavior="{behavior()}"</text>
           <view style={styles.row}>
-            <For each={["padding", "height", "position"] as const}>
-              {(b) => <UiButton label={b} color={behavior() === b ? colors.accent : "#57606a"} onPress={() => setBehavior(b)} />}
-            </For>
+            <each of={["padding", "height", "position"] as const}>
+              {(b) => <UiButton label={b()} color={behavior() === b() ? colors.accent : "#57606a"} onPress={() => behavior.set(b())} />}
+            </each>
           </view>
           <text style={styles.muted}>
             padding: the bottom pads (the blue background stays under the keyboard); height: the view shrinks; position: the content moves up.
@@ -148,16 +148,16 @@ function AvoidingPage() {
 }
 
 function ModalOptions() {
-  const [visible, setVisible] = createSignal(false);
-  const [translucent, setTranslucent] = createSignal(false);
+  const visible = signal(false);
+  const translucent = signal(false);
   return (
     <Section title="Modal options">
       <view style={styles.row}>
-        <UiButton label="Open" onPress={() => setVisible(true)} />
+        <UiButton label="Open" onPress={() => visible.set(true)} />
         <UiButton
           label={`statusBarTranslucent: ${translucent()}`}
           color="#57606a"
-          onPress={() => setTranslucent(!translucent())}
+          onPress={() => translucent.set(!translucent())}
         />
       </view>
       <text style={styles.muted}>
@@ -168,13 +168,13 @@ function ModalOptions() {
         animationType="slide"
         android={{ statusBarTranslucent: translucent() }}
         ios={{ supportedOrientations: ["portrait", "landscape"] }}
-        onRequestClose={() => setVisible(false)}
+        onRequestClose={() => visible.set(false)}
       >
         <view style={{ flex: 1, backgroundColor: "#fff8c5" }}>
           <SafeAreaView style={{ flex: 1, padding: 16, gap: 12 }}>
             <text style={{ fontSize: 22, fontWeight: "700" }}>A modal</text>
             <text style={styles.muted}>The yellow background starts {translucent() ? "under" : "below"} the status bar on Android.</text>
-            <UiButton label="Close" onPress={() => setVisible(false)} />
+            <UiButton label="Close" onPress={() => visible.set(false)} />
           </SafeAreaView>
         </view>
       </Modal>
@@ -193,25 +193,25 @@ function PlatformInfo() {
     ["screenReaderEnabled()", String(screenReaderEnabled())],
     ["reduceMotion()", String(reduceMotion())],
   ];
-  const [announced, setAnnounced] = createSignal(0);
+  const announced = signal(0);
   let target: any;
   return (
     <Section title="Platform, PixelRatio, AccessibilityInfo">
-      <For each={rows()}>
-        {([k, v]) => (
+      <each of={rows()}>
+        {(row) => (
           <view style={[styles.row, { justifyContent: "space-between" }]}>
-            <text style={styles.muted}>{k}</text>
-            <text style={styles.label}>{v}</text>
+            <text style={styles.muted}>{row()[0]}</text>
+            <text style={styles.label}>{row()[1]}</text>
           </view>
         )}
-      </For>
+      </each>
       <view style={{ height: hairline, backgroundColor: colors.text }} />
       <text style={styles.muted}>The line above is one device pixel tall.</text>
       <view style={styles.row}>
         <UiButton
           label="Announce"
           onPress={() => {
-            setAnnounced(announced() + 1);
+            announced.set(announced() + 1);
             AccessibilityInfo.announceForAccessibility(`Announcement ${announced()}`);
           }}
         />
@@ -224,15 +224,25 @@ function PlatformInfo() {
   );
 }
 
-/** The components of nsh/ui/mobile (js/ui/mobile/components). */
+/** The components of nsh/ui/mobile (Rust, `nsh-ui-mobile`). */
 function MobileComponents() {
-  const [presses, setPresses] = createSignal(0);
+  const presses = signal(0);
   return (
     <Section title="nsh/ui/mobile">
-      <Button title={`Primary (${presses()})`} onPress={() => setPresses(presses() + 1)} />
-      <Button title="Secondary" variant="secondary" onPress={() => setPresses(presses() + 1)} />
-      <Button title="Plain" variant="plain" onPress={() => setPresses(presses() + 1)} />
-      <Button title="Disabled" disabled onPress={() => setPresses(presses() + 1)} />
+      <Button title={`Primary (${presses()})`} onPress={() => presses.set(presses() + 1)} />
+      <Button title="Secondary" variant="secondary" onPress={() => presses.set(presses() + 1)} />
+      <Button title="Danger" variant="danger" onPress={() => presses.set(presses() + 1)} />
+      <Button title="Plain" variant="plain" onPress={() => presses.set(presses() + 1)} />
+      <Button title="Disabled" disabled onPress={() => presses.set(presses() + 1)} />
+      <Card
+        header={<text>Card with slots</text>}
+        footer={<Button title="Reset" variant="plain" onPress={() => presses.set(0)} />}
+      >
+        <text>The header, this body and the footer are JSX in a Rust component's slots and children.</text>
+      </Card>
+      <Card variant="outlined">
+        <text>An outlined card, children only.</text>
+      </Card>
     </Section>
   );
 }

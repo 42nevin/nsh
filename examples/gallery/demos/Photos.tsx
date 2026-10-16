@@ -1,4 +1,4 @@
-import { createSignal } from "solid-js";
+import { signal } from "nsh";
 import { createNativeValue } from "nsh/animated";
 import { List } from "nsh/list";
 import logo from "../logo@2x.png";
@@ -28,22 +28,22 @@ function Row(props: { photo: Photo }) {
 }
 
 export function Photos() {
-  const [photos, setPhotos] = createSignal(makePhotos(1, 1000));
-  const [refreshing, setRefreshing] = createSignal(false);
+  const photos = signal(makePhotos(1, 1000));
+  const refreshing = signal(false);
   // Scroll offset, fed natively: the header fades without any JS per frame.
   const scrollY = createNativeValue(0);
 
   const refresh = () => {
-    setRefreshing(true);
+    refreshing.set(true);
     setTimeout(() => {
-      setPhotos(makePhotos(1, 1000));
-      setRefreshing(false);
+      photos.set(makePhotos(1, 1000));
+      refreshing.set(false);
     }, 800);
   };
   const loadMore = () => {
     const current = photos();
     console.log("loading more after", current.length);
-    setPhotos([...current, ...makePhotos(current.length + 1, 200)]);
+    photos.set([...current, ...makePhotos(current.length + 1, 200)]);
   };
 
   return (

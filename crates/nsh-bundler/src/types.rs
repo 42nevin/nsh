@@ -1,17 +1,11 @@
-//! TypeScript declarations for editors: written to `.nsh/types` next to an
-//! app, and found through the app's `tsconfig.json` ([`TSCONFIG`]). Apps
-//! need no `node_modules` for them, like for the code.
+//! The app's part of the TypeScript declarations of `.nsh/types` (the rest
+//! is nsh's modules', from `nsh_js::type_definitions`): the JSX namespace
+//! with the app's kebab-case components (`jsx-runtime.d.ts`) and the asset
+//! imports the bundler loads (`assets.d.ts`). Apps find them through their
+//! `tsconfig.json` ([`TSCONFIG`]) and need no `node_modules`.
 
-use oxc::{
-    allocator::Allocator,
-    codegen::Codegen,
-    isolated_declarations::{IsolatedDeclarations, IsolatedDeclarationsOptions},
-    parser::Parser,
-    span::SourceType,
-};
-
-/// `tsconfig.json` of a new app (`nsh init`): resolves `nsh` and `solid-js`
-/// to `.nsh/types`, and JSX to nsh's elements.
+/// `tsconfig.json` of a new app (`nsh init`): resolves `nsh` to
+/// `.nsh/types`, and JSX to nsh's elements.
 pub const TSCONFIG: &str = r#"{
   "compilerOptions": {
     "target": "ES2023",
@@ -27,178 +21,137 @@ pub const TSCONFIG: &str = r#"{
     "types": [],
     "paths": {
       "nsh": ["./.nsh/types/nsh/index.d.ts"],
-      "nsh/*": ["./.nsh/types/nsh/*.d.ts"],
-      "solid-js": ["./.nsh/types/solid-js/types/index.d.ts"],
-      "solid-js/universal": ["./.nsh/types/solid-js/types/universal/index.d.ts"]
+      "nsh/*": ["./.nsh/types/nsh/*.d.ts"]
     }
   },
-  "include": ["**/*.ts", "**/*.tsx", ".nsh/types/nsh/globals.d.ts"]
+  "include": ["**/*.ts", "**/*.tsx", ".nsh/types/nsh/globals.d.ts", ".nsh/types/nsh/assets.d.ts"]
 }
 "#;
 
-const SOLID_TYPES: &[(&str, &str)] = &[
-    (
-        "solid-js/types/index.d.ts",
-        include_str!("../../../js/vendor/solid-js/types/index.d.ts"),
-    ),
-    (
-        "solid-js/types/reactive/signal.d.ts",
-        include_str!("../../../js/vendor/solid-js/types/reactive/signal.d.ts"),
-    ),
-    (
-        "solid-js/types/reactive/observable.d.ts",
-        include_str!("../../../js/vendor/solid-js/types/reactive/observable.d.ts"),
-    ),
-    (
-        "solid-js/types/reactive/scheduler.d.ts",
-        include_str!("../../../js/vendor/solid-js/types/reactive/scheduler.d.ts"),
-    ),
-    (
-        "solid-js/types/reactive/array.d.ts",
-        include_str!("../../../js/vendor/solid-js/types/reactive/array.d.ts"),
-    ),
-    (
-        "solid-js/types/render/index.d.ts",
-        include_str!("../../../js/vendor/solid-js/types/render/index.d.ts"),
-    ),
-    (
-        "solid-js/types/render/component.d.ts",
-        include_str!("../../../js/vendor/solid-js/types/render/component.d.ts"),
-    ),
-    (
-        "solid-js/types/render/flow.d.ts",
-        include_str!("../../../js/vendor/solid-js/types/render/flow.d.ts"),
-    ),
-    (
-        "solid-js/types/render/Suspense.d.ts",
-        include_str!("../../../js/vendor/solid-js/types/render/Suspense.d.ts"),
-    ),
-    (
-        "solid-js/types/render/hydration.d.ts",
-        include_str!("../../../js/vendor/solid-js/types/render/hydration.d.ts"),
-    ),
-    (
-        "solid-js/types/universal/index.d.ts",
-        include_str!("../../../js/vendor/solid-js/types/universal/index.d.ts"),
-    ),
-    (
-        "solid-js/types/universal/universal.d.ts",
-        include_str!("../../../js/vendor/solid-js/types/universal/universal.d.ts"),
-    ),
-    // Solid's own JSX namespace describes the DOM: nsh's replaces it.
-    (
-        "solid-js/types/jsx.d.ts",
-        "export type { JSX } from \"nsh\";\n",
-    ),
-];
-
-/// Declarations of a TypeScript module, from its source (it must have the
-/// explicit types `--isolatedDeclarations` asks for).
-fn declarations(source: &str, lang: crate::embedded::Lang) -> String {
-    let allocator = Allocator::default();
-    let source_type = match lang {
-        crate::embedded::Lang::Tsx => SourceType::tsx(),
-        _ => SourceType::ts(),
-    };
-    let parsed = Parser::new(&allocator, source, source_type).parse();
-    let ret = IsolatedDeclarations::new(
-        &allocator,
-        IsolatedDeclarationsOptions {
-            strip_internal: true,
-        },
-    )
-    .build(&parsed.program);
-    debug_assert!(
-        ret.diagnostics.is_empty(),
-        "the runtime needs explicit types: {:?}",
-        ret.diagnostics
-    );
-    Codegen::new().build(&ret.program).code
+/// The bundler's files of `.nsh/types`, with the components the app names
+/// in kebab case (`elements`, from its last build).
+pub fn type_definitions(elements: &[crate::AppElement]) -> Vec<(String, String)> {
+    vec![
+        ("nsh/jsx-runtime.d.ts".to_owned(), native_jsx(elements)),
+        ("nsh/assets.d.ts".to_owned(), assets()),
+    ]
 }
 
-/// The files of `.nsh/types`, as (path relative to it, contents): one
-/// declaration file per embedded file, importing each other relatively as
-/// the sources do: `nsh/list.d.ts` for `nsh/list`; a UI set's files under
-/// its directory (`nsh/ui/mobile/navigation.d.ts`) and its module next to it
-/// (`nsh/ui/mobile.d.ts`, found through the `nsh/*` path of tsconfig).
-pub fn type_definitions() -> Vec<(String, String)> {
-    let mut files: Vec<(String, String)> = Vec::new();
-    for f in crate::embedded::files() {
-        let dir = match f.root {
-            "runtime" => "nsh".to_owned(),
-            root => format!("nsh/{root}"),
-        };
-        files.push((
-            format!("{dir}/{}.d.ts", f.file()),
-            declarations(f.module.source, f.module.lang),
-        ));
-        if f.root != "runtime"
-            && f.file() == "index"
-            && let Some((_, last)) = f.root.rsplit_once('/')
-        {
-            files.push((
-                format!("{dir}.d.ts"),
-                format!("export * from \"./{last}/index\";\n"),
-            ));
+/// `assets.d.ts`: what importing an image or a font gives (`plugin.rs`).
+fn assets() -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from("// Generated by nsh: what asset imports give.\n");
+    for ext in crate::plugin::IMAGE_EXTENSIONS {
+        let _ = write!(
+            out,
+            "\ndeclare module \"*.{ext}\" {{\n  /** The image, sized in points (`@2x` files at half their pixels). */\n  const asset: import(\"./types\").ImageAsset;\n  export default asset;\n}}\n"
+        );
+    }
+    for ext in crate::plugin::FONT_EXTENSIONS {
+        let _ = write!(
+            out,
+            "\ndeclare module \"*.{ext}\" {{\n  /** The font's family name (for `fontFamily`); the font is registered before the first frame. */\n  const family: string;\n  export default family;\n}}\n"
+        );
+    }
+    out
+}
+
+/// The built-in elements and their props type.
+const NATIVE_ELEMENTS: &[(&str, &str)] = &[
+    ("view", "ViewProps"),
+    ("text", "TextProps"),
+    ("image", "ImageProps"),
+    ("scroll", "ScrollProps"),
+    ("input", "InputProps"),
+    ("canvas", "ControlProps"),
+    ("web-view", "ControlProps"),
+    ("video", "ControlProps"),
+    ("modal", "ControlProps"),
+    ("input-accessory", "ControlProps"),
+    ("list", "ListProps<any>"),
+];
+
+/// `nsh/jsx-runtime`: the built-in elements and the app's components named
+/// in kebab case (whose names win, as in the
+/// compiler).
+fn native_jsx(elements: &[crate::AppElement]) -> String {
+    let mut out = String::from(
+        "import type { ViewProps, TextProps, ImageProps, ScrollProps, InputProps, ControlProps, JSX as Base } from \"./types\";\n\
+         import type { ListProps } from \"./list\";\n\n\
+         type PropsOf<C> = C extends (props: infer P) => any ? P : Record<string, any>;\n\n\
+         export declare namespace JSX {\n\
+         \x20 /** What components return and children accept. */\n\
+         \x20 type Element = Base.Element;\n\
+         \x20 interface ElementChildrenAttribute {\n    children: {};\n  }\n\
+         \x20 interface IntrinsicElements {\n",
+    );
+    let quote = |s: &str| serde_json::to_string(s).expect("a string");
+    for (tag, props) in NATIVE_ELEMENTS {
+        if !elements.iter().any(|e| e.tag == *tag) {
+            out.push_str(&format!("    {}: {props};\n", quote(tag)));
         }
     }
-    files.extend(
-        [
-            (
-                "nsh/jsx-runtime.d.ts",
-                "export type { JSX } from \"./types\";\n".to_owned(),
-            ),
-            (
-                "nsh/globals.d.ts",
-                include_str!("../../../js/runtime/globals.d.ts").to_owned(),
-            ),
-        ]
-        .map(|(path, text)| (path.to_owned(), text)),
-    );
-    files.extend(
-        SOLID_TYPES
-            .iter()
-            .map(|(path, text)| ((*path).to_owned(), (*text).to_owned())),
-    );
-    files
+    if !elements.iter().any(|e| e.tag == "if") {
+        out.push_str(
+            "    /** Renders its children while `when` is truthy, else `else`. */\n\
+             \x20   if: { when: unknown; else?: Element; children?: Element };\n",
+        );
+    }
+    if !elements.iter().any(|e| e.tag == "each") {
+        out.push_str(
+            "    /** Renders `children(item, index)` for each item of `of`; rows are kept by `key` (default: the item). */\n\
+             \x20   each: { of: readonly any[] | null | undefined; key?: (item: any) => unknown; children: (item: () => any, index: () => number) => Element };\n",
+        );
+    }
+    for e in elements {
+        let ty = match &e.source {
+            // From `.nsh/types/nsh/`: the app directory is three levels up.
+            Some((module, export)) => {
+                let module = match module.strip_prefix("./") {
+                    Some(rel) => format!("../../../{rel}"),
+                    None => module.clone(),
+                };
+                format!(
+                    "PropsOf<typeof import({})[{}]>",
+                    quote(&module),
+                    quote(export)
+                )
+            }
+            None => "Record<string, any>".to_owned(),
+        };
+        out.push_str(&format!("    {}: {ty};\n", quote(&e.tag)));
+    }
+    out.push_str("  }\n}\n");
+    out
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn runtime_declarations_need_no_inference() {
-        for f in crate::embedded::files() {
-            let allocator = super::Allocator::default();
-            let source_type = match f.module.lang {
-                crate::embedded::Lang::Tsx => super::SourceType::tsx(),
-                _ => super::SourceType::ts(),
-            };
-            let parsed = super::Parser::new(&allocator, f.module.source, source_type).parse();
-            let ret = super::IsolatedDeclarations::new(
-                &allocator,
-                super::IsolatedDeclarationsOptions {
-                    strip_internal: true,
-                },
-            )
-            .build(&parsed.program);
-            assert!(ret.diagnostics.is_empty(), "{:?}", ret.diagnostics);
-        }
-        let files = super::type_definitions();
-        assert!(
-            files
-                .iter()
-                .any(|(p, t)| p == "nsh/list.d.ts" && t.contains("export declare function List"))
-        );
-        assert!(
-            files
-                .iter()
-                .any(|(p, t)| p == "nsh/ui/mobile.d.ts" && t.contains("./mobile/index"))
-        );
-        assert!(
-            files
-                .iter()
-                .any(|(p, t)| p == "nsh/ui/mobile/navigation.d.ts"
-                    && t.contains("export declare function Stack"))
-        );
+    fn native_jsx_names_the_apps_components() {
+        let jsx = super::native_jsx(&[
+            crate::AppElement {
+                tag: "weather-panel".into(),
+                source: Some(("./demos/Weather".into(), "WeatherPanel".into())),
+            },
+            crate::AppElement {
+                tag: "text".into(),
+                source: None,
+            },
+        ]);
+        assert!(jsx.contains(
+            r#""weather-panel": PropsOf<typeof import("../../../demos/Weather")["WeatherPanel"]>;"#
+        ));
+        // The app's `Text` wins over the built-in `<text>`.
+        assert!(jsx.contains(r#""text": Record<string, any>;"#));
+        assert!(!jsx.contains("TextProps;"));
+        assert!(jsx.contains(r#""web-view": ControlProps;"#));
+    }
+
+    #[test]
+    fn asset_imports_are_declared() {
+        let assets = super::assets();
+        assert!(assets.contains("declare module \"*.png\""));
+        assert!(assets.contains("declare module \"*.ttf\""));
     }
 }

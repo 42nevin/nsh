@@ -2,8 +2,7 @@
 // run. The badge is a native view of the host app, registered as
 // `embed.badge` (`NshAppView.register(component:)`, `NshView.registerComponent`).
 
-import { createSignal } from "solid-js";
-import { render, root, type YNode } from "nsh";
+import { mount, signal, type YNode } from "nsh";
 import { nativeComponent } from "nsh/native";
 import { SafeAreaView } from "nsh/ui/mobile";
 
@@ -16,7 +15,7 @@ const Badge = nativeComponent<{ text: string; color?: string }, { tap: { count: 
 const colors = ["#8250df", "#0969da", "#1a7f37", "#cf222e"];
 
 function App() {
-  const [taps, setTaps] = createSignal(0);
+  const taps = signal(0);
   let badge: YNode | undefined;
   return (
     <SafeAreaView style={{ flex: 1, padding: 20, gap: 16, backgroundColor: "#f6f8fa" }}>
@@ -29,7 +28,7 @@ function App() {
         text={taps() === 0 ? "Tap the native badge" : `Tapped ${taps()}×`}
         color={colors[taps() % colors.length]}
         onTap={(e) => {
-          setTaps(e.count);
+          taps.set(e.count);
           badge?.command("pulse");
         }}
         style={{ alignSelf: "flex-start", borderRadius: 8, overflow: "hidden" }}
@@ -39,4 +38,4 @@ function App() {
   );
 }
 
-render(() => <App />, root);
+mount(App);

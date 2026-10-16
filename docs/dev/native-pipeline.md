@@ -1,0 +1,152 @@
+# How apps are compiled and run: nsh's JSX compiler and native modules
+
+An app is TSX importing nsh's modules. The bundler compiles each module with nsh's JSX compiler and rolldown bundles
+them into one ES module holding only the app's code: imports of nsh's modules stay imports, and `nsh-js` serves them
+natively. The reactive graph, the renderer and every API apps import are Rust; nothing of nsh is JS. Apps cannot
+import `solid-js` (the bundler refuses it, pointing to `nsh`'s `signal` / `computed` / `effect` / ...).
+
+```tsx
+import { signal, computed, mount } from "nsh";
+
+function Counter(props: { label: string }) {
+  const count = signal(0);
+  return (
+    <view onPress={() => count.update((c) => c + 1)}>
+      <text>{props.label}: {count()}</text>
+      <if when={count() > 2} else={<text>keep going</text>}>
+        <text>done</text>
+      </if>
+    </view>
+  );
+}
+
+mount(() => <counter label="Taps" />);
+```
+
+## Modules
+
+`nsh_core::js::NATIVE_MODULES` names nsh's own, the registries name the rest; the bundler leaves imports of them in the
+bundle (`plugin.rs`, an unknown `nsh/…` is an error), `nsh-js` serves them (`modules.rs`, the module table and the
+loader). Where each one is implemented and declared: `js-modules.md`.
+
+- `nsh`: `signal` (`count()`, `count.set(v)`, `count.update(f)`), `computed`, `effect`, `batch`, `untracked`, `cleanup`,
+  `context` (`Theme()`, `<Theme.Provider value>`), `split(props, keys)` (`[picked, rest]`, keeping getters), `mount`.
+- `nsh:rt` (only compiled code imports it): `element`, `text`, `append`, `insert`, `prop`, `bindProp`, `spread`,
+  `component`, `cond`, `each`, `merge`, `list`, `setup`, `font`.
+- `nsh/device` (`windowSize`, `colorScheme`, `fontScale`, `Platform`, `PixelRatio`, `I18nManager`) and
+  `nsh/accessibility` (`reduceMotion`, `screenReaderEnabled`, `AccessibilityInfo`): the environment (`env.rs`), one
+  signal per part written when the platform reports a change, read through read-only accessors.
+- `nsh/list`, `nsh/gesture`, `nsh/animated`, `nsh/canvas`, `nsh/webview`, `nsh/video`, `nsh/native`, `nsh/ios` and the
+  hand-written part of `nsh/android` (below).
+- The modules of registries (`Registry::specifier`): the UI sets a host serves (`HostOptions::ui_sets`,
+  `nsh/ui/mobile`) and the runtime's (`nsh/android`, `nsh/image`, the registry part of `nsh/accessibility`). Their
+  components, modules and re-exports become exports (`components.rs`): a component is a host view naming it, with its
+  props sent as `$name` by one render effect, events delivered to `on<Event>` handlers, children and slot holders; a
+  module function sends a call to the core and, when it has a result, returns a promise settled by the core's
+  `$return` event. Values a registry names natively (`Registry::native_values`: the mobile UI's navigation) and
+  re-exports (`safeArea`, `useSafeAreaInsets`) come from the runtime. nsh's own export wins over a registry's of the
+  same name.
+
+QuickJS-NG resolves imports when it compiles a module, so the bytecode compiler installs the same loader
+(`compile_bytecode_with` with the UI sets); names are checked when the module links (evaluation). The exports are made
+on first import.
+
+## The compiler (`crates/nsh-bundler/src/jsx.rs`)
+
+One Oxc pass removes TypeScript and lowers JSX (`plugin.rs` `compile_native`):
+
+- **Tags.** Lowercase tags are built-ins: the host elements of `jsx::ELEMENTS` (kebab names: `<web-view>`), `<list>`
+  and `<if when else>` / `<each of key>`, unless a capitalized binding in scope has that name in kebab case
+  (`WeatherPanel` is `<weather-panel>`, an imported `Button` is `<button>`): the app's bindings win over built-ins (an
+  imported `Modal` makes `<modal>` that component, a local `Text` makes `<text>` it). An object of functions imported
+  from one of nsh's modules is no component (`Image` from `nsh/image` leaves `<image>` the element: `plugin.rs`
+  `native_object`). Capitalized and member tags name bindings. Unknown tags are errors that name the import when a UI
+  set has the component. Props keep their camelCase names.
+- **Host elements** become one arrow function making the element and its host children: static props and children
+  are set once (`prop`, `append`), changing ones are functions the renderer follows natively (`bindProp`, `insert`).
+  An expression changes when it calls something or reads a member outside nested functions (Solid's rule). Event
+  handlers are set once when they are a function or a name, followed otherwise. `ref={el}` assigns the variable,
+  `ref={fn}` calls it. Consecutive dynamic children share one `insert`, before the next static child.
+- **Components** are called untracked with a props object: static props as values, the others as getters, children as
+  the `children` getter; spreads go through `merge`, which keeps getters.
+- **Text** follows Babel's algorithm (what React renders): lines are trimmed except at the text's ends, whitespace-only
+  lines dropped, the rest joined with a space; whitespace on one line is kept (`{a} {b}` keeps its space).
+- Code is generated as JS text with holes, parsed, and the app's expressions are moved into the holes: they keep their
+  spans (the source map points at the app), generated nodes take their JSX element's span.
+- The entry's prologue gives the renderer the app's themes (`setup`: the Tailwind theme and the components' `uiTheme`,
+  before anything renders). A font import (`import Inter from "./Inter.ttf"`) compiles to `import { font } from
+  "nsh:rt"; export default font(uri, family)`: its family, registered by the host before the first frame.
+
+## The renderer (`crates/nsh-js/src/dom.rs`)
+
+- A node is an object of a native class holding its id, its children's objects and its event handlers, reported by its
+  GC mark: the tree and what handlers capture are one heap QuickJS collects. The root view is held by the renderer;
+  a node nothing refers to is collected and its view released (its finalizer queues the release separately, as the op
+  queue may be borrowed when a finalizer runs).
+- Every change is an `Op` pushed straight into the host's queue (`Shared.ops`, at most `Limits::max_op_values` at
+  once); the engine takes them after the JS turn for one `Core::commit`. Props are decoded from the JS value by
+  `protocol::decode_prop`. Events go from `Host::dispatch_event` to the handler the node holds (`dom::handler`);
+  touches to the responder system (`touch.rs`).
+- Dynamic children are a render effect whose value is the array of nodes it inserted, reconciled with Solid's
+  `reconcileArrays` against the renderer's mirror of the tree; a node that comes again later is moved, never removed
+  and inserted (the core would remake its view), and an insert that would not move a node is skipped.
+- `each` keys rows (`key(item)`, else the item; objects by identity, primitives by value) and updates the item and
+  index signals of kept rows (rows get accessors: `item()`, `index()`); each row has its own owner. `cond` renders a
+  branch per change of truthiness.
+- Platform-only props (`ios={{…}}`, `android={{…}}`, `desktop={{…}}`): only the current platform's object is sent, each
+  key as a prop of its own (`platform_props`).
+- The reactive graph and the renderer share one per-context state (`state.rs`); natives reach each part by shared or
+  short exclusive references, never across a call into JS or a free of a JS value.
+
+## Lists and node methods
+
+- `<list>` (`nsh/list`'s `List`) is a built-in the renderer implements (`list.rs`, compiled as a component call to
+  `nsh:rt`'s `list`). The core asks for rows (`Host::bind_list`), bound natively (`list::bind`); a recycled cell gets a
+  new index and its item accessor follows; header, footer, empty and separator cells, viewability tokens (with
+  `minimumViewTime`), `initialScrollIndex`. Rust components with rows (`ListView`) get a list of the app's data as
+  their items slot.
+- Nodes have the methods of `YNode` (`_core.d.ts`: `focus`, `blur`, `setSelection`, `command`, `scrollTo`, `zoomTo`,
+  `scrollToOffset`, `scrollToIndex`, `scrollToEnd`, the web view's and video's): each sends a command
+  (`protocol::decode_command`).
+
+## Navigation
+
+`createNavigator`, `Stack`, `Screen` and `Modal` are natives (`navigation.rs`), which the mobile UI exports
+(`Registry::native_values`). A stack renders each route (by identity) with the app's function into a screen, the app's
+`<Screen>` or one around what it rendered (also when a hot component returns an accessor); a screen the user pops
+natively removes its route; screens and modals provide the insets they report to what they render
+(`useSafeAreaInsets`).
+
+## Runtime modules
+
+- `nsh/gesture`: the responder system and `PanResponder` (`touch.rs`), in Rust as it runs on every touch move.
+- `nsh/animated` (`animated.rs`): operations are encoded as a few values (`ANIM_*`) and decoded into `AnimOp`s
+  (`protocol::decode_anim_op`); nodes and composites are released by their finalizers; a started animation's promise
+  settles when the core reports its end (`Host::animations_finished`).
+- `nsh/webview`, `nsh/video`, `nsh/native`, `nsh/ios` and the hand-written part of `nsh/android` (`isAvailable`,
+  `BackHandler`'s listeners): `platform_modules.rs`.
+- `nsh/canvas` (`canvas.rs`): a drawing makes thousands of calls, so the context records into a Rust list instead of a
+  JS array, and the core's decoder (`nsh_core::js::canvas::decode`) reads it into one `Op::Draw`. The recording methods
+  and properties are made from the core's specs (`CanvasOp::methods` / `properties`), so a new operation needs no
+  change here. Paths and gradients are taken as they are when the drawing uses them.
+
+## Types
+
+`.nsh/types` holds the declarations of everything nsh serves, made from its Rust sources (`nsh-js`
+`declarations.rs`, `tooling.md`), and the app's part (`crates/nsh-bundler/src/types.rs`): a JSX namespace with the
+built-ins and the app's kebab-case components (`nsh/jsx-runtime.d.ts`, rewritten after every build) and the asset
+imports (`nsh/assets.d.ts`): an exported or imported component's props come from
+its own type; one that is neither is not checked (TypeScript's intrinsic elements are global, so the compiler stays the
+reference for which tag names what). `<each>` items are not typed (intrinsic elements cannot be generic).
+
+TypeScript's import elision runs after the JSX is compiled (`plugin.rs` `elide_unused_imports`): an import only a
+kebab tag uses (`Card` for `<card>`) stays, one only types use goes even without `type`.
+
+## Hot module replacement
+
+Development bundles are compiled by the same compiler, after the bundler's hot transform (`crates/nsh-bundler/src/hot.rs`)
+has wrapped the components and top-level `context()` calls, one CommonJS chunk per module, and run by the native hot
+runtime (`crates/nsh-js/src/hot.rs`, see `tooling.md`). The script is an ES module: it imports `nsh:hot` (which makes the
+`__nsh_hot` global; only development bundles import it) and the namespaces of the native modules the app imports, which
+factories `require` by specifier; an edit that imports a native module the running script did not makes the host
+reload.

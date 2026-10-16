@@ -2,32 +2,36 @@
 
 Things that were found the hard way. Read the section of the area you change before changing it.
 
-## QuickJS and the JS runtime
+## QuickJS and the runtime
 
 - **QuickJS microtasks are run by the host.** Call `Host::run_jobs()` after every call from Rust into JS. `setTimeout` / `console` are our own;
   `queueMicrotask`, `WeakRef` and `FinalizationRegistry` are built into QuickJS-NG.
-- **The JS object graph must be reachable from a global.** `js/runtime` keeps the root, the registry and `listening` on `globalThis.__nsh`.
-  Without it the whole rendered app (nodes, handlers, signals, registry) is an isolated cycle that idle GC collects, and taps stop working.
-  `nsh trace` taps after 1.2s of idling by default; `crates/nsh-engine/tests/counter.rs` is the regression test.
-- **Nodes are released by GC, not by Remove.** Solid may keep removed nodes in a memo and insert them again, so `Remove` only detaches;
-  `Release` (from FinalizationRegistry) frees the node and its native view.
+- **The JS object graph must stay reachable from a GC root.** The renderer holds the root node, which holds its children's
+  objects and each node its handlers (`dom.rs`, reported by the classes' GC marks). Without that the whole rendered app (nodes,
+  handlers, signals) is an isolated cycle that idle GC collects, and taps stop working. `nsh trace` taps after 1.2s of idling by
+  default; `crates/nsh-engine/tests/engine/counter.rs` is the regression test.
+- **Nodes are released by GC, not by Remove.** A memo may keep removed nodes and insert them again, so `Remove` only detaches;
+  `Release` (queued by the node's finalizer) frees the node and its native view.
 - **`nsh_js::BUNDLE_NAME` (`bundle.js`)** is the module name of every bundle and is how stacks are matched for symbolication; `BYTECODE_VERSION`
   is tested against the linked QuickJS version: update both when upgrading rquickjs.
-- **Op buffer opcodes** are defined in both `js/runtime/_core.ts` (and `animated.ts`, `canvas.ts`) and `crates/nsh-js/src/protocol.rs` and must stay in sync.
+- **Encoded operations' codes** (`ANIM_*`, `CV_*`) come from `nsh_core::js` (`protocol.rs`, `canvas.rs`): never write a code's value
+  by hand in `nsh-js`.
 - **rquickjs converts `Option::None` to `undefined`, not `null`**: compare native results with `== null` in JS.
-- **`on*` props are event handlers to the JS renderer** (registered, sent to the core as a listener flag): settings must not
+- **`on*` props are event handlers to the renderer** (held on the node, sent to the core as a listener flag): settings must not
   be named `on...` on host elements (`List` sends `onEndReachedThreshold` as `endReachedThreshold`).
-- **Solid**: a computation that throws stays stale and never runs again (no error boundary), so hot component proxies catch
-  render errors and rethrow them from a microtask; the universal renderer's `render` disposer does not remove the inserted
-  views (the runtime's `render` does).
+- **There is no error boundary**: hot component proxies catch what a component throws, report it and render nothing until the
+  fix (`nsh-js` `hot.rs`).
 - **Hot proxies return accessors**, not nodes: runtime code that inspects what a component returned (`Stack` looks for a
-  `<screen>`) must accept an accessor (`createMemo` over it).
+  `<screen>`, `navigation.rs`) must accept an accessor.
 
 ## Core and layout
 
-- **Text nodes outside `<text>`** (e.g. empty placeholders of `<Show>` / `<For>`) create no native view and take no part in layout. A `<text>`
+- **Text nodes outside `<text>`** (e.g. a string child of a `<view>`) create no native view and take no part in layout. A `<text>`
   nested in `<text>` is a span without a native view; the whole block is merged into one `AttributedText`.
 - **`TextSpan` offsets are UTF-16**, like NSAttributedString / Android Spannable.
+- **Never re-insert a native child that is already in place.** `Insert` of a mounted view is a move: the platform takes it
+  out of the window for a moment, which ends its touches and its focus (an Android input loses the keyboard). Child diffs
+  (Rust components' `reconcile_children`) move only the children out of order, from the end, with `before` anchors.
 - **Taffy 0.15 custom measure callbacks must delegate to `taffy::compute_leaf_layout`** and only compute the content size. Returning the
   content size directly skips resolving the leaf's own style (width / height / padding / min / max), so leaves such as
   `<image style={{width: 48}}>` end up with a zero size.
@@ -55,13 +59,10 @@ Things that were found the hard way. Read the section of the area you change bef
 
 - **rquickjs must not enable the `full` feature.** It pulls in `dyn-load` (dlopen2), which does not compile for iOS / Catalyst. iOS targets
   have no prebuilt bindings and need the `bindgen` feature (and libclang).
-- **Use `oxc_sourcemap` 9.x** (matching rolldown / oxc 0.153); the oxc 0.118 inside the Solid compiler uses 6.x and only exchanges JSON strings,
-  so never mix the types.
+- **Use `oxc_sourcemap` 9.x** (matching rolldown / oxc 0.153): source maps are composed with rolldown's types, so never mix in
+  another version's.
 - **Our plugin's own compile errors** are kept in `NshPlugin.error` and shown directly (clean code frame + relative path) instead of rolldown's
   wrapped report.
-- **The bundler platform must not be Node.** solid-js's `node` export condition points to the non-reactive SSR build.
-- **`dom-expressions-compiler` is pinned to a commit on main.** Published tags predate the `compile` API we use. The project is young: run the
-  full test suite before upgrading.
 - **rolldown CommonJS chunks define reassigned exports as non-configurable getters**: a module run again fills a fresh
   `exports` object and the hot runtime forwards the importers' object to it.
 - **`nsh run` installs the host by copying to a temporary file and renaming it**: overwriting in place an executable that another session is

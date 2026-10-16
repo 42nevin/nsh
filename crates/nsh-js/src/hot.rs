@@ -1,0 +1,604 @@
+//! Hot module replacement (development bundles only): the module system
+//! and component registry behind `__nsh_hot`.
+//!
+//! A development bundle (`nsh-bundler` `HotBundle`) defines every module
+//! as a factory (rolldown CommonJS output, one chunk per module) and
+//! starts the entry with the namespaces of the native modules it imports
+//! (`import "nsh:hot"` makes `__nsh_hot`). An update script redefines the
+//! modules that changed; `update` runs them again, together with the
+//! importers that cannot take the change on their own, in place: the JS
+//! context, the native views and every other module keep their state.
+//!
+//! Components (top-level functions returning JSX, wrapped by the bundler)
+//! are registered by module and name and rendered through a stable proxy.
+//! Running a module again swaps the implementation behind its proxies; the
+//! mounted instances whose code changed render again. Contexts keep their
+//! identity across updates, so providers and consumers stay connected.
+//! `mount` calls made while a module runs are undone when it runs again.
+
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet, HashMap},
+    ffi::CString,
+};
+
+use rquickjs::qjs;
+
+use crate::web::js::{
+    self, Args, Ctx, R, Raw, UNDEFINED, V, closure, function, get, native, new_object, type_error,
+};
+
+/// The module dev bundles import for `__nsh_hot`.
+pub(crate) const SPECIFIER: &str = "nsh:hot";
+
+/// Name of the global.
+const GLOBAL: &std::ffi::CStr = c"__nsh_hot";
+
+/// The exports of [`SPECIFIER`].
+pub(crate) const EXPORTS: &[crate::modules::Item] = &[(
+    "hot",
+    crate::modules::Export::Value(install),
+    crate::modules::Ts::Internal,
+)];
+
+/// A context's hot state (empty until a development bundle starts).
+#[derive(Default)]
+pub(crate) struct Hot(RefCell<Inner>);
+
+#[derive(Default)]
+struct Inner {
+    /// Module id -> factory(module, exports, require).
+    factories: HashMap<String, V>,
+    /// Modules that never run again (rolldown's runtime).
+    fixed: BTreeSet<String>,
+    modules: HashMap<String, Module>,
+    /// Module id -> the ids of the modules that required it.
+    importers: BTreeMap<String, BTreeSet<String>>,
+    /// "module:name" -> component.
+    components: HashMap<String, Component>,
+    /// "module:name" -> context.
+    contexts: HashMap<String, V>,
+    /// Module id -> what its `mount` calls return (disposers).
+    renders: HashMap<String, Vec<V>>,
+    /// Specifier -> namespace of the native modules the app imports.
+    natives: V,
+    entry: Option<String>,
+    /// The module running now.
+    current: Option<String>,
+    /// Running an update: components whose code did not change still
+    /// render again (their module ran because a dependency changed).
+    forced: bool,
+    /// Components to render again once the update ran.
+    stale: Vec<String>,
+}
+
+struct Module {
+    /// The first exports object: importers keep it; later runs forward
+    /// it to theirs.
+    exports: V,
+    components: u32,
+    /// Takes its own updates: everything it exports is a component.
+    accepts: bool,
+}
+
+struct Component {
+    /// The implementation now.
+    fun: V,
+    /// Changes with the component's code (or its module's other code).
+    sig: String,
+    /// A signal the proxy reads: bumped to render again.
+    version: V,
+    proxy: V,
+}
+
+impl Hot {
+    /// Frees every JS value it holds (before the context goes).
+    pub(crate) fn free_all(&self) {
+        drop(std::mem::take(&mut *self.0.borrow_mut()));
+    }
+}
+
+fn hot<'a>(ctx: Ctx) -> &'a Hot {
+    // SAFETY: a projection of the state's field, reached by shared
+    // reference only.
+    unsafe { &(*crate::state::state(ctx)).hot }
+}
+
+fn with<T>(ctx: Ctx, f: impl FnOnce(&mut Inner) -> T) -> T {
+    f(&mut hot(ctx).0.borrow_mut())
+}
+
+/// Makes `__nsh_hot` (a global, which update scripts and the bundler's
+/// component wrappers call) and returns it.
+fn install(ctx: Ctx) -> Raw {
+    let made = (|| -> R<V> {
+        let obj = new_object(ctx)?;
+        let methods: [(&std::ffi::CStr, js::Native, i32); 5] = [
+            (c"define", define, 3),
+            (c"start", start, 2),
+            (c"update", update, 1),
+            (c"component", component, 4),
+            (c"context", context, 3),
+        ];
+        for (name, f, length) in methods {
+            let f = function(ctx, name, f, length)?;
+            let key = name.to_str().unwrap_or_default();
+            js::define(ctx, obj.raw(), key, f, true)?;
+        }
+        let global = js::global(ctx);
+        // SAFETY: a new reference for the global's property.
+        let r = unsafe {
+            qjs::JS_DefinePropertyValueStr(
+                ctx,
+                global.raw(),
+                GLOBAL.as_ptr(),
+                qjs::JS_DupValue(ctx, obj.raw()),
+                qjs::JS_PROP_CONFIGURABLE as i32,
+            )
+        };
+        if r < 0 {
+            return Err(js::Throw);
+        }
+        Ok(obj)
+    })();
+    match made {
+        Ok(v) => v.take(),
+        Err(_) => qjs::JS_EXCEPTION,
+    }
+}
+
+/// `mount` ran: what it returned is undone when the module running now
+/// runs again.
+pub(crate) fn rendered(ctx: Ctx, dispose: Raw) {
+    with(ctx, |h| {
+        if let Some(id) = h.current.clone() {
+            h.renders.entry(id).or_default().push(V::dup(ctx, dispose));
+        }
+    });
+}
+
+native! {
+    /// `define(id, factory, fixed)`: registers a module factory; fixed
+    /// modules never run again.
+    fn define(ctx, _this, args) {
+        let id = js::to_string(ctx, args.get(0))?;
+        let fixed = js::to_bool(ctx, args.get(2));
+        with(ctx, |h| {
+            h.factories.insert(id.clone(), V::dup(ctx, args.get(1)));
+            if fixed {
+                h.fixed.insert(id);
+            }
+        });
+        Ok(V::undefined())
+    }
+}
+
+native! {
+    /// `start(entry, natives)`: runs the entry; `natives` maps the native
+    /// modules' specifiers to their namespaces.
+    fn start(ctx, _this, args) {
+        let entry = js::to_string(ctx, args.get(0))?;
+        with(ctx, |h| {
+            h.entry = Some(entry.clone());
+            h.natives = V::dup(ctx, args.get(1));
+        });
+        load(ctx, &entry).map(|_| V::undefined())
+    }
+}
+
+native! {
+    /// `update(defs)`: replaces the factories of `defs` (id -> factory) and
+    /// runs the modules affected; `false` when the update cannot be applied
+    /// in place (the host reloads).
+    fn update(ctx, _this, args) {
+        let defs = args.get(0);
+        let mut changed = Vec::new();
+        let mut defined = BTreeSet::new();
+        for (id, factory) in js::record(ctx, defs)? {
+            with(ctx, |h| {
+                if h.modules.contains_key(&id) {
+                    changed.push(id.clone());
+                }
+                h.factories.insert(id.clone(), factory);
+            });
+            defined.insert(id);
+        }
+        // The changed modules, and the importers of those that do not take
+        // their own updates (up to the entry).
+        let Some(order) = with(ctx, |h| affected(h, changed)) else {
+            return Ok(V::bool(false));
+        };
+        let mut result = Ok(());
+        for id in &order {
+            with(ctx, |h| h.forced = !defined.contains(id));
+            result = run(ctx, id);
+            if result.is_err() {
+                break;
+            }
+        }
+        let stale = with(ctx, |h| {
+            h.forced = false;
+            let stale = std::mem::take(&mut h.stale);
+            stale
+                .iter()
+                .filter_map(|k| h.components.get(k).map(|c| c.version.clone_ref()))
+                .collect::<Vec<_>>()
+        });
+        result?;
+        crate::reactive::batch_with(ctx, || {
+            for version in &stale {
+                let n = crate::reactive::peek_number(ctx, version.raw()).unwrap_or(0.0);
+                crate::reactive::set_signal(ctx, version.raw(), qjs::JS_NewFloat64(n + 1.0));
+            }
+        });
+        Ok(V::bool(true))
+    }
+}
+
+/// The modules to run again for `changed`, dependencies before their
+/// importers; `None` when a change reaches a module nothing imports.
+fn affected(h: &Inner, changed: Vec<String>) -> Option<Vec<String>> {
+    let mut rerun = BTreeSet::new();
+    let mut queue = changed;
+    while let Some(id) = queue.pop() {
+        if !rerun.insert(id.clone()) {
+            continue;
+        }
+        let accepts = h.modules.get(&id).is_some_and(|m| m.accepts);
+        if accepts || h.entry.as_deref() == Some(id.as_str()) {
+            continue;
+        }
+        let from = h.importers.get(&id).filter(|f| !f.is_empty())?;
+        queue.extend(from.iter().cloned());
+    }
+    fn visit(
+        h: &Inner,
+        rerun: &BTreeSet<String>,
+        id: &str,
+        seen: &mut BTreeSet<String>,
+        order: &mut Vec<String>,
+    ) {
+        if !seen.insert(id.to_owned()) {
+            return;
+        }
+        for (dep, from) in &h.importers {
+            if rerun.contains(dep) && from.contains(id) {
+                visit(h, rerun, dep, seen, order);
+            }
+        }
+        order.push(id.to_owned());
+    }
+    let (mut seen, mut order) = (BTreeSet::new(), Vec::new());
+    for id in &rerun {
+        visit(h, &rerun, id, &mut seen, &mut order);
+    }
+    Some(order)
+}
+
+/// The exports of module `id`, running it the first time.
+fn load(ctx: Ctx, id: &str) -> R<V> {
+    if let Some(exports) = with(ctx, |h| h.modules.get(id).map(|m| m.exports.clone_ref())) {
+        return Ok(exports);
+    }
+    let exports = new_object(ctx)?;
+    with(ctx, |h| {
+        h.modules.insert(
+            id.to_owned(),
+            Module {
+                exports: exports.clone_ref(),
+                components: 0,
+                accepts: false,
+            },
+        )
+    });
+    run(ctx, id)?;
+    Ok(exports)
+}
+
+/// Runs module `id` (again).
+fn run(ctx: Ctx, id: &str) -> R<()> {
+    let Some((factory, kept, fixed, disposers)) = with(ctx, |h| {
+        let factory = h.factories.get(id)?.clone_ref();
+        let module = h.modules.get_mut(id)?;
+        module.components = 0;
+        Some((
+            factory,
+            module.exports.clone_ref(),
+            h.fixed.contains(id),
+            // Renders made by an earlier run of this module are replaced.
+            h.renders.remove(id).unwrap_or_default(),
+        ))
+    }) else {
+        return Err(type_error(ctx, &format!("nsh hot: no module {id}")));
+    };
+    for dispose in disposers {
+        if js::call(ctx, dispose.raw(), UNDEFINED, &[]).is_err() {
+            js::report_exception(ctx);
+        }
+    }
+    let exports = if fixed {
+        kept.clone_ref()
+    } else {
+        new_object(ctx)?
+    };
+    let module = new_object(ctx)?;
+    js::define(ctx, module.raw(), "exports", exports.clone_ref(), true)?;
+    let from = id.to_owned();
+    let require = closure(ctx, Vec::new(), move |ctx, _, args| {
+        require(ctx, &from, args)
+    })?;
+    let previous = with(ctx, |h| h.current.replace(id.to_owned()));
+    let ran = js::call(
+        ctx,
+        factory.raw(),
+        UNDEFINED,
+        &[module.raw(), exports.raw(), require.raw()],
+    );
+    with(ctx, |h| h.current = previous);
+    ran?;
+    if !js::same(exports.raw(), kept.raw()) {
+        forward(ctx, &kept, &exports)?;
+    }
+    let accepts = accepts(ctx, id, &kept)?;
+    with(ctx, |h| {
+        if let Some(m) = h.modules.get_mut(id) {
+            m.accepts = accepts;
+        }
+    });
+    Ok(())
+}
+
+/// A factory's `require(spec)`: a native module's namespace, or the
+/// exports of the app's module `spec` names (relative to `from`).
+fn require(ctx: Ctx, from: &str, args: Args<'_>) -> R<V> {
+    let spec = js::to_string(ctx, args.get(0))?;
+    if !spec.starts_with('.') {
+        let natives = with(ctx, |h| h.natives.clone_ref());
+        let namespace = get(ctx, natives.raw(), &spec)?;
+        if namespace.is_undefined() {
+            return Err(type_error(ctx, &format!("nsh hot: no module {spec}")));
+        }
+        return Ok(namespace);
+    }
+    let id = resolve(from, &spec);
+    with(ctx, |h| {
+        h.importers
+            .entry(id.clone())
+            .or_default()
+            .insert(from.to_owned());
+    });
+    load(ctx, &id)
+}
+
+/// `spec` relative to module `from` (`a/b.js` + `../c.js` -> `c.js`).
+fn resolve(from: &str, spec: &str) -> String {
+    let mut parts: Vec<&str> = from.split('/').collect();
+    parts.pop();
+    for part in spec.split('/') {
+        match part {
+            ".." => {
+                parts.pop();
+            }
+            "." => {}
+            part => parts.push(part),
+        }
+    }
+    parts.join("/")
+}
+
+/// Makes `kept` (what importers hold) forward to `exports` (the run's):
+/// its keys follow, read through getters.
+fn forward(ctx: Ctx, kept: &V, exports: &V) -> R<()> {
+    let new_keys = own_keys(ctx, exports.raw())?;
+    for (key, _) in own_keys(ctx, kept.raw())? {
+        if !new_keys.iter().any(|(k, _)| *k == key) {
+            let name = CString::new(key).unwrap_or_default();
+            // SAFETY: a new atom, freed below.
+            unsafe {
+                let atom = qjs::JS_NewAtom(ctx, name.as_ptr());
+                qjs::JS_DeleteProperty(ctx, kept.raw(), atom, 0);
+                qjs::JS_FreeAtom(ctx, atom);
+            }
+        }
+    }
+    for (key, enumerable) in new_keys {
+        let getter = {
+            let key = key.clone();
+            closure(ctx, vec![exports.clone_ref()], move |ctx, captures, _| {
+                get(ctx, captures[0].raw(), &key)
+            })?
+        };
+        let name = CString::new(key).unwrap_or_default();
+        let mut flags =
+            qjs::JS_PROP_CONFIGURABLE | qjs::JS_PROP_HAS_GET | qjs::JS_PROP_HAS_CONFIGURABLE;
+        flags |= qjs::JS_PROP_HAS_ENUMERABLE;
+        if enumerable {
+            flags |= qjs::JS_PROP_ENUMERABLE;
+        }
+        // SAFETY: a new atom, freed below; the getter is borrowed.
+        let r = unsafe {
+            let atom = qjs::JS_NewAtom(ctx, name.as_ptr());
+            let r = qjs::JS_DefineProperty(
+                ctx,
+                kept.raw(),
+                atom,
+                UNDEFINED,
+                getter.raw(),
+                UNDEFINED,
+                flags as i32,
+            );
+            qjs::JS_FreeAtom(ctx, atom);
+            r
+        };
+        if r < 0 {
+            return Err(js::Throw);
+        }
+    }
+    Ok(())
+}
+
+/// The own string keys of `obj`, and whether each is enumerable.
+fn own_keys(ctx: Ctx, obj: Raw) -> R<Vec<(String, bool)>> {
+    let mut tab: *mut qjs::JSPropertyEnum = std::ptr::null_mut();
+    let mut len = 0u32;
+    // SAFETY: an enumeration of a live object, freed below.
+    unsafe {
+        if qjs::JS_GetOwnPropertyNames(ctx, &mut tab, &mut len, obj, qjs::JS_GPN_STRING_MASK as i32)
+            < 0
+        {
+            return Err(js::Throw);
+        }
+        let mut out = Vec::with_capacity(len as usize);
+        for i in 0..len as usize {
+            let e = &*tab.add(i);
+            let name = qjs::JS_AtomToCStringLen(ctx, std::ptr::null_mut(), e.atom);
+            if !name.is_null() {
+                let key = std::ffi::CStr::from_ptr(name)
+                    .to_string_lossy()
+                    .into_owned();
+                qjs::JS_FreeCString(ctx, name);
+                out.push((key, e.is_enumerable));
+            }
+        }
+        qjs::JS_FreePropertyEnum(ctx, tab, len);
+        Ok(out)
+    }
+}
+
+/// Whether module `id` takes its own updates: it made components and
+/// everything it exports (enumerably) is one of their proxies.
+fn accepts(ctx: Ctx, id: &str, exports: &V) -> R<bool> {
+    let made = with(ctx, |h| h.modules.get(id).map_or(0, |m| m.components));
+    if made == 0 {
+        return Ok(false);
+    }
+    for (key, enumerable) in own_keys(ctx, exports.raw())? {
+        if !enumerable {
+            continue;
+        }
+        let value = get(ctx, exports.raw(), &key)?;
+        let proxy = with(ctx, |h| {
+            h.components
+                .values()
+                .any(|c| js::same(c.proxy.raw(), value.raw()))
+        });
+        if !proxy {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+native! {
+    /// `component(module, name, fn, signature)`: the stable proxy of a
+    /// component; a new signature renders its instances again.
+    fn component(ctx, _this, args) {
+        let key = format!(
+            "{}:{}",
+            js::to_string(ctx, args.get(0))?,
+            js::to_string(ctx, args.get(1))?
+        );
+        let sig = js::to_string(ctx, args.get(3))?;
+        let fun = V::dup(ctx, args.get(2));
+        let existing = with(ctx, |h| {
+            if let Some(m) = h.current.clone().and_then(|id| h.modules.get_mut(&id)) {
+                m.components += 1;
+            }
+            let forced = h.forced;
+            let c = h.components.get_mut(&key)?;
+            let stale = c.sig != sig || forced;
+            c.fun = fun.clone_ref();
+            c.sig = sig.clone();
+            let proxy = c.proxy.clone_ref();
+            if stale {
+                h.stale.push(key.clone());
+            }
+            Some(proxy)
+        });
+        if let Some(proxy) = existing {
+            return Ok(proxy);
+        }
+        let version = V::checked(ctx, crate::reactive::new_signal(ctx, qjs::JS_NewFloat64(0.0)))?;
+        let proxy = {
+            let key = key.clone();
+            closure(ctx, vec![version.clone_ref()], move |ctx, captures, args| {
+                render(ctx, &key, captures[0].raw(), args.get(0))
+            })?
+        };
+        let name = js::to_string(ctx, args.get(1))?;
+        js::define(ctx, proxy.raw(), "name", js::string(ctx, &name)?, false)?;
+        with(ctx, |h| {
+            h.components.insert(
+                key,
+                Component {
+                    fun,
+                    sig,
+                    version,
+                    proxy: proxy.clone_ref(),
+                },
+            )
+        });
+        Ok(proxy)
+    }
+}
+
+/// A proxy's render: a memo of the component's implementation now, run
+/// again when its version changes.
+fn render(ctx: Ctx, key: &str, version: Raw, props: Raw) -> R<V> {
+    let key = key.to_owned();
+    let run = closure(
+        ctx,
+        vec![V::dup(ctx, version), V::dup(ctx, props)],
+        move |ctx, captures, _| {
+            js::call(ctx, captures[0].raw(), UNDEFINED, &[])?;
+            let Some(fun) = with(ctx, |h| h.components.get(&key).map(|c| c.fun.clone_ref())) else {
+                return Ok(V::undefined());
+            };
+            let out = crate::reactive::untracked_with(ctx, || {
+                js::call(ctx, fun.raw(), UNDEFINED, &[captures[1].raw()])
+            });
+            // A component that throws reports the error and renders
+            // nothing, ready for the fix.
+            Ok(out.unwrap_or_else(|_| {
+                js::report_exception(ctx);
+                V::undefined()
+            }))
+        },
+    )?;
+    let memo = crate::reactive::memo(ctx, run.take(), false);
+    V::checked(ctx, crate::reactive::finish_value(ctx, memo))
+}
+
+native! {
+    /// `context(module, name, context)`: the first context made under that
+    /// name keeps its identity (taking the new default).
+    fn context(ctx, _this, args) {
+        let key = format!(
+            "{}:{}",
+            js::to_string(ctx, args.get(0))?,
+            js::to_string(ctx, args.get(1))?
+        );
+        let made = args.get(2);
+        let kept = with(ctx, |h| h.contexts.get(&key).map(V::clone_ref));
+        match kept {
+            Some(kept) => {
+                crate::dom::set_context_default(ctx, kept.raw(), made);
+                Ok(kept)
+            }
+            None => {
+                with(ctx, |h| h.contexts.insert(key, V::dup(ctx, made)));
+                Ok(V::dup(ctx, made))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn relative_ids() {
+        assert_eq!(super::resolve("App.js", "./Counter.js"), "Counter.js");
+        assert_eq!(super::resolve("a/b.js", "../c.js"), "c.js");
+        assert_eq!(super::resolve("a/b.js", "./d/e.js"), "a/d/e.js");
+    }
+}

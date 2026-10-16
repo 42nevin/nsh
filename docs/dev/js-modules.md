@@ -1,53 +1,68 @@
 # JS modules
 
-Two layers. `nsh` and `nsh/<module>` (`js/runtime`) are the primitives and the environment that every UI set builds
-on. `nsh/ui/<set>` (`js/ui/<set>`) is a whole UI for one form factor: `nsh/ui/mobile` has everything that is mobile UI or
-interaction, natively backed (navigation stacks, modals, the status bar, system dialogs) or JS (the components, one
-look on iOS and Android); a desktop set will be a separate one (`nsh/ui/desktop`), not an abstraction over both.
+Two layers. `nsh` and `nsh/<module>` are the primitives and the environment that every UI set builds on. `nsh/ui/<set>`
+is a whole UI for one form factor: `nsh/ui/mobile` has everything that is mobile UI or interaction (navigation stacks,
+modals, the status bar, system dialogs, and its components, one look on iOS and Android, written in Rust in
+`crates/nsh-ui-mobile`); a desktop set will be a separate one (`nsh/ui/desktop`), not an abstraction over both.
 Shared vs one form factor decides the layer, not JS vs native.
 
-`nsh-bundler/src/embedded.rs` lists the embedded files per root (`runtime`, `ui/mobile`) with the specifiers apps import;
-files import their own root's files relatively (`./navigation`) and the runtime's internals as `nsh/_core` (embedded
-files only; apps cannot). `.nsh/types` has one declaration file per embedded file (`nsh/list.d.ts`,
-`nsh/ui/mobile/navigation.d.ts`) and `nsh/ui/mobile.d.ts` re-exporting its set, found through the `nsh/*` path of the
-app's `tsconfig.json`; files nsh no longer generates are removed. `nsh` itself only has rendering and the types; there
-is no catch-all module, and moved APIs get no compatibility re-exports.
+Every module is native: `nsh-js` serves it (`modules.rs`: nsh's own modules by `nsh_core::js::NATIVE_MODULES`, then the
+registries: the runtime's `nsh_core::runtime::registries()` and the UI sets a host serves), and the bundler keeps
+imports of them as imports (`plugin.rs`; how apps are compiled: `native-pipeline.md`). A module can be both: the
+hand-written exports of `nsh/android` and `nsh/accessibility` are joined by their registry's. There is no JS file of
+nsh's and no internal module apps could reach.
 
-| Module | Exports |
-|---|---|
-| `nsh` | `render`, `root`, `YNode`; the types of styles, element props, events and `JSX` |
-| `nsh/animated` | `createNativeValue`, `NativeValue`, `NativeNode`, `Animated`, `Easing`, `LayoutAnimation` |
-| `nsh/device` | `windowSize()`, `colorScheme()`, `fontScale()`, `Platform`, `PixelRatio`, `I18nManager` |
-| `nsh/accessibility` | `AccessibilityInfo`, `screenReaderEnabled()`, `reduceMotion()` |
-| `nsh/list` | `List` |
-| `nsh/canvas` | `Canvas`, `Path2D`, `CanvasRenderingContext2D`, `CanvasGradient` |
-| `nsh/image` | `Image.getSize`, `Image.prefetch` |
-| `nsh/gesture` | `PanResponder` |
-| `nsh/webview`, `nsh/video` | `WebView`, `Video` |
-| `nsh/native` | `nativeComponent(name, { props, events })`: a component for a native component the embedding app registered |
-| `nsh/ios` | `isAvailable`, `InputAccessoryView` |
-| `nsh/android` | `isAvailable`, `Toast`, `BackHandler`, `setStatusBarBackgroundColor` |
-| `nsh/renderer` | what compiled JSX calls (`createElement`, `insert`, `spread`, ...; the Solid compiler's `moduleName`) |
-| `nsh/ui/mobile` | `Stack`, `Screen`, `createNavigator`, `Modal`; `SafeAreaView`, `useSafeAreaInsets`, `safeArea()`; `KeyboardAvoidingView`, `keyboard()`, `Keyboard.dismiss`; `StatusBar`, `Alert`, `ActionSheet` (a list dialog on Android) |
+Declarations: each export of a module of nsh's own carries its TypeScript declaration in its table (`modules::Item`:
+`signal`'s signatures next to `reactive::signal`), each module its own interfaces (`types`); a registry's components
+and modules are declared from their specs (`nsh_core::ui::declarations`, `docs/dev/components.md`), the styles, the
+host elements' props and events, the easings and the canvas methods from the core's tables. `nsh-js`'s
+`declarations.rs` assembles one file per module (`nsh/list.d.ts`, `nsh/ui/mobile.d.ts`), `nsh/types.d.ts` (the
+element and JSX types `nsh` exports) and `nsh/globals.d.ts`, and tests check every module's exports against its
+declarations; the CLI writes them into `.nsh/types` (`tooling.md`).
+`nsh` itself only has the reactive API, `mount` and the types; there is no catch-all module, and moved APIs get no
+compatibility re-exports.
+
+| Module | Exports | Implemented in (`crates/nsh-js/src`) |
+|---|---|---|
+| `nsh` | `signal`, `computed`, `effect`, `batch`, `untracked`, `cleanup`, `context`, `split`, `mount`; `YNode`, `Accessor`, `Signal`, `Context`, `Component`, the types of styles, element props, events and `JSX` | `reactive.rs`, `dom.rs` |
+| `nsh:rt` | what compiled JSX calls (`element`, `insert`, `spread`, `cond`, `each`, `list`, `font`, ...); apps never import it | `dom.rs`, `list.rs` |
+| `nsh/animated` | `createNativeValue`, `NativeValue`, `NativeNode`, `Animated`, `Easing`, `LayoutAnimation` | `animated.rs` |
+| `nsh/device` | `windowSize()`, `colorScheme()`, `fontScale()`, `Platform`, `PixelRatio`, `I18nManager` | `env.rs` |
+| `nsh/accessibility` | `AccessibilityInfo`, `screenReaderEnabled()`, `reduceMotion()` | `env.rs` + its registry (`nsh_core::runtime`) |
+| `nsh/list` | `List` | `list.rs` |
+| `nsh/canvas` | `Canvas`, `Path2D`, `CanvasRenderingContext2D`, `CanvasGradient` | `canvas.rs` |
+| `nsh/image` | `Image.getSize`, `Image.prefetch` (promises the core resolves from the root's `ImageInfo` event) | its registry (`components.rs`) |
+| `nsh/gesture` | `PanResponder` | `touch.rs` |
+| `nsh/webview`, `nsh/video` | `WebView`, `Video` | `platform_modules.rs` |
+| `nsh/native` | `nativeComponent(name, { props, events })`: a component for a native component the embedding app registered | `platform_modules.rs` |
+| `nsh/ios` | `isAvailable`, `InputAccessoryView` | `platform_modules.rs` |
+| `nsh/android` | `isAvailable`, `Toast.show(message, "short" \| "long")`, `BackHandler` (`addEventListener` native, `exitApp` Rust), `setStatusBarBackgroundColor` (the status bar's base layer) | `platform_modules.rs` + its registry |
+| `nsh/ui/mobile` | `Stack`, `Screen`, `createNavigator`, `Modal`; the Rust components and modules of `nsh-ui-mobile`: `SafeAreaView`, `KeyboardAvoidingView`, `StatusBar` (and `StatusBar.setBarStyle` / `setHidden`), `Alert.alert` and `ActionSheet.show` (promises of the index chosen; a list dialog on Android), `Keyboard.dismiss`, `Button`, `Card`, `Group`, `ListView`, `Stepper`, `TextField`, `Sheet`, `SelectList`; re-exported from the runtime: `safeArea()`, `keyboard()`, `useSafeAreaInsets()` | `navigation.rs`; the registry (`components.rs`), `env.rs` |
+
+`nsh:hot` (hot module replacement, `hot.rs`) is only imported by development bundles.
 
 - **Platform modules** are importable on both platforms (one bundle runs on both); on the other one their calls do
   nothing and their components render nothing. `isAvailable` tells which.
 - **Platform-only props** are grouped: `ios={{…}}` / `android={{…}}` / `desktop={{…}}` (macOS, Windows, Linux) on
-  elements and components (`IOSProps` / `AndroidProps` / `DesktopProps` in `types.ts`, extended per element). The
-  renderer (`platformProps` in `_core.ts`) sends only the current platform's object, each key as a prop of its own (keys removed from the object are cleared); the core knows them by
-  those names. Android: `ripple`, `elevation`, `accessibilityLiveRegion`, Modal `statusBarTranslucent`, StatusBar
-  `backgroundColor`, Alert `cancelable`. iOS: input `inputAccessoryViewID` / `textContentType`, Screen `headerLargeTitle` /
-  `headerBackTitle`, Modal `presentationStyle` / `supportedOrientations`, WebView `allowsBackForwardNavigationGestures`.
-- Module-level code that must always run (the engine's hooks `__nsh_dispatch` / `__nsh_env`, the root's direction, the
-  Tailwind theme) lives in `_core.ts`; feature modules only run when imported (production bundles tree-shake the rest).
-  `_core.ts` recognizes native animation values by their `__nv` field, so it does not import `nsh/animated`.
+  elements and components (`IOSProps` / `AndroidProps` / `DesktopProps` in `types.d.ts`, extended per element; the host
+  props in them are the generated `IOS…HostProps` / `Android…HostProps`). The renderer
+  (`platform_props` in `dom.rs`) sends only the current platform's object, each key as a prop of its own (keys removed
+  from the object are cleared); the core knows them by those names. Android: `ripple`, `elevation`,
+  `accessibilityLiveRegion`, Modal `statusBarTranslucent`, StatusBar `backgroundColor` (a Rust component's `android`
+  prop). Alert's `cancelable` is an option of both platforms (iOS alerts are never dismissed by a tap outside). iOS:
+  input `inputAccessoryViewID` / `textContentType`, Screen `headerLargeTitle` / `headerBackTitle`, Modal
+  `presentationStyle` / `supportedOrientations`, WebView `allowsBackForwardNavigationGestures`.
+- A module's exports are made when a bundle first imports it; what must always happen (the root's direction, the
+  themes) is the renderer's (`dom.rs`, `setup`), not a module's.
 
 ## Where new things go
 
-- A primitive or environment both UI sets need: a module of `js/runtime` (`nsh/<module>`), listed in
-  `crates/nsh-bundler/src/embedded.rs`.
-- Mobile UI or interaction, natively backed or JS: `js/ui/mobile` (`nsh/ui/mobile`); components drawn with the
-  primitives go to `js/ui/mobile/components/` (see its README).
+- A primitive or environment both UI sets need: a module of nsh's own (`nsh/<module>`), natives in `crates/nsh-js`
+  listed in `modules.rs` and `nsh_core::js::NATIVE_MODULES`, each export with its declaration (`Ts`) and the
+  module's interfaces in its `types`. Functions that only ask the platform (a command, a request answered by an event)
+  are a Rust `#[module]` in `crates/nsh-core/src/runtime/`, registered in `runtime::registries()` under the module's
+  specifier: their JS face and declarations come from the spec, with nothing written per function.
+- Mobile UI or interaction: `nsh/ui/mobile`; its components are Rust, in `crates/nsh-ui-mobile` (see its README).
 - Something only one platform has: `nsh/ios` / `nsh/android`, or a prop in `ios={{…}}` / `android={{…}}` /
   `desktop={{…}}`.
 - Never a compatibility re-export when something moves, never a React Native compatibility wrapper.

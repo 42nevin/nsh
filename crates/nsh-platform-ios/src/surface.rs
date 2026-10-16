@@ -9,7 +9,7 @@ use block2::RcBlock;
 use dispatch2::{DispatchQueue, MainThreadBound};
 use nsh_core::{MountBatch, Size};
 use nsh_engine::{
-    Bundle, ColorScheme, Engine, EngineConfig, Environment, Idiom, Insets, MountSink,
+    App, ColorScheme, Engine, EngineConfig, Environment, Idiom, Insets, MountSink, Policy,
 };
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
@@ -96,8 +96,8 @@ struct Running {
 }
 
 pub(crate) struct RootViewIvars {
-    /// Bundle waiting for the first non-empty layout.
-    pending: RefCell<Option<Bundle>>,
+    /// The app, waiting for the first non-empty layout.
+    pending: RefCell<Option<App>>,
     running: RefCell<Option<Running>>,
     size: Cell<CGSize>,
     options: SurfaceOptions,
@@ -137,8 +137,8 @@ define_class!(
                 return;
             }
             let pending = self.ivars().pending.borrow_mut().take();
-            if let Some(bundle) = pending {
-                self.start(bundle, viewport);
+            if let Some(app) = pending {
+                self.start(app, viewport);
             }
         }
 
@@ -162,11 +162,11 @@ impl RootView {
     fn new(
         mtm: MainThreadMarker,
         frame: CGRect,
-        bundle: Bundle,
+        app: App,
         options: SurfaceOptions,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(RootViewIvars {
-            pending: RefCell::new(Some(bundle)),
+            pending: RefCell::new(Some(app)),
             running: RefCell::new(None),
             size: Cell::new(CGSize::new(0.0, 0.0)),
             options,
@@ -365,15 +365,21 @@ impl RootView {
         }
     }
 
-    fn start(&self, mut bundle: Bundle, viewport: Size) {
+    fn start(&self, mut app: App, viewport: Size) {
         let mtm = self.mtm();
-        if let Some(granted) = &self.ivars().options.granted {
-            bundle.policy.granted = Some(granted.clone());
-        }
-        let access = Arc::new(bundle.policy.access());
+        let access = Arc::new(match &mut app {
+            App::Js(bundle) => {
+                if let Some(granted) = &self.ivars().options.granted {
+                    bundle.policy.granted = Some(granted.clone());
+                }
+                bundle.policy.access()
+            }
+            // Native code reaches what the platform allows.
+            App::Rust(_) => Policy::default().access(),
+        });
         let mounter: SharedMounter = Arc::new(MainThreadBound::new(RefCell::new(None), mtm));
         let config = EngineConfig {
-            bundle,
+            app,
             viewport,
             trace: self.ivars().options.trace,
             network: Some(crate::net::network()),
@@ -383,6 +389,8 @@ impl RootView {
             environment: self.environment(),
             header_heights: header_heights(mtm),
             limits: self.ivars().options.limits,
+            components: nsh_ui_mobile::registry(),
+            runtime: None,
         };
         let sink = MainThreadSink {
             mounter: mounter.clone(),
@@ -460,10 +468,11 @@ pub struct Surface {
 }
 
 impl Surface {
-    /// Creates a surface for `bundle`. `frame` is the initial view frame.
+    /// Creates a surface running `app` (a [`nsh_engine::Bundle`] or a Rust
+    /// app's [`nsh_engine::Root`]). `frame` is the initial view frame.
     pub fn new(
         mtm: MainThreadMarker,
-        bundle: Bundle,
+        app: impl Into<App>,
         frame: CGRect,
         options: SurfaceOptions,
     ) -> io::Result<Surface> {
@@ -472,7 +481,7 @@ impl Surface {
         std::thread::Builder::new()
             .name("nsh-prewarm".into())
             .spawn(crate::text::prewarm)?;
-        let view = RootView::new(mtm, frame, bundle, options);
+        let view = RootView::new(mtm, frame, app.into(), options);
         RootView::observe_keyboard(&view);
         Ok(Surface { view })
     }
@@ -514,15 +523,16 @@ impl Surface {
             .borrow_mut() = Some(Box::new(handler));
     }
 
-    /// Replaces the running app with `bundle` (state is reset).
-    pub fn reload(&self, bundle: Bundle) {
+    /// Replaces the running app with `app` (state is reset).
+    pub fn reload(&self, app: impl Into<App>) {
+        let app = app.into();
         self.view.stop();
         let size = self.view.ivars().size.get();
         if size.width > 0.0 && size.height > 0.0 {
             self.view
-                .start(bundle, Size::new(size.width as f32, size.height as f32));
+                .start(app, Size::new(size.width as f32, size.height as f32));
         } else {
-            *self.view.ivars().pending.borrow_mut() = Some(bundle);
+            *self.view.ivars().pending.borrow_mut() = Some(app);
         }
     }
 }

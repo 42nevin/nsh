@@ -1,5 +1,4 @@
-import { createSignal, For, Match, Switch } from "solid-js";
-import { type YNode } from "nsh";
+import { signal, type YNode } from "nsh";
 import { List } from "nsh/list";
 import { keyboard, KeyboardAvoidingView, useSafeAreaInsets } from "nsh/ui/mobile";
 import { colors } from "../ui";
@@ -9,7 +8,7 @@ const tints = ["#fde2e4", "#e2ece9", "#dfe7fd", "#fff1e6", "#e8e8e4", "#cddafd"]
 /** Three columns, a header and a footer, padding and gaps, viewability. */
 function Grid() {
   const items = Array.from({ length: 90 }, (_, i) => ({ id: i, height: 70 + (i % 4) * 20 }));
-  const [visible, setVisible] = createSignal("");
+  const visible = signal("");
   let list!: YNode;
   return (
     <List
@@ -21,7 +20,7 @@ function Grid() {
       contentContainerStyle={{ padding: 12, gap: 8 }}
       viewabilityConfig={{ itemVisiblePercentThreshold: 50 }}
       onViewableItemsChanged={({ viewableItems }) =>
-        setVisible(viewableItems.length ? `${viewableItems[0].index}–${viewableItems[viewableItems.length - 1].index}` : "")
+        visible.set(viewableItems.length ? `${viewableItems[0].index}–${viewableItems[viewableItems.length - 1].index}` : "")
       }
       ListHeaderComponent={
         <view style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingBottom: 4 }}>
@@ -68,31 +67,31 @@ function Contacts() {
   }
   return (
     <List each={rows} stickyHeaderIndices={headers} estimatedItemSize={44} style={{ flex: 1, backgroundColor: colors.surface }}>
-      {(row) => (
-        <Switch>
-          <Match when={"header" in row() && (row() as { header: string })}>
-            {(r) => (
-              <view style={{ backgroundColor: "#eaeef2", paddingHorizontal: 16, paddingVertical: 6 }}>
-                <text style={{ fontWeight: "700", color: colors.muted }}>{r().header}</text>
-              </view>
-            )}
-          </Match>
-          <Match when={"name" in row() && (row() as { name: string; last: boolean })}>
-            {(r) => (
+      {(row) => {
+        const header = () => row() as { header: string };
+        const contact = () => row() as { name: string; last: boolean };
+        return (
+          <if
+            when={"header" in row()}
+            else={
               <view
                 style={{
                   paddingHorizontal: 16,
                   paddingVertical: 12,
-                  borderBottomWidth: r().last ? 0 : 1,
+                  borderBottomWidth: contact().last ? 0 : 1,
                   borderBottomColor: "#eaeef2",
                 }}
               >
-                <text style={{ fontSize: 17 }}>{r().name}</text>
+                <text style={{ fontSize: 17 }}>{contact().name}</text>
               </view>
-            )}
-          </Match>
-        </Switch>
-      )}
+            }
+          >
+            <view style={{ backgroundColor: "#eaeef2", paddingHorizontal: 16, paddingVertical: 6 }}>
+              <text style={{ fontWeight: "700", color: colors.muted }}>{header().header}</text>
+            </view>
+          </if>
+        );
+      }}
     </List>
   );
 }
@@ -104,18 +103,18 @@ function Chat() {
   const insets = useSafeAreaInsets();
   let next = 0;
   const message = (text: string, mine: boolean): Message => ({ id: next++, text, mine });
-  const [messages, setMessages] = createSignal(
+  const messages = signal(
     Array.from({ length: 30 }, (_, i) => message(`Message ${30 - i}`, i % 3 === 0)),
   );
-  const [draft, setDraft] = createSignal("");
+  const draft = signal("");
   const send = () => {
     if (!draft().trim()) return;
-    setMessages((m) => [message(draft(), true), ...m]);
-    setDraft("");
+    messages.update((m) => [message(draft(), true), ...m]);
+    draft.set("");
   };
   const loadOlder = () => {
     const count = messages().length;
-    setMessages((m) => [...m, ...Array.from({ length: 20 }, (_, i) => message(`Older ${count + i + 1}`, i % 4 === 0))]);
+    messages.update((m) => [...m, ...Array.from({ length: 20 }, (_, i) => message(`Older ${count + i + 1}`, i % 4 === 0))]);
   };
   return (
     <KeyboardAvoidingView style={{ flex: 1 }}>
@@ -155,7 +154,7 @@ function Chat() {
       >
         <input
           value={draft()}
-          onChangeText={setDraft}
+          onChangeText={(v) => draft.set(v)}
           onSubmitEditing={send}
           blurOnSubmit={false}
           placeholder="Message"
@@ -172,14 +171,14 @@ function Chat() {
 
 /** Horizontal scrolling, pull to refresh on a plain scroll view, and an empty list. */
 function More() {
-  const [refreshing, setRefreshing] = createSignal(false);
-  const [refreshed, setRefreshed] = createSignal(0);
-  const [items, setItems] = createSignal<number[]>([]);
+  const refreshing = signal(false);
+  const refreshed = signal(0);
+  const items = signal<number[]>([]);
   const refresh = () => {
-    setRefreshing(true);
+    refreshing.set(true);
     setTimeout(() => {
-      setRefreshed(refreshed() + 1);
-      setRefreshing(false);
+      refreshed.set(refreshed() + 1);
+      refreshing.set(false);
     }, 1000);
   };
   const cards = Array.from({ length: 1000 }, (_, i) => i);
@@ -190,13 +189,13 @@ function More() {
         <text style={{ marginHorizontal: 12, fontWeight: "600" }}>A horizontal scroll view</text>
         <scroll horizontal showsIndicator={false}>
           <view style={{ flexDirection: "row", gap: 8, paddingHorizontal: 12 }}>
-            <For each={["Today", "Yesterday", "This week", "This month", "This year", "All time", "Custom"]}>
+            <each of={["Today", "Yesterday", "This week", "This month", "This year", "All time", "Custom"]}>
               {(label) => (
                 <text style={{ paddingHorizontal: 14, paddingVertical: 8, borderRadius: 16, overflow: "hidden", backgroundColor: colors.surface }}>
-                  {label}
+                  {label()}
                 </text>
               )}
-            </For>
+            </each>
           </view>
         </scroll>
         <text style={{ marginHorizontal: 12, fontWeight: "600" }}>A horizontal list of 1000 recycled cards</text>
@@ -209,10 +208,10 @@ function More() {
         </List>
         <view style={{ flexDirection: "row", alignItems: "center", marginHorizontal: 12 }}>
           <text style={{ flex: 1, fontWeight: "600" }}>An empty list ({items().length} items)</text>
-          <text onPress={() => setItems([...items(), items().length + 1])} style={{ color: colors.accent, marginRight: 16 }}>
+          <text onPress={() => items.set([...items(), items().length + 1])} style={{ color: colors.accent, marginRight: 16 }}>
             Add
           </text>
-          <text onPress={() => setItems([])} style={{ color: colors.accent }}>
+          <text onPress={() => items.set([])} style={{ color: colors.accent }}>
             Clear
           </text>
         </view>
@@ -233,10 +232,10 @@ function More() {
 type Tab = "grid" | "sections" | "chat" | "more";
 
 export function Lists() {
-  const [tab, setTab] = createSignal<Tab>("grid");
+  const tab = signal<Tab>("grid");
   const tabButton = (id: Tab, label: string) => (
     <text
-      onPress={() => setTab(id)}
+      onPress={() => tab.set(id)}
       style={{
         flex: 1,
         textAlign: "center",
@@ -258,20 +257,18 @@ export function Lists() {
         {tabButton("chat", "Chat")}
         {tabButton("more", "More")}
       </view>
-      <Switch>
-        <Match when={tab() === "grid"}>
-          <Grid />
-        </Match>
-        <Match when={tab() === "sections"}>
-          <Contacts />
-        </Match>
-        <Match when={tab() === "chat"}>
-          <Chat />
-        </Match>
-        <Match when={tab() === "more"}>
-          <More />
-        </Match>
-      </Switch>
+      {(() => {
+        switch (tab()) {
+          case "grid":
+            return <Grid />;
+          case "sections":
+            return <Contacts />;
+          case "chat":
+            return <Chat />;
+          case "more":
+            return <More />;
+        }
+      })()}
     </view>
   );
 }

@@ -16,7 +16,19 @@ public final class AppActivity extends Activity {
         DevActivity.edgeToEdge(this);
         view = new NshView(this);
         setContentView(view);
-        view.loadAssetBundle("nsh");
+        if (rustApp()) view.runRustApp("nsh");
+        else view.loadAssetBundle("nsh");
+    }
+
+    /** A Rust app (`nsh package --rust` sets the manifest's `com.longbridge.nsh.RUST`). */
+    private boolean rustApp() {
+        try {
+            android.content.pm.ApplicationInfo info = getPackageManager()
+                    .getApplicationInfo(getPackageName(), android.content.pm.PackageManager.GET_META_DATA);
+            return info.metaData != null && info.metaData.getBoolean("com.longbridge.nsh.RUST", false);
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            return false;
+        }
     }
 
     @Override

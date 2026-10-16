@@ -3,12 +3,14 @@
 //! on changes: the appearance, the window size, the layout direction, the
 //! node's interaction states, its group's states or its sibling position.
 
+use std::sync::Arc;
+
 use super::{Core, Key, Kind, NO_KEY, dirty, pressable};
 use crate::{
     mount::MountItem,
     ops::NodeId,
     style::{Color, Style, ViewStyle},
-    tailwind::{ClassEnvironment, ClassProps, Context, Theme, deps, position, state},
+    tailwind::{ClassEnvironment, ClassList, ClassProps, Context, Theme, deps, position, state},
     text::TextEngine,
 };
 
@@ -180,6 +182,12 @@ impl<M: TextEngine> Core<M> {
             }
             Some(classes)
         };
+        self.set_class_list(key, classes);
+    }
+
+    /// Sets the resolved classes of `key` (a Rust component's styles go
+    /// straight here).
+    pub(super) fn set_class_list(&mut self, key: Key, classes: Option<Arc<ClassList>>) {
         let node = &mut self.nodes[key as usize];
         let had_groups = node
             .classes

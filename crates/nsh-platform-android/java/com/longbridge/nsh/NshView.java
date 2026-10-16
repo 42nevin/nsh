@@ -204,6 +204,20 @@ public class NshView extends FrameLayout {
     }
 
     /**
+     * Runs the Rust app compiled into {@code libnsh.so} (an app built with
+     * {@code nsh package --rust}); its assets come from {@code dir/assets/}
+     * in the APK.
+     *
+     * @param dir the directory in the APK's assets
+     */
+    public void runRustApp(String dir) {
+        assetHttp = null;
+        assetDir = null;
+        assetApk = dir + "/assets/";
+        Native.runRust(handle);
+    }
+
+    /**
      * Runs a verified package ({@link NshTrust#openPackage}), replacing the
      * running app. Takes the package: it cannot run again.
      *

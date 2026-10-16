@@ -1,5 +1,4 @@
-import { createSignal, For, Index } from "solid-js";
-import { type ScrollEvent, type YNode } from "nsh";
+import { type ScrollEvent, signal, type YNode } from "nsh";
 import { windowSize } from "nsh/device";
 import { List } from "nsh/list";
 import { Button, colors, Section, Toggle as Switch } from "../ui";
@@ -18,8 +17,10 @@ function Toggle(props: { label: string; value: boolean; onChange: (v: boolean) =
 function Choice<T extends string>(props: { options: readonly T[]; value: T; onChange: (v: T) => void }) {
   return (
     <view style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
-      <For each={props.options}>
-        {(o) => (
+      <each of={props.options}>
+        {(option) => {
+          const o = option();
+          return (
           <text
             onPress={() => props.onChange(o)}
             style={{
@@ -34,8 +35,9 @@ function Choice<T extends string>(props: { options: readonly T[]; value: T; onCh
           >
             {o}
           </text>
-        )}
-      </For>
+          );
+        }}
+      </each>
     </view>
   );
 }
@@ -43,8 +45,8 @@ function Choice<T extends string>(props: { options: readonly T[]; value: T; onCh
 /** Full-width pages: one per fling, with a page indicator. */
 function Pager() {
   // Pages as wide as the scroll view.
-  const [width, setWidth] = createSignal(windowSize().width - 60);
-  const [page, setPage] = createSignal(0);
+  const width = signal(windowSize().width - 60);
+  const page = signal(0);
   return (
     <view style={{ gap: 8 }}>
       <scroll
@@ -52,26 +54,26 @@ function Pager() {
         pagingEnabled
         showsIndicator={false}
         style={{ height: 140, borderRadius: 12 }}
-        onLayout={(e) => setWidth(e.width)}
-        onMomentumScrollEnd={(e) => setPage(Math.round(e.x / width()))}
-        onScrollEnd={(e) => setPage(Math.round(e.x / width()))}
+        onLayout={(e) => width.set(e.width)}
+        onMomentumScrollEnd={(e) => page.set(Math.round(e.x / width()))}
+        onScrollEnd={(e) => page.set(Math.round(e.x / width()))}
       >
         <view style={{ flexDirection: "row" }}>
-          <Index each={palette.slice(0, 5)}>
+          <each of={palette.slice(0, 5)}>
             {(color, i) => (
               <view style={{ width: width(), height: 140, backgroundColor: color(), alignItems: "center", justifyContent: "center" }}>
-                <text style={{ color: "#ffffff", fontSize: 28, fontWeight: "700" }}>Page {i + 1}</text>
+                <text style={{ color: "#ffffff", fontSize: 28, fontWeight: "700" }}>Page {i() + 1}</text>
               </view>
             )}
-          </Index>
+          </each>
         </view>
       </scroll>
       <view style={{ flexDirection: "row", justifyContent: "center", gap: 6 }}>
-        <Index each={palette.slice(0, 5)}>
+        <each of={palette.slice(0, 5)}>
           {(_, i) => (
-            <view style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: page() === i ? colors.accent : colors.border }} />
+            <view style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: page() === i() ? colors.accent : colors.border }} />
           )}
-        </Index>
+        </each>
       </view>
     </view>
   );
@@ -81,8 +83,8 @@ function Pager() {
 function Cards() {
   const card = 220;
   const gap = 12;
-  const [oneStep, setOneStep] = createSignal(false);
-  const [align, setAlign] = createSignal<"start" | "center" | "end">("center");
+  const oneStep = signal(false);
+  const align = signal<"start" | "center" | "end">("center");
   return (
     <view style={{ gap: 10 }}>
       <List
@@ -112,21 +114,21 @@ function Cards() {
           </view>
         )}
       </List>
-      <Choice options={["start", "center", "end"] as const} value={align()} onChange={setAlign} />
-      <Toggle label="One card per fling" value={oneStep()} onChange={setOneStep} />
+      <Choice options={["start", "center", "end"] as const} value={align()} onChange={(v) => align.set(v)} />
+      <Toggle label="One card per fling" value={oneStep()} onChange={(v) => oneStep.set(v)} />
     </view>
   );
 }
 
 /** onScroll (throttled), drag and momentum events, scrollEnabled, bounces, contentInset. */
 function Events() {
-  const [offset, setOffset] = createSignal<ScrollEvent | null>(null);
-  const [log, setLog] = createSignal<string[]>([]);
-  const [enabled, setEnabled] = createSignal(true);
-  const [bounces, setBounces] = createSignal(true);
-  const [inset, setInset] = createSignal(false);
-  const [throttle, setThrottle] = createSignal<"0" | "100" | "500">("100");
-  const note = (name: string) => (e: { y: number }) => setLog((l) => [`${name} @ ${Math.round(e.y)}`, ...l].slice(0, 5));
+  const offset = signal<ScrollEvent | null>(null);
+  const log = signal<string[]>([]);
+  const enabled = signal(true);
+  const bounces = signal(true);
+  const inset = signal(false);
+  const throttle = signal<"0" | "100" | "500">("100");
+  const note = (name: string) => (e: { y: number }) => log.update((l) => [`${name} @ ${Math.round(e.y)}`, ...l].slice(0, 5));
   return (
     <view style={{ gap: 10 }}>
       <scroll
@@ -135,16 +137,16 @@ function Events() {
         bounces={bounces()}
         contentInset={inset() ? { top: 40, bottom: 40 } : undefined}
         scrollEventThrottle={Number(throttle())}
-        onScroll={setOffset}
+        onScroll={(v) => offset.set(v)}
         onScrollBeginDrag={note("begin drag")}
         onScrollEndDrag={note("end drag")}
         onMomentumScrollBegin={note("momentum begin")}
         onMomentumScrollEnd={note("momentum end")}
       >
         <view style={{ padding: 12, gap: 6 }}>
-          <For each={Array.from({ length: 30 }, (_, i) => i + 1)}>
-            {(i) => <text style={{ color: colors.muted }}>Line {i}</text>}
-          </For>
+          <each of={Array.from({ length: 30 }, (_, i) => i + 1)}>
+            {(i) => <text style={{ color: colors.muted }}>Line {i()}</text>}
+          </each>
         </view>
       </scroll>
       <text style={{ fontVariant: ["tabular-nums"] }}>
@@ -155,12 +157,12 @@ function Events() {
       <text style={{ color: colors.muted, fontSize: 13 }}>{log().join("\n") || "No drags yet"}</text>
       <view style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <text style={{ flex: 1 }}>onScroll every</text>
-        <Choice options={["0", "100", "500"] as const} value={throttle()} onChange={setThrottle} />
+        <Choice options={["0", "100", "500"] as const} value={throttle()} onChange={(v) => throttle.set(v)} />
         <text>ms</text>
       </view>
-      <Toggle label="Scroll enabled" value={enabled()} onChange={setEnabled} />
-      <Toggle label="Bounces" value={bounces()} onChange={setBounces} />
-      <Toggle label="Content inset 40 (top and bottom)" value={inset()} onChange={setInset} />
+      <Toggle label="Scroll enabled" value={enabled()} onChange={(v) => enabled.set(v)} />
+      <Toggle label="Bounces" value={bounces()} onChange={(v) => bounces.set(v)} />
+      <Toggle label="Content inset 40 (top and bottom)" value={inset()} onChange={(v) => inset.set(v)} />
     </view>
   );
 }
@@ -168,8 +170,8 @@ function Events() {
 /** Pinch to zoom (natively); tap a tile to zoom in on it. */
 function Zoom() {
   let scroll: YNode | undefined;
-  const [scale, setScale] = createSignal(1);
-  const [bounces, setBounces] = createSignal(true);
+  const scale = signal(1);
+  const bounces = signal(true);
   const tiles = Array.from({ length: 24 }, (_, i) => i);
   return (
     <view style={{ gap: 10 }}>
@@ -181,11 +183,13 @@ function Zoom() {
         bouncesZoom={bounces()}
         centerContent
         scrollEventThrottle={50}
-        onScroll={(e) => setScale(e.zoomScale)}
+        onScroll={(e) => scale.set(e.zoomScale)}
       >
         <view style={{ flexDirection: "row", flexWrap: "wrap", padding: 6, gap: 6 }}>
-          <For each={tiles}>
-            {(i) => (
+          <each of={tiles}>
+            {(tile) => {
+              const i = tile();
+              return (
               <view
                 style={{
                   width: 74,
@@ -205,8 +209,9 @@ function Zoom() {
               >
                 <text style={{ color: "#ffffff", fontSize: 11 }}>Tile {i + 1}</text>
               </view>
-            )}
-          </For>
+              );
+            }}
+          </each>
         </view>
       </scroll>
       <text style={{ fontVariant: ["tabular-nums"] }}>Zoom {scale().toFixed(2)}×</text>
@@ -215,7 +220,7 @@ function Zoom() {
         <Button label="2×" onPress={() => scroll?.zoomTo({ scale: 2 })} />
         <Button label="0.5×" onPress={() => scroll?.zoomTo({ scale: 0.5 })} />
       </view>
-      <Toggle label="Bounces past the limits" value={bounces()} onChange={setBounces} />
+      <Toggle label="Bounces past the limits" value={bounces()} onChange={(v) => bounces.set(v)} />
     </view>
   );
 }
@@ -226,9 +231,9 @@ type Post = { id: number; label: string };
 function Feed() {
   let next = 0;
   const post = (label: string): Post => ({ id: next++, label });
-  const [posts, setPosts] = createSignal(Array.from({ length: 30 }, (_, i) => post(`Post ${i + 1}`)));
+  const posts = signal(Array.from({ length: 30 }, (_, i) => post(`Post ${i + 1}`)));
   let fresh = 0;
-  const addOnTop = () => setPosts((p) => [...Array.from({ length: 3 }, () => post(`New ${++fresh}`)), ...p]);
+  const addOnTop = () => posts.update((p) => [...Array.from({ length: 3 }, () => post(`New ${++fresh}`)), ...p]);
   return (
     <view style={{ gap: 10 }}>
       <List each={posts()} estimatedItemSize={44} style={{ height: 240, borderRadius: 10, backgroundColor: "#f6f8fa" }}>
@@ -246,8 +251,8 @@ function Feed() {
 type Taps = "never" | "handled" | "always";
 
 export function Scrolling() {
-  const [taps, setTaps] = createSignal<Taps>("never");
-  const [presses, setPresses] = createSignal(0);
+  const taps = signal<Taps>("never");
+  const presses = signal(0);
   return (
     <scroll style={{ flex: 1, backgroundColor: colors.background }} keyboardShouldPersistTaps={taps()}>
       <view style={{ padding: 16, gap: 20 }}>
@@ -267,7 +272,7 @@ export function Scrolling() {
           <Feed />
         </Section>
         <Section title="Taps with the keyboard up (keyboardShouldPersistTaps)">
-          <Choice options={["never", "handled", "always"] as const} value={taps()} onChange={setTaps} />
+          <Choice options={["never", "handled", "always"] as const} value={taps()} onChange={(v) => taps.set(v)} />
           <text style={{ color: colors.muted, fontSize: 13 }}>
             {taps() === "never"
               ? "A tap outside the input only hides the keyboard; the button does not get it."
@@ -279,7 +284,7 @@ export function Scrolling() {
             placeholder="Type here, then tap the button"
             style={{ fontSize: 16, borderWidth: 1, borderColor: colors.border, borderRadius: 10, padding: 10 }}
           />
-          <Button label={`Pressed ${presses()} times`} onPress={() => setPresses(presses() + 1)} />
+          <Button label={`Pressed ${presses()} times`} onPress={() => presses.set(presses() + 1)} />
           <view style={{ height: 300 }} />
         </Section>
       </view>

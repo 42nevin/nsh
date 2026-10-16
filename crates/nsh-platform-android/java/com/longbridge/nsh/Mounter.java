@@ -620,6 +620,8 @@ final class Mounter {
         ModalHost modal = modals.get(id);
         if (modal != null) {
             modal.dismiss();
+            // The batch's end updates the back button without it.
+            shownModals.remove(modal);
             modals.remove(id);
             touchTrackers.remove(modal.touches());
         }

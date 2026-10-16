@@ -25,6 +25,9 @@ pub(crate) struct Java {
     /// `com.longbridge.nsh.Net`: HTTP (any thread).
     pub(crate) net: GlobalRef,
     pub(crate) net_fetch: JStaticMethodID,
+    pub(crate) net_send: JStaticMethodID,
+    pub(crate) net_finish: JStaticMethodID,
+    pub(crate) net_pause: JStaticMethodID,
     pub(crate) net_cancel: JStaticMethodID,
     /// `com.longbridge.nsh.NshView` instance methods.
     pub(crate) view_submit: JMethodID,
@@ -83,8 +86,11 @@ pub(crate) fn init(vm: JavaVM) -> jni::errors::Result<()> {
         net_fetch: env.get_static_method_id(
             net_class,
             "fetch",
-            "(JLjava/lang/String;Ljava/lang/String;[Ljava/lang/String;[BZ)V",
+            "(JLjava/lang/String;Ljava/lang/String;[Ljava/lang/String;[BZZ)V",
         )?,
+        net_send: env.get_static_method_id(net_class, "send", "(J[B)V")?,
+        net_finish: env.get_static_method_id(net_class, "finish", "(J)V")?,
+        net_pause: env.get_static_method_id(net_class, "pause", "(JZ)V")?,
         net_cancel: env.get_static_method_id(net_class, "cancel", "(J)V")?,
         view_submit: env.get_method_id(view_class, "submit", "([B[Ljava/lang/Object;J)V")?,
         view_report_error: env.get_method_id(view_class, "reportError", "(Ljava/lang/String;)V")?,

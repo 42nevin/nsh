@@ -1,4 +1,4 @@
-import { createSignal } from "solid-js";
+import { signal } from "nsh";
 import { fontScale } from "nsh/device";
 import pacifico from "../fonts/Pacifico-Regular.ttf";
 import logo from "../logo@2x.png";
@@ -9,23 +9,23 @@ const LOREM =
 export function TextDemo() {
   const caption = { fontSize: 12, color: "#6e7781", marginTop: 10 } as const;
   const link = { color: "#0969da", textDecorationLine: "underline" } as const;
-  const [tapped, setTapped] = createSignal("Tap a link in the sentence");
-  const [likes, setLikes] = createSignal(3);
+  const tapped = signal("Tap a link in the sentence");
+  const likes = signal(3);
   return (
     <scroll style={{ flex: 1 }}>
       <view style={{ padding: 20, gap: 4 }}>
-        <text style={{ fontSize: 16, lineHeight: 24 }} onPress={() => setTapped("the sentence (not a link)")}>
+        <text style={{ fontSize: 16, lineHeight: 24 }} onPress={() => tapped.set("the sentence (not a link)")}>
           {"By continuing you agree to the "}
-          <text style={link} onPress={() => setTapped("Terms of service")} onLongPress={() => setTapped("Terms (long press)")}>
+          <text style={link} onPress={() => tapped.set("Terms of service")} onLongPress={() => tapped.set("Terms (long press)")}>
             Terms of service
           </text>
           {" and the "}
-          <text style={link} onPress={() => setTapped("Privacy policy")}>
+          <text style={link} onPress={() => tapped.set("Privacy policy")}>
             Privacy policy
           </text>
           {", which mention "}
           <text style={{ fontWeight: "700" }}>
-            nested <text style={link} onPress={() => setTapped("a link inside bold text")}>links</text> too
+            nested <text style={link} onPress={() => tapped.set("a link inside bold text")}>links</text> too
           </text>
           .
         </text>
@@ -40,7 +40,7 @@ export function TextDemo() {
           </view>
           {" and a button inside the sentence "}
           <view
-            onPress={() => setLikes(likes() + 1)}
+            onPress={() => likes.set(likes() + 1)}
             style={{ backgroundColor: "#ddf4ff", borderRadius: 6, paddingHorizontal: 8, height: 22, justifyContent: "center" }}
           >
             <text style={{ color: "#0969da", fontSize: 13 }}>♥ {likes()}</text>

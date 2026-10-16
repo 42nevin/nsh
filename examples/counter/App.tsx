@@ -1,5 +1,4 @@
-import { createSignal, For } from "solid-js";
-import { render, root } from "nsh";
+import { mount, signal } from "nsh";
 
 function Button(props: { label: string; color: string; onPress: () => void }) {
   return (
@@ -19,13 +18,13 @@ function Button(props: { label: string; color: string; onPress: () => void }) {
 }
 
 function App() {
-  const [count, setCount] = createSignal(0);
-  const [history, setHistory] = createSignal<number[]>([]);
+  const count = signal(0);
+  const history = signal<number[]>([]);
 
   const change = (delta: number) => {
     const next = count() + delta;
-    setCount(next);
-    setHistory([next, ...history()].slice(0, 5));
+    count.set(next);
+    history.update((h) => [next, ...h].slice(0, 5));
   };
 
   return (
@@ -53,10 +52,10 @@ function App() {
         <text style={{ fontSize: 14, color: "#6e7781" }}>
           Recent values: <text style={{ fontWeight: "bold", color: "#1f2328" }}>{history().length}</text>
         </text>
-        <For each={history()}>{(value) => <text style={{ fontSize: 16, color: "#1f2328" }}>• {value}</text>}</For>
+        <each of={history()}>{(value) => <text style={{ fontSize: 16, color: "#1f2328" }}>• {value()}</text>}</each>
       </view>
     </view>
   );
 }
 
-render(() => <App />, root);
+mount(App);

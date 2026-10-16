@@ -1,5 +1,4 @@
-import { createSignal, For, splitProps } from "solid-js";
-import { type InputProps, type YNode } from "nsh";
+import { type InputProps, signal, split, type YNode } from "nsh";
 import { Keyboard, keyboard, KeyboardAvoidingView, Modal, SafeAreaView, Screen, useSafeAreaInsets } from "nsh/ui/mobile";
 import { nav } from "../nav";
 import { Button, colors, Section } from "../ui";
@@ -17,7 +16,7 @@ const field = {
 
 /** A labelled input; `next` focuses another input on return. */
 function Field(props: InputProps & { label: string; next?: () => YNode | undefined }) {
-  const [own, input] = splitProps(props, ["label", "next"]);
+  const [own, input] = split(props, ["label", "next"]);
   return (
     <view style={{ gap: 4 }}>
       <text style={{ fontSize: 13, color: colors.muted }}>{own.label}</text>
@@ -39,13 +38,13 @@ type Mode = "none" | "on-drag" | "interactive";
  * keyboard.
  */
 export function Form() {
-  const [name, setName] = createSignal("");
-  const [email, setEmail] = createSignal("");
-  const [shout, setShout] = createSignal("");
-  const [notes, setNotes] = createSignal("");
-  const [mode, setMode] = createSignal<Mode>("on-drag");
-  const [submitted, setSubmitted] = createSignal("");
-  const [sheet, setSheet] = createSignal(false);
+  const name = signal("");
+  const email = signal("");
+  const shout = signal("");
+  const notes = signal("");
+  const mode = signal<Mode>("on-drag");
+  const submitted = signal("");
+  const sheet = signal(false);
   // Inputs in return-key order.
   const refs: YNode[] = [];
   const next = (i: number) => () => refs[i + 1];
@@ -56,34 +55,34 @@ export function Form() {
       <view style={{ padding: 16, gap: 20 }}>
         <view style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
           <text style={{ flex: 1, color: colors.muted }}>Keyboard {Math.round(keyboard().height)} pt</text>
-          <For each={["none", "on-drag", "interactive"] as Mode[]}>
+          <each of={["none", "on-drag", "interactive"] as Mode[]}>
             {(m) => (
               <text
-                onPress={() => setMode(m)}
+                onPress={() => mode.set(m())}
                 style={{
                   fontSize: 13,
                   paddingHorizontal: 8,
                   paddingVertical: 4,
                   borderRadius: 6,
                   overflow: "hidden",
-                  color: mode() === m ? "#ffffff" : colors.text,
-                  backgroundColor: mode() === m ? colors.accent : "#e1e4e8",
+                  color: mode() === m() ? "#ffffff" : colors.text,
+                  backgroundColor: mode() === m() ? colors.accent : "#e1e4e8",
                 }}
               >
-                {m}
+                {m()}
               </text>
             )}
-          </For>
+          </each>
         </view>
 
         <Section title="Account">
-          <Field ref={ref(0)} next={next(0)} label="Name" value={name()} onChangeText={setName} autoCapitalize="words" autoComplete="name" placeholder="Ada Lovelace" />
+          <Field ref={ref(0)} next={next(0)} label="Name" value={name()} onChangeText={(v) => name.set(v)} autoCapitalize="words" autoComplete="name" placeholder="Ada Lovelace" />
           <Field
             ref={ref(1)}
             next={next(1)}
             label="E-mail"
             value={email()}
-            onChangeText={setEmail}
+            onChangeText={(v) => email.set(v)}
             keyboardType="email-address"
             autoCapitalize="none"
             autoCorrect={false}
@@ -125,7 +124,7 @@ export function Form() {
             next={next(12)}
             label="Controlled: uppercased as you type"
             value={shout()}
-            onChangeText={(t) => setShout(t.toUpperCase())}
+            onChangeText={(t) => shout.set(t.toUpperCase())}
           />
           <Field label="Read only" value="Not editable" editable={false} style={{ ...field, color: colors.muted, backgroundColor: "#f6f8fa" }} />
           <Field
@@ -144,7 +143,7 @@ export function Form() {
               multiline
               maxLength={280}
               value={notes()}
-              onChangeText={setNotes}
+              onChangeText={(v) => notes.set(v)}
               placeholder="Return adds a line"
             />
             <text style={{ fontSize: 12, color: colors.muted, textAlign: "right" }}>{`${notes().length}/280`}</text>
@@ -157,10 +156,10 @@ export function Form() {
         </Section>
 
         <view style={{ gap: 10 }}>
-          <Button label="Submit" onPress={() => setSubmitted(`${name() || "Nobody"} <${email() || "no e-mail"}>`)} />
+          <Button label="Submit" onPress={() => submitted.set(`${name() || "Nobody"} <${email() || "no e-mail"}>`)} />
           <text style={{ color: "#1a7f37" }}>{submitted()}</text>
           <Button label="Hide the keyboard" color="#57606a" onPress={() => Keyboard.dismiss()} />
-          <Button label="Inputs in a sheet" color="#8250df" onPress={() => setSheet(true)} />
+          <Button label="Inputs in a sheet" color="#8250df" onPress={() => sheet.set(true)} />
           <Button
             label="A message bar at the bottom"
             color="#1a7f37"
@@ -169,15 +168,15 @@ export function Form() {
         </view>
       </view>
 
-      <Modal visible={sheet()} ios={{ presentationStyle: "pageSheet" }} onRequestClose={() => setSheet(false)}>
+      <Modal visible={sheet()} ios={{ presentationStyle: "pageSheet" }} onRequestClose={() => sheet.set(false)}>
         <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
           <scroll style={{ flex: 1 }} keyboardDismissMode="interactive">
             <view style={{ padding: 16, gap: 12 }}>
               <text style={{ fontSize: 22, fontWeight: "700" }}>A sheet</text>
-              <Button label="Close" onPress={() => setSheet(false)} />
-              <For each={["First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh"]}>
-                {(label) => <Field label={label} placeholder={`${label} field`} />}
-              </For>
+              <Button label="Close" onPress={() => sheet.set(false)} />
+              <each of={["First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh"]}>
+                {(label) => <Field label={label()} placeholder={`${label()} field`} />}
+              </each>
             </view>
           </scroll>
         </SafeAreaView>
@@ -189,8 +188,8 @@ export function Form() {
 /** An input pinned to the bottom (outside any scroll view): it rides on the keyboard. */
 /** A multiline input that grows with its text (onContentSizeChange), up to 5 lines. */
 function AutoGrow() {
-  const [height, setHeight] = createSignal(0);
-  const [size, setSize] = createSignal("");
+  const height = signal(0);
+  const size = signal("");
   return (
     <view style={{ gap: 4 }}>
       <text style={{ fontSize: 13, color: colors.muted }}>Grows with its text (onContentSizeChange): {size()}</text>
@@ -198,8 +197,8 @@ function AutoGrow() {
         multiline
         placeholder="Type several lines"
         onContentSizeChange={(e) => {
-          setSize(`${Math.round(e.width)}×${Math.round(e.height)}`);
-          setHeight(Math.min(e.height, 110));
+          size.set(`${Math.round(e.width)}×${Math.round(e.height)}`);
+          height.set(Math.min(e.height, 110));
         }}
         style={{ ...field, height: Math.max(height(), 20) + 20 }}
       />
@@ -209,12 +208,12 @@ function AutoGrow() {
 
 function MessageBar() {
   const insets = useSafeAreaInsets();
-  const [messages, setMessages] = createSignal<string[]>([]);
-  const [draft, setDraft] = createSignal("");
+  const messages = signal<string[]>([]);
+  const draft = signal("");
   const send = () => {
     if (!draft().trim()) return;
-    setMessages((m) => [...m, draft()]);
-    setDraft("");
+    messages.update((m) => [...m, draft()]);
+    draft.set("");
   };
   return (
     <Screen title="Message bar">
@@ -224,7 +223,7 @@ function MessageBar() {
           <text style={{ color: colors.muted }}>
             The bar below sits outside the scroll view; KeyboardAvoidingView lifts it with the keyboard.
           </text>
-          <For each={messages()}>
+          <each of={messages()}>
             {(m) => (
               <text
                 style={{
@@ -237,10 +236,10 @@ function MessageBar() {
                   paddingVertical: 8,
                 }}
               >
-                {m}
+                {m()}
               </text>
             )}
-          </For>
+          </each>
         </view>
       </scroll>
       <view
@@ -255,7 +254,7 @@ function MessageBar() {
       >
         <input
           value={draft()}
-          onChangeText={setDraft}
+          onChangeText={(v) => draft.set(v)}
           onSubmitEditing={send}
           blurOnSubmit={false}
           placeholder="Message"
@@ -271,22 +270,22 @@ function MessageBar() {
   );
 }
 
-/** `onSelectionChange`, `onKeyPress`, `selection` and `setSelection`. */
+/** `onSelectionChange`, `onKeyPress`, `selection` and `(v) => selection.set(v)`. */
 function SelectionDemo() {
-  const [text, setText] = createSignal("Select part of this text");
-  const [range, setRange] = createSignal({ start: 0, end: 0 });
-  const [keys, setKeys] = createSignal<string[]>([]);
-  const [selection, setSelection] = createSignal<{ start: number; end?: number } | undefined>(undefined);
+  const text = signal("Select part of this text");
+  const range = signal({ start: 0, end: 0 });
+  const keys = signal<string[]>([]);
+  const selection = signal<{ start: number; end?: number } | undefined>(undefined);
   let input: YNode | undefined;
   return (
     <view style={{ gap: 8 }}>
       <input
         ref={(node) => (input = node)}
         value={text()}
-        onChangeText={setText}
+        onChangeText={(v) => text.set(v)}
         selection={selection()}
-        onSelectionChange={setRange}
-        onKeyPress={(e) => setKeys((k) => [...k, e.key].slice(-8))}
+        onSelectionChange={(v) => range.set(v)}
+        onKeyPress={(e) => keys.update((k) => [...k, e.key].slice(-8))}
         autoComplete="off"
         style={field}
       />
@@ -296,7 +295,7 @@ function SelectionDemo() {
       <text style={{ fontSize: 13, color: colors.muted }}>{`Keys: ${keys().join(" ") || "–"}`}</text>
       <view style={{ flexDirection: "row", gap: 8 }}>
         <view style={{ flex: 1 }}>
-          <Button label="Select all" onPress={() => setSelection({ start: 0, end: text().length })} />
+          <Button label="Select all" onPress={() => selection.set({ start: 0, end: text().length })} />
         </view>
         <view style={{ flex: 1 }}>
           <Button label="Caret to start" color="#57606a" onPress={() => input?.setSelection(0)} />

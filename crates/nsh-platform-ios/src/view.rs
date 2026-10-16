@@ -6,7 +6,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use nsh_engine::Bundle;
+use nsh_engine::{App, Bundle, Root};
 use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained};
 use objc2_core_foundation::CGRect;
 use objc2_ui_kit::{UIView, UIViewAutoresizing};
@@ -15,9 +15,10 @@ use crate::surface::{Surface, SurfaceOptions};
 
 /// A UIKit view running a nsh app.
 ///
-/// Add [`AppView::view`] to any hierarchy, then [`AppView::load`] a bundle
-/// (or, in development builds, [`AppView::connect_dev_server`]). Loading
-/// again replaces the running app. Dropping the `AppView` stops the app.
+/// Add [`AppView::view`] to any hierarchy, then [`AppView::run`] a Rust
+/// app's root component or [`AppView::load`] a JS bundle (or, in
+/// development builds, [`AppView::connect_dev_server`]). Loading again
+/// replaces the running app. Dropping the `AppView` stops the app.
 pub struct AppView {
     inner: Rc<Inner>,
 }
@@ -67,7 +68,13 @@ impl AppView {
 
     /// Runs `bundle`, replacing the running app (its state is reset).
     pub fn load(&self, bundle: Bundle) {
-        Inner::load(&self.inner, bundle);
+        Inner::load(&self.inner, App::Js(bundle));
+    }
+
+    /// Runs a Rust app: its root component (`Root::of::<App>()`), replacing
+    /// the running app.
+    pub fn run(&self, root: Root) {
+        Inner::load(&self.inner, App::Rust(root));
     }
 
     /// Sets where `asset:/…` files (images, fonts) are read from. A change
@@ -146,14 +153,14 @@ impl AppView {
 }
 
 impl Inner {
-    pub(crate) fn load(this: &Rc<Inner>, bundle: Bundle) {
+    pub(crate) fn load(this: &Rc<Inner>, app: App) {
         let mut state = this.state.borrow_mut();
         if let Some(surface) = &state.surface {
-            return surface.reload(bundle);
+            return surface.reload(app);
         }
         let mtm = this.container.mtm();
         let options = state.options.clone();
-        let surface = match Surface::new(mtm, bundle, this.container.bounds(), options) {
+        let surface = match Surface::new(mtm, app, this.container.bounds(), options) {
             Ok(surface) => surface,
             Err(err) => return log::error!("failed to start the engine: {err}"),
         };

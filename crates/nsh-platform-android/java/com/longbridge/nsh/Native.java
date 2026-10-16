@@ -75,6 +75,9 @@ final class Native {
 
     static native boolean connectDevServer(long handle, String url);
 
+    /** Runs the Rust app this library is (defined by the app's `nsh::main!`; absent from the JS runtime's). */
+    static native void runRust(long handle);
+
     /** A trust store kept in {@code dir}; 0 if its state cannot be read. */
     static native long trustCreate(String dir);
 

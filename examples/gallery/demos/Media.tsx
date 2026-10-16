@@ -1,5 +1,4 @@
-import { createSignal } from "solid-js";
-import { type YNode } from "nsh";
+import { signal, type YNode } from "nsh";
 import { Video } from "nsh/video";
 import { WebView, type WebViewNavigation } from "nsh/webview";
 import { Button, colors, Section } from "../ui";
@@ -13,11 +12,11 @@ const page = `<!doctype html><html><head><meta name="viewport" content="width=de
 </body></html>`;
 
 export function Media() {
-  const [state, setState] = createSignal<WebViewNavigation | null>(null);
-  const [controls, setControls] = createSignal(false);
-  const [message, setMessage] = createSignal("");
-  const [paused, setPaused] = createSignal(true);
-  const [progress, setProgress] = createSignal("");
+  const state = signal<WebViewNavigation | null>(null);
+  const controls = signal(false);
+  const message = signal("");
+  const paused = signal(true);
+  const progress = signal("");
   let web!: YNode;
   let site!: YNode;
   let video!: YNode;
@@ -25,7 +24,7 @@ export function Media() {
     <scroll style={{ flex: 1, backgroundColor: colors.background }}>
       <view style={{ padding: 16, gap: 20 }}>
         <Section title="Web view">
-          <WebView ref={web} source={{ html: page }} style={{ height: 200, borderRadius: 8, overflow: "hidden" }} onMessage={(e) => setMessage(e.data)} />
+          <WebView ref={web} source={{ html: page }} style={{ height: 200, borderRadius: 8, overflow: "hidden" }} onMessage={(e) => message.set(e.data)} />
           <view style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
             <Button label="Post to the page" onPress={() => web.postMessage(`hi #${Math.round(performance.now()) % 1000}`)} />
             <text style={{ flex: 1, color: colors.muted }}>{message()}</text>
@@ -36,7 +35,7 @@ export function Media() {
             ref={site}
             source={{ uri: "https://en.m.wikipedia.org/wiki/React_Native" }}
             style={{ height: 320, borderRadius: 8, overflow: "hidden" }}
-            onNavigationStateChange={setState}
+            onNavigationStateChange={(v) => state.set(v)}
           />
           <text numberOfLines={1} style={{ color: colors.muted, fontSize: 13 }}>
             {state() ? `${state()!.loading ? "Loading " : ""}${state()!.title || state()!.url}` : "…"}
@@ -56,12 +55,12 @@ export function Media() {
             repeat
             controls={controls()}
             style={{ height: 200, backgroundColor: "#000000", borderRadius: 8, overflow: "hidden" }}
-            onProgress={(e) => setProgress(`${e.currentTime.toFixed(1)} / ${e.duration.toFixed(1)} s`)}
+            onProgress={(e) => progress.set(`${e.currentTime.toFixed(1)} / ${e.duration.toFixed(1)} s`)}
           />
           <view style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-            <Button label={paused() ? "Play" : "Pause"} onPress={() => setPaused(!paused())} />
+            <Button label={paused() ? "Play" : "Pause"} onPress={() => paused.set(!paused())} />
             <Button label="Restart" color="#57606a" onPress={() => video.seek(0)} />
-            <Button label={controls() ? "Own controls" : "System controls"} color="#8250df" onPress={() => setControls(!controls())} />
+            <Button label={controls() ? "Own controls" : "System controls"} color="#8250df" onPress={() => controls.set(!controls())} />
             <text style={{ color: colors.muted }}>{progress()}</text>
           </view>
         </Section>

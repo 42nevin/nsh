@@ -1,0 +1,282 @@
+//! The JS side of an engine running a JS app: its VM ([`nsh_js::Host`])
+//! and the source maps its stack traces are mapped with. A Rust app has
+//! none; without feature `js` the engine cannot make one (the type is
+//! uninhabited, so the loop needs no `cfg`).
+
+#[cfg(feature = "js")]
+pub(crate) use imp::Script;
+#[cfg(not(feature = "js"))]
+pub(crate) use stub::Script;
+
+#[cfg(feature = "js")]
+mod imp {
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::{Arc, atomic::AtomicBool},
+        time::Instant,
+    };
+
+    use nsh_core::{EventKind, EventPayload, NodeId, Op, TextEngine};
+    use nsh_js::{Host, HostOptions, JsError, NetworkQueue, RequestId};
+
+    use crate::{
+        Bundle, BundleCode, Environment, FetchEvent, HotUpdate, Limits, MountSink,
+        symbolicate::Symbolicator,
+    };
+
+    /// A JS app's VM.
+    pub(crate) struct Script {
+        host: Host,
+        symbolicator: Rc<RefCell<Symbolicator>>,
+    }
+
+    impl Script {
+        /// Starts a VM for `bundle` and evaluates it (errors go to `sink`);
+        /// also the time evaluation took. `None`: the VM did not start.
+        pub(crate) fn start<M: TextEngine + 'static>(
+            bundle: &Bundle,
+            limits: Limits,
+            ui_set: &nsh_core::ui::Registry,
+            environment: &Environment,
+            text_engine: Rc<M>,
+            stop: Arc<AtomicBool>,
+            sink: Rc<dyn MountSink>,
+        ) -> Option<(Script, u128)> {
+            let options = HostOptions {
+                limits,
+                harden: bundle.policy.harden,
+                ui_sets: vec![ui_set.clone()],
+            };
+            let mut host = match Host::with_options(options) {
+                Ok(host) => host,
+                Err(err) => {
+                    log::error!("failed to start JS: {err}");
+                    sink.report_error(&err.message);
+                    return None;
+                }
+            };
+            host.set_stop_flag(stop);
+            let symbolicator = Rc::new(RefCell::new(Symbolicator::new(bundle.source_map.clone())));
+            let (map, errors) = (symbolicator.clone(), sink.clone());
+            host.set_error_handler(Box::new(move |err| {
+                let message = map.borrow_mut().rewrite(&err.message);
+                log::error!(target: "js", "uncaught exception: {message}");
+                errors.report_error(&message);
+            }));
+            // Canvas `measureText` measures on this thread.
+            host.set_text_measurer(Box::new(move |font, text| {
+                nsh_core::canvas::measure_line(&*text_engine, font, text)
+            }));
+            host.set_environment(environment);
+            let script = Script { host, symbolicator };
+            let start = Instant::now();
+            let loaded: Result<(), JsError> = match &bundle.code {
+                BundleCode::Bytecode(bytes) => script.host.eval_bytecode(bytes),
+                BundleCode::Source(code) => script.host.eval_source(code),
+            };
+            if let Err(err) = loaded {
+                script.report(&*sink, "bundle failed", &err.message);
+            }
+            let eval_us = start.elapsed().as_micros();
+            Some((script, eval_us))
+        }
+
+        /// Reports an error of the app, its stack mapped to the sources.
+        pub(crate) fn report(&self, sink: &dyn MountSink, what: &str, message: &str) {
+            let message = self.symbolicator.borrow_mut().rewrite(message);
+            log::error!(target: "js", "{what}: {message}");
+            sink.report_error(&message);
+        }
+
+        /// Applies a development update in place.
+        pub(crate) fn hot_update(&self, update: HotUpdate, sink: &dyn MountSink) {
+            if let Some(map) = update.source_map {
+                self.symbolicator.borrow_mut().add(&update.name, map);
+            }
+            let start = Instant::now();
+            match self.host.eval_script(&update.name, &update.code) {
+                Ok(true) => log::info!("hot update applied in {}µs", start.elapsed().as_micros()),
+                Ok(false) => sink.hot_update_failed(),
+                // The app keeps the modules that ran; the next update can
+                // fix the rest.
+                Err(err) => self.report(sink, "hot update failed", &err.message),
+            }
+        }
+
+        pub(crate) fn dispatch_event(&self, id: NodeId, event: EventKind, payload: &EventPayload) {
+            self.host.dispatch_event(id, event, payload);
+        }
+
+        pub(crate) fn bind_list(&self, list: NodeId, binds: &[(u32, u32)]) {
+            self.host.bind_list(list, binds);
+        }
+
+        pub(crate) fn animations_finished(&self, finished: &[nsh_anim::Finished]) {
+            self.host.animations_finished(finished);
+        }
+
+        pub(crate) fn take_ops(&self, out: &mut Vec<Op>) {
+            self.host.take_ops(out);
+        }
+
+        pub(crate) fn next_timer(&self) -> Option<Instant> {
+            self.host.next_timer()
+        }
+
+        pub(crate) fn run_timers(&self, now: Instant) {
+            self.host.run_timers(now);
+        }
+
+        pub(crate) fn wants_frame(&self) -> bool {
+            self.host.wants_frame()
+        }
+
+        pub(crate) fn run_frame(&self) {
+            self.host.run_frame();
+        }
+
+        pub(crate) fn set_environment(&self, environment: &Environment) {
+            self.host.set_environment(environment);
+        }
+
+        pub(crate) fn take_fonts(&self, out: &mut Vec<String>) {
+            self.host.take_fonts(out);
+        }
+
+        pub(crate) fn take_network(&self, out: &mut NetworkQueue) {
+            self.host.take_network(out);
+        }
+
+        pub(crate) fn fetch_event(&self, id: RequestId, event: FetchEvent) {
+            self.host.fetch_event(id, event);
+        }
+
+        pub(crate) fn collect_garbage(&self) {
+            self.host.collect_garbage();
+        }
+
+        pub(crate) fn fatal(&self) -> Option<String> {
+            self.host.fatal()
+        }
+
+        pub(crate) fn stop(&self, reason: String) {
+            self.host.stop(reason);
+        }
+    }
+}
+
+#[cfg(not(feature = "js"))]
+mod stub {
+    use std::{
+        rc::Rc,
+        sync::{Arc, atomic::AtomicBool},
+        time::Instant,
+    };
+
+    use nsh_core::{EventKind, EventPayload, NodeId, Op, TextEngine};
+
+    use crate::{Bundle, Environment, HotUpdate, Limits, MountSink};
+
+    /// No JS in this build: never made.
+    pub(crate) enum Script {}
+
+    /// What JS asked of its requests (nothing without JS).
+    #[derive(Default)]
+    pub(crate) struct NetworkQueue {
+        pub(crate) ops: Vec<(u32, crate::FetchOp)>,
+    }
+
+    impl Script {
+        pub(crate) fn start<M: TextEngine + 'static>(
+            _: &Bundle,
+            _: Limits,
+            _: &nsh_core::ui::Registry,
+            _: &Environment,
+            _: Rc<M>,
+            _: Arc<AtomicBool>,
+            sink: Rc<dyn MountSink>,
+        ) -> Option<(Script, u128)> {
+            let message = "this build of nsh runs Rust apps only (feature `js` is off)";
+            log::error!("{message}");
+            sink.report_error(message);
+            None
+        }
+
+        pub(crate) fn report(&self, _: &dyn MountSink, _: &str, _: &str) {
+            match *self {}
+        }
+
+        pub(crate) fn hot_update(&self, _: HotUpdate, _: &dyn MountSink) {
+            match *self {}
+        }
+
+        pub(crate) fn dispatch_event(&self, _: NodeId, _: EventKind, _: &EventPayload) {
+            match *self {}
+        }
+
+        pub(crate) fn bind_list(&self, _: NodeId, _: &[(u32, u32)]) {
+            match *self {}
+        }
+
+        pub(crate) fn animations_finished(&self, _: &[nsh_anim::Finished]) {
+            match *self {}
+        }
+
+        pub(crate) fn take_ops(&self, _: &mut Vec<Op>) {
+            match *self {}
+        }
+
+        pub(crate) fn next_timer(&self) -> Option<Instant> {
+            match *self {}
+        }
+
+        pub(crate) fn run_timers(&self, _: Instant) {
+            match *self {}
+        }
+
+        pub(crate) fn wants_frame(&self) -> bool {
+            match *self {}
+        }
+
+        pub(crate) fn run_frame(&self) {
+            match *self {}
+        }
+
+        pub(crate) fn set_environment(&self, _: &Environment) {
+            match *self {}
+        }
+
+        pub(crate) fn take_fonts(&self, _: &mut Vec<String>) {
+            match *self {}
+        }
+
+        pub(crate) fn take_network(&self, _: &mut NetworkQueue) {
+            match *self {}
+        }
+
+        pub(crate) fn fetch_event(&self, _: u32, _: crate::FetchEvent) {
+            match *self {}
+        }
+
+        pub(crate) fn collect_garbage(&self) {
+            match *self {}
+        }
+
+        pub(crate) fn fatal(&self) -> Option<String> {
+            match *self {}
+        }
+
+        pub(crate) fn stop(&self, _: String) {
+            match *self {}
+        }
+    }
+}
+
+#[cfg(feature = "js")]
+pub(crate) use nsh_js::{NetworkQueue, RequestId};
+#[cfg(not(feature = "js"))]
+pub(crate) use stub::NetworkQueue;
+/// Identifies a request between JS and the network stack.
+#[cfg(not(feature = "js"))]
+pub(crate) type RequestId = u32;

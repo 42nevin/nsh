@@ -11,10 +11,9 @@ unsafe extern "C" {
 struct Logger;
 
 impl log::Log for Logger {
+    /// Info and up: nsh's, JS's and a Rust app's own logs.
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        metadata.target().starts_with("nsh")
-            || metadata.target() == "js"
-            || metadata.level() <= log::Level::Warn
+        metadata.level() <= log::Level::Info
     }
 
     fn log(&self, record: &log::Record<'_>) {

@@ -31,7 +31,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 pub use self::theme::{Theme, ThemeError};
-use self::utilities::{Decl, Parts, touched};
+pub(crate) use self::utilities::{Decl, Len, Part};
+use self::utilities::{Parts, touched};
 use crate::{
     ops::ResizeMode,
     props::PointerEvents,
@@ -214,6 +215,30 @@ pub(crate) struct Rule {
     important: bool,
 }
 
+/// Ranks of the variants Rust components use (Tailwind's order, as
+/// [`variant`] gives them).
+pub(crate) mod rank {
+    pub(crate) const HOVER: u16 = 31;
+    pub(crate) const FOCUS: u16 = 32;
+    pub(crate) const ACTIVE: u16 = 33;
+}
+
+impl Rule {
+    /// A rule applying `decls` while the node is in all of [`state`]
+    /// `states`, ordered by `rank`.
+    pub(crate) fn new(states: u8, rank: u16, decls: Vec<Decl>) -> Self {
+        Self {
+            cond: Condition {
+                states,
+                ..Condition::default()
+            },
+            decls,
+            rank,
+            important: false,
+        }
+    }
+}
+
 /// Node properties classes can set (an explicit prop wins over them).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ClassProps {
@@ -306,7 +331,7 @@ impl ClassList {
             }
             important |= rule.important;
             for decl in &rule.decls {
-                decl.apply(style, props, &mut parts);
+                decl.apply(cx.env.dark, style, props, &mut parts);
             }
         }
         // `placeholder:` rules only carry a color.
@@ -336,12 +361,50 @@ impl ClassList {
             {
                 if rule.cond.matches(cx) {
                     for decl in &rule.decls {
-                        decl.apply(style, props, &mut parts);
+                        decl.apply(cx.env.dark, style, props, &mut parts);
                     }
                 }
             }
             parts.finish(style, props, theme, cx.window, parts.touched);
         }
+    }
+}
+
+impl ClassList {
+    /// The rules of a Rust component's styles (already in order).
+    pub(crate) fn from_rules(rules: Vec<Rule>) -> Self {
+        let mut list = ClassList::default();
+        for rule in rules {
+            list.add(rule);
+        }
+        list.rules.sort_by_key(|r| (r.important, r.rank));
+        list
+    }
+
+    fn add(&mut self, rule: Rule) {
+        self.deps |= rule.cond.deps();
+        self.tracked |= rule.cond.states & !state::DISABLED;
+        if rule.cond.states & state::FOCUS_WITHIN != 0 {
+            self.tracked |= state::FOCUS_WITHIN;
+        }
+        for d in &rule.decls {
+            self.deps |= d.deps();
+        }
+        self.rules.push(rule);
+    }
+
+    /// `self`, then `over`: at equal rank `over`'s rules win (the app's
+    /// classes on a Rust component).
+    pub(crate) fn merged(&self, over: &ClassList) -> ClassList {
+        let mut list = self.clone();
+        for rule in &over.rules {
+            list.add(rule.clone());
+        }
+        list.groups.extend(over.groups.iter().cloned());
+        list.unknown.extend(over.unknown.iter().cloned());
+        list.tracked |= over.tracked;
+        list.rules.sort_by_key(|r| (r.important, r.rank));
+        list
     }
 }
 
@@ -396,17 +459,7 @@ pub fn parse(theme: &Theme, classes: &str) -> ClassList {
     let mut list = ClassList::default();
     for token in classes.split_ascii_whitespace() {
         match parse_token(theme, token) {
-            Some(Token::Rule(rule)) => {
-                list.deps |= rule.cond.deps();
-                list.tracked |= rule.cond.states & !state::DISABLED;
-                if rule.cond.states & state::FOCUS_WITHIN != 0 {
-                    list.tracked |= state::FOCUS_WITHIN;
-                }
-                for d in &rule.decls {
-                    list.deps |= d.deps();
-                }
-                list.rules.push(rule);
-            }
+            Some(Token::Rule(rule)) => list.add(rule),
             Some(Token::Group(name)) => {
                 list.tracked |= state::PRESSED | state::HOVERED | state::FOCUS_WITHIN;
                 list.groups.push(name);

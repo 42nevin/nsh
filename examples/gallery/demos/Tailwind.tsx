@@ -1,4 +1,4 @@
-import { createSignal, For, Index } from "solid-js";
+import { signal } from "nsh";
 import logo from "../logo@2x.png";
 
 const photo = "https://picsum.photos/seed/nsh-tailwind/600/400";
@@ -18,32 +18,32 @@ function Label(props: { children: string }) {
 
 /** Buttons: press states without JS, transitions, `disabled:`. */
 function Buttons() {
-  const [count, setCount] = createSignal(0);
-  const [busy, setBusy] = createSignal(false);
+  const count = signal(0);
+  const busy = signal(false);
   return (
     <view class="gap-3">
       <view class="flex-row flex-wrap gap-2">
         <view
-          onPress={() => setCount(count() + 1)}
+          onPress={() => count.set(count() + 1)}
           class="rounded-lg bg-brand-600 px-4 py-2 transition-colors duration-150 active:bg-brand-700 hover:bg-brand-500"
         >
           <text class="font-medium text-white">Pressed {count()}×</text>
         </view>
         <view
-          onPress={() => setCount(0)}
+          onPress={() => count.set(0)}
           class="rounded-lg border border-zinc-300 px-4 py-2 transition active:scale-95 active:bg-zinc-100 dark:border-zinc-600 dark:active:bg-zinc-700"
         >
           <text class="font-medium text-zinc-900 dark:text-white">Reset</text>
         </view>
         <view
-          onPress={() => setBusy(!busy())}
+          onPress={() => busy.set(!busy())}
           disabled={busy()}
           class="rounded-full bg-emerald-500 px-4 py-2 disabled:opacity-40 active:bg-emerald-600"
         >
           <text class="font-medium text-white">{busy() ? "Disabled" : "Enabled"}</text>
         </view>
       </view>
-      <view onPress={() => setBusy(false)} class="self-start rounded-md px-2 py-1 active:bg-zinc-100 dark:active:bg-zinc-700">
+      <view onPress={() => busy.set(false)} class="self-start rounded-md px-2 py-1 active:bg-zinc-100 dark:active:bg-zinc-700">
         <text class="text-sm text-brand-600 underline decoration-dotted underline-offset-4">Enable again</text>
       </view>
     </view>
@@ -103,14 +103,14 @@ const shades = ["100", "300", "500", "700", "900"];
 function Colors() {
   return (
     <view class="gap-1">
-      <For each={palette}>
+      <each of={palette}>
         {(name) => (
           <view class="flex-row gap-1">
-            <text class="w-16 text-xs text-zinc-500">{name}</text>
-            <For each={shades}>{(shade) => <view class={`h-6 flex-1 rounded bg-${name}-${shade}`} />}</For>
+            <text class="w-16 text-xs text-zinc-500">{name()}</text>
+            <each of={shades}>{(shade) => <view class={`h-6 flex-1 rounded bg-${name()}-${shade()}`} />}</each>
           </view>
         )}
-      </For>
+      </each>
     </view>
   );
 }
@@ -120,14 +120,14 @@ function Shadows() {
   return (
     <view class="gap-4">
       <view class="flex-row flex-wrap justify-between gap-y-5 px-1 py-2">
-        <For each={sizes}>
+        <each of={sizes}>
           {(s) => (
             <view class="gap-1">
-              <view class={`size-14 rounded-xl bg-white dark:bg-zinc-600 ${s}`} />
-              <Label>{s.slice(7)}</Label>
+              <view class={`size-14 rounded-xl bg-white dark:bg-zinc-600 ${s()}`} />
+              <Label>{s().slice(7)}</Label>
             </view>
           )}
-        </For>
+        </each>
       </view>
       <view class="flex-row justify-between px-1">
         <view class="gap-1">
@@ -160,7 +160,7 @@ function Gradients() {
   ];
   return (
     <view class="flex-row justify-between">
-      <For each={kinds}>{(k) => <view class={`size-16 rounded-xl ${k}`} />}</For>
+      <each of={kinds}>{(k) => <view class={`size-16 rounded-xl ${k()}`} />}</each>
     </view>
   );
 }
@@ -193,14 +193,14 @@ function Effects() {
   return (
     <view class="gap-3">
       <view class="flex-row justify-between">
-        <Index each={["", "grayscale", "sepia", "blur-sm", "brightness-50"]}>
+        <each of={["", "grayscale", "sepia", "blur-sm", "brightness-50"]}>
           {(f) => (
             <view class="gap-1">
               <image src={photo} class={`size-14 rounded-lg ${f()}`} />
               <Label>{f() || "none"}</Label>
             </view>
           )}
-        </Index>
+        </each>
       </view>
       <view class="h-28 overflow-hidden rounded-xl">
         <image src={photo} class="absolute inset-0 size-full" />
@@ -247,14 +247,14 @@ function Lists() {
   const items = ["Inbox", "Drafts", "Sent", "Archive", "Trash"];
   return (
     <view class="overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-700">
-      <For each={items}>
+      <each of={items}>
         {(item) => (
           <view class="flex-row items-center justify-between border-t border-zinc-200 px-3 py-2.5 first:border-t-0 even:bg-zinc-50 last:bg-rose-50 active:bg-brand-50 dark:border-zinc-700 dark:even:bg-zinc-900 dark:last:bg-rose-950">
-            <text class="text-zinc-800 dark:text-zinc-100">{item}</text>
+            <text class="text-zinc-800 dark:text-zinc-100">{item()}</text>
             <text class="text-xs text-zinc-400">›</text>
           </view>
         )}
-      </For>
+      </each>
     </view>
   );
 }
@@ -289,13 +289,16 @@ export function Tailwind() {
   return (
     <scroll class="flex-1 bg-zinc-100 dark:bg-zinc-900">
       <view class="gap-5 p-4">
-        <For each={sections}>
-          {([title, Body]) => (
-            <Section title={title}>
-              <Body />
-            </Section>
-          )}
-        </For>
+        <each of={sections}>
+          {(section) => {
+            const [title, Body] = section();
+            return (
+              <Section title={title}>
+                <Body />
+              </Section>
+            );
+          }}
+        </each>
       </view>
     </scroll>
   );

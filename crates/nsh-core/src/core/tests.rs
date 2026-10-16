@@ -799,7 +799,7 @@ fn scroll_reports_content_size() {
     )));
 }
 
-/// Plays the JS runtime: creates a cell per new slot, renders a fixed-height
+/// Plays JS: creates a cell per new slot, renders a fixed-height
 /// row for each bind and confirms the index.
 fn render_binds(
     c: &mut Core<FakeEngine>,
@@ -2881,4 +2881,1525 @@ fn refused_urls_fail_and_send_nothing() {
         &events[..],
         [(3, EventKind::Error, EventPayload::Error { message })] if message.contains("`tracker.io`")
     ));
+}
+
+mod components {
+    use serde_json::json;
+
+    use super::*;
+    use crate::ui::{
+        Children, Component, Event, NoEvent, Props, Registry, RenderCx, Slot, prelude::*,
+    };
+
+    /// Counts taps; shows `label` and the count; holds its JSX children.
+    #[derive(Default)]
+    struct Tally {
+        taps: u32,
+    }
+
+    #[derive(Clone, PartialEq, Props)]
+    struct TallyProps {
+        #[prop(default = "Taps".into())]
+        label: SharedString,
+        children: Children,
+    }
+
+    #[derive(Event)]
+    enum TallyEvent {
+        Tap { count: u32 },
+    }
+
+    impl Component for Tally {
+        const NAME: &'static str = "test.tally";
+        type Props = TallyProps;
+        type Event = TallyEvent;
+
+        fn render(&self, props: &TallyProps, cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            view()
+                .p_2()
+                .on_press(cx.listener(|this: &mut Self, _, cx| {
+                    this.taps += 1;
+                    cx.emit(TallyEvent::Tap { count: this.taps });
+                    cx.notify();
+                }))
+                .child(text(format!("{} {}", props.label, self.taps)))
+                .child(view().gap_1().child(props.children))
+        }
+    }
+
+    fn texts(batch: &MountBatch) -> Vec<String> {
+        batch
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::Text { text, .. } => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn core_with_tally() -> Core<FakeEngine> {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Tally>();
+        c.set_components(registry);
+        c
+    }
+
+    /// A Rust app's root: mounted with no op from JS and no registration.
+    #[test]
+    fn a_rust_root_mounts_renders_and_handles_events() {
+        let mut c = core();
+        c.mount_root(&crate::ui::Root::new::<Tally>(|| TallyProps {
+            label: "Root".into(),
+            children: Children::default(),
+        }));
+        let batch = c.commit().unwrap();
+        assert_eq!(texts(&batch), ["Root 0"]);
+        let host = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Insert {
+                    parent: ROOT_ID,
+                    child,
+                    ..
+                } => Some(*child),
+                _ => None,
+            })
+            .expect("the root's host is in the root view");
+        assert_eq!(host % 2, 1, "the core's own id");
+        assert!(c.component_event(host, EventKind::Press, &EventPayload::None));
+        assert_eq!(texts(&c.commit().unwrap()), ["Root 1"]);
+    }
+
+    #[test]
+    fn components_render_handle_events_and_place_children() {
+        let mut c = core_with_tally();
+        let prop = |name: &str, value| Op::SetProp {
+            id: 2,
+            prop: Prop::ComponentProp(name.into(), Some(value)),
+        };
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Component("test.tally".into()),
+                },
+                prop("label", json!("Hits")),
+                Op::Create {
+                    id: 4,
+                    tag: Tag::View,
+                },
+                Op::Insert {
+                    parent: 2,
+                    child: 4,
+                    before: None,
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ],
+        );
+        let batch = c.commit().unwrap();
+        assert_eq!(texts(&batch), ["Hits 0"]);
+        // Expanded nodes have odd ids; the JS child sits where the render
+        // put `Children`, not in the host.
+        let holder = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Insert {
+                    parent, child: 4, ..
+                } => Some(*parent),
+                _ => None,
+            })
+            .expect("JS child placed");
+        assert!(holder % 2 == 1 && holder != 2);
+        assert!(
+            batch
+                .items
+                .iter()
+                .any(|i| matches!(i, MountItem::Create { id: 2, .. }))
+        );
+
+        // A press on the host goes to the component, which emits and renders
+        // again.
+        assert!(c.component_event(2, EventKind::Press, &EventPayload::None));
+        let mut events = Vec::new();
+        c.take_events(&mut events);
+        assert_eq!(
+            events,
+            [(
+                2,
+                EventKind::NativeEvent,
+                EventPayload::Native {
+                    name: "tap".into(),
+                    data: json!({ "count": 1 })
+                }
+            )]
+        );
+        let batch = c.commit().unwrap();
+        assert_eq!(texts(&batch), ["Hits 1"]);
+
+        // A prop change renders again; only what changed is sent. Clearing
+        // a prop restores its default.
+        apply(
+            &mut c,
+            vec![Op::SetProp {
+                id: 2,
+                prop: Prop::ComponentProp("label".into(), None),
+            }],
+        );
+        let batch = c.commit().unwrap();
+        assert_eq!(texts(&batch), ["Taps 1"]);
+        assert!(
+            !batch
+                .items
+                .iter()
+                .any(|i| matches!(i, MountItem::Create { .. }))
+        );
+        // A value of the wrong type is refused (and logged), nothing renders.
+        apply(&mut c, vec![prop("label", json!(3))]);
+        assert!(c.commit().is_none());
+
+        // Unknown events on the host (no handler) are JS's.
+        assert!(!c.component_event(2, EventKind::Layout, &EventPayload::None));
+
+        // Releasing the host frees what it rendered; its JS child stays.
+        apply(
+            &mut c,
+            vec![
+                Op::Remove {
+                    parent: ROOT_ID,
+                    child: 2,
+                },
+                Op::Release { id: 2 },
+            ],
+        );
+        let batch = c.commit().unwrap();
+        let deleted: Vec<NodeId> = batch
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::Delete { id } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert!(deleted.contains(&2) && deleted.contains(&holder));
+        assert!(!deleted.contains(&4));
+        assert!(c.key(4).is_ok());
+    }
+
+    /// A header slot above its children.
+    #[derive(Default)]
+    struct Card;
+
+    #[derive(Clone, PartialEq, Props)]
+    struct CardProps {
+        header: Option<Slot>,
+        children: Children,
+    }
+
+    impl Component for Card {
+        const NAME: &'static str = "test.card";
+        type Props = CardProps;
+        type Event = NoEvent;
+
+        fn render(&self, props: &CardProps, _cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            let filled = props.header.is_some();
+            view().slot(props.header, |h| h.h(px(44.0))).child(
+                view()
+                    .map(|v| if filled { v.mt_2() } else { v.mt_0() })
+                    .child(props.children),
+            )
+        }
+    }
+
+    #[test]
+    fn slots_are_the_glues_nodes_placed_by_the_render() {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Card>();
+        c.set_components(registry);
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Component("test.card".into()),
+                },
+                // The glue's node for `header`, then its JSX.
+                Op::Create {
+                    id: 4,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 4,
+                    prop: Prop::ComponentSlot("header".into()),
+                },
+                Op::Insert {
+                    parent: 2,
+                    child: 4,
+                    before: None,
+                },
+                Op::Create {
+                    id: 6,
+                    tag: Tag::View,
+                },
+                Op::Insert {
+                    parent: 4,
+                    child: 6,
+                    before: None,
+                },
+                // Children go before the slot's node (the anchor).
+                Op::Create {
+                    id: 8,
+                    tag: Tag::View,
+                },
+                style_op(8, &[("height", StyleValue::Number(10.0))]),
+                Op::Insert {
+                    parent: 2,
+                    child: 8,
+                    before: Some(4),
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ],
+        );
+        let batch = c.commit().unwrap();
+        // The slot's node is the header element (in the host, 44pt tall).
+        assert!(batch.items.iter().any(|i| matches!(
+            i,
+            MountItem::Insert {
+                parent: 2,
+                child: 4,
+                ..
+            }
+        )));
+        assert_eq!(frame_of(&batch, 4).map(|f| f.height), Some(44.0));
+        // The children sit below it, after `mt_2` (the slot is filled).
+        let holder = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Insert {
+                    parent, child: 8, ..
+                } => Some(*parent),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(frame_of(&batch, holder).map(|f| f.y), Some(52.0));
+
+        // Emptying the slot renders again: no header, `mt_0`.
+        apply(
+            &mut c,
+            vec![Op::Remove {
+                parent: 4,
+                child: 6,
+            }],
+        );
+        let batch = c.commit().unwrap();
+        assert!(
+            batch
+                .items
+                .iter()
+                .any(|i| matches!(i, MountItem::Remove { id: 4 }))
+        );
+        assert_eq!(frame_of(&batch, holder).map(|f| f.y), Some(0.0));
+    }
+
+    /// Renders a Tally and counts its taps.
+    #[derive(Default)]
+    struct Outer {
+        inner_taps: u32,
+    }
+
+    #[derive(Clone, PartialEq, Props)]
+    struct OuterProps {}
+
+    #[derive(Event)]
+    enum OuterEvent {
+        InnerTap(u32),
+    }
+
+    impl Component for Outer {
+        const NAME: &'static str = "test.outer";
+        type Props = OuterProps;
+        type Event = OuterEvent;
+
+        fn render(&self, _props: &OuterProps, cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            view()
+                .child(text(format!("outer {}", self.inner_taps)))
+                .child(
+                    Tally::element(TallyProps {
+                        label: "In".into(),
+                        ..TallyProps::initial()
+                    })
+                    .on_event(cx.listener(
+                        |this: &mut Self, event: &TallyEvent, cx| {
+                            let TallyEvent::Tap { .. } = event;
+                            this.inner_taps += 1;
+                            cx.emit(OuterEvent::InnerTap(this.inner_taps));
+                            cx.notify();
+                        },
+                    )),
+                )
+        }
+    }
+
+    #[test]
+    fn nested_components_render_and_report_to_their_parent() {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Tally>().register::<Outer>();
+        c.set_components(registry);
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Component("test.outer".into()),
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ],
+        );
+        let batch = c.commit().unwrap();
+        let mut shown = texts(&batch);
+        shown.sort();
+        assert_eq!(shown, ["In 0", "outer 0"]);
+        // The nested Tally's host: the node listening to presses.
+        let inner = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Events { id, events } if events.contains(EventKind::Press) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        assert!(c.component_event(inner, EventKind::Press, &EventPayload::None));
+        let mut events = Vec::new();
+        c.take_events(&mut events);
+        // JS hears the outer component's event, not the inner one.
+        assert_eq!(
+            events,
+            [(
+                2,
+                EventKind::NativeEvent,
+                EventPayload::Native {
+                    name: "innerTap".into(),
+                    data: json!(1)
+                }
+            )]
+        );
+        let mut shown = texts(&c.commit().unwrap());
+        shown.sort();
+        assert_eq!(shown, ["In 1", "outer 1"]);
+    }
+
+    #[test]
+    fn the_apps_class_goes_last_and_unknown_components_render_nothing() {
+        let mut c = core_with_tally();
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Component("test.tally".into()),
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Class("p-8".into()),
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+                Op::Create {
+                    id: 6,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 6,
+                    prop: Prop::Component("test.missing".into()),
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 6,
+                    before: None,
+                },
+            ],
+        );
+        let batch = c.commit().unwrap();
+        // `p-8` (32pt) wins over the component's `p_2`: the text sits 32pt in.
+        let text_id = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Text { id, .. } => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        let frame = frame_of(&batch, text_id).unwrap();
+        assert_eq!((frame.x, frame.y), (32.0, 32.0));
+        // The unknown one is an empty view.
+        assert!(
+            batch
+                .items
+                .iter()
+                .any(|i| matches!(i, MountItem::Create { id: 6, .. }))
+        );
+    }
+
+    /// A theme-colored swatch that darkens while pressed.
+    #[derive(Default)]
+    struct Swatch;
+
+    #[derive(Clone, PartialEq, Props)]
+    struct SwatchProps {}
+
+    impl Component for Swatch {
+        const NAME: &'static str = "test.swatch";
+        type Props = SwatchProps;
+        type Event = NoEvent;
+
+        fn render(&self, _props: &SwatchProps, cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            let theme = cx.theme();
+            view()
+                .size_10()
+                .bg(theme.primary)
+                .active(|s| s.bg(rgb(0xff0000)))
+        }
+    }
+
+    #[test]
+    fn theme_colors_and_press_styles_switch_natively() {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Swatch>();
+        c.set_components(registry);
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Component("test.swatch".into()),
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ],
+        );
+        let background = |batch: &MountBatch| {
+            batch.items.iter().find_map(|i| match i {
+                MountItem::ViewStyle { id: 2, style } => Some(style.background_color),
+                _ => None,
+            })
+        };
+        let theme = crate::ui::Theme::default();
+        let batch = c.commit().unwrap();
+        assert_eq!(background(&batch), Some(theme.primary.light));
+        assert_eq!(frame_of(&batch, 2).map(|f| f.width), Some(40.0));
+        // The platform reports presses on it (`active`).
+        assert!(batch.items.iter().any(|i| matches!(
+            i,
+            MountItem::TrackStates { id: 2, states } if states & crate::tailwind::state::PRESSED != 0
+        )));
+        // Dark appearance: restyled without a render.
+        c.set_class_environment(crate::tailwind::ClassEnvironment {
+            dark: true,
+            ..Default::default()
+        });
+        let batch = c.commit().unwrap();
+        assert_eq!(background(&batch), Some(theme.primary.dark));
+        c.set_states(2, crate::tailwind::state::PRESSED);
+        let batch = c.commit().unwrap();
+        assert_eq!(background(&batch), Some(Color(0xff0000ff)));
+    }
+
+    /// Wraps each JS child in a padded row.
+    #[derive(Default)]
+    struct Rows;
+
+    #[derive(Clone, PartialEq, Props)]
+    struct RowsProps {
+        children: Children,
+    }
+
+    impl Component for Rows {
+        const NAME: &'static str = "test.rows";
+        type Props = RowsProps;
+        type Event = NoEvent;
+
+        fn render(&self, props: &RowsProps, _cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            view().children_each(props.children, |child, at| {
+                view()
+                    .p_1()
+                    .when(!at.is_first(), |v| v.mt_2())
+                    .when(at.is_last(), |v| v.pb_2())
+                    .child(child)
+            })
+        }
+    }
+
+    #[test]
+    fn children_each_wraps_every_js_child_and_follows_changes() {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Rows>();
+        c.set_components(registry);
+        let child = |id: NodeId| {
+            vec![
+                Op::Create { id, tag: Tag::View },
+                style_op(id, &[("height", StyleValue::Number(10.0))]),
+            ]
+        };
+        let mut ops = vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Component("test.rows".into()),
+            },
+        ];
+        ops.extend(child(4));
+        ops.extend(child(6));
+        ops.extend([
+            Op::Insert {
+                parent: 2,
+                child: 4,
+                before: None,
+            },
+            Op::Insert {
+                parent: 2,
+                child: 6,
+                before: None,
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ]);
+        apply(&mut c, ops);
+        let batch = c.commit().unwrap();
+        let wrapper_of = |batch: &MountBatch, id: NodeId| {
+            batch.items.iter().find_map(|i| match i {
+                MountItem::Insert { parent, child, .. } if *child == id => Some(*parent),
+                _ => None,
+            })
+        };
+        let (w4, w6) = (
+            wrapper_of(&batch, 4).unwrap(),
+            wrapper_of(&batch, 6).unwrap(),
+        );
+        assert!(w4 % 2 == 1 && w6 % 2 == 1 && w4 != w6);
+        // 4pt padding, 10pt children, 8pt between the rows.
+        assert_eq!(
+            frame_of(&batch, w4).map(|f| (f.y, f.height)),
+            Some((0.0, 18.0))
+        );
+        // The last has 8pt below.
+        assert_eq!(
+            frame_of(&batch, w6).map(|f| (f.y, f.height)),
+            Some((26.0, 22.0))
+        );
+
+        // A child inserted first gets its own wrapper; the others keep theirs
+        // and move down (the second row now has the margin).
+        let mut ops = child(8);
+        ops.push(Op::Insert {
+            parent: 2,
+            child: 8,
+            before: Some(4),
+        });
+        apply(&mut c, ops);
+        let batch = c.commit().unwrap();
+        let w8 = wrapper_of(&batch, 8).unwrap();
+        assert!(![w4, w6].contains(&w8));
+        assert_eq!(frame_of(&batch, w8).map(|f| f.y), Some(0.0));
+        assert_eq!(frame_of(&batch, w4).map(|f| f.y), Some(26.0));
+        assert!(wrapper_of(&batch, 4).is_none() && wrapper_of(&batch, 6).is_none());
+
+        // A child removed takes its wrapper away; the child itself stays JS's.
+        apply(
+            &mut c,
+            vec![Op::Remove {
+                parent: 2,
+                child: 4,
+            }],
+        );
+        let batch = c.commit().unwrap();
+        assert!(
+            batch
+                .items
+                .iter()
+                .any(|i| matches!(i, MountItem::Delete { id } if *id == w4))
+        );
+        assert!(c.key(4).is_ok());
+        assert_eq!(frame_of(&batch, w6).map(|f| f.y), Some(26.0));
+    }
+
+    /// Ticks every 20ms from `start` until 3, then reports it; shows
+    /// whether the window is wide.
+    #[derive(Default)]
+    struct Clock {
+        ticks: u32,
+        timer: Option<crate::ui::Task<()>>,
+    }
+
+    #[derive(Clone, PartialEq, Props)]
+    struct ClockProps {
+        #[prop(default)]
+        start: u32,
+    }
+
+    #[derive(Event)]
+    enum ClockEvent {
+        Done,
+    }
+
+    impl Component for Clock {
+        const NAME: &'static str = "test.clock";
+        type Props = ClockProps;
+        type Event = ClockEvent;
+
+        fn setup(&mut self, props: &ClockProps, cx: &mut crate::ui::Context<'_, Self>) {
+            self.ticks = props.start;
+            self.timer = Some(cx.set_interval(
+                std::time::Duration::from_millis(20),
+                |this: &mut Self, cx| {
+                    this.ticks += 1;
+                    cx.notify();
+                    if this.ticks == 3 {
+                        cx.emit(ClockEvent::Done);
+                        // Dropping the task stops it (`clearInterval`).
+                        this.timer = None;
+                    }
+                },
+            ));
+        }
+
+        fn props_changed(
+            &mut self,
+            old: &ClockProps,
+            new: &ClockProps,
+            _cx: &mut crate::ui::Context<'_, Self>,
+        ) {
+            if old.start != new.start {
+                self.ticks = new.start;
+            }
+        }
+
+        fn render(&self, _props: &ClockProps, cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            let width = if cx.window().width > 500.0 {
+                "wide"
+            } else {
+                "narrow"
+            };
+            view().child(text(format!("{} {width}", self.ticks)))
+        }
+    }
+
+    /// Fetches a value on the runtime's threads, then shows it.
+    #[derive(Default)]
+    struct Loader {
+        value: Option<u64>,
+        task: Option<crate::ui::Task<()>>,
+    }
+
+    #[derive(Clone, PartialEq, Props)]
+    struct LoaderProps {}
+
+    impl Component for Loader {
+        const NAME: &'static str = "test.loader";
+        type Props = LoaderProps;
+        type Event = NoEvent;
+
+        fn setup(&mut self, _props: &LoaderProps, cx: &mut crate::ui::Context<'_, Self>) {
+            self.task = Some(cx.spawn(|this, cx| async move {
+                // tokio's ecosystem: a `Send` future on the runtime, a timer.
+                let value = cx
+                    .background(async { (1..=10u64).product::<u64>() })
+                    .await
+                    .unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                this.update(move |this: &mut Self, cx| {
+                    this.value = Some(value);
+                    cx.notify();
+                })
+                .await;
+            }));
+        }
+
+        fn render(&self, _props: &LoaderProps, _cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            view().child(text(match self.value {
+                Some(v) => format!("loaded {v}"),
+                None => "loading".to_owned(),
+            }))
+        }
+    }
+
+    /// Runs the tasks and commits until `done` holds of what was shown.
+    fn run_until(c: &mut Core<FakeEngine>, done: impl Fn(&[String]) -> bool) -> Vec<String> {
+        let mut shown = Vec::new();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < end {
+            c.run_component_tasks();
+            if let Some(batch) = c.commit() {
+                shown.extend(texts(&batch));
+                if done(&shown) {
+                    return shown;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("not done: {shown:?}");
+    }
+
+    #[test]
+    fn state_tasks_props_and_the_environment() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_time()
+            .build()
+            .unwrap();
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Clock>().register::<Loader>();
+        c.set_components(registry);
+        c.set_task_runtime(runtime.handle().clone());
+        let mount = |c: &mut Core<FakeEngine>, id: NodeId, name: &str| {
+            apply(
+                c,
+                vec![
+                    Op::Create { id, tag: Tag::View },
+                    Op::SetProp {
+                        id,
+                        prop: Prop::Component(name.into()),
+                    },
+                    Op::Insert {
+                        parent: ROOT_ID,
+                        child: id,
+                        before: None,
+                    },
+                ],
+            )
+        };
+        mount(&mut c, 2, "test.clock");
+        assert_eq!(texts(&c.commit().unwrap()), ["0 narrow"]);
+
+        // The interval (a task: a timer, then an update) ticks to 3,
+        // reports it and stops.
+        let shown = run_until(&mut c, |s| s.iter().any(|t| t == "3 narrow"));
+        assert!(shown.starts_with(&["1 narrow".to_owned()]));
+        let mut events = Vec::new();
+        c.take_events(&mut events);
+        assert!(
+            matches!(&events[..], [(2, EventKind::NativeEvent, EventPayload::Native { name, .. })] if &**name == "done")
+        );
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        c.run_component_tasks();
+        assert!(c.commit().is_none(), "stopped");
+
+        // A prop change reaches `props_changed` before the render.
+        apply(
+            &mut c,
+            vec![Op::SetProp {
+                id: 2,
+                prop: Prop::ComponentProp("start".into(), Some(json!(10))),
+            }],
+        );
+        assert_eq!(texts(&c.commit().unwrap()), ["10 narrow"]);
+
+        // What the render read of the environment renders it again; the
+        // rest does not.
+        let env = crate::ui::Environment {
+            window: Size::new(390.0, 844.0),
+            ..Default::default()
+        };
+        c.set_environment(crate::ui::Environment {
+            keyboard_height: 300.0,
+            ..env
+        });
+        assert!(c.commit().is_none());
+        c.set_viewport(Size::new(800.0, 600.0));
+        assert!(texts(&c.commit().unwrap()).contains(&"10 wide".to_owned()));
+
+        // A task with background work and a tokio timer.
+        mount(&mut c, 4, "test.loader");
+        assert!(texts(&c.commit().unwrap()).contains(&"loading".to_owned()));
+        run_until(&mut c, |s| s.iter().any(|t| t == "loaded 3628800"));
+
+        // A released component's tasks end with it.
+        mount(&mut c, 6, "test.clock");
+        c.commit();
+        assert_eq!(c.components.executor.task_count(), 1);
+        apply(
+            &mut c,
+            vec![
+                Op::Remove {
+                    parent: ROOT_ID,
+                    child: 6,
+                },
+                Op::Release { id: 6 },
+            ],
+        );
+        c.commit();
+        assert_eq!(c.components.executor.task_count(), 0);
+    }
+
+    /// A form: an input it controls, a scroll view, a modal while the
+    /// name is long enough, a canvas drawing its length.
+    #[derive(Default)]
+    struct Form {
+        name: String,
+        focused: bool,
+        field: Option<ElementRef>,
+    }
+
+    impl Component for Form {
+        const NAME: &'static str = "test.form";
+        type Props = FormProps;
+        type Event = NoEvent;
+
+        fn setup(&mut self, _: &FormProps, cx: &mut Context<'_, Self>) {
+            self.field = Some(cx.element_ref());
+        }
+
+        fn render(&self, _: &FormProps, cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            let len = self.name.len() as f32;
+            view()
+                .child(
+                    scroll().bounces(false).child(
+                        input()
+                            .element_ref(self.field.as_ref().unwrap())
+                            .value(self.name.clone())
+                            .when(self.name.is_empty(), |i| i.placeholder("Name"))
+                            .on_change_text(cx.listener(|this: &mut Self, text: &str, cx| {
+                                this.name = text.to_owned();
+                                cx.notify();
+                            }))
+                            .on_focus(cx.listener(|this: &mut Self, _, cx| {
+                                this.focused = true;
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .child(canvas(Painter::new().fill_rect(0.0, 0.0, len, 4.0)))
+                .children((self.name.len() > 2).then(|| {
+                    modal()
+                        .transparent(true)
+                        .child(text(format!("Hi {}", self.name)))
+                }))
+                .child(text(if self.focused { "focused" } else { "idle" }))
+                // Back to the field: focus it, the caret at the end.
+                .child(view().on_press(cx.listener(|this: &mut Self, _, _| {
+                    let field = this.field.as_ref().unwrap();
+                    field.focus();
+                    field.set_selection(3, 3);
+                })))
+        }
+    }
+
+    #[derive(Clone, PartialEq, Props)]
+    struct FormProps {}
+
+    #[test]
+    fn host_elements_take_typed_props_and_events() {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Form>();
+        c.set_components(registry);
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Component("test.form".into()),
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ],
+        );
+        let batch = c.commit().unwrap();
+        let created = |batch: &MountBatch, wanted: ViewKind| {
+            batch.items.iter().find_map(|i| match i {
+                MountItem::Create { id, kind } if *kind == wanted => Some(*id),
+                _ => None,
+            })
+        };
+        let input = created(&batch, ViewKind::Input).expect("an input");
+        let button = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Events { id, events } if events.contains(EventKind::Press) => Some(*id),
+                _ => None,
+            })
+            .expect("the button listens to presses");
+        assert!(created(&batch, ViewKind::Scroll).is_some());
+        assert!(created(&batch, ViewKind::Modal).is_none(), "no modal yet");
+        let placeholder = |batch: &MountBatch| {
+            batch.items.iter().find_map(|i| match i {
+                MountItem::Input { config, .. } => Some(config.placeholder.clone()),
+                _ => None,
+            })
+        };
+        assert_eq!(placeholder(&batch).as_deref(), Some("Name"));
+        assert!(
+            batch
+                .items
+                .iter()
+                .any(|i| matches!(i, MountItem::Canvas { .. }))
+        );
+        assert_eq!(texts(&batch), ["idle"]);
+
+        // Typing: the component gets the text, the placeholder goes back to
+        // its default, the modal appears, the canvas draws again; the
+        // input's value is the platform's already, so it is not sent back.
+        c.input_changed(input, "Ada", 1);
+        assert!(c.component_event(
+            input,
+            EventKind::ChangeText,
+            &EventPayload::Text {
+                text: "Ada".into(),
+                count: 1
+            }
+        ));
+        assert!(c.component_event(input, EventKind::Focus, &EventPayload::None));
+        let batch = c.commit().unwrap();
+        assert_eq!(placeholder(&batch).as_deref(), Some(""));
+        assert!(created(&batch, ViewKind::Modal).is_some());
+        assert!(
+            batch
+                .items
+                .iter()
+                .any(|i| matches!(i, MountItem::Canvas { .. }))
+        );
+        assert!(
+            !batch
+                .items
+                .iter()
+                .any(|i| matches!(i, MountItem::InputValue { .. }))
+        );
+        assert_eq!(texts(&batch), ["Hi Ada", "focused"]);
+
+        // The ref's commands reach the input it is on, in the next batch.
+        assert!(c.component_event(button, EventKind::Press, &EventPayload::None));
+        let batch = c.commit().unwrap();
+        let commands: Vec<_> = batch
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::Command { id, command } => Some((*id, command.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                (input, Command::Focus),
+                (input, Command::SetSelection { start: 3, end: 3 })
+            ]
+        );
+    }
+
+    /// Provides an accent to what is below it, through the app's JSX.
+    #[derive(Default)]
+    struct Theming {
+        accent: u32,
+    }
+
+    #[derive(Clone, PartialEq, Debug)]
+    struct Accent(u32);
+
+    #[derive(Default)]
+    struct Clicks(u32);
+
+    #[derive(Clone, PartialEq, Props)]
+    struct WithChildren {
+        children: Children,
+    }
+
+    impl Component for Theming {
+        const NAME: &'static str = "test.theming";
+        type Props = WithChildren;
+        type Event = NoEvent;
+
+        fn render(&self, props: &WithChildren, cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            cx.provide(Accent(self.accent));
+            view()
+                .on_press(cx.listener(|this: &mut Self, _, cx| {
+                    this.accent += 1;
+                    cx.notify();
+                }))
+                .child(props.children)
+        }
+    }
+
+    /// Shows the accent above it and the surface's clicks; a press counts
+    /// one.
+    #[derive(Default)]
+    struct AccentSwatch;
+
+    impl Component for AccentSwatch {
+        const NAME: &'static str = "test.accent_swatch";
+        type Props = FormProps;
+        type Event = NoEvent;
+
+        fn render(&self, _: &FormProps, cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            let accent = cx.context::<Accent>().map_or(0, |a| a.0);
+            let clicks = cx.global::<Clicks>().0;
+            view()
+                .on_press(cx.listener(|_: &mut Self, _, cx| {
+                    cx.update_global(|c: &mut Clicks, _| c.0 += 1);
+                }))
+                .child(text(format!("accent {accent} clicks {clicks}")))
+        }
+    }
+
+    #[test]
+    fn context_flows_down_and_globals_render_their_readers() {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Theming>().register::<AccentSwatch>();
+        c.set_components(registry);
+        // <Theming><view><Swatch/></view></Theming> and a second Swatch
+        // outside it.
+        let host = |id, name: &str| {
+            vec![
+                Op::Create { id, tag: Tag::View },
+                Op::SetProp {
+                    id,
+                    prop: Prop::Component(name.into()),
+                },
+            ]
+        };
+        let mut ops = host(2, "test.theming");
+        ops.push(Op::Create {
+            id: 4,
+            tag: Tag::View,
+        });
+        ops.extend(host(6, "test.accent_swatch"));
+        ops.extend(host(8, "test.accent_swatch"));
+        for (parent, child) in [(4, 6), (2, 4), (ROOT_ID, 2), (ROOT_ID, 8)] {
+            ops.push(Op::Insert {
+                parent,
+                child,
+                before: None,
+            });
+        }
+        apply(&mut c, ops);
+        let batch = c.commit().unwrap();
+        let mut shown = texts(&batch);
+        shown.sort();
+        assert_eq!(shown, ["accent 0 clicks 0", "accent 0 clicks 0"]);
+
+        // A new value: only the swatch below the provider renders again.
+        assert!(c.component_event(2, EventKind::Press, &EventPayload::None));
+        assert_eq!(texts(&c.commit().unwrap()), ["accent 1 clicks 0"]);
+
+        // A global changed by one swatch renders both.
+        assert!(c.component_event(8, EventKind::Press, &EventPayload::None));
+        let mut shown = texts(&c.commit().unwrap());
+        shown.sort();
+        assert_eq!(shown, ["accent 0 clicks 1", "accent 1 clicks 1"]);
+    }
+
+    /// A sheet that follows drags natively and springs back when let go.
+    #[derive(Default)]
+    struct Sheet {
+        offset: Option<NativeValue>,
+        state: &'static str,
+        spring: Option<Task<()>>,
+    }
+
+    impl Component for Sheet {
+        const NAME: &'static str = "test.sheet";
+        type Props = FormProps;
+        type Event = NoEvent;
+
+        fn setup(&mut self, _: &FormProps, cx: &mut Context<'_, Self>) {
+            self.offset = Some(cx.native_value(0.0));
+            self.state = "resting";
+        }
+
+        fn render(&self, _: &FormProps, cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            let offset = self.offset.as_ref().unwrap();
+            view()
+                .bind_translate_y(offset)
+                .bind_opacity(&offset.interpolate(&[0.0, 300.0], &[1.0, 0.2]))
+                .pan_values(None, Some(offset))
+                .on_pan_end(cx.listener(|this: &mut Self, e: &PanEvent, cx| {
+                    assert_eq!(e.value_y, Some(120.0));
+                    let end = this.offset.as_ref().unwrap().spring(0.0, Spring::default());
+                    this.state = "springing";
+                    cx.notify();
+                    this.spring = Some(cx.spawn(|this, _| async move {
+                        let finished = end.await;
+                        this.update(move |this, cx| {
+                            this.state = if finished { "back" } else { "stopped" };
+                            cx.notify();
+                        })
+                        .await;
+                    }));
+                }))
+                .child(text(self.state))
+        }
+    }
+
+    #[test]
+    fn native_values_bind_animate_and_end() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Sheet>();
+        c.set_components(registry);
+        c.set_task_runtime(runtime.handle().clone());
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Component("test.sheet".into()),
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ],
+        );
+        let batch = c.commit().unwrap();
+        let anims: Vec<_> = batch
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::Anim(op) => Some(op.clone()),
+                _ => None,
+            })
+            .collect();
+        // The value and its interpolation, in the core's id range.
+        let value = match anims[0] {
+            nsh_anim::AnimOp::CreateValue { node, value: 0.0 } => node,
+            ref op => panic!("{op:?}"),
+        };
+        assert_eq!(value % 2, 1, "the core's ids are odd");
+        assert!(
+            matches!(anims[1], nsh_anim::AnimOp::CreateInterpolate { input, .. } if input == value)
+        );
+        assert_eq!(texts(&batch), ["resting"]);
+
+        // Let go: a spring starts; its end resolves the task.
+        let payload = EventPayload::Pan {
+            translation_x: 0.0,
+            translation_y: 120.0,
+            velocity_x: 0.0,
+            velocity_y: 300.0,
+            value_x: None,
+            value_y: Some(120.0),
+        };
+        assert!(c.component_event(2, EventKind::PanEnd, &payload));
+        let batch = c.commit().unwrap();
+        let animation = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Anim(nsh_anim::AnimOp::Start {
+                    node, animation, ..
+                }) if *node == value => Some(*animation),
+                _ => None,
+            })
+            .expect("a spring");
+        assert_eq!(texts(&batch), ["springing"]);
+        let mut finished = vec![
+            nsh_anim::Finished {
+                animation,
+                finished: true,
+            },
+            // JS's (even ids) stay for JS.
+            nsh_anim::Finished {
+                animation: 8,
+                finished: true,
+            },
+        ];
+        c.animations_finished(&mut finished);
+        assert_eq!(finished.len(), 1);
+        let _guard = runtime.enter();
+        assert_eq!(
+            run_until(&mut c, |s| s.contains(&"back".to_owned())),
+            ["back"]
+        );
+
+        // Released with the component: the value and what derives from it.
+        apply(
+            &mut c,
+            vec![
+                Op::Remove {
+                    parent: ROOT_ID,
+                    child: 2,
+                },
+                Op::Release { id: 2 },
+            ],
+        );
+        let batch = [c.commit(), c.commit()];
+        let released = batch
+            .iter()
+            .flatten()
+            .flat_map(|b| &b.items)
+            .filter(|i| matches!(i, MountItem::Anim(nsh_anim::AnimOp::Release { .. })))
+            .count();
+        assert_eq!(released, 2, "{batch:?}");
+    }
+
+    /// Its own rows in a virtual list; a press on a row removes it.
+    #[derive(Default)]
+    struct Inbox {
+        rows: std::rc::Rc<Vec<String>>,
+    }
+
+    impl Component for Inbox {
+        const NAME: &'static str = "test.inbox";
+        type Props = FormProps;
+        type Event = NoEvent;
+
+        fn setup(&mut self, _: &FormProps, _: &mut Context<'_, Self>) {
+            self.rows = std::rc::Rc::new((0..100).map(|i| format!("mail {i}")).collect());
+        }
+
+        fn render(&self, _: &FormProps, cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            let rows = self.rows.clone();
+            let remove = cx.listener(|this: &mut Self, at: &usize, cx| {
+                std::rc::Rc::make_mut(&mut this.rows).remove(*at);
+                cx.notify();
+            });
+            view().flex_1().child(
+                virtual_list(rows.len(), move |i, at| {
+                    let remove = remove.clone();
+                    view()
+                        .h(px(40.0))
+                        .on_press(remove.map(move |_: &()| i))
+                        .child(text(format!(
+                            "{}{}",
+                            rows[i],
+                            if at.is_last() { " (last)" } else { "" }
+                        )))
+                })
+                .estimated_item_size(40.0)
+                .keys(self.rows.iter().cloned())
+                .flex_1(),
+            )
+        }
+    }
+
+    #[test]
+    fn virtual_lists_render_their_own_rows() {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Inbox>();
+        c.set_components(registry);
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Component("test.inbox".into()),
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ],
+        );
+        let batch = c.commit().unwrap();
+        // Bound in the same commit, no JS: the rows near the viewport.
+        let shown = texts(&batch);
+        assert!(shown.contains(&"mail 0".to_owned()), "{shown:?}");
+        assert!(shown.len() < 100, "virtualized: {}", shown.len());
+        let mut binds = Vec::new();
+        c.take_list_binds(&mut binds);
+        assert!(binds.is_empty(), "nothing for JS");
+
+        // A press on row 0 goes to the component, which removes it: the
+        // list splices, the other rows keep their cells (nothing to send),
+        // and the freed cell shows the row coming into view.
+        let row0 = batch
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::Events { id, events } if events.contains(EventKind::Press) => Some(*id),
+                _ => None,
+            })
+            .next()
+            .expect("a row listens to presses");
+        assert!(c.component_event(row0, EventKind::Press, &EventPayload::None));
+        let batch = c.commit().unwrap();
+        assert_eq!(texts(&batch), ["mail 25"]);
+        assert!(
+            batch
+                .items
+                .iter()
+                .all(|i| !matches!(i, MountItem::Create { .. }))
+        );
+    }
+
+    /// Shows a fallback while a component below it failed; a press tries
+    /// again.
+    #[derive(Default)]
+    struct Boundary {
+        error: Option<ComponentError>,
+    }
+
+    impl Component for Boundary {
+        const NAME: &'static str = "test.boundary";
+        type Props = WithChildren;
+        type Event = NoEvent;
+
+        fn catch_error(&mut self, error: &ComponentError, cx: &mut Context<'_, Self>) -> bool {
+            self.error = Some(error.clone());
+            cx.notify();
+            true
+        }
+
+        fn render(&self, props: &WithChildren, cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            view()
+                .on_press(cx.listener(|this: &mut Self, _, cx| {
+                    this.error = None;
+                    cx.notify();
+                }))
+                .map(|v| match &self.error {
+                    Some(e) => v.child(text(format!("oops: {} ({})", e.component, e.message))),
+                    None => v.child(props.children),
+                })
+        }
+    }
+
+    /// Panics when pressed, and in its render once `explode` is set.
+    #[derive(Default)]
+    struct Faulty;
+
+    #[derive(Clone, PartialEq, Props)]
+    struct FaultyProps {
+        #[prop(default)]
+        explode: bool,
+    }
+
+    impl Component for Faulty {
+        const NAME: &'static str = "test.faulty";
+        type Props = FaultyProps;
+        type Event = NoEvent;
+
+        fn render(&self, props: &FaultyProps, cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            assert!(!props.explode, "exploded");
+            view()
+                .on_press(cx.listener(|_: &mut Self, _, _| panic!("pressed")))
+                .child(text("fine"))
+        }
+    }
+
+    #[test]
+    fn errors_of_components_go_to_the_nearest_boundary() {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Boundary>().register::<Faulty>();
+        c.set_components(registry);
+        let host = |id, name: &str| {
+            vec![
+                Op::Create { id, tag: Tag::View },
+                Op::SetProp {
+                    id,
+                    prop: Prop::Component(name.into()),
+                },
+            ]
+        };
+        let mut ops = host(2, "test.boundary");
+        ops.push(Op::Create {
+            id: 4,
+            tag: Tag::View,
+        });
+        ops.extend(host(6, "test.faulty"));
+        for (parent, child) in [(4, 6), (2, 4), (ROOT_ID, 2)] {
+            ops.push(Op::Insert {
+                parent,
+                child,
+                before: None,
+            });
+        }
+        apply(&mut c, ops);
+        assert_eq!(texts(&c.commit().unwrap()), ["fine"]);
+
+        // A listener panics: the boundary shows its fallback.
+        assert!(c.component_event(6, EventKind::Press, &EventPayload::None));
+        assert_eq!(texts(&c.commit().unwrap()), ["oops: test.faulty (pressed)"]);
+        // Again: the content is back.
+        assert!(c.component_event(2, EventKind::Press, &EventPayload::None));
+        c.commit();
+
+        // A render panics: the same.
+        apply(
+            &mut c,
+            vec![Op::SetProp {
+                id: 6,
+                prop: Prop::ComponentProp("explode".into(), Some(serde_json::json!(true))),
+            }],
+        );
+        assert_eq!(
+            texts(&c.commit().unwrap()),
+            ["oops: test.faulty (exploded)"]
+        );
+    }
 }

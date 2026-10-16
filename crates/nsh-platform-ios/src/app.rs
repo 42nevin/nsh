@@ -1,6 +1,6 @@
 use std::{cell::RefCell, sync::Mutex};
 
-use nsh_engine::Bundle;
+use nsh_engine::{Bundle, Root};
 use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained};
 use objc2_core_foundation::CGSize;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
@@ -18,10 +18,12 @@ const CATALYST_WINDOW: CGSize = CGSize {
     height: 844.0,
 };
 
-/// Where a standalone app gets its JS from.
+/// What a standalone app runs.
 #[derive(Debug, Clone)]
 pub enum AppSource {
-    /// A bundle shipped with (or passed to) the app.
+    /// A Rust app: its root component.
+    Rust(Root),
+    /// A JS bundle shipped with (or passed to) the app.
     Bundle(Bundle),
     /// A dev server (`ws://host:port/ws`); bundles are pushed on every
     /// rebuild.
@@ -180,6 +182,7 @@ fn connect(mtm: MainThreadMarker, scene: &UIWindowScene) {
     );
     root.addSubview(view.view());
     match source {
+        AppSource::Rust(root) => view.run(root),
         AppSource::Bundle(bundle) => view.load(bundle),
         #[cfg(feature = "dev")]
         AppSource::DevServer(url) => view.connect_dev_server(url),
