@@ -1,6 +1,6 @@
 // An existing UIKit app that embeds a nsh app below its own native UI.
 //
-// Build: see README.md. The nsh bundle (`nsh build ../embedded/App.tsx`) is
+// Build: see README.md. The nsh bundle (`nsh build ../embedded`) is
 // copied into the app as `nsh/bundle.qbc` (+ `nsh/assets`). The app registers
 // a native component the bundle uses (`embed.badge`). "Load update" runs a
 // signed package (`nsh publish`) verified against a root key; a real app

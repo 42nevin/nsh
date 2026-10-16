@@ -6,12 +6,12 @@ its own native views.
 1. Add `dist/nsh/embed/android/nsh.aar` (or `nsh-dev.aar` for development
    builds) to the app, e.g. in Gradle: `implementation(files("libs/nsh.aar"))`.
 2. Build the nsh bundle into the app's assets:
-   `nsh build ../embedded/App.tsx --release --out app/src/main/assets/nsh`.
+   `nsh build ../embedded --release --out app/src/main/assets/nsh`.
 3. Create a `com.longbridge.nsh.NshView`, add it to a layout and call
    `loadAssetBundle("nsh")`. Call `destroy()` when the activity goes away.
 
 Native components: the app's own views, used from JS with `nativeComponent` (`nsh/native`).
-`MainActivity` registers `embed.badge`, which `examples/embedded/App.tsx` shows:
+`MainActivity` registers `embed.badge`, which `examples/embedded` shows:
 
 ```java
 nsh.registerComponent("embed.badge", context -> new Badge(this, context));  // Badge implements NshComponent

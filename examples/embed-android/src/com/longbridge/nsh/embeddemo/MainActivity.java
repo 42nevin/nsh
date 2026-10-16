@@ -16,7 +16,7 @@ import com.longbridge.nsh.NshView;
 
 /**
  * An existing Android app that embeds a nsh app below its own native UI.
- * The nsh bundle (`nsh build ../embedded/App.tsx`) is packaged as APK
+ * The nsh bundle (`nsh build ../embedded`) is packaged as APK
  * assets under `nsh/`; it uses a native component the app registers
  * (`embed.badge`).
  */

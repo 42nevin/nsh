@@ -3,6 +3,7 @@
 mod android;
 mod build;
 mod dev;
+mod entry;
 mod init;
 mod logger;
 mod net;
@@ -38,7 +39,9 @@ enum Command {
     },
     /// Bundle an app and compile it to QuickJS bytecode.
     Build {
-        /// Entry module, e.g. `App.tsx`.
+        /// The entry module, or the app's directory (default: the current one),
+        /// whose `App.tsx` is the entry.
+        #[arg(default_value = ".")]
         entry: PathBuf,
         /// Output directory.
         #[arg(short, long, default_value = "out")]
@@ -49,7 +52,9 @@ enum Command {
     },
     /// Run an app headless and print the mount instructions and timings.
     Trace {
-        /// Entry module, e.g. `App.tsx`.
+        /// The entry module, or the app's directory (default: the current one),
+        /// whose `App.tsx` is the entry.
+        #[arg(default_value = ".")]
         entry: PathBuf,
         /// Number of taps to send to the first pressable view.
         #[arg(long, default_value_t = 2)]
@@ -71,7 +76,9 @@ enum Command {
     },
     /// Serve an app to dev hosts (simulators, devices) and push rebuilds.
     Dev {
-        /// Entry module, e.g. `App.tsx`.
+        /// The entry module, or the app's directory (default: the current one),
+        /// whose `App.tsx` is the entry.
+        #[arg(default_value = ".")]
         entry: PathBuf,
         /// Dev server port (the next free one is used if it is taken).
         #[arg(long, default_value_t = nsh_dev::protocol::DEFAULT_PORT)]
@@ -88,7 +95,9 @@ enum Command {
     /// Catalyst app (default), an iOS simulator, or an Android device or
     /// emulator.
     Run {
-        /// Entry module, e.g. `App.tsx`.
+        /// The entry module, or the app's directory (default: the current one),
+        /// whose `App.tsx` is the entry.
+        #[arg(default_value = ".")]
         entry: PathBuf,
         /// Dev server port (the next free one is used if it is taken).
         #[arg(long, default_value_t = nsh_dev::protocol::DEFAULT_PORT)]
@@ -136,7 +145,9 @@ enum Command {
     /// for apps that embed nsh to verify and run. Metadata comes from
     /// `nsh.json` next to the entry, overridden by the flags below.
     Publish {
-        /// Entry module, e.g. `App.tsx`.
+        /// The entry module, or the app's directory (default: the current one),
+        /// whose `App.tsx` is the entry.
+        #[arg(default_value = ".")]
         entry: PathBuf,
         /// The release key's secret key (`.secret`).
         #[arg(long)]
@@ -197,7 +208,9 @@ enum Command {
 /// Arguments of `nsh package`.
 #[derive(Args)]
 struct PackageArgs {
-    /// Entry module, e.g. `App.tsx`.
+    /// The entry module, or the app's directory (default: the current one),
+    /// whose `App.tsx` is the entry.
+    #[arg(default_value = ".")]
     entry: PathBuf,
     /// What to build for.
     #[arg(long, value_enum)]
@@ -240,21 +253,34 @@ struct PackageArgs {
     run: bool,
 }
 
+impl Command {
+    /// The entry argument of the commands that build an app.
+    fn entry_mut(&mut self) -> Option<&mut PathBuf> {
+        match self {
+            Command::Build { entry, .. }
+            | Command::Trace { entry, .. }
+            | Command::Dev { entry, .. }
+            | Command::Run { entry, .. }
+            | Command::Publish { entry, .. } => Some(entry),
+            Command::Package(args) => Some(&mut args.entry),
+            Command::Init { .. }
+            | Command::Keygen { .. }
+            | Command::Certify { .. }
+            | Command::Verify { .. }
+            | Command::Revoke { .. } => None,
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     logger::init();
-    let command = Cli::parse().command;
-    match &command {
-        Command::Build { entry, .. } | Command::Dev { entry, .. } | Command::Run { entry, .. } => {
-            init::write_types_for(entry)
+    let mut command = Cli::parse().command;
+    let types = !matches!(command, Command::Trace { .. });
+    if let Some(entry) = command.entry_mut() {
+        *entry = entry::resolve(entry)?;
+        if types {
+            init::write_types_for(entry);
         }
-        Command::Package(args) => init::write_types_for(&args.entry),
-        Command::Publish { entry, .. } => init::write_types_for(entry),
-        Command::Init { .. }
-        | Command::Trace { .. }
-        | Command::Keygen { .. }
-        | Command::Certify { .. }
-        | Command::Verify { .. }
-        | Command::Revoke { .. } => {}
     }
     match command {
         Command::Init { dir, name } => init::init(&dir, name),

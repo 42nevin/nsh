@@ -1,0 +1,60 @@
+//! Finds an app's entry module by convention: commands take the entry
+//! itself or the app's directory (the current one by default), whose
+//! `App.tsx` is the entry. The name matches in any case (`app.tsx` too,
+//! also on case-sensitive file systems).
+
+use std::path::{Path, PathBuf};
+
+use anyhow::bail;
+
+/// The entry module of an app directory.
+pub(crate) const ENTRY: &str = "App.tsx";
+
+/// The entry module `path` names: the file itself, or the directory's
+/// [`ENTRY`].
+pub(crate) fn resolve(path: &Path) -> anyhow::Result<PathBuf> {
+    if !path.is_dir() {
+        if path.exists() {
+            return Ok(path.to_owned());
+        }
+        bail!("{} does not exist", path.display());
+    }
+    let entry = std::fs::read_dir(path)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case(ENTRY))
+        });
+    match entry {
+        Some(entry) => Ok(entry),
+        None => bail!(
+            "no {ENTRY} in {}: add one, or pass the entry module",
+            path.display()
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conventional_entry() {
+        let dir = std::env::temp_dir().join(format!("nsh-entry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(resolve(&dir).is_err());
+        std::fs::write(dir.join("Other.tsx"), "").unwrap();
+        assert!(resolve(&dir).is_err());
+        std::fs::write(dir.join("app.tsx"), "").unwrap();
+        assert_eq!(resolve(&dir).unwrap(), dir.join("app.tsx"));
+        // A file is the entry whatever its name.
+        assert_eq!(
+            resolve(&dir.join("Other.tsx")).unwrap(),
+            dir.join("Other.tsx")
+        );
+        assert!(resolve(&dir.join("missing.tsx")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

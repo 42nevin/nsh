@@ -7,7 +7,7 @@ native views.
    development builds) to the app target (`cargo xtask ios-embed` builds both). Swift code then
    `import NativeShell`.
 2. Build the nsh bundle and add the output folder to the app's resources as
-   `nsh`: `nsh build ../embedded/App.tsx --release --out nsh`.
+   `nsh`: `nsh build ../embedded --release --out nsh`.
 3. Create an `NshAppView` (a `UIView`), add it to a view hierarchy and call
    `try app.loadBundle(at:)` with the URL of `nsh/bundle.qbc`. The app stops when the view is deallocated.
 
@@ -24,7 +24,7 @@ stays). Bytecode files only load from inside the app bundle: downloaded code mus
 package (or JS source).
 
 Native components: the app's own views, used from JS with `nativeComponent` (`nsh/native`).
-`main.swift` registers `embed.badge`, which `examples/embedded/App.tsx` shows:
+`main.swift` registers `embed.badge`, which `examples/embedded` shows:
 
 ```swift
 app.register(component: "embed.badge") { context in Badge(context) }  // Badge: NshComponent

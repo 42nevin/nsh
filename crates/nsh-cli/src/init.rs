@@ -30,10 +30,15 @@ mount(App);
 
 const GITIGNORE: &str = ".nsh/\nout/\n";
 
-/// Creates an app in `dir`: `App.tsx`, `nsh.json`, `tsconfig.json`,
+/// Creates an app in `dir`: `App.tsx` (the entry by convention), `nsh.json`, `tsconfig.json`,
 /// `.gitignore` and the type declarations. Existing files are kept.
 pub(crate) fn init(dir: &Path, name: Option<String>) -> anyhow::Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let run = if dir == Path::new(".") {
+        "nsh run".to_owned()
+    } else {
+        format!("nsh run {}", dir.display())
+    };
     let dir = dir.canonicalize()?;
     let name = name.unwrap_or_else(|| {
         dir.file_name()
@@ -74,7 +79,7 @@ pub(crate) fn init(dir: &Path, name: Option<String>) -> anyhow::Result<()> {
         log::info!("created {}", path.display());
     }
     write_types(&dir);
-    log::info!("run it with `nsh run {}`", dir.join("App.tsx").display());
+    log::info!("run it with `{run}`");
     Ok(())
 }
 
