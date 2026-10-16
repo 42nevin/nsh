@@ -76,6 +76,7 @@ const COPY = {
     runLocally: 'Run it on a simulator or device:',
     missing: (name) => `Demo “${name}” was not found in website/demos.`,
     label: 'Demo',
+    live: 'Live',
   },
   'zh-CN': {
     preview: '预览',
@@ -87,28 +88,40 @@ const COPY = {
     runLocally: '在模拟器或真机上运行：',
     missing: (name) => `website/demos 中没有名为“${name}”的示例。`,
     label: '示例',
+    live: '运行中',
   },
 };
 
 export function playerHref(name, base = '/') {
-  return `${base}play/index.html?theme=light#${encodeURIComponent(name)}`;
+  return `${base}play/index.html?theme=dark#${encodeURIComponent(name)}`;
 }
 
 /**
- * A phone at 390×844 points, scaled to fit (`--phone-scale`), with the demo
- * running inside, or a placeholder screen when there is no player.
+ * The frame a demo runs in: a card of the site's design (no device chrome)
+ * with a slim bar (an icon tile, the title, a badge) above the app's inset
+ * surface. Shared with the playground.
+ */
+export function frameBar(title, badge) {
+  return `<div class="phone__bar"><span class="phone__tile" aria-hidden="true"><svg viewBox="14 12 100 100" width="12" height="12"><path d="M30 100 V58 a34 34 0 0 1 68 0 V100" fill="none" stroke="currentColor" stroke-width="22" stroke-linecap="round"/></svg></span><span class="phone__title">${escape(title)}</span>${badge ? `<span class="phone__badge"><i aria-hidden="true"></i>${escape(badge)}</span>` : ''}</div>`;
+}
+
+/**
+ * A frame at phone width: the app renders at 390×844 points, scaled to fit
+ * (`--phone-scale`), with the demo running inside, or a placeholder screen
+ * when there is no player.
  */
 export function phoneHtml(name, { base = '/', lang = 'en', eager = false } = {}) {
   const t = COPY[lang] ?? COPY.en;
   const screen = hasPlayer()
-    ? `<iframe src="${escape(playerHref(name, base))}" title="${escape(t.frame(name))}" loading="${eager ? 'eager' : 'lazy'}" width="${SCREEN.width}" height="${SCREEN.height}"></iframe>`
+    ? `<iframe allow="clipboard-write" data-player-src="${escape(playerHref(name, base))}" title="${escape(t.frame(name))}" loading="${eager ? 'eager' : 'lazy'}" width="${SCREEN.width}" height="${SCREEN.height}"></iframe>`
     : `<div class="phone__placeholder">
         <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M10.5 18.5h3"/></svg>
         <p class="phone__placeholder-title">${escape(t.pending)}</p>
         <p>${escape(t.runLocally)}</p>
         <code>nsh run website/demos/${escape(name)}.tsx</code>
       </div>`;
-  return `<div class="phone" style="--phone-w:${SCREEN.width};--phone-h:${SCREEN.height}"><div class="phone__screen">${screen}</div></div>`;
+  const bar = frameBar(`${name}.tsx`, hasPlayer() ? t.live : '');
+  return `<div class="phone" style="--phone-w:${SCREEN.width};--phone-h:${SCREEN.height}">${bar}<div class="phone__screen">${screen}</div></div>`;
 }
 
 /** The demo block of a documentation page: phone and source behind a segmented control. */

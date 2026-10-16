@@ -1,8 +1,7 @@
 import { mount, signal, Text, View } from "nsh";
 import { createNativeValue } from "nsh/animated";
 import { PanResponder } from "nsh/gesture";
-
-const muted = "#57606a";
+import { tint, ui } from "./palette";
 
 /** A card dragged on the UI thread: `pan` drives two native values. */
 function DragCard() {
@@ -10,7 +9,7 @@ function DragCard() {
   const y = createNativeValue(0);
   const flings = signal(0);
   return (
-    <View style={{ height: 150, borderRadius: 12, backgroundColor: "#eaeef2", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+    <View style={{ ...ui().inset, height: 150, borderRadius: 12, alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
       <View
         pan={{ x, y }}
         onPanEnd={(e) => {
@@ -23,14 +22,14 @@ function DragCard() {
           width: 120,
           height: 80,
           borderRadius: 16,
-          backgroundColor: "#8250df",
+          ...ui().accentFill,
           alignItems: "center",
           justifyContent: "center",
           transform: [{ translateX: x }, { translateY: y }],
         }}
       >
-        <Text style={{ color: "#ffffff", fontWeight: "700" }}>Drag me</Text>
-        <Text style={{ color: "#ffffff", fontSize: 12 }}>released {flings()}×</Text>
+        <Text style={{ color: ui().onAccent, fontWeight: "700" }}>Drag me</Text>
+        <Text style={{ color: ui().onAccent, fontSize: 12 }}>released {flings()}×</Text>
       </View>
     </View>
   );
@@ -53,7 +52,7 @@ function ResponderDot() {
   });
   return (
     <View style={{ gap: 6 }}>
-      <View style={{ height: 110, borderRadius: 12, backgroundColor: "#eaeef2", overflow: "hidden" }}>
+      <View style={{ ...ui().inset, height: 110, borderRadius: 12, overflow: "hidden" }}>
         <View
           {...responder.panHandlers}
           style={{
@@ -63,12 +62,12 @@ function ResponderDot() {
             width: 50,
             height: 50,
             borderRadius: 25,
-            backgroundColor: "#0969da",
+            backgroundColor: ui().info,
             transform: [{ translateX: pos().x }, { translateY: pos().y }],
           }}
         />
       </View>
-      <Text style={{ color: muted, fontSize: 13 }}>PanResponder: {state()}</Text>
+      <Text style={{ color: ui().muted, fontSize: 13 }}>PanResponder: {state()}</Text>
     </View>
   );
 }
@@ -79,7 +78,7 @@ function App() {
   const dot = signal(0);
   const under = signal(0);
   return (
-    <View style={{ flex: 1, backgroundColor: "#f6f8fa", padding: 16, paddingTop: 24, gap: 14 }}>
+    <View style={{ flex: 1, backgroundColor: ui().page, padding: 16, paddingTop: 24, gap: 14 }}>
       <View style={{ flexDirection: "row", gap: 10 }}>
         <View
           onPressIn={() => add("pressIn")}
@@ -87,45 +86,51 @@ function App() {
           onPress={() => add("press")}
           onLongPress={() => add("longPress")}
           activeOpacity={0.5}
-          style={{ flex: 1, padding: 14, borderRadius: 12, backgroundColor: "#0969da", alignItems: "center" }}
+          style={{
+            flex: 1,
+            padding: 14,
+            borderRadius: 12,
+            ...ui().primary,
+            alignItems: "center",
+          }}
         >
-          <Text style={{ color: "#ffffff", fontWeight: "600" }}>activeOpacity</Text>
+          <Text style={{ color: ui().onPrimary, fontWeight: "600" }}>activeOpacity</Text>
         </View>
         <View
           onPress={() => add("underlay")}
-          underlayColor="#ddf4ff"
-          style={{ flex: 1, padding: 14, borderRadius: 12, backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#d0d7de", alignItems: "center" }}
+          underlayColor={ui().border}
+          style={{ ...ui().raised, flex: 1, padding: 14, borderRadius: 12, alignItems: "center" }}
         >
-          <Text style={{ fontWeight: "600" }}>underlayColor</Text>
+          <Text style={{ color: ui().text, fontWeight: "600" }}>underlayColor</Text>
         </View>
         <View
           onPress={() => add("active:")}
-          class="flex-1 items-center rounded-xl bg-emerald-600 p-3.5 transition active:scale-95 active:bg-emerald-800"
+          class="flex-1 items-center rounded-xl bg-[#0f8a55] p-3.5 transition active:scale-95 active:bg-[#0b6b42] dark:bg-[#45d49a] dark:active:bg-[#2fae7b]"
         >
-          <Text class="font-semibold text-white">active:</Text>
+          <Text class="font-semibold text-white dark:text-[#0c0d0f]">active:</Text>
         </View>
       </View>
-      <Text style={{ color: muted, fontSize: 13 }}>{log().join(" · ") || "Tap, hold, or slide off a button"}</Text>
+      <Text style={{ color: ui().muted, fontSize: 13 }}>{log().join(" · ") || "Tap, hold, or slide off a button"}</Text>
 
       <View style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
         <View
           hitSlop={24}
           onPress={() => dot.update((n) => n + 1)}
-          style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: "#cf222e", margin: 12 }}
+          style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: ui().down, margin: 12 }}
         />
-        <Text style={{ flex: 1 }}>hitSlop 24: the dot takes taps around it ({dot()})</Text>
+        <Text style={{ flex: 1, color: ui().text }}>hitSlop 24: the dot takes taps around it ({dot()})</Text>
       </View>
 
       <View style={{ height: 52 }}>
         <View
           onPress={() => under.update((n) => n + 1)}
-          style={{ flex: 1, borderRadius: 12, backgroundColor: "#1a7f37", alignItems: "center", justifyContent: "center" }}
+          style={{ flex: 1, borderRadius: 12, backgroundColor: tint(ui().up, 0.14), alignItems: "center", justifyContent: "center" }}
         >
-          <Text style={{ color: "#ffffff" }}>Under an overlay: {under()}</Text>
+          <Text style={{ color: ui().up }}>Under an overlay: {under()}</Text>
         </View>
         <View
           pointerEvents="none"
-          style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, borderRadius: 12, borderWidth: 3, borderColor: "#bf8700", borderStyle: "dashed" }}
+          style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, borderRadius: 12, borderWidth: 3, borderColor: ui().warn, borderStyle: "dashed" }}
         />
       </View>
 

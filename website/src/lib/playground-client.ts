@@ -8,12 +8,26 @@ import { keymap } from '@codemirror/view';
 import { javascript } from '@codemirror/lang-javascript';
 import { syntaxHighlighting } from '@codemirror/language';
 import { classHighlighter } from '@lezer/highlight';
+import { onThemeChange, siteTheme } from './demo-client';
 
 // Each demo's source, loaded when picked.
 const DEMOS = import.meta.glob('/demos/*.tsx', { query: '?raw', import: 'default' }) as Record<
   string,
   () => Promise<string>
 >;
+
+// The demos' shared palette (demos/palette.ts). The player compiles one
+// file, so a demo that imports it gets it inlined in place of the import.
+import paletteSource from '/demos/palette.ts?raw';
+
+const PALETTE_IMPORT = /^import\s*\{[^}]*\}\s*from\s*["']\.\/palette["'];?[ \t]*$/m;
+
+function withPalette(source: string): string {
+  const match = PALETTE_IMPORT.exec(source);
+  if (!match) return source;
+  const palette = paletteSource.replace(/^export /gm, '');
+  return source.slice(0, match.index) + palette + source.slice(match.index + match[0].length);
+}
 
 const STORAGE_KEY = 'nsh-playground-code';
 const RUN_DELAY = 450;
@@ -49,6 +63,98 @@ async function decodeCode(text: string): Promise<string> {
   return new TextDecoder().decode(await pipe(fromBase64Url(text), new DecompressionStream('deflate-raw')));
 }
 
+/**
+ * The example picker: a trigger button and a listbox popover (WAI-ARIA
+ * select-only combobox pattern, simplified). Focus moves to the list while
+ * it is open; `aria-activedescendant` names the option the keys point at.
+ */
+function mountPicker(el: HTMLElement, onPick: (value: string) => void) {
+  const trigger = el.querySelector<HTMLButtonElement>('[data-trigger]')!;
+  const menu = el.querySelector<HTMLElement>('[data-menu]')!;
+  const current = el.querySelector<HTMLElement>('[data-current]')!;
+  const options = [...menu.querySelectorAll<HTMLElement>('[role="option"]')];
+  let active = 0;
+
+  const index = () => Math.max(0, options.findIndex((o) => o.dataset.value === el.dataset.value));
+  const setActive = (i: number) => {
+    active = Math.max(0, Math.min(options.length - 1, i));
+    options.forEach((o, k) => o.toggleAttribute('data-active', k === active));
+    menu.setAttribute('aria-activedescendant', options[active].id);
+    options[active].scrollIntoView({ block: 'nearest' });
+  };
+  const isOpen = () => !menu.hidden;
+  const open = () => {
+    menu.hidden = false;
+    trigger.setAttribute('aria-expanded', 'true');
+    setActive(index());
+    menu.focus();
+  };
+  const close = (refocus = true) => {
+    if (!isOpen()) return;
+    menu.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+    if (refocus) trigger.focus();
+  };
+  const set = (value: string) => {
+    el.dataset.value = value;
+    for (const o of options) o.setAttribute('aria-selected', String(o.dataset.value === value));
+    current.textContent = `${value}.tsx`;
+  };
+  const choose = (i: number) => {
+    const value = options[i].dataset.value!;
+    close();
+    if (value === el.dataset.value) return;
+    set(value);
+    onPick(value);
+  };
+
+  trigger.addEventListener('click', () => (isOpen() ? close() : open()));
+  trigger.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      open();
+    }
+  });
+  menu.addEventListener('keydown', (e) => {
+    switch (e.key) {
+      case 'ArrowDown': setActive(active + 1); break;
+      case 'ArrowUp': setActive(active - 1); break;
+      case 'Home': setActive(0); break;
+      case 'End': setActive(options.length - 1); break;
+      case 'PageDown': setActive(active + 8); break;
+      case 'PageUp': setActive(active - 8); break;
+      case 'Enter':
+      case ' ': choose(active); break;
+      case 'Escape': close(); break;
+      // Tab leaves the menu closed, focus back on the trigger it belongs to.
+      case 'Tab': close(); break;
+      default: return;
+    }
+    e.preventDefault();
+  });
+  menu.addEventListener('click', (e) => {
+    const option = (e.target as HTMLElement).closest<HTMLElement>('[role="option"]');
+    if (option) choose(options.indexOf(option));
+  });
+  menu.addEventListener('pointermove', (e) => {
+    const option = (e.target as HTMLElement).closest<HTMLElement>('[role="option"]');
+    if (option && options.indexOf(option) !== active) setActive(options.indexOf(option));
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (isOpen() && !el.contains(e.target as Node)) close(false);
+  });
+  menu.addEventListener('focusout', (e) => {
+    if (isOpen() && !el.contains(e.relatedTarget as Node | null)) close(false);
+  });
+
+  return {
+    get value() {
+      return el.dataset.value ?? '';
+    },
+    set,
+  };
+}
+
 function storage(): Storage | null {
   try {
     return window.localStorage;
@@ -59,11 +165,17 @@ function storage(): Storage | null {
 
 export async function mountPlayground(root: HTMLElement) {
   const t: Copy = JSON.parse(root.dataset.copy ?? '{}');
-  const select = root.querySelector<HTMLSelectElement>('[data-example]')!;
+  const select = mountPicker(root.querySelector<HTMLElement>('[data-example]')!, (value) => pick(value));
   const status = root.querySelector<HTMLElement>('[data-status]')!;
   const log = root.querySelector<HTMLElement>('[data-log]')!;
   const frame = root.querySelector<HTMLIFrameElement>('[data-frame]');
+  // The app's appearance follows the page's theme until changed here.
   const dark = root.querySelector<HTMLInputElement>('[data-dark]')!;
+  dark.checked = siteTheme() === 'dark';
+  onThemeChange((theme) => {
+    dark.checked = theme === 'dark';
+    frame?.contentWindow?.postMessage({ theme }, '*');
+  });
 
   const setStatus = (text: string, kind?: 'ok' | 'error') => {
     // Errors start with a blank line before their code frame.
@@ -101,7 +213,7 @@ export async function mountPlayground(root: HTMLElement) {
   }
   const named = hash.get('demo');
   if (!initial && named && (await demoSource(named)) !== null) {
-    select.value = named;
+    select.set(named);
     initial = await demoSource(named);
   }
   if (!initial) initial = storage()?.getItem(STORAGE_KEY) ?? null;
@@ -119,7 +231,7 @@ export async function mountPlayground(root: HTMLElement) {
       return;
     }
     clearLog();
-    frame.contentWindow?.postMessage({ type: 'run', source: view.state.doc.toString() }, '*');
+    frame.contentWindow?.postMessage({ type: 'run', source: withPalette(view.state.doc.toString()) }, '*');
   };
 
   const view = new EditorView({
@@ -144,11 +256,11 @@ export async function mountPlayground(root: HTMLElement) {
     run();
   };
 
-  select.addEventListener('change', async () => {
-    const code = await demoSource(select.value);
+  async function pick(value: string) {
+    const code = await demoSource(value);
     if (code !== null) replace(code);
-    history.replaceState(null, '', `#demo=${encodeURIComponent(select.value)}`);
-  });
+    history.replaceState(null, '', `#demo=${encodeURIComponent(value)}`);
+  }
   root.querySelector('[data-reset]')?.addEventListener('click', async () => {
     const code = await demoSource(select.value);
     if (code !== null) replace(code);
@@ -176,7 +288,7 @@ export async function mountPlayground(root: HTMLElement) {
     if (data.type === 'ready') {
       ready = true;
       setStatus('');
-      if (dark.checked) frame.contentWindow?.postMessage({ theme: 'dark' }, '*');
+      frame.contentWindow?.postMessage({ theme: dark.checked ? 'dark' : 'light' }, '*');
       if (pending || initial) run();
     } else if (data.type === 'compiled') {
       if (data.error) {
@@ -193,5 +305,5 @@ export async function mountPlayground(root: HTMLElement) {
     }
   });
   setStatus(t.loading);
-  frame.src = root.dataset.player!;
+  frame.src = root.dataset.player!.replace(/theme=(dark|light)/, `theme=${siteTheme()}`);
 }

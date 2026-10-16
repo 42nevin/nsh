@@ -1,6 +1,12 @@
 import { batch, cleanup, computed, context, effect, mount, Scroll, signal, Text, untracked, View } from "nsh";
+import { tint, ui } from "./palette";
 
-const Accent = context(signal("#0969da"));
+/** The accent's palette key: a key, not a colour, so it follows the theme. */
+type Swatch = "accent" | "info" | "up" | "violet";
+const Accent = context(signal<Swatch>("accent"));
+
+/** A raised control, as in the gallery: a top highlight over a soft shadow. */
+const raised = () => ({ ...ui().raised, borderRadius: 10 });
 
 /** A stopwatch: the effect starts a timer and its cleanup stops it. */
 function Stopwatch() {
@@ -14,14 +20,14 @@ function Stopwatch() {
   const accent = Accent();
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-      <Text style={{ flex: 1, fontSize: 28, fontWeight: "600", fontVariant: ["tabular-nums"], color: "#1f2328" }}>
+      <Text style={{ flex: 1, fontSize: 28, fontWeight: "600", fontVariant: ["tabular-nums"], color: ui().text }}>
         {(tenths() / 10).toFixed(1)} s
       </Text>
-      <View onPress={() => running.set(!running())} activeOpacity={0.6} style={{ backgroundColor: accent(), borderRadius: 8, paddingHorizontal: 14, paddingVertical: 8 }}>
-        <Text style={{ color: "#ffffff", fontWeight: "600" }}>{running() ? "Stop" : "Start"}</Text>
+      <View onPress={() => running.set(!running())} activeOpacity={0.6} style={{ backgroundColor: ui()[accent()], borderRadius: 8, paddingHorizontal: 14, paddingVertical: 8 }}>
+        <Text style={{ color: ui().page, fontWeight: "600" }}>{running() ? "Stop" : "Start"}</Text>
       </View>
-      <View onPress={() => tenths.set(0)} activeOpacity={0.6} style={{ backgroundColor: "#57606a", borderRadius: 8, paddingHorizontal: 14, paddingVertical: 8 }}>
-        <Text style={{ color: "#ffffff" }}>Reset</Text>
+      <View onPress={() => tenths.set(0)} activeOpacity={0.6} style={{ ...raised(), paddingHorizontal: 14, paddingVertical: 8 }}>
+        <Text style={{ color: ui().text }}>Reset</Text>
       </View>
     </View>
   );
@@ -29,8 +35,8 @@ function Stopwatch() {
 
 function Section(props: { title: string; children: any }) {
   return (
-    <View style={{ backgroundColor: "#ffffff", borderRadius: 12, padding: 14, gap: 10 }}>
-      <Text style={{ fontSize: 13, fontWeight: "600", color: "#6e7781" }}>{props.title}</Text>
+    <View style={{ ...ui().card, borderRadius: 16, padding: 14, gap: 10 }}>
+      <Text style={{ fontSize: 13, fontWeight: "600", color: ui().muted }}>{props.title}</Text>
       {props.children}
     </View>
   );
@@ -59,30 +65,30 @@ function App() {
     });
   };
 
-  const colors = ["#0969da", "#8250df", "#1a7f37", "#bf3989"];
+  const swatches: Swatch[] = ["accent", "info", "up", "violet"];
 
   return (
-    <Scroll style={{ flex: 1, backgroundColor: "#f6f8fa" }}>
+    <Scroll style={{ flex: 1, backgroundColor: ui().page }}>
       <View style={{ padding: 20, paddingTop: 24, gap: 16 }}>
         <Section title="signal + computed">
-          <Text style={{ fontSize: 17, color: "#1f2328" }}>
-            {price()} × {quantity()} = <Text style={{ fontWeight: "700", color: accent() }}>{total()}</Text>
+          <Text style={{ fontSize: 17, color: ui().text }}>
+            {price()} × {quantity()} = <Text style={{ fontWeight: "700", color: ui()[accent()] }}>{total()}</Text>
           </Text>
           <View style={{ flexDirection: "row", gap: 8 }}>
-            <View onPress={() => step(1, 0)} activeOpacity={0.6} style={{ backgroundColor: "#ddf4ff", borderRadius: 8, padding: 8 }}>
-              <Text>price +1</Text>
+            <View onPress={() => step(1, 0)} activeOpacity={0.6} style={{ ...raised(), padding: 8 }}>
+              <Text style={{ color: ui().text }}>price +1</Text>
             </View>
-            <View onPress={() => step(0, 1)} activeOpacity={0.6} style={{ backgroundColor: "#ddf4ff", borderRadius: 8, padding: 8 }}>
-              <Text>qty +1</Text>
+            <View onPress={() => step(0, 1)} activeOpacity={0.6} style={{ ...raised(), padding: 8 }}>
+              <Text style={{ color: ui().text }}>qty +1</Text>
             </View>
-            <View onPress={() => step(1, 1)} activeOpacity={0.6} style={{ backgroundColor: "#fff8c5", borderRadius: 8, padding: 8 }}>
-              <Text>both (batch)</Text>
+            <View onPress={() => step(1, 1)} activeOpacity={0.6} style={{ backgroundColor: tint(ui().warn, 0.14), borderWidth: 1, borderColor: tint(ui().warn, 0.3), borderRadius: 10, padding: 8 }}>
+              <Text style={{ color: ui().warn }}>both (batch)</Text>
             </View>
           </View>
         </Section>
 
         <Section title="effect + untracked">
-          <Each of={log()}>{(line) => <Text style={{ fontSize: 13, color: "#57606a" }}>{line()}</Text>}</Each>
+          <Each of={log()}>{(line) => <Text style={{ fontSize: 13, color: ui().muted }}>{line()}</Text>}</Each>
         </Section>
 
         <Section title="effect + cleanup">
@@ -91,11 +97,11 @@ function App() {
 
         <Section title="context (the value is a signal)">
           <View style={{ flexDirection: "row", gap: 10 }}>
-            <Each of={colors}>
+            <Each of={swatches}>
               {(c) => (
                 <View
                   onPress={() => accent.set(c())}
-                  style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: c(), borderWidth: 3, borderColor: accent() === c() ? "#1f2328" : "transparent" }}
+                  style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: ui()[c()], borderWidth: 3, borderColor: accent() === c() ? ui().text : "transparent" }}
                 />
               )}
             </Each>
@@ -107,7 +113,7 @@ function App() {
 }
 
 mount(() => (
-  <Accent.Provider value={signal("#0969da")}>
+  <Accent.Provider value={signal<Swatch>("accent")}>
     <App />
   </Accent.Provider>
 ));

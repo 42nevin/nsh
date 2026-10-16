@@ -1,8 +1,9 @@
 # Website design
 
-Rules for `website/`, so later changes stay coherent. The site follows
-gpui-kit.com's design language — same restraint, same neutral palette and
-code themes — adapted for a mobile framework.
+Rules for `website/`, so later changes stay coherent. The site follows the
+gallery's design language (`examples/gallery/ui.tsx`): graphite surfaces lit
+from above, one citrus accent, tinted status colours — neutral and refined,
+the look of the UI nsh draws.
 
 ## Principles
 
@@ -11,39 +12,93 @@ code themes — adapted for a mobile framework.
    apps (AI-generated and dynamically delivered UI first, plugins second,
    standalone apps third), never presented as a way to write whole apps, and
    never compared with other frameworks outside the comparison page. Architecture comes further down.
-2. **Show the real thing, in its real place.** The hero is a native host app
-   (drawn as such: status bar, navigation bar, chat, input) whose assistant
-   answers with a module; only the dashed, tagged region is nsh, and it runs
-   the real `demos/home-module.tsx` through the web player. The legend says
-   which part is the host and that the module is a web preview. Documentation
-   pages run their demos in a phone frame; the code shown is always the
-   source of what runs.
+2. **Show the real thing.** The hero runs the gallery's AI chat
+   (`demos/home-chat.tsx`, its files in `demos/hero-chat/`, copied from
+   `examples/gallery`) live on the web player: it plays one scenario on
+   load (a tool call and a streamed Markdown reply, fictional content) and
+   stays interactive. Documentation pages run their demos in a frame at
+   phone width; the code shown is always the source of what runs.
+   The product is written "Native Shell" where it is a name; `nsh` and
+   `native-shell` stay as they are in code, commands and URLs.
 3. **Specifics over adjectives.** Every capability card names something a
    reader can check in the repository: a crate, an element, a module, a
    command (`Taffy`, `<List>`, `nsh/animated`, `nsh publish`). Claims track
    `README.md` and `AGENTS.md`; update the copy when they change.
-4. **Restraint carries the design.** Hierarchy comes from type scale, weight
-   and hairlines, not colour fills or gradients.
+4. **Restraint carries the design.** Hierarchy comes from type scale, weight,
+   hairlines and surface depth (card, inset, raised), not colour fills. The
+   only gradients are the surfaces' own top-to-bottom light.
 
 ## Colour
 
-Tokens live in `src/styles/global.css` (`:root` and `.dark`).
+Tokens live in `src/styles/global.css`: `:root` holds the dark theme,
+`html.light` its light variant. A pre-paint script in `BaseLayout.astro`
+sets `dark` or `light` on `<html>` from `localStorage.theme` ("light",
+"dark", or absent for the system's), so nothing flashes; the nav's
+System / Light / Dark segmented control (`ThemeSwitch.astro`) sets it.
 
-- **The brand is near-black (near-white in dark mode)**: primary buttons,
-  focus, the current item. It is the text colour, so it is never used as an
-  accent to add interest; kickers and captions use `--muted-foreground`.
-- **Blue (`--data-2`, `#3b82f6` / `#419cff`) is for links, the logo's prompt
-  and the main-thread hop in the architecture diagram** — things that are
-  "live" or "go somewhere". Green (`--success`) marks running demos.
-- Callouts take one tint each (note blue, tip green, important violet,
-  warning amber, caution red) at 6% fill and a 30% border; nothing else on a
-  page is tinted.
-- **Code colours come from the Shiki themes** (`src/light.theme.json`,
-  `src/dark.theme.json`, macOS classic, shared with gpui-kit). `global.css`
-  maps their hex values onto `--code-*` tokens, so fenced blocks, demo
-  sources and the home page's code switch theme together. Never hand-colour
-  a snippet.
-- The phone bezel is dark in both themes: it is the device, not the page.
+The light variant keeps the design and its material: a warm off-white page
+`#f3f3ef` with a faint grain (`--grain`, both themes), cards `#ffffff →
+#fafaf7` with a 1px border, a crisp top highlight, a faint bottom edge and
+layered warm shadows; insets `#ecece7` with an inner shadow; raised
+controls `#ffffff → #f4f4f0` with a top highlight; text `#15161a`, muted
+`#565a61`, faint `#8c9097`. The accent token (`--citrus`) becomes `#4a6a0a`
+so it reads as text and lines; the bright citrus stays the fill of accent
+badges and buttons (`--finish-accent-bg`, a `#a7cf3f` border, text
+`#1b2207`). Primary buttons are dark (`#2a2b30 → #16171a`). Status colours
+for white: up `#0f8a55`, danger `#d43345`, info `#3d63d1`, warn `#b26a00`.
+The values below are the dark theme's.
+
+- **Surfaces**, as in the gallery: page `#101113`, card `#18191c`, inset
+  `#0c0d0f`, raised `#24262a`; border `#2c2e33`, hairline `#1f2124`; text
+  `#eceef1`, muted `#8d9198`, faint `#5a5e65`.
+- **Finishes** (`--finish-*`, the gallery's `finish`): cards take a
+  `#1d1e22 → #17181b` gradient, an inner top highlight and a soft shadow;
+  insets (code, the demo stage, the search field, segmented tracks) are
+  recessed with an inner shadow; raised controls (secondary buttons, kbd,
+  segmented thumbs) have a top highlight. Navigation stays quiet: the
+  current nav and sidebar item is a soft tint (`--nav-active`), the sidebar's
+  with a 2px accent bar; scroll areas use thin overlay scrollbars.
+  Primary buttons are light (`#fbfbfc → #d4d6d9`, dark text).
+- **One accent, citrus `#c8f26d`** (text on it `#13160c`): the logo, links,
+  kickers, the current TOC entry, the nsh module's tag in the hero, the
+  accent of the diagrams. Never a large fill.
+- Status colours: up / success `#45d49a`, danger `#ff6170`, info `#7ea8ff`,
+  warn `#ffb547`, as small tinted badges or dots. Callouts take one
+  palette colour each (note info, tip up green, important citrus, warning
+  amber, caution danger): a soft tint over the page (`--callout-tint`, 11%
+  dark, 7% light), a 25% border, the icon and label in the colour, the body
+  in the text colour. No purple anywhere.
+- **Code colours are tokens** (`--code-*`): Shiki emits the macos-classic
+  light theme's hex values (`src/light.theme.json`) and `global.css` maps
+  them onto the tokens, so fenced blocks, demo sources and the home page's
+  code share one palette. Never hand-colour a snippet.
+- Diagrams in `public/diagrams` come as a light and a dark file, each with
+  `:root` tokens in its theme's palette; the page shows the one of its theme.
+- **Code blocks** are one card (radius 14, hairline, the card gradient and
+  top highlight, a soft outer shadow, no inner shadow): a header row naming
+  the language (`pre::before`, from `data-language`) with the copy button,
+  a hairline, the code on a faintly tinted surface. Syntax colours per
+  theme: keywords info, strings up green, numbers amber, functions citrus,
+  comments faint. Tables are clean cards (a faint header tint, 13px muted
+  labels, row hairlines). Inline code is a light-touch chip.
+- **A touch of liquid glass**, on floating and layered surfaces only: the nav
+  bar, the search panel, menus, segmented controls (a glassy track, the
+  selected item a lit glass pill), the copy buttons and badges get a
+  translucent fill (`--glass-fill`), a lit rim (`--glass-edge`: top light,
+  bottom dark) and backdrop blur where content passes under them, with an
+  opaque fallback. Cards and reading surfaces stay calm.
+- Diagrams are never upscaled (at most their 880px viewBox width, centred);
+  in docs they scroll inside `.diagram-scroll` rather than shrink below
+  640px.
+- Radii: cards 16px, insets 12px, controls 10px.
+- The logo is the app icon's mark (`public/logo.svg`, inline in
+  `Logo.astro`): a citrus arch holding a light dot (on the light theme a
+  deeper citrus arch and a dark dot, `--logo-*`). The favicon
+  (`favicon.svg`) is the mark itself on a transparent background, its
+  colours switching with `prefers-color-scheme` inside the SVG;
+  `apple-touch-icon.png` and `icon-512.png` (og:image) are the light mark on
+  a plain `#f3f3ef` square. The graphite app icon is the gallery's, not
+  the site's.
 
 ## Typography
 
@@ -52,10 +107,14 @@ Chinese); `ui-monospace` / SF Mono for code. No webfonts. Base 15px.
 
 - Display: `clamp(2.3rem, 4.6vw, 3.75rem)`, weight 680, tracking −0.045em.
 - Section heading: `clamp(1.9rem, 3.4vw, 2.8rem)`, weight 660.
-- Kickers: 0.68rem mono, uppercase, wide tracking, muted. Small mono labels
+- Kickers: 0.68rem mono, uppercase, wide tracking, faint (citrus on the
+  home page's sections). Small mono labels
   — not colour — mark structure (section kicker, sidebar group, "On this page").
 - Negative and wide tracking are for Latin only: `html[lang^="zh"]` resets
   them.
+- Chinese headings, titles and kickers never end with "。" (body sentences
+  keep it); English headlines keep their full stop where the component's
+  other headlines have one.
 
 ## Layout
 
@@ -70,24 +129,48 @@ Chinese); `ui-monospace` / SF Mono for code. No webfonts. Base 15px.
 - Grid columns use `minmax(0, 1fr)`; check phone widths for horizontal
   overflow (the page's `scrollWidth` must equal the viewport).
 
-## The hero story
+## The hero
 
-The hero plays once on load (Replay restarts it): the question rises, the
-assistant types, a pending card ticks Compiled → Signature verified →
-Sandboxed, then the live module fades in once both the story (≥3.2s) and the
-frame have loaded. Entrance motion only, 620ms `cubic-bezier(.16, 1, .3, 1)`;
-with reduced motion the final state shows at once. The host app is always
-light, like the module, regardless of the page theme.
+The chat sits in a card frame of the site's design (a slim bar with the
+file name and a "Live" badge, the app on an inset surface; no device
+chrome) and follows the page's theme (the player's `?theme=`, then a
+message on every change); the gallery's palette has both. The caption says
+what runs; Replay reloads it, which plays the scenario again. Entrance
+motion only, 620ms `cubic-bezier(.16, 1, .3, 1)`. The copied chat imports
+`./clipboard`, a no-op, because this runtime has no `nsh/clipboard` yet;
+the playground lists every demo but this one (it compiles single files).
 
-## Devices and demos
+Behind the hero, `HeroField.astro` draws the dot grid on a 2D canvas, mostly
+dark and quiet: every dot has a seeded size, brightness and twinkle, and a
+slowly drifting value-noise field decides where the grid shimmers. Near the
+pointer (or the last touch) a few dots light up more than their
+neighbours inside a noise-perturbed reach that trails the pointer a little,
+over a small faint halo (140 px, peak alpha 0.06); the field is faint over
+the copy. It pauses off
+screen and in hidden tabs, draws one static frame with reduced motion,
+never takes pointer events, and costs about 0.2 ms a frame (`?fieldperf`
+logs it).
 
-- A demo is shown on a **phone** (`.phone`): the app renders at its real
-  390×844 points and the whole device is scaled with `--phone-scale`, so the
-  app's own layout never reflows to fit the page.
+## Demo frames
+
+- Demos (`demos/*.tsx`), the hero's chat and the playground follow the
+  page's theme: the player starts with `?theme=` and gets a message on every
+  change (`themeDemos` in `src/lib/demo-client.ts`), and demos read their
+  colours from `demos/palette.ts` (`ui()`, over `colorScheme()`) inside JSX,
+  so they switch live. The playground inlines that file into a demo that
+  imports it; its Dark switch follows the page until changed.
+  `demos/nsh.json` gives `nsh/ui/mobile` both appearances
+  (`demos/graphite-theme.json`). Never custom Tailwind colour names: the
+  playground compiles without `nsh.json`.
+- A demo is shown in a **frame** (`.phone`, `frameBar()` in
+  `src/lib/demo.js`): a card with the card finish, a slim bar (an icon tile,
+  the file name, a "Live" badge) and the app on an inset surface, no device
+  chrome. The app renders at its real 390×844 points and the frame is
+  scaled with `--phone-scale`, so the app's own layout never reflows.
 - The demo panel's bar carries the file name and "Open in new tab"; the stage
-  is a faint 24px blueprint grid. Wide panels show the phone and source side
+  is a faint 24px blueprint grid. Wide panels show the frame and source side
   by side (a container query on `.demo`); narrow ones switch with a segmented
-  control. View switching lives in the bar, never inside the device.
+  control. View switching lives in the panel's bar, never inside the frame.
 - Code shown as "a file you wrote" uses the macOS window frame
   (`.code-window`): traffic lights, centred title.
 

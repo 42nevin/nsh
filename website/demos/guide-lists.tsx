@@ -1,8 +1,9 @@
 import { effect, mount, signal, Text, View, type YNode } from "nsh";
 import { List } from "nsh/list";
+import { tint, ui } from "./palette";
 
-const tints = ["#fde2e4", "#e2ece9", "#dfe7fd", "#fff1e6", "#e8e8e4", "#cddafd"];
-const muted = "#57606a";
+// Grid tiles, tinted with the status and info colours.
+const tints = ["down", "up", "info", "warn", "faint", "violet"] as const;
 
 type Post = { id: number; title: string };
 
@@ -45,21 +46,21 @@ function Feed() {
       }
       ListHeaderComponent={
         <View style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingBottom: 4 }}>
-          <Text style={{ flex: 1, color: muted }}>
+          <Text style={{ flex: 1, color: ui().muted }}>
             {posts().length} posts, visible {visible()}
           </Text>
-          <Text onPress={() => list.scrollToIndex({ index: 30, viewPosition: 0.5 })} style={{ color: "#0969da" }}>
+          <Text onPress={() => list.scrollToIndex({ index: 30, viewPosition: 0.5 })} style={{ color: ui().accent }}>
             #30
           </Text>
-          <Text onPress={() => list.scrollToOffset({ offset: 0 })} style={{ color: "#0969da" }}>
+          <Text onPress={() => list.scrollToOffset({ offset: 0 })} style={{ color: ui().accent }}>
             Top
           </Text>
         </View>
       }
     >
       {(post) => (
-        <View style={{ padding: 16, borderRadius: 10, backgroundColor: "#ffffff" }}>
-          <Text style={{ fontSize: 16 }}>{post().title}</Text>
+        <View style={{ ...ui().row, padding: 16, borderRadius: 12 }}>
+          <Text style={{ fontSize: 16, color: ui().text }}>{post().title}</Text>
         </View>
       )}
     </List>
@@ -72,8 +73,8 @@ function Grid() {
   return (
     <List each={items} numColumns={3} estimatedItemSize={80} style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 8 }}>
       {(item) => (
-        <View style={{ height: item().height, borderRadius: 10, backgroundColor: tints[item().id % tints.length], alignItems: "center", justifyContent: "center" }}>
-          <Text style={{ fontWeight: "600" }}>{item().id}</Text>
+        <View style={{ height: item().height, borderRadius: 10, backgroundColor: tint(ui()[tints[item().id % tints.length]], 0.16), alignItems: "center", justifyContent: "center" }}>
+          <Text style={{ fontWeight: "600", color: ui().text }}>{item().id}</Text>
         </View>
       )}
     </List>
@@ -92,18 +93,18 @@ function Contacts() {
     for (const name of names.filter((n) => n[0] === letter)) rows.push({ name });
   }
   return (
-    <List each={rows} stickyHeaderIndices={headers} estimatedItemSize={44} style={{ flex: 1, backgroundColor: "#ffffff" }}>
+    <List each={rows} stickyHeaderIndices={headers} estimatedItemSize={44} style={{ flex: 1, backgroundColor: ui().card.backgroundColor }}>
       {(row) => (
         <If
           when={"header" in row()}
           else={
-            <View style={{ paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#eaeef2" }}>
-              <Text style={{ fontSize: 16 }}>{(row() as { name: string }).name}</Text>
+            <View style={{ paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: ui().line }}>
+              <Text style={{ fontSize: 16, color: ui().text }}>{(row() as { name: string }).name}</Text>
             </View>
           }
         >
-          <View style={{ backgroundColor: "#eaeef2", paddingHorizontal: 16, paddingVertical: 6 }}>
-            <Text style={{ fontWeight: "700", color: muted }}>{(row() as { header: string }).header}</Text>
+          <View style={{ backgroundColor: ui().inset.backgroundColor, paddingHorizontal: 16, paddingVertical: 6 }}>
+            <Text style={{ fontWeight: "700", color: ui().muted }}>{(row() as { header: string }).header}</Text>
           </View>
         </If>
       )}
@@ -125,15 +126,18 @@ function App() {
         borderRadius: 8,
         overflow: "hidden",
         fontWeight: "600",
-        backgroundColor: tab() === id ? "#ffffff" : "transparent",
+        color: tab() === id ? ui().text : ui().muted,
+        backgroundColor: tab() === id ? ui().raised.backgroundColor : "transparent",
+        backgroundImage: tab() === id ? ui().raised.backgroundImage : "none",
+        boxShadow: tab() === id ? ui().raised.boxShadow : "none",
       }}
     >
       {label}
     </Text>
   );
   return (
-    <View style={{ flex: 1, backgroundColor: "#f6f8fa", paddingTop: 24 }}>
-      <View style={{ flexDirection: "row", marginHorizontal: 12, padding: 3, borderRadius: 10, backgroundColor: "#e1e4e8" }}>
+    <View style={{ flex: 1, backgroundColor: ui().page, paddingTop: 24 }}>
+      <View style={{ ...ui().inset, flexDirection: "row", marginHorizontal: 12, padding: 3, borderRadius: 10 }}>
         {button("feed", "Feed")}
         {button("grid", "Grid")}
         {button("contacts", "Sticky")}

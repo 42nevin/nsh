@@ -1,6 +1,7 @@
 // Navigation: a stack of screens with header options, pushed and popped.
 import { mount, signal, Text, View } from "nsh";
 import { Button, createNavigator, Screen, Stack } from "nsh/ui/mobile";
+import { ui } from "./palette";
 
 type Route = { name: "home" } | { name: "detail"; id: number };
 
@@ -10,8 +11,8 @@ function Home() {
   const opened = signal(0);
   return (
     <Screen title="Inbox">
-      <View style={{ flex: 1, backgroundColor: "#ffffff", padding: 16, paddingTop: 24, gap: 12 }}>
-        <Text style={{ color: "#737373" }}>{`Opened ${opened()} messages`}</Text>
+      <View style={{ flex: 1, backgroundColor: ui().page, padding: 16, paddingTop: 24, gap: 12 }}>
+        <Text style={{ color: ui().muted }}>{`Opened ${opened()} messages`}</Text>
         <Button
           title="Open message 1"
           onPress={() => {
@@ -31,13 +32,13 @@ function Detail(props: { id: number }) {
     <Screen
       title={`Message ${props.id}`}
       headerRight={
-        <Text onPress={() => starred.set(!starred())} style={{ fontSize: 17 }}>
+        <Text onPress={() => starred.set(!starred())} style={{ fontSize: 17, color: ui().accent }}>
           {starred() ? "★" : "☆"}
         </Text>
       }
     >
-      <View style={{ flex: 1, backgroundColor: "#ffffff", padding: 16, gap: 12 }}>
-        <Text>{`The body of message ${props.id}.`}</Text>
+      <View style={{ flex: 1, backgroundColor: ui().page, padding: 16, gap: 12 }}>
+        <Text style={{ color: ui().text }}>{`The body of message ${props.id}.`}</Text>
         <Button title="Next message" onPress={() => nav.push({ name: "detail", id: props.id + 1 })} />
         <Button title="Back to the inbox" variant="secondary" onPress={() => nav.popToTop()} />
       </View>

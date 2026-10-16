@@ -1,8 +1,10 @@
 import { mount, Scroll, signal, Text, View, type YNode } from "nsh";
 import { createNativeValue } from "nsh/animated";
+import { tint, ui } from "./palette";
 
-const palette = ["#0969da", "#8250df", "#bf3989", "#cf222e", "#bc4c00", "#1a7f37"];
-const muted = "#57606a";
+// Tints of the info, violet, danger, warn and up colours under the text colour.
+const hues = ["info", "violet", "down", "warn", "up", "faint"] as const;
+const hue = (i: number) => tint(ui()[hues[i % hues.length]], 0.28);
 
 /** Pages as wide as the scroll view, with a page indicator. */
 function Pager() {
@@ -20,10 +22,10 @@ function Pager() {
         onScrollEnd={(e) => page.set(Math.round(e.x / width()))}
       >
         <View style={{ flexDirection: "row" }}>
-          <Each of={palette.slice(0, 4)}>
-            {(color, i) => (
-              <View style={{ width: width(), height: 110, backgroundColor: color(), alignItems: "center", justifyContent: "center" }}>
-                <Text style={{ color: "#ffffff", fontSize: 24, fontWeight: "700" }}>Page {i() + 1}</Text>
+          <Each of={[0, 1, 2, 3]}>
+            {(i) => (
+              <View style={{ width: width(), height: 110, backgroundColor: hue(i()), alignItems: "center", justifyContent: "center" }}>
+                <Text style={{ color: ui().text, fontSize: 24, fontWeight: "700" }}>Page {i() + 1}</Text>
               </View>
             )}
           </Each>
@@ -31,7 +33,7 @@ function Pager() {
       </Scroll>
       <View style={{ flexDirection: "row", justifyContent: "center", gap: 6 }}>
         <Each of={[0, 1, 2, 3]}>
-          {(i) => <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: page() === i() ? "#0969da" : "#d0d7de" }} />}
+          {(i) => <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: page() === i() ? ui().accent : ui().border }} />}
         </Each>
       </View>
     </View>
@@ -45,8 +47,18 @@ function Cards() {
       <View style={{ flexDirection: "row", gap: 12, paddingHorizontal: 4 }}>
         <Each of={Array.from({ length: 12 }, (_, i) => i)}>
           {(i) => (
-            <View style={{ width: 140, height: 90, borderRadius: 14, backgroundColor: palette[i() % palette.length], alignItems: "center", justifyContent: "center" }}>
-              <Text style={{ color: "#ffffff", fontWeight: "700" }}>Card {i() + 1}</Text>
+            <View
+              style={{
+                width: 140,
+                height: 90,
+                borderRadius: 14,
+                backgroundColor: hue(i()),
+                boxShadow: "inset 0 1px 0 rgba(255,255,255,0.08)",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <Text style={{ color: ui().text, fontWeight: "700" }}>Card {i() + 1}</Text>
             </View>
           )}
         </Each>
@@ -70,22 +82,23 @@ function App() {
     }, 1200);
   };
   return (
-    <View style={{ flex: 1, backgroundColor: "#f6f8fa", paddingTop: 24 }}>
+    <View style={{ flex: 1, backgroundColor: ui().page, paddingTop: 24 }}>
       {/* A bar that fades in and shrinks its title as the page scrolls: no JS per frame. */}
       <View
         style={{
           height: 48,
           paddingHorizontal: 16,
           justifyContent: "center",
-          backgroundColor: offset.interpolate({ inputRange: [0, 80], outputRange: ["#f6f8fa", "#ffffff"] }),
+          backgroundColor: offset.interpolate({ inputRange: [0, 80], outputRange: [ui().page, ui().card.backgroundColor] }),
           borderBottomWidth: 1,
-          borderBottomColor: "#d0d7de",
+          borderBottomColor: ui().line,
         }}
       >
         <Text
           style={{
             fontSize: 22,
             fontWeight: "700",
+            color: ui().text,
             transformOrigin: "left center",
             transform: [{ scale: offset.interpolate({ inputRange: [0, 80], outputRange: [1, 0.8] }) }],
           }}
@@ -104,26 +117,31 @@ function App() {
         keyboardDismissMode="on-drag"
       >
         <View style={{ padding: 16, gap: 18 }}>
-          <Text style={{ color: muted }}>
+          <Text style={{ color: ui().muted }}>
             Pull down to refresh ({refreshed()}×). onScroll: y = {y()}
           </Text>
-          <Text style={{ fontWeight: "600" }}>pagingEnabled</Text>
+          <Text style={{ fontWeight: "600", color: ui().text }}>pagingEnabled</Text>
           <Pager />
-          <Text style={{ fontWeight: "600" }}>snapToInterval</Text>
+          <Text style={{ fontWeight: "600", color: ui().text }}>snapToInterval</Text>
           <Cards />
           <Each of={Array.from({ length: 24 }, (_, i) => i + 1)}>
             {(n) => (
-              <View style={{ padding: 14, borderRadius: 10, backgroundColor: "#ffffff" }}>
-                <Text>Row {n()}</Text>
+              <View style={{ ...ui().row, padding: 14, borderRadius: 12 }}>
+                <Text style={{ color: ui().text }}>Row {n()}</Text>
               </View>
             )}
           </Each>
           <View
             onPress={() => scroll.scrollTo({ y: 0 })}
             activeOpacity={0.6}
-            style={{ padding: 14, borderRadius: 10, backgroundColor: "#0969da", alignItems: "center" }}
+            style={{
+              padding: 14,
+              borderRadius: 10,
+              ...ui().primary,
+              alignItems: "center",
+            }}
           >
-            <Text style={{ color: "#ffffff", fontWeight: "600" }}>Back to the top (ref.scrollTo)</Text>
+            <Text style={{ color: ui().onPrimary, fontWeight: "600" }}>Back to the top (ref.scrollTo)</Text>
           </View>
         </View>
       </Scroll>
