@@ -39,7 +39,9 @@ crates/
                        the app's themes (nsh.json `tailwind` / `theme`, checked, handed to the renderer by the entry) and the
                        unknown-class check (`classes.rs`);
                        development bundles with hot module replacement (`hot.rs`); the app's part of `.nsh/types` (`types.rs`:
-                       its kebab-case components' JSX types, asset imports)
+                       its kebab-case components' JSX types, asset imports); feature `bundle` (default off in the workspace;
+                       the CLI turns it on) is all of that, without it only `compile_module` (`compile.rs`: one module, no
+                       rolldown) is left, which also builds for WebAssembly (the website's playground)
   nsh-dev/             Dev tooling: dev server protocol, server (CLI, feature `server`), client (host, feature `client`)
   nsh-platform-ios/    UIKit backend (iOS / simulator / Mac Catalyst): native view mounting, CoreText text engine, input, AppView, standalone app;
                        feature `dev`: dev server client, log forwarding, error overlay; feature `embed`: the C ABI (`embed.rs`,
@@ -48,7 +50,8 @@ crates/
                        runtime in `java/com/longbridge/nsh` (NshView, Mounter, views, images, networking); feature `dev` as above
   nsh-platform-web/    WebAssembly backend (the website's live demos): the engine on the page's main thread (`LocalEngine`), text
                        laid out with browser font metrics, batches as JSON + CSS for the DOM runtime in `web/nsh.js`, the
-                       animator on requestAnimationFrame; `web/index.html` is the demo player (`cargo xtask web`)
+                       animator on requestAnimationFrame; `web/index.html` is the demo player (`cargo xtask web`); feature
+                       `compiler`: the playground's TSX compiler (`nsh-playground.wasm`)
   nsh-ios-host/        Development host app (Catalyst / iOS simulator); connects to a dev server or runs a local bundle
   nsh-ios-app/         Release runner: the executable of iOS apps built by `nsh package`
   nsh-cli/             The `nsh` command line (a library: `main_with(ui_sets)`): init / build / trace / dev / run / package; keygen /
@@ -124,7 +127,7 @@ cargo clippy --workspace --all-targets
 cargo clippy -p nsh-platform-ios -p nsh-ios-host -p nsh-ios-app --target aarch64-apple-ios-macabi --features nsh-platform-ios/embed,nsh-platform-ios/dev
 cargo xtask ios-embed                                                           # NativeShell(Dev).xcframework into dist/nsh/embed/ios
 cargo xtask web                                                                 # nsh.wasm + player + website demos into website/public/play
-cargo clippy -p nsh-platform-web --target wasm32-unknown-unknown                # the web backend (empty off WebAssembly)
+cargo clippy -p nsh-platform-web --target wasm32-unknown-unknown --features compiler   # the web backend (empty off WebAssembly)
 cd website && bun run dev                                                       # the documentation site (builds the player too)
 ```
 
