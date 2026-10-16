@@ -103,4 +103,4 @@ inside `prefers-reduced-motion: no-preference`. The live dot pulses slowly
   `order` and `demo` (`tests/content.test.ts`).
 - Home copy is the bilingual `copy` object in `src/components/Home.astro`;
   section names and blurbs are in `src/lib/sections.ts`.
-- The licence is MIT OR Apache-2.0; no version number is shown anywhere.
+- The licence is Apache-2.0; no version number is shown anywhere.
