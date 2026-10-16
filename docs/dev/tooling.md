@@ -60,5 +60,14 @@
 ## Finding the runtimes
 
 The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distribution layout) or, in a checkout, in
-`target/<triple>/<profile>` and `target/android/<profile>[-dev]` with the CLI's own profile (`NSH_RUNTIME` overrides).
+`target/<triple>/<profile>` and `target/android/<profile>[-dev]` with the CLI's own profile (`NSH_RUNTIME` overrides). In a checkout (`<root>/target/<profile>/nsh` next to
+`crates/nsh-ios-host`), the CLI builds what it needs with cargo first (`cargo build -p nsh-ios-host --target ...`,
+`cargo xtask android --dev`), so `nsh run` never uses a missing or stale host.
+
+## Entries and `cargo run`
+
+Commands that build an app take its entry module or its directory (the current one by default), whose `App.tsx` is
+the entry (matched in any case: `crates/nsh-cli/src/entry.rs`). `cargo run` is `xtask run` (the workspace's default
+member): the gallery in the Mac Catalyst host through `nsh run`, in a process group of its own that is stopped and
+started again when a source under `crates/` changes (`crates/xtask/src/run.rs`).
 `.cargo/config.toml` sets `IPHONEOS_DEPLOYMENT_TARGET = 15.0` for Rust and C alike.

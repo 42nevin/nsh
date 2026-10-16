@@ -116,25 +116,24 @@ the two platform-specific clippy runs above.
 ### Run the examples
 
 `examples/gallery` has a demo for every area of nsh. If you change an existing feature, run the related demo on the
-platforms it touches. `make dev` builds the CLI and the development host, runs the gallery in the iOS simulator with
-hot reload for JS and TSX, and rebuilds and restarts it whenever Rust code under `crates/` changes (components are
-Rust; this needs `cargo install cargo-watch`):
+platforms it touches. `cargo run` runs the gallery in the Mac Catalyst window (UIKit on macOS, no simulator): it builds
+the CLI and the development host, reloads JS and TSX in place, and rebuilds and restarts the app whenever Rust code
+under `crates/` changes (components and modules are Rust and live in the host). Ctrl-C stops it.
 
 ```sh
-make dev                                       # the gallery in the iOS simulator
-make dev TARGET=android                        # on an Android device or emulator
-make dev TARGET=catalyst                       # in the Mac Catalyst window
-make dev APP=examples/counter/App.tsx DEVICE="iPhone 17 Pro"
+cargo run                                      # the gallery in the Mac Catalyst window
+cargo run -- examples/counter                  # another app: its directory (App.tsx is the entry) or entry module
+cargo run -- --target ios                      # in an iOS simulator
+cargo run -- --target android                  # on an Android device or emulator
 ```
 
-Or step by step:
+`nsh run` itself works too; in a checkout it builds the host it needs first:
 
 ```sh
 cargo build -p nsh-cli
-cargo build -p nsh-ios-host --target aarch64-apple-ios-macabi
-./target/debug/nsh run examples/gallery/App.tsx                    # Mac Catalyst window
-./target/debug/nsh run examples/gallery/App.tsx --target ios       # iOS simulator (needs the aarch64-apple-ios-sim host)
-./target/debug/nsh run examples/gallery/App.tsx --target android   # emulator or device (needs `cargo xtask android --dev`)
+./target/debug/nsh run examples/gallery                    # Mac Catalyst window
+./target/debug/nsh run examples/gallery --target ios       # iOS simulator
+./target/debug/nsh run examples/gallery --target android   # emulator or device
 ```
 
 ### Reviewing UI and platform changes
@@ -153,7 +152,7 @@ mount item counts, compared with the baselines in [docs/dev/performance.md](docs
 baselines when they move.
 
 ```sh
-./target/debug/nsh trace examples/counter/App.tsx
+./target/debug/nsh trace examples/counter
 cargo build --release -p nsh-cli
 ./target/release/nsh trace examples/gallery/Bench.tsx --scroll 3000 --taps 0
 cargo test --release -p nsh-engine --test list_bench -- --ignored --nocapture

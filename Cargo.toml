@@ -1,7 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-default-members = ["crates/nsh-cli"]
+# `cargo run` runs the gallery (`crates/xtask/src/run.rs`).
+default-members = ["crates/xtask"]
 
 [workspace.package]
 version = "0.1.0"

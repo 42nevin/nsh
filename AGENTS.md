@@ -83,25 +83,25 @@ Keep them current: a change that alters documented behavior updates its page (or
 ## Commands
 
 ```sh
-make dev [TARGET=ios|android|catalyst] [APP=...] [DEVICE=...]                      # gallery with hot reload; rebuilds and restarts on Rust changes
+cargo run [-- <app>] [-- --target ios|android]                                     # the gallery in Mac Catalyst, hot reload; rebuilt and restarted on Rust changes
 cargo build -p nsh-cli                                                             # build the nsh CLI
 ./target/debug/nsh init my-app                                                     # new app: App.tsx, nsh.json, tsconfig.json, .nsh/types
-cargo build -p nsh-ios-host --target aarch64-apple-ios-macabi                          # build the Catalyst development host (needed by nsh run)
+cargo build -p nsh-ios-host --target aarch64-apple-ios-macabi                          # the Catalyst development host (nsh run builds it in a checkout)
 cargo build -p nsh-ios-host --target aarch64-apple-ios-sim                             # the iOS simulator host (`nsh run --target ios`)
 cargo build -p nsh-ios-app --target aarch64-apple-ios-sim                              # the release runner (`nsh package --target ios-simulator`)
-./target/debug/nsh trace examples/counter/App.tsx                                  # headless run: prints mount items and the time of every commit
+./target/debug/nsh trace examples/counter                                  # headless run: prints mount items and the time of every commit
 ./target/release/nsh trace examples/gallery/Bench.tsx --scroll 3000 --taps 0       # headless scrolling (10pt per frame): per-frame list cost
-./target/debug/nsh run examples/counter/App.tsx --trace                            # dev server + Catalyst host (390×844), hot reload on save
-./target/debug/nsh run examples/gallery/App.tsx --target ios                       # in an iOS simulator (boots one; needs the nsh-ios-host sim build)
-./target/debug/nsh run examples/gallery/App.tsx --target android                   # on an emulator / device (needs `cargo xtask android --dev`)
-./target/debug/nsh package examples/gallery/App.tsx --target ios-simulator --run   # installable app (.app / .ipa / .apk)
+./target/debug/nsh run examples/counter --trace                            # dev server + Catalyst host (390×844), hot reload on save
+./target/debug/nsh run examples/gallery --target ios                       # in an iOS simulator (boots one; needs the nsh-ios-host sim build)
+./target/debug/nsh run examples/gallery --target android                   # on an emulator / device (needs `cargo xtask android --dev`)
+./target/debug/nsh package examples/gallery --target ios-simulator --run   # installable app (.app / .ipa / .apk)
 cargo xtask android [--release] [--dev]                                            # Android runtime into target/android/<profile>[-dev]
 cargo xtask dist                                                                   # the distribution in dist/nsh
-./target/debug/nsh dev examples/counter/App.tsx                                    # dev server only (for simulators / devices); prints local and LAN URLs
-./target/debug/nsh build examples/counter/App.tsx --release                        # writes bundle.js / bundle.qbc
+./target/debug/nsh dev examples/counter                                    # dev server only (for simulators / devices); prints local and LAN URLs
+./target/debug/nsh build examples/counter --release                        # writes bundle.js / bundle.qbc
 ./target/debug/nsh keygen keys/root && ./target/debug/nsh keygen keys/release      # signing keys (.secret / .pub)
 ./target/debug/nsh certify --root keys/root.secret --key keys/release.pub --apps 'com.example.*' -o keys/release.cert
-./target/debug/nsh publish examples/counter/App.tsx --key keys/release.secret --cert keys/release.cert --build 2
+./target/debug/nsh publish examples/counter --key keys/release.secret --cert keys/release.cert --build 2
 ./target/debug/nsh verify out/com.example.counter-2.nshpkg --root keys/root.pub     # as a device would check it
 ./target/debug/nsh revoke --root keys/root.secret --sequence 1 --package <sha256> -o revocations.json
 

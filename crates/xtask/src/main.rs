@@ -1,5 +1,7 @@
 //! Maintainer tasks, run with `cargo xtask <task>`:
 //!
+//! - `run` (the default, and what `cargo run` runs): an example app in the
+//!   Mac Catalyst development host, restarted when Rust code changes.
 //! - `android`: the Android runtime (`libnsh.so` per ABI, `classes.dex`)
 //!   into `target/android/<profile>`, where `nsh run` / `nsh package` find it.
 //! - `dist`: the distribution in `dist/nsh`: the `nsh` CLI plus every
@@ -10,18 +12,29 @@
 mod android;
 mod dist;
 mod ios;
+mod run;
 
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "xtask")]
+#[command(
+    name = "xtask",
+    about = "Maintainer tasks; without one, run the gallery (`cargo run`)",
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
     #[command(subcommand)]
-    task: Task,
+    task: Option<Task>,
+    /// Without a task: `run` with these options.
+    #[command(flatten)]
+    run: run::RunArgs,
 }
 
 #[derive(Subcommand)]
 enum Task {
+    /// Run an example app (default: the gallery, in Mac Catalyst) with hot
+    /// reload, rebuilt and restarted when Rust code changes.
+    Run(run::RunArgs),
     /// Build the Android runtime.
     Android {
         /// Optimized build.
@@ -43,7 +56,9 @@ enum Task {
 }
 
 fn main() -> anyhow::Result<()> {
-    match Cli::parse().task {
+    let cli = Cli::parse();
+    match cli.task.unwrap_or(Task::Run(cli.run)) {
+        Task::Run(args) => run::run(args),
         Task::Android { release, dev, abi } => {
             let abis = if abi.is_empty() {
                 android::ABIS.iter().map(|a| a.to_string()).collect()

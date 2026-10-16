@@ -13,8 +13,8 @@ describes the UI and handles the events.
 
 | Example | What it shows |
 |---|---|
-| `examples/gallery/App.tsx` | A demo index covering what nsh supports: lists (recycling, columns, sticky sections, an inverted chat, horizontal lists), navigation (header options, modals, the back button), forms and the keyboard, controls, gestures, native animations, images, styles, text, web view and video, environment / timers / fetch |
-| `examples/counter/App.tsx` | The smallest app |
+| `examples/gallery` | A demo index covering what nsh supports: lists (recycling, columns, sticky sections, an inverted chat, horizontal lists), navigation (header options, modals, the back button), forms and the keyboard, controls, gestures, native animations, images, styles, text, web view and video, environment / timers / fetch |
+| `examples/counter` | The smallest app |
 | `examples/bench` | Rust components against the same component in TSX (see its README) |
 | `examples/embed-ios`, `examples/embed-android` | nsh inside existing native apps (see their READMEs), running `examples/embedded` with a native component the host app registers |
 
@@ -26,9 +26,9 @@ edited components render again, the rest of the app keeps its state). Logs and e
 `dist/nsh` (made by `cargo xtask dist`) contains the CLI and prebuilt runtimes:
 
 ```sh
-dist/nsh/bin/nsh run examples/gallery/App.tsx                      # Mac Catalyst window (390×844), macOS only
-dist/nsh/bin/nsh run examples/gallery/App.tsx --target ios         # iOS simulator (boots one if none is running)
-dist/nsh/bin/nsh run examples/gallery/App.tsx --target android     # Android emulator or device
+dist/nsh/bin/nsh run examples/gallery                      # Mac Catalyst window (390×844), macOS only
+dist/nsh/bin/nsh run examples/gallery --target ios         # iOS simulator (boots one if none is running)
+dist/nsh/bin/nsh run examples/gallery --target android     # Android emulator or device
 ```
 
 Requirements: Xcode for the Mac and iOS targets; for Android, the Android SDK (`ANDROID_HOME`, or
@@ -37,33 +37,28 @@ Requirements: Xcode for the Mac and iOS targets; for Android, the Android SDK (`
 
 ### From a checkout
 
-Build the CLI and the development host of the target you want once (and again after changing Rust code):
+`cargo run` runs the gallery in the Mac Catalyst window, with hot reload; it rebuilds and restarts it when the Rust
+code changes. Other apps and targets:
 
 ```sh
-cargo build -p nsh-cli
-cargo build -p nsh-ios-host --target aarch64-apple-ios-macabi   # for the Mac Catalyst window
-cargo build -p nsh-ios-host --target aarch64-apple-ios-sim      # for --target ios
-cargo xtask android --dev                                   # for --target android
+cargo run -- examples/counter
+cargo run -- --target ios          # iOS simulator
+cargo run -- --target android      # Android emulator or device
 ```
 
-Then run an example:
-
-```sh
-./target/debug/nsh run examples/gallery/App.tsx
-./target/debug/nsh run examples/gallery/App.tsx --target ios
-./target/debug/nsh run examples/gallery/App.tsx --target android
-```
+`./target/debug/nsh run <app>` works as well (after `cargo build -p nsh-cli`): in a checkout it builds the development
+host it needs.
 
 ### Other ways to run an app
 
 `nsh` below is `dist/nsh/bin/nsh` or `./target/debug/nsh`.
 
 ```sh
-nsh dev examples/gallery/App.tsx                                    # dev server only; prints the URLs for hosts on this machine and the LAN
-nsh trace examples/counter/App.tsx                                  # headless: prints the native view operations and timings
-nsh package examples/gallery/App.tsx --target ios-simulator --run   # an installable app (.app / .ipa / .apk)
-nsh build examples/counter/App.tsx --release                        # bundle.js / bundle.qbc for embedding
-nsh publish App.tsx --key release.secret --cert release.cert        # a signed package (.nshpkg) for apps to download and verify
+nsh dev examples/gallery                                    # dev server only; prints the URLs for hosts on this machine and the LAN
+nsh trace examples/counter                                  # headless: prints the native view operations and timings
+nsh package examples/gallery --target ios-simulator --run   # an installable app (.app / .ipa / .apk)
+nsh build examples/counter --release                        # bundle.js / bundle.qbc for embedding
+nsh publish --key release.secret --cert release.cert        # a signed package (.nshpkg) for apps to download and verify
 ```
 
 Signing keys: `nsh keygen` (a root key kept offline and release keys), `nsh certify` (the root certifies a release
@@ -73,7 +68,7 @@ key for some app ids), `nsh verify`, `nsh revoke` (a signed revocation list). Se
 
 ```sh
 nsh init my-app
-nsh run my-app/App.tsx
+nsh run my-app
 ```
 
 `nsh init` creates `App.tsx`, `nsh.json` (name, id, version, icon) and a `tsconfig.json`; type declarations for
