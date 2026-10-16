@@ -13,7 +13,10 @@ use std::{
 };
 
 use dispatch2::{DispatchQueue, MainThreadBound};
-use nsh_dev::{DevClient, DevEvent, protocol::BundleFormat};
+use nsh_dev::{
+    DevClient, DevEvent, HostInfo,
+    protocol::{BundleFormat, HostPlatform},
+};
 use nsh_engine::{BYTECODE_VERSION, Bundle, Policy};
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained, sel,
@@ -91,26 +94,36 @@ impl DevSession {
         show_status(&ui, &container, &format!("Connecting to {url}…"));
         let target = MainThreadBound::new((view, ui.clone()), mtm);
         let target = Arc::new(target);
-        let started = DevClient::start(
-            url,
-            device_name(mtm),
-            BYTECODE_VERSION.to_owned(),
-            move |event| {
-                match event {
-                    DevEvent::Connected => CONNECTED.store(true, Ordering::Relaxed),
-                    DevEvent::Disconnected => CONNECTED.store(false, Ordering::Relaxed),
-                    _ => {}
-                }
-                let target = target.clone();
-                DispatchQueue::main().exec_async(move || {
-                    let mtm = MainThreadMarker::new().expect("main queue");
-                    let (view, ui) = target.get(mtm);
-                    if let Some(view) = view.upgrade() {
-                        handle(&view, ui, event);
-                    }
-                });
+        let host = HostInfo {
+            device: device_name(mtm),
+            platform: if cfg!(target_abi = "macabi") {
+                HostPlatform::MacCatalyst
+            } else if cfg!(target_abi = "sim") {
+                HostPlatform::IosSimulator
+            } else {
+                HostPlatform::Ios
             },
-        );
+            bytecode_version: BYTECODE_VERSION.to_owned(),
+            ui_sets: crate::ui_sets()
+                .iter()
+                .filter_map(|set| set.specifier().map(str::to_owned))
+                .collect(),
+        };
+        let started = DevClient::start(url, host, move |event| {
+            match event {
+                DevEvent::Connected => CONNECTED.store(true, Ordering::Relaxed),
+                DevEvent::Disconnected => CONNECTED.store(false, Ordering::Relaxed),
+                _ => {}
+            }
+            let target = target.clone();
+            DispatchQueue::main().exec_async(move || {
+                let mtm = MainThreadMarker::new().expect("main queue");
+                let (view, ui) = target.get(mtm);
+                if let Some(view) = view.upgrade() {
+                    handle(&view, ui, event);
+                }
+            });
+        });
         match started {
             Ok(client) => {
                 let client = Arc::new(client);
@@ -128,7 +141,7 @@ impl DevSession {
     }
 
     pub(crate) fn show_error(&self, container: &UIView, title: &str, message: &str) {
-        show_error(&self.ui, container, title, message);
+        show_error(&self.ui, container, title, message, false);
     }
 
     /// A hot update failed: loads the latest bundle from scratch.
@@ -146,8 +159,9 @@ impl DevSession {
 
 #[derive(Default)]
 struct DevUi {
-    /// Build the app runs (loaded, or reached by hot updates).
-    running: Option<u64>,
+    /// Build the app runs (loaded, or reached by hot updates): the server
+    /// run it came from and its number.
+    running: Option<(u64, u64)>,
     /// The latest bundle, for reloads.
     latest: Option<Bundle>,
     status: Option<Retained<UILabel>>,
@@ -199,8 +213,21 @@ fn handle(view: &Rc<Inner>, ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
             show_status(ui, container, "Dev server disconnected — reconnecting…")
         }
         DevEvent::Building => {}
-        DevEvent::BuildFailed(message) => show_error(ui, container, "Build failed", &message),
+        DevEvent::BuildFailed(message) => {
+            show_error(ui, container, "Build failed", &message, false)
+        }
+        DevEvent::CannotRun { message, .. } => {
+            hide_status(ui);
+            show_error(
+                ui,
+                container,
+                "This host cannot run the app",
+                &message,
+                true,
+            )
+        }
         DevEvent::Bundle {
+            session,
             version,
             format,
             bytes,
@@ -221,6 +248,7 @@ fn handle(view: &Rc<Inner>, ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
                             container,
                             "Invalid bundle",
                             "the dev server sent non-UTF-8 source",
+                            true,
                         );
                     }
                 },
@@ -230,16 +258,16 @@ fn handle(view: &Rc<Inner>, ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
             }
             bundle = match bundle.with_capabilities_json(capabilities.as_deref()) {
                 Ok(bundle) => bundle,
-                Err(err) => return show_error(ui, container, "Invalid capabilities", &err),
+                Err(err) => return show_error(ui, container, "Invalid capabilities", &err, true),
             };
             hide_status(ui);
             let running = {
                 let mut ui = ui.borrow_mut();
                 ui.latest = Some(bundle.clone());
-                ui.running.replace(version)
+                ui.running.replace((session, version))
             };
             // Already there through a hot update.
-            if running == Some(version) {
+            if running == Some((session, version)) {
                 return;
             }
             log::info!("loading build {version}");
@@ -247,12 +275,13 @@ fn handle(view: &Rc<Inner>, ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
             Inner::load(view, bundle.into());
         }
         DevEvent::Patch {
+            session,
             version,
             base,
             code,
             source_map,
         } => {
-            if ui.borrow().running != Some(base) {
+            if ui.borrow().running != Some((session, base)) {
                 return;
             }
             let update = nsh_engine::HotUpdate {
@@ -262,7 +291,7 @@ fn handle(view: &Rc<Inner>, ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
             };
             if view.hot_update(update) {
                 log::info!("updating to build {version}");
-                ui.borrow_mut().running = Some(version);
+                ui.borrow_mut().running = Some((session, version));
                 hide_error(ui);
             }
         }
@@ -322,8 +351,16 @@ fn hide_status(ui: &RefCell<DevUi>) {
     }
 }
 
-/// Shows a full-screen error over the app; tap to dismiss.
-fn show_error(ui: &Rc<RefCell<DevUi>>, container: &UIView, title: &str, message: &str) {
+/// Shows a full-screen error over the app; tap to dismiss. `prose` wraps
+/// the message to the screen; otherwise its lines are kept (code frames,
+/// stack traces) and it scrolls sideways.
+fn show_error(
+    ui: &Rc<RefCell<DevUi>>,
+    container: &UIView,
+    title: &str,
+    message: &str,
+    prose: bool,
+) {
     let mtm = container.mtm();
     hide_error(ui);
     let overlay = UIView::initWithFrame(UIView::alloc(mtm), container.bounds());
@@ -358,10 +395,12 @@ fn show_error(ui: &Rc<RefCell<DevUi>>, container: &UIView, title: &str, message:
     text.setText(Some(&NSString::from_str(&format!(
         "{title}\n\n{message}\n\n(tap to dismiss)"
     ))));
-    // Keep code frames intact: no wrapping, scroll sideways instead.
-    let container_text = text.textContainer();
-    container_text.setWidthTracksTextView(false);
-    container_text.setSize(CGSize::new(4000.0, CGFloat::MAX));
+    if !prose {
+        // Keep code frames intact: no wrapping, scroll sideways instead.
+        let container_text = text.textContainer();
+        container_text.setWidthTracksTextView(false);
+        container_text.setSize(CGSize::new(4000.0, CGFloat::MAX));
+    }
     overlay.addSubview(&text);
 
     {

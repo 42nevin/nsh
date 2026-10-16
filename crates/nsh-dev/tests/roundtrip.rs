@@ -3,11 +3,21 @@
 use std::{sync::mpsc, time::Duration};
 
 use nsh_dev::{
-    DevClient, DevEvent, DevServer,
-    protocol::{BundleFormat, LogLevel, WS_PATH},
+    ClientEvent, DevClient, DevEvent, DevServer, HostInfo,
+    protocol::{BundleFormat, HostPlatform, LogLevel, WS_PATH},
 };
 
 const TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A host named `device` with bytecode `bytecode` serving the mobile UI.
+fn host(device: &str, bytecode: &str) -> HostInfo {
+    HostInfo {
+        device: device.into(),
+        platform: HostPlatform::Android,
+        bytecode_version: bytecode.into(),
+        ui_sets: vec!["nsh/ui/mobile".into()],
+    }
+}
 
 fn next_non_status(rx: &mpsc::Receiver<DevEvent>) -> DevEvent {
     loop {
@@ -20,9 +30,9 @@ fn next_non_status(rx: &mpsc::Receiver<DevEvent>) -> DevEvent {
 
 #[test]
 fn bundles_errors_and_logs_round_trip() {
-    let (log_tx, log_rx) = mpsc::channel();
-    let server = DevServer::start("127.0.0.1:0".parse().unwrap(), "bc-1", None, move |log| {
-        let _ = log_tx.send(log);
+    let (client_tx, client_rx) = mpsc::channel();
+    let server = DevServer::start("127.0.0.1:0".parse().unwrap(), "bc-1", None, move |event| {
+        let _ = client_tx.send(event);
     })
     .unwrap();
     server.publish(
@@ -31,30 +41,41 @@ fn bundles_errors_and_logs_round_trip() {
         Some("{\"version\":3}".into()),
         Some("{\"statusBar\":true}".into()),
         None,
+        vec!["nsh/ui/mobile".into()],
     );
     let url = format!("ws://{}{WS_PATH}", server.local_addr());
 
     // A client with the same bytecode version gets bytecode, starting with
     // the latest bundle published before it connected.
     let (tx, rx) = mpsc::channel();
-    let client = DevClient::start(url.clone(), "test-device".into(), "bc-1".into(), move |e| {
+    let client = DevClient::start(url.clone(), host("test-device", "bc-1"), move |e| {
         let _ = tx.send(e);
     })
     .unwrap();
     match next_non_status(&rx) {
         DevEvent::Bundle {
+            session,
             version: 1,
             format: BundleFormat::Bytecode,
             bytes,
             source_map,
             capabilities,
         } => {
+            assert_ne!(session, 0, "the server names its run");
             assert_eq!(bytes, [1, 2, 3]);
             assert_eq!(source_map.as_deref(), Some("{\"version\":3}"));
             assert_eq!(capabilities.as_deref(), Some("{\"statusBar\":true}"));
         }
         other => panic!("{other:?}"),
     }
+    // The server reports the host with the build it sent first.
+    match client_rx.recv_timeout(TIMEOUT).unwrap() {
+        ClientEvent::Connected { device, build } => {
+            assert_eq!((device.as_str(), build), ("test-device", Some(1)))
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(server.clients(), 1);
 
     server.publish_error("syntax error at App.tsx:3");
     assert!(matches!(next_non_status(&rx), DevEvent::BuildFailed(m) if m.contains("App.tsx:3")));
@@ -67,6 +88,7 @@ fn bundles_errors_and_logs_round_trip() {
         None,
         None,
         Some(("patch v2".into(), Some("{}".into()))),
+        Vec::new(),
     );
     match next_non_status(&rx) {
         DevEvent::Patch {
@@ -74,6 +96,7 @@ fn bundles_errors_and_logs_round_trip() {
             base: 1,
             code,
             source_map,
+            ..
         } => {
             assert_eq!(code, "patch v2");
             assert_eq!(source_map.as_deref(), Some("{}"));
@@ -86,15 +109,17 @@ fn bundles_errors_and_logs_round_trip() {
     ));
 
     client.log(LogLevel::Warn, "js", "hello from device");
-    let log = log_rx.recv_timeout(TIMEOUT).unwrap();
-    assert_eq!(
-        (log.device.as_str(), log.message.as_str()),
-        ("test-device", "hello from device")
-    );
+    match client_rx.recv_timeout(TIMEOUT).unwrap() {
+        ClientEvent::Log(log) => assert_eq!(
+            (log.device.as_str(), log.message.as_str()),
+            ("test-device", "hello from device")
+        ),
+        other => panic!("{other:?}"),
+    }
 
     // A client with another engine build gets JS source instead.
     let (tx2, rx2) = mpsc::channel();
-    let _other = DevClient::start(url, "old-host".into(), "bc-0".into(), move |e| {
+    let _other = DevClient::start(url, host("old-host", "bc-0"), move |e| {
         let _ = tx2.send(e);
     })
     .unwrap();
@@ -104,6 +129,158 @@ fn bundles_errors_and_logs_round_trip() {
             bytes,
             ..
         } => assert_eq!(bytes, b"source v2"),
+        other => panic!("{other:?}"),
+    }
+
+    // A host that goes away is reported once its session ends.
+    drop(client);
+    let gone = std::iter::from_fn(|| client_rx.recv_timeout(TIMEOUT).ok()).find_map(|e| match e {
+        ClientEvent::Disconnected { device } => Some(device),
+        _ => None,
+    });
+    assert_eq!(gone.as_deref(), Some("test-device"));
+}
+
+/// Build numbers start at 1 in each run of the server: a host still running
+/// build 1 of an earlier run tells the new run's build 1 apart by its
+/// session.
+#[test]
+fn each_run_of_the_server_has_its_own_session() {
+    let session_of = || {
+        let server =
+            DevServer::start("127.0.0.1:0".parse().unwrap(), "bc-1", None, |_| {}).unwrap();
+        server.publish(vec![1], "v1".into(), None, None, None, Vec::new());
+        let url = format!("ws://{}{WS_PATH}", server.local_addr());
+        let (tx, rx) = mpsc::channel();
+        let _client = DevClient::start(url, host("test-device", "bc-1"), move |e| {
+            let _ = tx.send(e);
+        })
+        .unwrap();
+        match next_non_status(&rx) {
+            DevEvent::Bundle {
+                session,
+                version: 1,
+                ..
+            } => session,
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_ne!(session_of(), session_of());
+}
+
+/// A host built for another app (without the app's own UI set) gets no
+/// bundle but a message saying why, and the server reports it; once a
+/// bundle needs only what it has, it gets bundles again.
+#[test]
+fn a_host_without_the_apps_ui_set_is_told_it_cannot_run_it() {
+    let (client_tx, client_rx) = mpsc::channel();
+    let server = DevServer::start("127.0.0.1:0".parse().unwrap(), "bc-1", None, move |event| {
+        let _ = client_tx.send(event);
+    })
+    .unwrap();
+    server.install_commands([(
+        HostPlatform::Android,
+        "nsh run examples/gallery-rs --target android".to_owned(),
+    )]);
+    let needs = || vec!["gallery/native".to_owned(), "nsh/ui/mobile".to_owned()];
+    server.publish(vec![1], "v1".into(), None, None, None, needs());
+    let url = format!("ws://{}{WS_PATH}", server.local_addr());
+
+    let (tx, rx) = mpsc::channel();
+    let _client = DevClient::start(url.clone(), host("Android Emulator", "bc-1"), move |e| {
+        let _ = tx.send(e);
+    })
+    .unwrap();
+    match next_non_status(&rx) {
+        DevEvent::CannotRun { missing, message } => {
+            assert_eq!(missing, ["gallery/native"]);
+            assert!(message.contains("gallery/native"), "{message}");
+            assert!(
+                message.contains("nsh run examples/gallery-rs --target android"),
+                "{message}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    // Connected without a build, then why.
+    match client_rx.recv_timeout(TIMEOUT).unwrap() {
+        ClientEvent::Connected { device, build } => {
+            assert_eq!((device.as_str(), build), ("Android Emulator", None))
+        }
+        other => panic!("{other:?}"),
+    }
+    match client_rx.recv_timeout(TIMEOUT).unwrap() {
+        ClientEvent::CannotRun {
+            device,
+            missing,
+            install,
+        } => {
+            assert_eq!(device, "Android Emulator");
+            assert_eq!(missing, ["gallery/native"]);
+            assert_eq!(
+                install.as_deref(),
+                Some("nsh run examples/gallery-rs --target android")
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // A rebuild that still needs it: neither its patch nor its bundle, and
+    // no news (the host shows the message already); nor a build error.
+    server.publish(
+        vec![2],
+        "v2".into(),
+        None,
+        None,
+        Some(("patch v2".into(), None)),
+        needs(),
+    );
+    server.publish_error("syntax error");
+    // A bundle that needs only the mobile UI reaches it again.
+    server.publish(
+        vec![3],
+        "v3".into(),
+        None,
+        None,
+        None,
+        vec!["nsh/ui/mobile".into()],
+    );
+    match next_non_status(&rx) {
+        DevEvent::Bundle {
+            version: 3, bytes, ..
+        } => assert_eq!(bytes, [3]),
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        client_rx.try_recv().is_err(),
+        "the rebuild that still needed it was not reported again"
+    );
+
+    // Needed again: reported again.
+    server.publish(vec![4], "v4".into(), None, None, None, needs());
+    assert!(matches!(next_non_status(&rx), DevEvent::CannotRun { .. }));
+    assert!(matches!(
+        client_rx.recv_timeout(TIMEOUT).unwrap(),
+        ClientEvent::CannotRun { .. }
+    ));
+
+    // A host that has the set runs the app.
+    let (tx2, rx2) = mpsc::channel();
+    let mut app_host = host("iOS Simulator", "bc-1");
+    app_host.platform = HostPlatform::IosSimulator;
+    app_host.ui_sets.push("gallery/native".into());
+    let _app_host = DevClient::start(url, app_host, move |e| {
+        let _ = tx2.send(e);
+    })
+    .unwrap();
+    assert!(matches!(
+        next_non_status(&rx2),
+        DevEvent::Bundle { version: 4, .. }
+    ));
+    match client_rx.recv_timeout(TIMEOUT).unwrap() {
+        ClientEvent::Connected { device, build } => {
+            assert_eq!((device.as_str(), build), ("iOS Simulator", Some(4)))
+        }
         other => panic!("{other:?}"),
     }
 }

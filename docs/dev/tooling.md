@@ -29,14 +29,67 @@
   QuickJS-NG's is declared), every event has a type or is internal, and every imported name has one home.
 - To check the declarations themselves, run `tsc -p . --skipLibCheck false` in an app.
 
+## Output
+
+The CLI's terminal output is `crates/nsh-cli/src/ui.rs` (`website/docs/cli.md`, "Output", shows it): one line per
+step, the details only when something fails. Every command prints through it:
+
+- `✓` a step that finished (`ui::done`, or `ui::Step`, which shows a spinner while the step runs, on a terminal only,
+  and adds its time), `→` where to find something, `•` what a device did, `warn` / `error` (wrapped under their first
+  word on a terminal), plain lines for the app's own output. Paths are relative to the current directory when inside
+  it. Colors on terminals unless `NO_COLOR` is set; redirected, only the result lines, no ANSI. All of it is stderr:
+  stdout is the commands' results (`nsh trace`'s mount items, the signing commands' lines).
+- Tools run captured: `ui::cargo` (every cargo build: the app's crate, the hosts, `cargo xtask android`) shows the
+  crate being compiled in its spinner, counts cargo's warnings into the `✓` line and, when the build fails, returns a
+  `ui::failure` whose details are cargo's whole output; `ui::report` prints `error <message>` and those details (the
+  commands' errors all end there, `main_with`). `ui::quiet` keeps the Catalyst host's own output (AppKit's notes) and
+  shows it if the host fails. simctl, adb, codesign and the SDK's tools were captured already.
+- Log lines (`logger.rs`): the library crates and the devices log through `log`; normally warnings and errors are shown
+  without targets (a device's after its name: `warn iOS Simulator: …`), `js` lines and a device's lines from other
+  crates (the app's Rust code) plainly (with the device's name when several are connected), `nsh::perf` as `perf …`;
+  nsh's own info lines (a device's "loading build 3") are not shown: the CLI's steps say what happens. The dev server
+  reports hosts connecting and leaving (`nsh_dev::ClientEvent`) rather than logging it, so the CLI prints
+  `• Mac Catalyst connected, build 1`, and a host that cannot run the app as one `warn` line
+  (`warn Android Emulator: its host has no gallery/native (it was built for another app): nsh run examples/gallery-rs
+  --target android installs this app's host`; "Dev server" below).
+- Verbose (`-v` / `--verbose` on any command, or `NSH_VERBOSE=1`; the app's command line inherits both): no spinner,
+  and everything as it comes: every log line with its level and target, cargo's and the hosts' output.
+
+`xtask` has the same style in `crates/xtask/src/term.rs` (it cannot depend on `nsh-cli`, which would build the bundler
+before every `cargo run`): `✓` lines for its builds, cargo's and the tools' output only when they fail, `-v` /
+`NSH_VERBOSE` to see it all (`cargo xtask clippy-android` streams clippy's output: it is what the task is for).
+
 ## Dev server (nsh dev / nsh run)
 
 - The CLI watches sources with notify and pushes every rebuild over WebSocket (`/ws`, default port 8790, the next free port if taken) to all
   connected hosts; new clients subscribe before receiving the current state, so no event is missed. Protocol: `crates/nsh-dev/src/protocol.rs`
   (JSON text frames + binary frames).
 - Bytecode version negotiation: the client reports `BYTECODE_VERSION` in its handshake; on a mismatch the server sends JS source instead.
+- `nsh run --target android` forwards the dev server's port to the device (`adb reverse tcp:<port> tcp:<port>`,
+  `android::Reverse`) and removes that rule, and only that one (`adb reverse --remove tcp:<port>`), however the run
+  ends: normally, by an error, by Ctrl-C or SIGTERM, or for a restart of an app with a Rust crate (exit code 75; the
+  next run sets it again). Otherwise a host left on the device keeps reaching whatever dev server listens on that port
+  next, of any app. Ctrl-C reaches the run through `ui::Stoppable`: while one is held, the signal handler records
+  SIGINT / SIGTERM instead of ending the process, the dev session's watch loop returns, the command undoes what it set
+  up, and `main_with` then ends the process by the same signal; a second signal ends it at once. The prebuilt `nsh`
+  that runs an app's own command line holds one too while it waits, so the shell (and `cargo run`'s restart, which
+  stops the process group) waits for the clean-up, and passes a stop sent to it alone on to the app's command line,
+  which does not take that one as a second (the sender is its parent: `SA_SIGINFO`). `nsh dev` sets nothing up on
+  devices.
+- Hosts that cannot run the app: several hosts on one session is intended (a phone joining), but a host serves only the
+  UI sets it was built with, and dev hosts keep reconnecting, so a host built for another app (an Android host left on
+  the emulator, whose `adb reverse` still reaches this port) can connect. The hello reports the host's platform and
+  the specifiers of the UI sets it serves (`HostPlatform`, `ui_sets`: iOS `set_ui_sets` or the mobile UI, Android
+  `ui_sets!` or the mobile UI); each bundle is published with the UI sets it imports (`Built::ui_sets`: the bundle's
+  native imports that are UI sets, `Bundle::natives` / `HotBundle::natives`). The server checks every host against
+  the latest bundle, on connect and on each new one: a host missing any gets neither the bundle nor its patch (nor
+  build errors, which would hide why) but `ServerMessage::CannotRun`, which it shows over the app ("This host cannot run
+  the app", what is missing and the command that installs the app's host, from `DevServer::install_commands`: one per
+  platform `nsh run` has a target for), and the CLI prints one `warn` line (`ClientEvent::CannotRun`), once per change
+  of what is missing. A later bundle that needs only what the host has reaches it again. Hosts that do not report
+  their UI sets (older ones) get every bundle.
 - The host's `log` output (including JS `console.*`, target `js`) is forwarded to the CLI terminal with the device name while connected, and goes
-  to stderr when disconnected.
+  to stderr when disconnected (see "Output" for what the CLI shows of it).
 - Build failures, bundle evaluation failures and uncaught exceptions show a red overlay on the host (tap to dismiss); it disappears on the next
   successful reload.
 - **Hot module replacement** (`nsh dev` / `nsh run` without `--release`): development bundles keep one CommonJS chunk per
@@ -116,5 +169,10 @@ The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distributi
 Commands that build an app take its entry module or its directory (the current one by default), whose `App.tsx` is
 the entry (matched in any case: `crates/nsh-cli/src/entry.rs`). `cargo run` is `xtask run` (the workspace's default
 member): the gallery in the Mac Catalyst host through `nsh run`, in a process group of its own that is stopped and
-started again when a source under `crates/` changes (`crates/xtask/src/run.rs`).
+started again when a source under `crates/` changes (`crates/xtask/src/run.rs`). The first two lines (`Finished`,
+`Running`) are the outer `cargo run`'s own, which only a global `term.quiet` would hide (it would hide `cargo build`'s
+too); `cargo xtask [run] [<app>]` is the same task through the alias in `.cargo/config.toml` (`run -q`), without them. xtask
+drops the variables `cargo run` sets for it (`CARGO_MANIFEST_DIR`, `CARGO_PKG_*`, ...) first: the builds it and `nsh`
+start would inherit them, and since some crates' builds depend on them, every `cargo run` rebuilt ring, taffy and the
+rest of what a plain `cargo build` had built.
 `.cargo/config.toml` sets `IPHONEOS_DEPLOYMENT_TARGET = 15.0` for Rust and C alike.

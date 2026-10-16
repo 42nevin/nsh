@@ -30,6 +30,16 @@ pub enum ClientMessage {
         bytecode_version: String,
         /// Human-readable device name, shown in logs.
         device: String,
+        /// What kind of host it is, for the command that installs another
+        /// (`None`: a host that does not say).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        platform: Option<HostPlatform>,
+        /// The UI sets the host serves, by specifier (`nsh/ui/mobile`, an
+        /// app's own `gallery/native`): bundles importing others are not
+        /// sent to it ([`ServerMessage::CannotRun`]). `None`: a host that
+        /// does not say, which gets every bundle.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ui_sets: Option<Vec<String>>,
     },
     /// A log line from the host (JS console or native).
     Log {
@@ -42,6 +52,23 @@ pub enum ClientMessage {
     },
 }
 
+/// What kind of host a dev host is.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum HostPlatform {
+    /// The Mac Catalyst host.
+    MacCatalyst,
+    /// A host in an iOS simulator.
+    IosSimulator,
+    /// A host on an iOS device.
+    Ios,
+    /// A host on an Android device or emulator.
+    Android,
+    /// A platform this version does not know.
+    #[serde(other)]
+    Other,
+}
+
 /// Messages from the server to dev hosts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -50,9 +77,24 @@ pub enum ServerMessage {
     Hello {
         /// [`PROTOCOL_VERSION`] of the server.
         protocol: u32,
+        /// This run of the server: build numbers start at 1 in each run, so
+        /// a host still running a build of an earlier run tells them apart
+        /// by it.
+        #[serde(default)]
+        session: u64,
     },
     /// A rebuild started.
     Building,
+    /// The host cannot run the app: the latest bundle imports UI sets it
+    /// does not serve (it was built for another app). No bundle is sent to
+    /// it until one needs only what it has; the host shows `message`.
+    CannotRun {
+        /// The UI sets the app imports that the host does not serve.
+        missing: Vec<String>,
+        /// What to tell the developer: what is missing, and how to install
+        /// the app's host.
+        message: String,
+    },
     /// The build failed; the host should show the error.
     BuildFailed {
         /// Compiler output.
@@ -146,6 +188,27 @@ mod tests {
             r#"{"type":"hello","protocol":1,"bytecode_version":"x","device":"Mac"}"#,
         )
         .unwrap();
-        assert!(matches!(hello, ClientMessage::Hello { protocol: 1, .. }));
+        // An older host says nothing of its platform or UI sets.
+        assert!(matches!(
+            hello,
+            ClientMessage::Hello {
+                protocol: 1,
+                platform: None,
+                ui_sets: None,
+                ..
+            }
+        ));
+        let hello: ClientMessage = serde_json::from_str(
+            r#"{"type":"hello","protocol":2,"bytecode_version":"x","device":"Mac","platform":"vision","ui_sets":["nsh/ui/mobile"]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            hello,
+            ClientMessage::Hello {
+                platform: Some(HostPlatform::Other),
+                ui_sets: Some(sets),
+                ..
+            } if sets == ["nsh/ui/mobile"]
+        ));
     }
 }

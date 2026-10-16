@@ -1,7 +1,10 @@
 use std::{
     io,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -18,8 +21,41 @@ use axum::{
 use tokio::sync::broadcast;
 
 use crate::protocol::{
-    BundleFormat, ClientMessage, LogLevel, PROTOCOL_VERSION, ServerMessage, WS_PATH,
+    BundleFormat, ClientMessage, HostPlatform, LogLevel, PROTOCOL_VERSION, ServerMessage, WS_PATH,
 };
+
+/// What a dev host did, for the server's owner to show ([`DevServer::start`]).
+#[derive(Debug, Clone)]
+pub enum ClientEvent {
+    /// A host connected.
+    Connected {
+        /// Device name from the client's hello.
+        device: String,
+        /// The build it was sent first: the latest bundle (`None`: none
+        /// yet, or the latest build failed).
+        build: Option<u64>,
+    },
+    /// A host cannot run the app: the latest bundle imports UI sets it
+    /// does not serve (it was built for another app). It gets no bundle
+    /// until one needs only what it has, and shows why. Reported once per
+    /// change of what is missing.
+    CannotRun {
+        /// Device name from the client's hello.
+        device: String,
+        /// The UI sets the app imports that the host does not serve.
+        missing: Vec<String>,
+        /// The command that installs the app's host on the host's
+        /// platform ([`DevServer::install_commands`]), if there is one.
+        install: Option<String>,
+    },
+    /// A host's connection ended.
+    Disconnected {
+        /// Device name from the client's hello.
+        device: String,
+    },
+    /// A log line from a host.
+    Log(ClientLog),
+}
 
 /// A log line received from a dev host.
 #[derive(Debug, Clone)]
@@ -40,6 +76,8 @@ struct Bundle {
     source: axum::body::Bytes,
     source_map: Option<axum::body::Bytes>,
     capabilities: Option<String>,
+    /// The UI sets it imports.
+    ui_sets: Arc<[String]>,
 }
 
 struct Patch {
@@ -47,6 +85,8 @@ struct Patch {
     base: u64,
     code: axum::body::Bytes,
     source_map: Option<axum::body::Bytes>,
+    /// The UI sets the bundle of `version` imports.
+    ui_sets: Arc<[String]>,
 }
 
 #[derive(Clone)]
@@ -63,11 +103,26 @@ struct Shared {
     /// Files served at `/assets/<path>` from elsewhere (the files the UI
     /// sets' crates ship), by path.
     files: Mutex<std::collections::HashMap<String, std::path::PathBuf>>,
+    /// The commands that install the app's host, by platform.
+    install: Mutex<std::collections::HashMap<HostPlatform, String>>,
     /// The state a newly connected client must see first.
     latest: Mutex<Option<Event>>,
     events: broadcast::Sender<Event>,
     bytecode_version: String,
-    on_log: Box<dyn Fn(ClientLog) + Send + Sync>,
+    /// This run of the server ([`ServerMessage::Hello`]).
+    session: u64,
+    /// Hosts connected now.
+    clients: AtomicUsize,
+    on_event: Box<dyn Fn(ClientEvent) + Send + Sync>,
+}
+
+/// An id for this run of the server, different from earlier runs' (the
+/// clock and the process).
+fn new_session() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    nanos ^ (u64::from(std::process::id()) << 40)
 }
 
 /// The dev server: serves the latest bundle to dev hosts and pushes
@@ -82,12 +137,13 @@ pub struct DevServer {
 impl DevServer {
     /// Starts listening on `addr`. `bytecode_version` is the format of the
     /// bytecode this server publishes; clients reporting another version get
-    /// JS source instead. `on_log` receives client log lines.
+    /// JS source instead. `on_event` receives what hosts do (connecting,
+    /// disconnecting, their log lines), on the server's threads.
     pub fn start(
         addr: SocketAddr,
         bytecode_version: impl Into<String>,
         assets_root: Option<std::path::PathBuf>,
-        on_log: impl Fn(ClientLog) + Send + Sync + 'static,
+        on_event: impl Fn(ClientEvent) + Send + Sync + 'static,
     ) -> io::Result<DevServer> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -97,10 +153,13 @@ impl DevServer {
         let shared = Arc::new(Shared {
             assets_root: assets_root.and_then(|p| p.canonicalize().ok()),
             files: Mutex::default(),
+            install: Mutex::default(),
             latest: Mutex::new(None),
             events: broadcast::channel(16).0,
             bytecode_version: bytecode_version.into(),
-            on_log: Box::new(on_log),
+            session: new_session(),
+            clients: AtomicUsize::new(0),
+            on_event: Box::new(on_event),
         });
         let listener = runtime.block_on(tokio::net::TcpListener::bind(addr))?;
         let addr = listener.local_addr()?;
@@ -129,9 +188,21 @@ impl DevServer {
         self.shared.files.lock().expect("files lock").extend(files);
     }
 
+    /// Sets the command that installs the app's host, for each platform
+    /// there is one for: hosts that cannot run the app show it
+    /// ([`ClientEvent::CannotRun`]).
+    pub fn install_commands(&self, commands: impl IntoIterator<Item = (HostPlatform, String)>) {
+        *self.shared.install.lock().expect("install lock") = commands.into_iter().collect();
+    }
+
     /// The bound address (useful with port 0).
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// The number of hosts connected now.
+    pub fn clients(&self) -> usize {
+        self.shared.clients.load(Ordering::Relaxed)
     }
 
     /// Announces that a rebuild started.
@@ -139,9 +210,11 @@ impl DevServer {
         let _ = self.shared.events.send(Event::Building);
     }
 
-    /// Publishes a new bundle (and its source map) to every client. With a
-    /// `patch` (a hot update script from the previous bundle, and its source
-    /// map), clients running the previous bundle update in place.
+    /// Publishes a new bundle (and its source map) to every client that
+    /// serves the `ui_sets` it imports (by specifier); the others are told
+    /// they cannot run it ([`ClientEvent::CannotRun`]). With a `patch` (a
+    /// hot update script from the previous bundle, and its source map),
+    /// clients running the previous bundle update in place.
     pub fn publish(
         &self,
         bytecode: Vec<u8>,
@@ -149,7 +222,9 @@ impl DevServer {
         source_map: Option<String>,
         capabilities: Option<String>,
         patch: Option<(String, Option<String>)>,
+        ui_sets: Vec<String>,
     ) {
+        let ui_sets: Arc<[String]> = ui_sets.into();
         let version = {
             let mut next = self.next_version.lock().expect("version lock");
             *next += 1;
@@ -164,6 +239,7 @@ impl DevServer {
                 base: version - 1,
                 code: code.into(),
                 source_map: map.map(Into::into),
+                ui_sets: ui_sets.clone(),
             })));
         }
         self.set(Event::Bundle(Arc::new(Bundle {
@@ -172,6 +248,7 @@ impl DevServer {
             source: source.into(),
             source_map: source_map.map(Into::into),
             capabilities,
+            ui_sets,
         })));
     }
 
@@ -265,6 +342,8 @@ async fn serve_client(mut socket: WebSocket, shared: Arc<Shared>) -> Result<(), 
         protocol,
         bytecode_version,
         device,
+        platform,
+        ui_sets,
     } = serde_json::from_str(&text)?
     else {
         return Err("expected hello".into());
@@ -287,25 +366,41 @@ async fn serve_client(mut socket: WebSocket, shared: Arc<Shared>) -> Result<(), 
         &mut socket,
         &ServerMessage::Hello {
             protocol: PROTOCOL_VERSION,
+            session: shared.session,
         },
     )
     .await?;
-    log::info!("{device} connected");
+
+    let mut host = Host {
+        device,
+        platform,
+        ui_sets,
+        format,
+        refused: None,
+    };
 
     // Subscribe before reading the latest state so no event is missed.
     let mut events = shared.events.subscribe();
     let latest = shared.latest.lock().expect("latest lock").clone();
+    let build = match &latest {
+        Some(Event::Bundle(bundle)) if host.missing(&bundle.ui_sets).is_empty() => {
+            Some(bundle.version)
+        }
+        _ => None,
+    };
+    let device = host.device.clone();
+    let _connection = Connection::new(&shared, &device, build);
     if let Some(event) = latest {
-        send_event(&mut socket, &event, format).await?;
+        send_event(&mut socket, &shared, &mut host, &event).await?;
     }
     loop {
         tokio::select! {
             event = events.recv() => match event {
-                Ok(event) => send_event(&mut socket, &event, format).await?,
+                Ok(event) => send_event(&mut socket, &shared, &mut host, &event).await?,
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     let latest = shared.latest.lock().expect("latest lock").clone();
                     if let Some(event) = latest {
-                        send_event(&mut socket, &event, format).await?;
+                        send_event(&mut socket, &shared, &mut host, &event).await?;
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => return Ok(()),
@@ -313,17 +408,88 @@ async fn serve_client(mut socket: WebSocket, shared: Arc<Shared>) -> Result<(), 
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(ClientMessage::Log { level, target, message }) = serde_json::from_str(&text) {
-                        (shared.on_log)(ClientLog { device: device.clone(), level, target, message });
+                        (shared.on_event)(ClientEvent::Log(ClientLog { device: device.clone(), level, target, message }));
                     }
                 }
                 Some(Ok(_)) => {}
                 Some(Err(err)) => return Err(err.into()),
-                None => {
-                    log::info!("{device} disconnected");
-                    return Ok(());
-                }
+                None => return Ok(()),
             },
         }
+    }
+}
+
+/// What the server knows of a connected host.
+struct Host {
+    device: String,
+    platform: Option<HostPlatform>,
+    /// The UI sets it serves (`None`: it does not say).
+    ui_sets: Option<Vec<String>>,
+    /// The format of the bundles it gets.
+    format: BundleFormat,
+    /// What it was last told it lacks, while it gets no bundles.
+    refused: Option<Vec<String>>,
+}
+
+impl Host {
+    /// The UI sets of `needed` the host does not serve.
+    fn missing(&self, needed: &[String]) -> Vec<String> {
+        match &self.ui_sets {
+            Some(has) => needed
+                .iter()
+                .filter(|s| !has.contains(s))
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// What a host that cannot run the app shows (as prose: hosts wrap it to
+/// their screen).
+fn cannot_run_message(missing: &[String], install: Option<&str>) -> String {
+    let sets = match missing {
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        [] => String::new(),
+    };
+    let mut prose = format!(
+        "The app imports {sets}, which this host does not have: it was built for another app."
+    );
+    if install.is_some() {
+        prose.push_str(" To install this app's host, run");
+    }
+    let mut message = prose;
+    if let Some(install) = install {
+        message.push_str(&format!("\n\n  {install}"));
+    }
+    message
+}
+
+/// A host connected after its hello: counted and reported until its
+/// session ends, however it ends.
+struct Connection<'a> {
+    shared: &'a Shared,
+    device: &'a str,
+}
+
+impl<'a> Connection<'a> {
+    fn new(shared: &'a Shared, device: &'a str, build: Option<u64>) -> Self {
+        shared.clients.fetch_add(1, Ordering::Relaxed);
+        (shared.on_event)(ClientEvent::Connected {
+            device: device.to_owned(),
+            build,
+        });
+        Connection { shared, device }
+    }
+}
+
+impl Drop for Connection<'_> {
+    fn drop(&mut self) {
+        self.shared.clients.fetch_sub(1, Ordering::Relaxed);
+        (self.shared.on_event)(ClientEvent::Disconnected {
+            device: self.device.to_owned(),
+        });
     }
 }
 
@@ -336,11 +502,14 @@ async fn send(socket: &mut WebSocket, msg: &ServerMessage) -> Result<(), BoxErro
 
 async fn send_event(
     socket: &mut WebSocket,
+    shared: &Shared,
+    host: &mut Host,
     event: &Event,
-    format: BundleFormat,
 ) -> Result<(), BoxError> {
     match event {
         Event::Building => send(socket, &ServerMessage::Building).await,
+        // It cannot run the last good build either: it keeps showing why.
+        Event::Failed(_) if host.refused.is_some() => Ok(()),
         Event::Failed(message) => {
             send(
                 socket,
@@ -350,6 +519,8 @@ async fn send_event(
             )
             .await
         }
+        // The bundle that follows says why.
+        Event::Patch(patch) if !host.missing(&patch.ui_sets).is_empty() => Ok(()),
         Event::Patch(patch) => {
             send(
                 socket,
@@ -367,6 +538,38 @@ async fn send_event(
             Ok(())
         }
         Event::Bundle(bundle) => {
+            let missing = host.missing(&bundle.ui_sets);
+            if !missing.is_empty() {
+                if host.refused.as_ref() == Some(&missing) {
+                    return Ok(());
+                }
+                let install = host.platform.and_then(|p| {
+                    shared
+                        .install
+                        .lock()
+                        .expect("install lock")
+                        .get(&p)
+                        .cloned()
+                });
+                let message = cannot_run_message(&missing, install.as_deref());
+                send(
+                    socket,
+                    &ServerMessage::CannotRun {
+                        missing: missing.clone(),
+                        message,
+                    },
+                )
+                .await?;
+                (shared.on_event)(ClientEvent::CannotRun {
+                    device: host.device.clone(),
+                    missing: missing.clone(),
+                    install,
+                });
+                host.refused = Some(missing);
+                return Ok(());
+            }
+            host.refused = None;
+            let format = host.format;
             send(
                 socket,
                 &ServerMessage::Bundle {
@@ -387,5 +590,28 @@ async fn send_event(
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_host_that_cannot_run_the_app_is_told_why() {
+        let message = super::cannot_run_message(
+            &["gallery/native".to_owned()],
+            Some("nsh run examples/gallery-rs --target android"),
+        );
+        assert_eq!(
+            message,
+            "The app imports gallery/native, which this host does not have: it was built for \
+             another app. To install this app's host, run\n\n  nsh run examples/gallery-rs \
+             --target android"
+        );
+        let two = super::cannot_run_message(&["a/x".to_owned(), "b/y".to_owned()], None);
+        assert!(
+            two.starts_with("The app imports a/x and b/y, which"),
+            "{two}"
+        );
+        assert!(!two.contains("run"), "{two}");
     }
 }

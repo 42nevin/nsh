@@ -15,6 +15,7 @@ mod android;
 mod dist;
 mod ios;
 mod run;
+mod term;
 mod web;
 
 use clap::{Parser, Subcommand};
@@ -26,6 +27,16 @@ use clap::{Parser, Subcommand};
     args_conflicts_with_subcommands = true
 )]
 struct Cli {
+    /// Show the output of cargo and the other tools as it comes (`run`
+    /// passes it on to `nsh`).
+    #[arg(
+        short,
+        long,
+        global = true,
+        env = "NSH_VERBOSE",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    verbose: bool,
     #[command(subcommand)]
     task: Option<Task>,
     /// Without a task: `run` with these options.
@@ -64,9 +75,48 @@ enum Task {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> std::process::ExitCode {
+    forget_cargo_run();
     let cli = Cli::parse();
-    match cli.task.unwrap_or(Task::Run(cli.run)) {
+    term::init(cli.verbose);
+    match task(cli.task.unwrap_or(Task::Run(cli.run))) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            term::report(&e);
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Drops what `cargo run` tells xtask about its own package
+/// (`CARGO_MANIFEST_DIR`, `CARGO_PKG_NAME`, ...): the cargo builds xtask
+/// and `nsh` start would inherit them, and some crates' builds (ring's,
+/// for one) depend on them, so each `cargo run` rebuilt what a plain
+/// `cargo build` had built, and the other way round.
+fn forget_cargo_run() {
+    let names: Vec<_> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with("CARGO_PKG_")
+                || matches!(
+                    &*name,
+                    "CARGO_MANIFEST_DIR"
+                        | "CARGO_MANIFEST_PATH"
+                        | "CARGO_CRATE_NAME"
+                        | "CARGO_BIN_NAME"
+                        | "CARGO_PRIMARY_PACKAGE"
+                )
+        })
+        .collect();
+    for name in names {
+        // SAFETY: first thing in `main`, before any other thread exists.
+        unsafe { std::env::remove_var(name) };
+    }
+}
+
+fn task(task: Task) -> anyhow::Result<()> {
+    match task {
         Task::Run(args) => run::run(args),
         Task::Android { release, dev, abi } => {
             let abis = if abi.is_empty() {
@@ -78,7 +128,7 @@ fn main() -> anyhow::Result<()> {
         }
         Task::ClippyAndroid => android::clippy(),
         Task::Dist => dist::dist(),
-        Task::IosEmbed => ios::build().map(|out| println!("{}", out.display())),
+        Task::IosEmbed => ios::build().map(|out| term::note(out.display())),
         Task::Web { out } => web::build(&out),
     }
 }

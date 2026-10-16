@@ -8,7 +8,9 @@ use std::{
 
 use tungstenite::{Message, WebSocket, stream::MaybeTlsStream};
 
-use crate::protocol::{BundleFormat, ClientMessage, LogLevel, PROTOCOL_VERSION, ServerMessage};
+use crate::protocol::{
+    BundleFormat, ClientMessage, HostPlatform, LogLevel, PROTOCOL_VERSION, ServerMessage,
+};
 
 /// Something the dev server told the host.
 #[derive(Debug)]
@@ -21,9 +23,20 @@ pub enum DevEvent {
     Building,
     /// The build failed.
     BuildFailed(String),
+    /// The host cannot run the app (see [`ServerMessage::CannotRun`]): no
+    /// bundle comes until one needs only the UI sets it serves.
+    CannotRun {
+        /// The UI sets the app imports that the host does not serve.
+        missing: Vec<String>,
+        /// What to show the developer.
+        message: String,
+    },
     /// A hot update for hosts running bundle `base` (see
     /// [`ServerMessage::Patch`]); the bundle of `version` follows.
     Patch {
+        /// The server run the build numbers are of
+        /// ([`ServerMessage::Hello`]).
+        session: u64,
         /// Build number after the update.
         version: u64,
         /// Build number the update applies to.
@@ -35,6 +48,8 @@ pub enum DevEvent {
     },
     /// A new bundle.
     Bundle {
+        /// The server run the build number is of.
+        session: u64,
         /// Build number.
         version: u64,
         /// Payload format.
@@ -46,6 +61,20 @@ pub enum DevEvent {
         /// What the app declares it may reach (JSON), if it declares it.
         capabilities: Option<String>,
     },
+}
+
+/// What a host tells the dev server about itself.
+#[derive(Debug, Clone)]
+pub struct HostInfo {
+    /// Human-readable device name, shown in the developer's terminal.
+    pub device: String,
+    /// What kind of host it is.
+    pub platform: HostPlatform,
+    /// The bytecode format its engine loads (`BYTECODE_VERSION`).
+    pub bytecode_version: String,
+    /// The specifiers of the UI sets it serves (`nsh/ui/mobile`, an app's
+    /// own): the server sends no bundle that imports others.
+    pub ui_sets: Vec<String>,
 }
 
 /// Connects a dev host to a dev server, reconnecting until dropped, and
@@ -63,15 +92,16 @@ impl DevClient {
     /// Starts the client thread. `on_event` runs on that thread.
     pub fn start(
         url: String,
-        device: String,
-        bytecode_version: String,
+        host: HostInfo,
         mut on_event: impl FnMut(DevEvent) + Send + 'static,
     ) -> std::io::Result<DevClient> {
         let (logs, log_rx) = mpsc::sync_channel(LOG_QUEUE);
         let hello = ClientMessage::Hello {
             protocol: PROTOCOL_VERSION,
-            bytecode_version,
-            device,
+            bytecode_version: host.bytecode_version,
+            device: host.device,
+            platform: Some(host.platform),
+            ui_sets: Some(host.ui_sets),
         };
         thread::Builder::new()
             .name("nsh-dev-client".into())
@@ -140,6 +170,7 @@ fn session(
         bytes: Option<Vec<u8>>,
     }
     let mut pending: Option<Pending> = None;
+    let mut server_session = 0;
     loop {
         loop {
             match logs.try_recv() {
@@ -159,10 +190,13 @@ fn session(
         };
         match msg {
             Message::Text(text) => match serde_json::from_str::<ServerMessage>(&text) {
-                Ok(ServerMessage::Hello { .. }) => {}
+                Ok(ServerMessage::Hello { session, .. }) => server_session = session,
                 Ok(ServerMessage::Building) => on_event(DevEvent::Building),
                 Ok(ServerMessage::BuildFailed { message }) => {
                     on_event(DevEvent::BuildFailed(message))
+                }
+                Ok(ServerMessage::CannotRun { missing, message }) => {
+                    on_event(DevEvent::CannotRun { missing, message })
                 }
                 Ok(ServerMessage::Bundle {
                     version,
@@ -212,6 +246,7 @@ fn session(
                 match p.base {
                     Some(base) => match String::from_utf8(bytes) {
                         Ok(code) => on_event(DevEvent::Patch {
+                            session: server_session,
                             version: p.version,
                             base,
                             code,
@@ -220,6 +255,7 @@ fn session(
                         Err(_) => log::warn!("dev server sent a non-UTF-8 patch"),
                     },
                     None => on_event(DevEvent::Bundle {
+                        session: server_session,
                         version: p.version,
                         format: p.format,
                         bytes,

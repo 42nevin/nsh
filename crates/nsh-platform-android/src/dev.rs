@@ -6,7 +6,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use nsh_dev::{DevClient, DevEvent, protocol::BundleFormat};
+use nsh_dev::{
+    DevClient, DevEvent, HostInfo,
+    protocol::{BundleFormat, HostPlatform},
+};
 use nsh_engine::{BYTECODE_VERSION, Bundle, Policy};
 
 use crate::host::Host;
@@ -37,8 +40,9 @@ pub(crate) struct DevSession {
 
 #[derive(Default)]
 struct DevState {
-    /// Build the app runs (loaded, or reached by hot updates).
-    running: Option<u64>,
+    /// Build the app runs (loaded, or reached by hot updates): the server
+    /// run it came from and its number.
+    running: Option<(u64, u64)>,
     /// The latest bundle, for reloads.
     latest: Option<Bundle>,
 }
@@ -49,21 +53,25 @@ impl DevSession {
         let weak = Arc::downgrade(&host);
         let state = Arc::new(Mutex::new(DevState::default()));
         let client_state = state.clone();
-        let started = DevClient::start(
-            url,
-            device_name(),
-            BYTECODE_VERSION.to_owned(),
-            move |event| {
-                match event {
-                    DevEvent::Connected => CONNECTED.store(true, Ordering::Relaxed),
-                    DevEvent::Disconnected => CONNECTED.store(false, Ordering::Relaxed),
-                    _ => {}
-                }
-                if let Some(host) = weak.upgrade() {
-                    handle(&host, &client_state, event);
-                }
-            },
-        );
+        let host_info = HostInfo {
+            device: device_name(),
+            platform: HostPlatform::Android,
+            bytecode_version: BYTECODE_VERSION.to_owned(),
+            ui_sets: crate::ui_sets()
+                .iter()
+                .filter_map(|set| set.specifier().map(str::to_owned))
+                .collect(),
+        };
+        let started = DevClient::start(url, host_info, move |event| {
+            match event {
+                DevEvent::Connected => CONNECTED.store(true, Ordering::Relaxed),
+                DevEvent::Disconnected => CONNECTED.store(false, Ordering::Relaxed),
+                _ => {}
+            }
+            if let Some(host) = weak.upgrade() {
+                handle(&host, &client_state, event);
+            }
+        });
         match started {
             Ok(client) => {
                 let client = Arc::new(client);
@@ -81,7 +89,7 @@ impl DevSession {
     }
 
     pub(crate) fn show_error(&self, host: &Host, title: &str, message: &str) {
-        host.dev_error(Some((title, message)));
+        host.dev_error(Some((title, message)), false);
     }
 
     /// A hot update failed: loads the latest bundle from scratch (on its
@@ -106,8 +114,13 @@ fn handle(host: &Arc<Host>, state: &Mutex<DevState>, event: DevEvent) {
         DevEvent::Connected => host.dev_status(None),
         DevEvent::Disconnected => host.dev_status(Some("Dev server disconnected — reconnecting…")),
         DevEvent::Building => {}
-        DevEvent::BuildFailed(message) => host.dev_error(Some(("Build failed", &message))),
+        DevEvent::BuildFailed(message) => host.dev_error(Some(("Build failed", &message)), false),
+        DevEvent::CannotRun { message, .. } => {
+            host.dev_status(None);
+            host.dev_error(Some(("This host cannot run the app", &message)), true)
+        }
         DevEvent::Bundle {
+            session,
             version,
             format,
             bytes,
@@ -123,10 +136,10 @@ fn handle(host: &Arc<Host>, state: &Mutex<DevState>, event: DevEvent) {
                 BundleFormat::Source => match String::from_utf8(bytes) {
                     Ok(code) => Bundle::source(code).with_policy(Policy::development()),
                     Err(_) => {
-                        return host.dev_error(Some((
-                            "Invalid bundle",
-                            "the dev server sent non-UTF-8 source",
-                        )));
+                        return host.dev_error(
+                            Some(("Invalid bundle", "the dev server sent non-UTF-8 source")),
+                            true,
+                        );
                     }
                 },
             };
@@ -135,30 +148,31 @@ fn handle(host: &Arc<Host>, state: &Mutex<DevState>, event: DevEvent) {
             }
             bundle = match bundle.with_capabilities_json(capabilities.as_deref()) {
                 Ok(bundle) => bundle,
-                Err(err) => return host.dev_error(Some(("Invalid capabilities", &err))),
+                Err(err) => return host.dev_error(Some(("Invalid capabilities", &err)), true),
             };
             host.dev_status(None);
             let running = {
                 let mut state = state.lock().expect("dev state");
                 state.latest = Some(bundle.clone());
-                state.running.replace(version)
+                state.running.replace((session, version))
             };
             // Already there through a hot update.
-            if running == Some(version) {
+            if running == Some((session, version)) {
                 return;
             }
             log::info!("loading build {version}");
-            host.dev_error(None);
+            host.dev_error(None, false);
             host.load(bundle);
         }
         DevEvent::Patch {
+            session,
             version,
             base,
             code,
             source_map,
         } => {
             let mut state = state.lock().expect("dev state");
-            if state.running != Some(base) {
+            if state.running != Some((session, base)) {
                 return;
             }
             let update = nsh_engine::HotUpdate {
@@ -168,8 +182,8 @@ fn handle(host: &Arc<Host>, state: &Mutex<DevState>, event: DevEvent) {
             };
             if host.hot_update(update) {
                 log::info!("updating to build {version}");
-                state.running = Some(version);
-                host.dev_error(None);
+                state.running = Some((session, version));
+                host.dev_error(None, false);
             }
         }
     }
