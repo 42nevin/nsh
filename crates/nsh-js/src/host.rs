@@ -1,12 +1,8 @@
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use nsh_core::{
     EventKind, EventPayload, NodeId, Op, PayloadValue, TouchPhase, js::Limits,
-    platform::Environment,
+    platform::Environment, time::Instant,
 };
 use rquickjs::{
     CatchResultExt, Context, Ctx, Function, Module, Persistent, Runtime, Value, function::Opt, qjs,

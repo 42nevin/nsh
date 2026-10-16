@@ -14,10 +14,9 @@ mod imp {
         cell::RefCell,
         rc::Rc,
         sync::{Arc, atomic::AtomicBool},
-        time::Instant,
     };
 
-    use nsh_core::{EventKind, EventPayload, NodeId, Op, TextEngine};
+    use nsh_core::{EventKind, EventPayload, NodeId, Op, TextEngine, time::Instant};
     use nsh_js::{Host, HostOptions, JsError, NetworkQueue, RequestId};
 
     use crate::{
@@ -171,10 +170,9 @@ mod stub {
     use std::{
         rc::Rc,
         sync::{Arc, atomic::AtomicBool},
-        time::Instant,
     };
 
-    use nsh_core::{EventKind, EventPayload, NodeId, Op, TextEngine};
+    use nsh_core::{EventKind, EventPayload, NodeId, Op, TextEngine, time::Instant};
 
     use crate::{Bundle, Environment, HotUpdate, Limits, MountSink};
 

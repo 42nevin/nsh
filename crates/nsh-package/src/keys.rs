@@ -31,7 +31,8 @@ fn decode32(b64: &str, what: &str) -> Result<[u8; 32], Error> {
 }
 
 impl SecretKey {
-    /// A fresh random key.
+    /// A fresh random key (not in WebAssembly).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn generate() -> Result<SecretKey, Error> {
         let mut seed = [0u8; 32];
         getrandom::fill(&mut seed).map_err(|e| Error::Key(format!("no randomness: {e}")))?;

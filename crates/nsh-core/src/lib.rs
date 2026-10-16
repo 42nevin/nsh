@@ -27,6 +27,7 @@ pub mod shape;
 mod style;
 pub mod tailwind;
 mod text;
+pub mod time;
 mod transform;
 pub mod ui;
 

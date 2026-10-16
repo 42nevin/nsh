@@ -1,0 +1,640 @@
+//! WebAssembly backend for nsh: runs an app in a browser page and renders
+//! it to the DOM, for the website's live demos.
+//!
+//! - The engine runs on the page's main thread ([`nsh_engine::LocalEngine`]):
+//!   the JS runtime (`web/nsh.js`) calls [`nsh_pump`] after input and when
+//!   the deadline it returned is reached.
+//! - Each commit becomes one JSON batch ([`encode`]) applied by the DOM
+//!   mounter: absolutely positioned elements at the frames the core laid
+//!   out, CSS made here from the view styles.
+//! - Text is laid out here with the browser's font measurements and drawn
+//!   run by run ([`text`]); native animations run here on
+//!   `requestAnimationFrame` ([`anim`]).
+//!
+//! There is no network stack (`fetch` fails), no web view and no native
+//! components; scroll views use the browser's scrolling. Off WebAssembly
+//! this crate is empty.
+
+#![cfg(target_arch = "wasm32")]
+
+mod anim;
+mod canvas;
+mod encode;
+mod ffi;
+mod text;
+
+use std::cell::{Cell, RefCell};
+
+use nsh_core::{EventKind, EventPayload, MountBatch, MountItem, PayloadValue, ROOT_ID, Size};
+use nsh_engine::{
+    App, Assets, Bundle, ColorScheme, EngineConfig, EngineControl, Environment, Idiom, Limits,
+    LocalEngine, MountSink, Os, Policy,
+};
+
+use crate::{anim::UiAnim, encode::Out, text::WebTextEngine};
+
+thread_local! {
+    static APP: RefCell<Option<Running>> = const { RefCell::new(None) };
+    /// Batches submitted during a pump, applied after it (the sink cannot
+    /// reach the running app while it pumps).
+    static BATCHES: RefCell<Vec<MountBatch>> = const { RefCell::new(Vec::new()) };
+    /// The bytes of the asset JS hands over in `read_asset`.
+    pub(crate) static ASSET: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+    static FRAME_REQUESTED: Cell<bool> = const { Cell::new(false) };
+}
+
+struct Running {
+    engine: LocalEngine<WebTextEngine>,
+    control: EngineControl,
+    anim: UiAnim,
+    /// JS asked for a display frame (`requestAnimationFrame`).
+    js_frame: bool,
+    /// The surface's environment (window, appearance).
+    environment: Environment,
+}
+
+struct Sink;
+
+impl MountSink for Sink {
+    fn submit(&self, batch: MountBatch) {
+        BATCHES.with(|b| b.borrow_mut().push(batch));
+    }
+
+    fn report_error(&self, message: &str) {
+        ffi::report_error(message);
+    }
+
+    fn request_frame(&self) {
+        FRAME_REQUESTED.with(|f| f.set(true));
+    }
+}
+
+/// Bundled files the page preloaded (fonts, images drawn on a canvas).
+struct PageAssets;
+
+impl Assets for PageAssets {
+    fn read(&self, uri: &str) -> Result<Vec<u8>, String> {
+        ffi::read_asset(uri).ok_or_else(|| format!("{uri} is not available on the web"))
+    }
+}
+
+struct Logger;
+
+impl log::Log for Logger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            ffi::log(record.level(), &record.args().to_string());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static LOGGER: Logger = Logger;
+
+/// Memory for JS to write strings and bytes into.
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_alloc(len: usize) -> *mut u8 {
+    let mut buf = Vec::<u8>::with_capacity(len.max(1));
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(buf);
+    ptr
+}
+
+/// Frees what [`nsh_alloc`] returned.
+///
+/// # Safety
+///
+/// `ptr` and `len` come from one [`nsh_alloc`] call, freed once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_dealloc(ptr: *mut u8, len: usize) {
+    // SAFETY: the caller passes what `nsh_alloc` returned for `len`.
+    drop(unsafe { Vec::from_raw_parts(ptr, 0, len.max(1)) });
+}
+
+/// # Safety
+///
+/// `ptr..ptr + len` is memory from [`nsh_alloc`] holding `len` bytes.
+unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
+    if len == 0 {
+        return &[];
+    }
+    // SAFETY: guaranteed by the caller.
+    unsafe { std::slice::from_raw_parts(ptr, len) }
+}
+
+/// # Safety
+///
+/// As [`bytes`].
+unsafe fn string(ptr: *const u8, len: usize) -> String {
+    // SAFETY: guaranteed by the caller.
+    String::from_utf8_lossy(unsafe { bytes(ptr, len) }).into_owned()
+}
+
+/// Hands the asset JS was asked for (`read_asset`) back.
+///
+/// # Safety
+///
+/// `ptr..ptr + len` is memory from [`nsh_alloc`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_asset_bytes(ptr: *const u8, len: usize) {
+    // SAFETY: guaranteed by the caller.
+    let data = unsafe { bytes(ptr, len) }.to_vec();
+    ASSET.with(|a| *a.borrow_mut() = Some(data));
+}
+
+fn environment(width: f32, height: f32, dark: bool, pixel_ratio: f32) -> Environment {
+    Environment {
+        window: (width, height),
+        color_scheme: if dark {
+            ColorScheme::Dark
+        } else {
+            ColorScheme::Light
+        },
+        pixel_ratio,
+        // The demos show what the iOS build looks like.
+        os: Os::Ios,
+        idiom: Idiom::Phone,
+        ..Environment::default()
+    }
+}
+
+/// Starts the app in `bundle` (JS source, an ES module as `nsh build`
+/// writes it) in a `width` × `height` surface. Returns the delay (ms) until
+/// [`nsh_pump`] is due, or -1.
+///
+/// # Safety
+///
+/// `ptr..ptr + len` is memory from [`nsh_alloc`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_start(
+    ptr: *const u8,
+    len: usize,
+    width: f32,
+    height: f32,
+    dark: u32,
+    pixel_ratio: f32,
+) -> f64 {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let _ = log::set_logger(&LOGGER);
+        log::set_max_level(log::LevelFilter::Info);
+        std::panic::set_hook(Box::new(|info| {
+            ffi::report_error(&format!("nsh panicked: {info}"));
+        }));
+    });
+    // SAFETY: guaranteed by the caller.
+    let code = unsafe { string(ptr, len) };
+    APP.with(|a| a.borrow_mut().take());
+    let environment = environment(width, height, dark != 0, pixel_ratio);
+    let bundle = Bundle::source(code).with_policy(Policy::development());
+    let config = EngineConfig {
+        app: App::Js(bundle),
+        viewport: Size::new(width, height),
+        trace: false,
+        network: None,
+        assets: Some(std::sync::Arc::new(PageAssets)),
+        environment,
+        header_heights: (44.0, 96.0),
+        limits: Limits::default(),
+        ui_sets: vec![nsh_ui_mobile::registry()],
+        runtime: None,
+    };
+    let Some(engine) = LocalEngine::start(config, WebTextEngine::default(), Sink) else {
+        return -1.0;
+    };
+    let control = engine.control();
+    APP.with(|a| {
+        *a.borrow_mut() = Some(Running {
+            engine,
+            control,
+            anim: UiAnim::default(),
+            js_frame: false,
+            environment,
+        });
+    });
+    pump()
+}
+
+/// Stops the app.
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_stop() {
+    APP.with(|a| a.borrow_mut().take());
+    BATCHES.with(|b| b.borrow_mut().clear());
+}
+
+/// Applies the submitted batches: animation items to the animator, the
+/// rest to the DOM.
+fn flush() {
+    let batches = BATCHES.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    if batches.is_empty() {
+        request_frames();
+        return;
+    }
+    APP.with(|a| {
+        let mut app = a.borrow_mut();
+        let Some(app) = app.as_mut() else { return };
+        let mut out = Out::new();
+        for batch in &batches {
+            for item in &batch.items {
+                app.anim.apply(item);
+                if !matches!(item, MountItem::Anim(_) | MountItem::AnimBindings { .. }) {
+                    encode::encode(&mut out, item);
+                }
+            }
+        }
+        // Bound properties follow the styles just applied.
+        app.anim.outputs(&mut out);
+        if !out.is_empty() {
+            ffi::submit(&out.finish());
+        }
+        finish_animations(app);
+    });
+    request_frames();
+}
+
+fn finish_animations(app: &mut Running) {
+    if !app.anim.finished.is_empty() {
+        let finished = std::mem::take(&mut app.anim.finished);
+        app.control.animations_finished(finished);
+    }
+}
+
+fn request_frames() {
+    let wanted = FRAME_REQUESTED.with(|f| f.replace(false));
+    let animating = APP.with(|a| {
+        let mut app = a.borrow_mut();
+        let Some(app) = app.as_mut() else {
+            return false;
+        };
+        app.js_frame |= wanted;
+        app.js_frame || app.anim.animating()
+    });
+    if animating {
+        ffi::request_frame();
+    }
+}
+
+/// Runs the engine; the delay (ms) until it is due again, or -1.
+fn pump() -> f64 {
+    let deadline = APP.with(|a| {
+        let mut app = a.borrow_mut();
+        app.as_mut().map(|app| app.engine.pump())
+    });
+    flush();
+    match deadline.flatten() {
+        Some(at) => {
+            at.saturating_duration_since(nsh_core::time::Instant::now())
+                .as_secs_f64()
+                * 1000.0
+        }
+        None => -1.0,
+    }
+}
+
+/// Runs what is due; returns the delay (ms) until it is due again, or -1.
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_pump() -> f64 {
+    pump()
+}
+
+fn send(f: impl FnOnce(&mut Running)) -> f64 {
+    APP.with(|a| {
+        if let Some(app) = a.borrow_mut().as_mut() {
+            f(app);
+        }
+    });
+    pump()
+}
+
+/// A display frame (`requestAnimationFrame`, `now` in ms): ticks the
+/// native animations and runs JS's frame callbacks. Returns the pump
+/// delay.
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_frame(now: f64) -> f64 {
+    APP.with(|a| {
+        let mut app = a.borrow_mut();
+        let Some(app) = app.as_mut() else { return };
+        if app.anim.animating() {
+            app.anim.tick(now);
+            let mut out = Out::new();
+            app.anim.outputs(&mut out);
+            if !out.is_empty() {
+                ffi::submit(&out.finish());
+            }
+            finish_animations(app);
+        }
+        if std::mem::take(&mut app.js_frame) {
+            app.control.frame();
+        }
+    });
+    pump()
+}
+
+/// An event on view `id`, named by its prop (`onPress`), with its payload
+/// as JSON (an object or null).
+///
+/// # Safety
+///
+/// `name..name + name_len` and `ptr..ptr + len` are memory from
+/// [`nsh_alloc`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_event(
+    id: u32,
+    name: *const u8,
+    name_len: usize,
+    ptr: *const u8,
+    len: usize,
+) -> f64 {
+    // SAFETY: guaranteed by the caller.
+    let name = unsafe { string(name, name_len) };
+    let Some(kind) = EventKind::from_prop(&name) else {
+        return pump();
+    };
+    // SAFETY: guaranteed by the caller.
+    let json = unsafe { string(ptr, len) };
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
+    let num = |k: &str| value.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let text = |k: &str| {
+        value
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let payload = match kind {
+        EventKind::ScrollEnd
+        | EventKind::ScrollBeginDrag
+        | EventKind::ScrollEndDrag
+        | EventKind::MomentumScrollBegin
+        | EventKind::MomentumScrollEnd => EventPayload::Scroll {
+            x: num("x"),
+            y: num("y"),
+        },
+        EventKind::Load => EventPayload::Image {
+            width: num("width"),
+            height: num("height"),
+        },
+        EventKind::Error => EventPayload::Error {
+            message: text("message"),
+        },
+        EventKind::ChangeText | EventKind::SubmitEditing => EventPayload::Text {
+            text: text("text"),
+            count: num("count") as u32,
+        },
+        _ => match &value {
+            serde_json::Value::Object(map) => EventPayload::Map(
+                map.iter()
+                    .filter_map(|(k, v)| {
+                        // Payload keys are static in the core: intern the
+                        // known ones.
+                        let key: &'static str = match k.as_str() {
+                            "key" => "key",
+                            "start" => "start",
+                            "end" => "end",
+                            "id" => "id",
+                            "index" => "index",
+                            "data" => "data",
+                            "actionName" => "actionName",
+                            "currentTime" => "currentTime",
+                            "duration" => "duration",
+                            "isBuffering" => "isBuffering",
+                            "width" => "width",
+                            "height" => "height",
+                            "top" => "top",
+                            "right" => "right",
+                            "bottom" => "bottom",
+                            "left" => "left",
+                            _ => return None,
+                        };
+                        let v = match v {
+                            serde_json::Value::Number(n) => {
+                                PayloadValue::Number(n.as_f64().unwrap_or(0.0))
+                            }
+                            serde_json::Value::Bool(b) => PayloadValue::Bool(*b),
+                            serde_json::Value::String(s) => PayloadValue::Str(s.clone()),
+                            _ => return None,
+                        };
+                        Some((key, v))
+                    })
+                    .collect(),
+            ),
+            _ => EventPayload::None,
+        },
+    };
+    send(|app| app.control.dispatch_event(id, kind, payload))
+}
+
+/// Touches, as JSON `{ phase, time, points: [{ id, target, path, pageX,
+/// pageY, x, y, changed }] }` (`phase`: 0 start, 1 move, 2 end, 3
+/// cancel).
+///
+/// # Safety
+///
+/// `ptr..ptr + len` is memory from [`nsh_alloc`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_touch(ptr: *const u8, len: usize) -> f64 {
+    // SAFETY: guaranteed by the caller.
+    let json = unsafe { string(ptr, len) };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else {
+        return pump();
+    };
+    let f = |v: &serde_json::Value, k: &str| v.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let phase = match f(&value, "phase") as u32 {
+        0 => nsh_core::TouchPhase::Start,
+        1 => nsh_core::TouchPhase::Move,
+        2 => nsh_core::TouchPhase::End,
+        _ => nsh_core::TouchPhase::Cancel,
+    };
+    let points = value
+        .get("points")
+        .and_then(|p| p.as_array())
+        .map(|points| {
+            points
+                .iter()
+                .map(|p| nsh_core::TouchPoint {
+                    id: f(p, "id") as u32,
+                    target: f(p, "target") as u32,
+                    path: p
+                        .get("path")
+                        .and_then(|p| p.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_u64())
+                                .map(|v| v as u32)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    page_x: f(p, "pageX") as f32,
+                    page_y: f(p, "pageY") as f32,
+                    location_x: f(p, "x") as f32,
+                    location_y: f(p, "y") as f32,
+                    changed: p.get("changed").and_then(|v| v.as_bool()).unwrap_or(true),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let event = nsh_core::TouchEvent {
+        phase,
+        timestamp: f(&value, "time"),
+        points,
+    };
+    send(|app| {
+        app.control.dispatch_event(
+            ROOT_ID,
+            EventKind::Touch,
+            EventPayload::Touch(Box::new(event)),
+        )
+    })
+}
+
+/// A scroll view's offset changed (`applied`: the scrolls the core asked
+/// for that were applied before it).
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_scroll(id: u32, x: f32, y: f32, applied: u32) -> f64 {
+    send(|app| {
+        if app.anim.scrolled(id, x, y) {
+            let mut out = Out::new();
+            app.anim.outputs(&mut out);
+            if !out.is_empty() {
+                ffi::submit(&out.finish());
+            }
+        }
+        app.control.scroll(id, x, y, applied);
+    })
+}
+
+/// A drag on a view with native pan values (`phase`: 0 start, 1 move, 2
+/// end), translated `(tx, ty)` since it began, at velocity `(vx, vy)`
+/// points per second.
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_pan(id: u32, phase: u32, tx: f32, ty: f32, vx: f32, vy: f32) -> f64 {
+    send(|app| {
+        match phase {
+            0 => app.anim.pan_began(id),
+            _ => app.anim.pan_moved(id, tx, ty),
+        }
+        let mut out = Out::new();
+        app.anim.outputs(&mut out);
+        if !out.is_empty() {
+            ffi::submit(&out.finish());
+        }
+        let (value_x, value_y) = app.anim.pan_values(id);
+        let payload = EventPayload::Pan {
+            translation_x: tx,
+            translation_y: ty,
+            velocity_x: vx,
+            velocity_y: vy,
+            value_x,
+            value_y,
+        };
+        match phase {
+            0 => app.control.dispatch_event(id, EventKind::PanStart, payload),
+            2 => app.control.dispatch_event(id, EventKind::PanEnd, payload),
+            _ => {}
+        }
+    })
+}
+
+/// A pinch (`rotation` 0; `amount`: the scale since it began) or rotation
+/// (1; degrees) on a view with native values (`phase`: 0 start, 1 move, 2
+/// end).
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_transform_gesture(id: u32, rotation: u32, phase: u32, amount: f32) -> f64 {
+    let rotation = rotation != 0;
+    send(|app| {
+        match phase {
+            0 => app.anim.transform_began(id, rotation),
+            _ => app.anim.transform_moved(id, rotation, amount),
+        }
+        let mut out = Out::new();
+        app.anim.outputs(&mut out);
+        if !out.is_empty() {
+            ffi::submit(&out.finish());
+        }
+        let key = if rotation { "rotation" } else { "scale" };
+        let payload = EventPayload::Map(vec![
+            (key, PayloadValue::Number(amount as f64)),
+            ("velocity", PayloadValue::Number(0.0)),
+        ]);
+        let kind = match (rotation, phase) {
+            (false, 0) => Some(EventKind::PinchStart),
+            (false, 2) => Some(EventKind::PinchEnd),
+            (true, 0) => Some(EventKind::RotationStart),
+            (true, 2) => Some(EventKind::RotationEnd),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            app.control.dispatch_event(id, kind, payload);
+        }
+    })
+}
+
+/// The platform presents root `id` (a screen or modal) at `width` ×
+/// `height`, with insets covered by system UI.
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_root_size(
+    id: u32,
+    width: f32,
+    height: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+) -> f64 {
+    send(|app| {
+        let insets = nsh_core::EdgeInsets {
+            top,
+            right,
+            bottom,
+            left,
+        };
+        app.control
+            .set_root_size(id, Size::new(width, height), insets);
+        let n = |v: f32| PayloadValue::Number(v as f64);
+        app.control.dispatch_event(
+            id,
+            EventKind::Insets,
+            EventPayload::Map(vec![
+                ("top", n(top)),
+                ("right", n(right)),
+                ("bottom", n(bottom)),
+                ("left", n(left)),
+            ]),
+        );
+    })
+}
+
+/// The interaction states of view `id` (`active:`, `hover:`, `focus:`
+/// classes).
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_states(id: u32, states: u32) -> f64 {
+    send(|app| app.control.set_states(id, states as u8))
+}
+
+/// The surface was resized (points).
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_resize(width: f32, height: f32) -> f64 {
+    send(|app| {
+        app.environment.window = (width, height);
+        app.control.resize(Size::new(width, height));
+        app.control.set_environment(app.environment);
+    })
+}
+
+/// The page switched between light and dark.
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_set_dark(dark: u32) -> f64 {
+    send(|app| {
+        app.environment.color_scheme = if dark != 0 {
+            ColorScheme::Dark
+        } else {
+            ColorScheme::Light
+        };
+        app.control.set_environment(app.environment);
+    })
+}

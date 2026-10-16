@@ -1,0 +1,199 @@
+---
+title: Dev Server and Debugging
+description: Run apps with nsh run and nsh dev, connect simulators, emulators and devices, and use hot module replacement, logs, the error overlay and source-mapped stacks.
+order: 32
+---
+
+# Dev Server and Debugging
+
+During development, nsh builds your app on every save and pushes it to every connected host, which updates in place.
+Two commands do this:
+
+- `nsh run` starts the dev server **and** launches a development host: a Mac Catalyst window, an iOS simulator or an
+  Android device or emulator.
+- `nsh dev` starts only the dev server, for hosts you start yourself: your own app with the development SDK, a device
+  on the network, or several hosts at once.
+
+```sh
+nsh run App.tsx                     # Mac Catalyst window, 390×844 (macOS)
+nsh run App.tsx --target ios        # iOS simulator
+nsh run App.tsx --target android    # Android device or emulator
+nsh dev App.tsx                     # server only
+```
+
+## `nsh run`
+
+| Flag | Description |
+|---|---|
+| `--target <catalyst \| ios \| android>` | Where to run. Default `catalyst`: an iPhone-sized (390×844) Mac window. |
+| `--device <name or UDID>` | The iOS simulator to use. Default: a booted one, else the newest iPhone (booted for you). |
+| `--port <port>` | Dev server port. Default 8790; the next free port is used if it is taken. |
+| `--release` | Serve release builds (minified, no debug info, no hot updates). |
+| `--trace` | Log the time of every commit on the host. |
+
+What each target does:
+
+- **`catalyst`** (macOS) runs the development host as a Mac app. Stopping `nsh run` (Ctrl-C) closes it, and closing the
+  window ends `nsh run`.
+- **`ios`** installs the development host in the simulator, launches it pointed at the dev server and keeps watching.
+  The simulator shares the Mac's network, so the host reaches the server on `127.0.0.1`. Requires Xcode.
+- **`android`** installs the development host APK (again only when the runtime changed), runs
+  `adb reverse tcp:<port> tcp:<port>` so the device's own `127.0.0.1` reaches the server, and starts it. Works with an
+  emulator or a USB device. Requires the Android SDK (`ANDROID_HOME`).
+
+The hosts are generic: they run any nsh app the server sends, so there is nothing to build per app.
+
+## `nsh dev`
+
+```sh
+nsh dev App.tsx
+```
+
+```text
+ info dev server: ws://127.0.0.1:8790/ws
+ info devices on this network: ws://192.168.1.20:8790/ws
+ info watching /Users/me/my-app
+```
+
+| Flag | Description |
+|---|---|
+| `--port <port>` | Dev server port. Default 8790 (the next free one if taken). |
+| `--release` | Serve release builds. |
+
+Connect hosts to the printed URL:
+
+- **Your own iOS app**, linked with `NativeShellDev.xcframework`:
+  `try app.connectDevServer(URL(string: "ws://192.168.1.20:8790/ws")!)`. See [Embedding in iOS apps](./embedding-ios.md#development).
+- **Your own Android app**, with `nsh-dev.aar`: `nsh.connectDevServer("ws://192.168.1.20:8790/ws")`, or
+  `adb reverse tcp:8790 tcp:8790` and `ws://127.0.0.1:8790/ws`. See [Embedding in Android apps](./embedding-android.md#development).
+
+Any number of hosts can be connected at once; every build goes to all of them. A host that connects later receives the
+current build right away.
+
+> [!NOTE]
+> A device on the LAN needs to reach your computer on the dev server's port: same network, no firewall in between.
+> Assets (images, fonts) are served over plain HTTP from the same port.
+
+## Hot module replacement
+
+Development builds keep one module per source file. When you save, nsh rebuilds, compares the modules with the last
+good build and sends a **patch** with only the modules that changed. The host applies it in place in well under a
+millisecond; from saving a file to seeing the change takes roughly 120 ms.
+
+What happens to your app:
+
+- **Only the components you edited render again.** Every top-level component (a capitalized function that returns JSX)
+  is wrapped in a stable proxy. When its code changes (or the rest of its module's code, which it may use), its
+  instances render again with the new code; components whose code did not change keep their instances, and with them
+  their signals and state. Edit a button's style and the
+  screen stays where it was, with the same input text and scroll position.
+- **Modules that changed run again**, and so do the modules importing a changed module that cannot take the update
+  by itself, up to the entry. Module-level code therefore runs again: a `signal` created at the top of an edited module starts from its initial value.
+- **Top-level `context()` objects keep their identity**, taking the new default value, so providers and consumers in
+  different modules keep matching.
+- **`mount` calls are undone** when their module runs again, so the entry module re-mounting does not stack apps.
+- **A component that throws** reports the error and renders nothing until you fix it; the rest of the app keeps
+  running. The next good save recovers.
+
+The host **reloads the whole app** instead of patching when:
+
+- the change imports an nsh module the running app did not import yet (for example the first `import … from "nsh/list"`);
+- the app's `capabilities` in `nsh.json` changed;
+- the host is not running the build the patch is based on (it just connected, or a previous load failed);
+- a patch cannot be applied.
+
+> [!TIP]
+> Keep state you want to survive edits inside components (or in a module you are not editing), not at the top of the
+> module you are working on.
+
+`--release` serves release builds, without hot updates: every save reloads the app. Use it to check the minified build.
+Anything loaded from a dev server, `--release` or not, skips the runtime's hardening (`eval` stays available); see
+[Sandbox and capabilities](./sandbox-and-capabilities.md#hardening).
+
+## Logs
+
+`console.log`, `console.info`, `console.debug`, `console.warn` and `console.error` go to the native log with target
+`js`. While a host is connected, its log lines are forwarded to the terminal running `nsh run` / `nsh dev`, prefixed
+with the device's name:
+
+```text
+ info iPhone 16 Pro js loading more after 1000
+ warn iPhone 16 Pro js deprecated option
+error iPhone 16 Pro js uncaught exception: TypeError: cannot read property 'id' of undefined
+    at Row (demos/Photos.tsx:18:22)
+```
+
+`console.log` formats values like a browser console: strings as they are, errors with their stack, functions by name,
+objects and arrays as JSON. When the host is not connected, logs go to the platform's log (Xcode's console / the
+unified log on iOS, `adb logcat` on Android).
+
+`--trace` adds the cost of every commit:
+
+```text
+ info nsh::perf commit: 10 ops, 151µs (list js 2µs), 8 mount items, 27 nodes
+```
+
+See [Testing with nsh trace](./testing-and-trace.md) for what these numbers mean.
+
+## The error overlay
+
+These errors show a red overlay over the app on the host, with the message and stack:
+
+- a build failure (a syntax error, an unknown element, a missing import), with a code frame pointing at the line;
+- an error while the bundle is evaluated;
+- an uncaught exception in an event handler, timer or effect.
+
+Tap the overlay to dismiss it. It also disappears on the next successful reload. Build failures are printed in the
+terminal too:
+
+```text
+error build failed:
+App.tsx
+
+  x unknown element <buton> (built-in elements: view, text, image, scroll,
+  | input, canvas, web-view, video, modal, input-accessory; `if`, `each`; or a
+  | component in scope, by its name in kebab case)
+   ,-[3:11]
+ 2 | function App() {
+ 3 |   return <buton />;
+   :           ^^^^^
+ 4 | }
+```
+
+The bundler removes TypeScript types without checking them; run `tsc` (with the `tsconfig.json` `nsh init` writes) or
+rely on your editor for type errors.
+
+In release builds (an embedding app with the release SDK, a packaged app), errors are logged and passed to the host
+app's error handler (`NshAppView.onError`, `NshView.setErrorListener`) but not shown over the app.
+
+## Source maps and stack traces
+
+Bundling produces a source map that composes every step (TypeScript → JSX → the bundle), and it is sent along with each
+build. Before a stack trace is printed or shown, the runtime rewrites the bundle's positions to your sources, so stacks
+point at `App.tsx:2:28`, not at the bundle:
+
+```text
+error js uncaught exception: Error: tap boom
+    at <anonymous> (App.tsx:2:58)
+```
+
+`nsh build` writes the map as `bundle.js.map`; an embedding app that loads a bundle from a folder reads it from next to
+the bundle, and [signed packages](./signed-packages.md) carry it too.
+
+## Debugging tips
+
+- **Nothing updates after an edit**: check the terminal for a build error; the overlay shows it on the host too.
+- **The app keeps old state you expected to reset**: hot replacement keeps unchanged components' state on purpose.
+  Restart with Ctrl-C and `nsh run`, or change the entry module.
+- **A request fails only in a packaged or embedded build**: check the app's [capabilities](./sandbox-and-capabilities.md);
+  refusals are logged with the key to add.
+- **Something is slow**: run with `--trace`, or reproduce it headless with [`nsh trace`](./testing-and-trace.md), which
+  prints every native view operation.
+- **Type errors in the editor**: `nsh run` and `nsh dev` keep `.nsh/types` up to date; see
+  [Project structure](./project-structure.md).
+
+## See also
+
+- [CLI](./cli.md)
+- [Testing with nsh trace](./testing-and-trace.md)
+- [Embedding in iOS apps](./embedding-ios.md), [Embedding in Android apps](./embedding-android.md)

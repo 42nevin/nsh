@@ -1,0 +1,62 @@
+---
+import '../styles/global.css';
+import { BASE, SITE_DESCRIPTION, SITE_TITLE, SITE_URL, type Lang } from '../lib/site';
+
+export interface Props {
+  title?: string;
+  description?: string;
+  lang?: Lang;
+  /** Routes (without the base) of this page in each locale, for hreflang. */
+  alternates?: { en?: string; 'zh-CN'?: string };
+  robots?: string;
+}
+
+const { title, description = SITE_DESCRIPTION, lang = 'en', alternates, robots } = Astro.props;
+
+const pageTitle = !title || title === SITE_TITLE ? `${SITE_TITLE} — Native apps in TSX` : `${title} · ${SITE_TITLE}`;
+const canonical = new URL(Astro.url.pathname.replace(/\/+$/, '') || '/', SITE_URL).href;
+const abs = (route: string) => new URL(`${BASE.replace(/\/$/, '')}${route}`, SITE_URL).href;
+---
+
+<!doctype html>
+<html lang={lang}>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{pageTitle}</title>
+    <meta name="description" content={description} />
+    {robots && <meta name="robots" content={robots} />}
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/svg+xml" href={`${BASE}logo.svg`} />
+    <link rel="canonical" href={canonical} />
+    {alternates?.en && <link rel="alternate" hreflang="en" href={abs(alternates.en)} />}
+    {alternates?.['zh-CN'] && <link rel="alternate" hreflang="zh-CN" href={abs(alternates['zh-CN'])} />}
+    {alternates?.en && <link rel="alternate" hreflang="x-default" href={abs(alternates.en)} />}
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={SITE_TITLE} />
+    <meta property="og:title" content={pageTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta name="twitter:card" content="summary" />
+    <link rel="alternate" type="text/plain" title="llms.txt" href={`${BASE}llms.txt`} />
+
+    <!-- Before first paint: `theme` in localStorage is "light" or "dark"; absent follows the system. -->
+    <script is:inline>
+      (function () {
+        var stored = null;
+        try { stored = localStorage.getItem('theme'); } catch (e) {}
+        var media = window.matchMedia('(prefers-color-scheme: dark)');
+        var root = document.documentElement;
+        root.dataset.themePref = stored === 'light' || stored === 'dark' ? stored : 'system';
+        root.classList.toggle('dark', stored === 'dark' || (stored !== 'light' && media.matches));
+        media.addEventListener('change', function (event) {
+          if (root.dataset.themePref === 'system') root.classList.toggle('dark', event.matches);
+        });
+      })();
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">{lang === 'zh-CN' ? '跳到正文' : 'Skip to content'}</a>
+    <slot />
+  </body>
+</html>

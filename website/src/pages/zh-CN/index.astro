@@ -1,0 +1,18 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Nav from '../../components/Nav.astro';
+import Home from '../../components/Home.astro';
+import SiteFooter from '../../components/SiteFooter.astro';
+import { url } from '../../lib/site';
+---
+
+<BaseLayout
+  lang="zh-CN"
+  title="native-shell — 用 TSX 编写原生应用"
+  description="native-shell（nsh）：用 TSX 编写应用，运行在 Rust 实现的原生运行时上，由 Taffy 布局，并用真正的 UIKit 与 Android 视图渲染。"
+  alternates={{ en: '/', 'zh-CN': '/zh-CN' }}
+>
+  <Nav lang="zh-CN" currentPath={Astro.url.pathname} langHref={url('')} />
+  <Home lang="zh-CN" />
+  <SiteFooter lang="zh-CN" />
+</BaseLayout>

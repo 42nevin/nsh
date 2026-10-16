@@ -19,14 +19,14 @@ use std::{
     rc::{Rc, Weak},
     sync::{Arc, Mutex},
     task::{Context as TaskContext, Poll, Wake, Waker},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use rustc_hash::FxHashMap;
 use tokio::runtime::Handle;
 
 use super::{Component, Context, element::ErasedCx};
-use crate::{Command, Dialog, JsonValue, NodeId, ROOT_ID, StatusBarSetting};
+use crate::{Command, Dialog, JsonValue, NodeId, ROOT_ID, StatusBarSetting, time::Instant};
 
 type LocalFuture = Pin<Box<dyn Future<Output = ()>>>;
 
@@ -439,18 +439,33 @@ impl AsyncCx {
 
     /// Completes after `delay` (TS: what `setTimeout` waits for):
     /// `tokio::time::sleep`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn timer(&self, delay: Duration) -> tokio::time::Sleep {
         tokio::time::sleep(delay)
     }
 
     /// Completes at `at`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn timer_until(&self, at: Instant) -> tokio::time::Sleep {
         tokio::time::sleep_until(at.into())
     }
 
+    /// Completes after `delay` (TS: what `setTimeout` waits for).
+    #[cfg(target_arch = "wasm32")]
+    pub fn timer(&self, delay: Duration) -> crate::time::Sleep {
+        crate::time::sleep(delay)
+    }
+
+    /// Completes at `at`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn timer_until(&self, at: Instant) -> crate::time::Sleep {
+        crate::time::sleep_until(at)
+    }
+
     /// Runs `future` on the runtime's threads (`tokio::spawn`): `Send`
     /// work that should not hold the engine thread. Await the handle for
-    /// its output.
+    /// its output. Not in WebAssembly, which has no threads.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn background<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
@@ -460,7 +475,8 @@ impl AsyncCx {
     }
 
     /// Runs blocking `f` on the runtime's blocking threads
-    /// (`tokio::task::spawn_blocking`).
+    /// (`tokio::task::spawn_blocking`). Not in WebAssembly.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn blocking<R: Send + 'static>(
         &self,
         f: impl FnOnce() -> R + Send + 'static,

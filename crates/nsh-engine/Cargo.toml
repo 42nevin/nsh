@@ -24,7 +24,11 @@ serde_json.workspace = true
 nsh-anim.workspace = true
 nsh-js = { workspace = true, optional = true }
 crossbeam-channel.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["rt", "time"] }
+
+# WebAssembly has no threads: `LocalEngine` drives the engine there.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 libc.workspace = true

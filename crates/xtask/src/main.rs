@@ -8,11 +8,14 @@
 //!   prebuilt runtime, so app developers never need Rust.
 //! - `ios-embed`: only the iOS embedding SDK (`NativeShell.xcframework`,
 //!   `NativeShellDev.xcframework`) into `dist/nsh/embed/ios`.
+//! - `web`: the WebAssembly runtime, its player and the website's demos
+//!   (`website/public/play` by default).
 
 mod android;
 mod dist;
 mod ios;
 mod run;
+mod web;
 
 use clap::{Parser, Subcommand};
 
@@ -53,6 +56,12 @@ enum Task {
     Dist,
     /// Build only the iOS embedding XCFrameworks.
     IosEmbed,
+    /// Build the WebAssembly runtime and the website's demos.
+    Web {
+        /// Output directory.
+        #[arg(long, default_value = "website/public/play")]
+        out: std::path::PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -70,5 +79,6 @@ fn main() -> anyhow::Result<()> {
         Task::ClippyAndroid => android::clippy(),
         Task::Dist => dist::dist(),
         Task::IosEmbed => ios::build().map(|out| println!("{}", out.display())),
+        Task::Web { out } => web::build(&out),
     }
 }

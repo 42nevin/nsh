@@ -13,18 +13,12 @@ mod script;
 #[cfg(feature = "js")]
 mod symbolicate;
 
-use std::{
-    io,
-    rc::Rc,
-    sync::Arc,
-    thread::{self, JoinHandle},
-    time::{Duration, Instant},
-};
+use std::{io, rc::Rc, sync::Arc, time::Duration};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{Receiver, Sender};
 use nsh_core::{
     ApplyError, Core, EdgeInsets, EventKind, EventPayload, ListBind, MountBatch, NodeId, Op,
-    PayloadValue, Size, TextEngine,
+    PayloadValue, Size, TextEngine, time::Instant,
 };
 pub use nsh_core::{
     access::{Access, Capabilities},
@@ -44,6 +38,7 @@ use rustc_hash::FxHashMap;
 
 use crate::script::{NetworkQueue, RequestId, Script};
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Stack size of the engine thread. QuickJS recursion (and deep Solid
 /// component trees) needs more than the 512 KiB default of secondary
 /// threads on Apple platforms.
@@ -392,6 +387,7 @@ pub struct EngineConfig {
     pub runtime: Option<tokio::runtime::Handle>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The runtime of components' tasks when the embedder gives none: a few
 /// threads, made on first use, shared by every engine (like a thread pool,
 /// it holds no engine's state).
@@ -443,6 +439,8 @@ enum Message {
     /// engine left are dropped).
     Fetch(RequestId, u64, FetchEvent),
     Hot(HotUpdate),
+    /// Sent by a dropped [`Engine`] (there is none in WebAssembly).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Shutdown,
 }
 
@@ -540,14 +538,16 @@ impl EngineControl {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// A running engine. Dropping it stops the thread.
 pub struct Engine {
     control: EngineControl,
-    thread: Option<JoinHandle<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
     /// Interrupts running JS when the engine stops.
     stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Engine {
     /// Starts the engine thread. `make_text_engine` runs on that thread.
     pub fn start<M, F, S>(config: EngineConfig, make_text_engine: F, sink: S) -> io::Result<Engine>
@@ -560,7 +560,7 @@ impl Engine {
         let engine_tx = tx.clone();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let engine_stop = stop.clone();
-        let thread = thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("nsh-engine".into())
             .stack_size(ENGINE_STACK_SIZE)
             .spawn(move || run(config, make_text_engine(), sink, engine_tx, rx, engine_stop))?;
@@ -577,6 +577,7 @@ impl Engine {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Engine {
     fn drop(&mut self) {
         // Dropped on the platform's main thread: a script still running is
@@ -589,6 +590,7 @@ impl Drop for Engine {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The engine thread turns input into frames: it is as latency-critical as
 /// the UI thread. Without this, Apple platforms may run it on efficiency
 /// cores at low clock speeds.
@@ -600,6 +602,7 @@ fn raise_thread_priority() {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run<M: TextEngine + 'static, S: MountSink>(
     config: EngineConfig,
     text_engine: M,
@@ -609,132 +612,15 @@ fn run<M: TextEngine + 'static, S: MountSink>(
     stop: Arc<std::sync::atomic::AtomicBool>,
 ) {
     raise_thread_priority();
-    let sink: Rc<dyn MountSink> = Rc::new(sink);
-    let text_engine = Rc::new(text_engine);
-    let access = Arc::new(match &config.app {
-        App::Js(bundle) => bundle.policy.access(),
-        // Native code is trusted: it reaches what the platform allows.
-        App::Rust(_) => Policy::default().access(),
-    });
-    let mut core = Core::new(text_engine.clone(), config.viewport);
-    core.set_components(nsh_core::ui::Registry::merged(&config.ui_sets));
-    if let App::Js(_) = &config.app {
-        // Only JS is limited (Rust code is as trusted as the platform).
-        core.set_max_nodes(config.limits.max_nodes);
-    }
-    core.set_access(access.clone());
-    core.set_font_scale(config.environment.font_scale);
-    core.set_class_environment(class_environment(&config.environment));
-    core.set_header_heights(config.header_heights.0, config.header_heights.1);
-    core.set_safe_area(insets(&config.environment));
-    core.set_environment(ui_environment(&config.environment, config.viewport));
-    core.set_task_runtime(config.runtime.clone().unwrap_or_else(shared_runtime));
-    // A Rust app's theme and fonts come with its root (a JS app's from its
-    // bundle).
-    if let App::Rust(root) = &config.app {
-        if let Some(theme) = root.theme_ref() {
-            core.set_theme(theme.clone());
-        }
-        for font in root.fonts() {
-            if let Err(err) = core.register_font(font) {
-                log::error!("font failed: {err}");
-                sink.report_error(&format!("font failed: {err}"));
-            }
-        }
-    }
-    // A task woken on any thread wakes the loop.
-    let wake = tx.clone();
-    core.set_task_notify(Arc::new(move || {
-        let _ = wake.send(Message::Wake);
-    }));
-    let mut state = State {
-        core,
-        frame_requested: false,
-        ops: Vec::new(),
-        binds: Vec::new(),
-        events: Vec::new(),
-        trace: config.trace,
-        committed_since_gc: false,
-        hot: Vec::new(),
-        scroll_events: FxHashMap::default(),
-        touch_move: None,
-        net: Net {
-            network: config.network.clone(),
-            tx,
-            queue: NetworkQueue::default(),
-            inflight: FxHashMap::default(),
-            access: access.clone(),
-            hops: 0,
-        },
+    let Some(mut driver) = Driver::start(config, text_engine, Rc::new(sink), tx, stop) else {
+        return;
     };
-    let mut last_gc = Instant::now();
-
-    let mut environment = config.environment;
-    environment.window = (config.viewport.width, config.viewport.height);
-    let start = Instant::now();
-    let (script, eval_us) = match &config.app {
-        App::Js(bundle) => match Script::start(
-            bundle,
-            config.limits,
-            &config.ui_sets,
-            &environment,
-            text_engine,
-            stop,
-            sink.clone(),
-        ) {
-            Some((script, eval_us)) => (Some(script), eval_us),
-            None => return,
-        },
-        App::Rust(root) => {
-            state.core.mount_root(root);
-            (None, 0)
-        }
-    };
-    let script = script.as_ref();
-    // A VM stopped for good (out of memory, over a quota) is reported once;
-    // its views stay as they were and no JS runs any more.
-    let mut stopped = false;
-    let mut check_stopped = |script: Option<&Script>| {
-        if let Some(script) = script
-            && !stopped
-            && let Some(reason) = script.fatal()
-        {
-            stopped = true;
-            script.report(&*sink, "stopped", &reason);
-        }
-    };
-    state.load_fonts(script, config.assets.as_deref(), &*sink);
-    if let Some(batch) = state.commit(script) {
-        if state.trace {
-            log::info!(
-                target: "nsh::perf",
-                "first frame: eval {eval_us}µs, total {}µs",
-                start.elapsed().as_micros()
-            );
-        }
-        sink.submit(batch);
-    }
-    state.net.pump(script);
-    state.request_frame(script, &*sink);
-    check_stopped(script);
-
     loop {
-        // Wake for the next timer, or for an idle collection if one is due.
-        let gc_deadline =
-            (script.is_some() && state.committed_since_gc).then(|| last_gc + IDLE_GC_INTERVAL);
-        let deadline = [
-            script.and_then(Script::next_timer),
-            gc_deadline,
-            state.next_scroll_event(),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
-        let message = match deadline {
+        let message = match driver.deadline() {
             Some(deadline) => match rx.recv_deadline(deadline) {
                 Ok(message) => Some(message),
-                Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => return,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => None,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
             },
             None => match rx.recv() {
                 Ok(message) => Some(message),
@@ -742,45 +628,291 @@ fn run<M: TextEngine + 'static, S: MountSink>(
             },
         };
         if let Some(message) = message {
-            if !handle(script, &mut state, message) {
+            if !driver.handle(message) {
                 return;
             }
             // Coalesce everything already queued into this frame.
             while let Ok(message) = rx.try_recv() {
-                if !handle(script, &mut state, message) {
+                if !driver.handle(message) {
                     return;
                 }
             }
         }
+        driver.turn();
+        if rx.is_empty() {
+            driver.collect_if_idle();
+        }
+    }
+}
+
+/// An engine driven by its host's event loop instead of a thread of its
+/// own: the browser's main thread in WebAssembly, where there are no
+/// threads to block. Input sent through its [`EngineControl`] is handled
+/// at the next [`LocalEngine::pump`].
+pub struct LocalEngine<M: TextEngine + 'static> {
+    driver: Driver<M>,
+    rx: Receiver<Message>,
+    control: EngineControl,
+}
+
+impl<M: TextEngine + 'static> LocalEngine<M> {
+    /// Starts the app (its first frame goes to `sink` before this returns);
+    /// `None` if it could not start (reported to `sink`).
+    pub fn start<S: MountSink>(config: EngineConfig, text_engine: M, sink: S) -> Option<Self> {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let control = EngineControl { tx: tx.clone() };
+        let driver = Driver::start(config, text_engine, Rc::new(sink), tx, stop)?;
+        Some(LocalEngine {
+            driver,
+            rx,
+            control,
+        })
+    }
+
+    /// A handle for sending input.
+    pub fn control(&self) -> EngineControl {
+        self.control.clone()
+    }
+
+    /// Handles the input sent since the last call, runs what is due
+    /// (timers, tasks) and commits. Returns when to call again at the
+    /// latest (sooner if input arrives); `None`: only for input.
+    pub fn pump(&mut self) -> Option<Instant> {
+        // Bounded: messages sent while handling (a task waking another)
+        // are handled in the same call, a loop that never settles is not.
+        for _ in 0..4 {
+            while let Ok(message) = self.rx.try_recv() {
+                self.driver.handle(message);
+            }
+            self.driver.turn();
+            if self.rx.is_empty() {
+                break;
+            }
+        }
+        self.driver.collect_if_idle();
+        self.driver.deadline()
+    }
+}
+
+/// One engine's state and the work of one wake-up, whoever drives it.
+struct Driver<M: TextEngine + 'static> {
+    state: State<Rc<M>>,
+    script: Option<Script>,
+    sink: Rc<dyn MountSink>,
+    assets: Option<Arc<dyn Assets>>,
+    /// A VM stopped for good (out of memory, over a quota) is reported
+    /// once; its views stay as they were and no JS runs any more.
+    stopped: bool,
+    last_gc: Instant,
+}
+
+impl<M: TextEngine + 'static> Driver<M> {
+    /// Sets up the core, starts the app and submits its first frame.
+    fn start(
+        config: EngineConfig,
+        text_engine: M,
+        sink: Rc<dyn MountSink>,
+        tx: Sender<Message>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Option<Self> {
+        let text_engine = Rc::new(text_engine);
+        let access = Arc::new(match &config.app {
+            App::Js(bundle) => bundle.policy.access(),
+            // Native code is trusted: it reaches what the platform allows.
+            App::Rust(_) => Policy::default().access(),
+        });
+        let mut core = Core::new(text_engine.clone(), config.viewport);
+        core.set_components(nsh_core::ui::Registry::merged(&config.ui_sets));
+        if let App::Js(_) = &config.app {
+            // Only JS is limited (Rust code is as trusted as the platform).
+            core.set_max_nodes(config.limits.max_nodes);
+        }
+        core.set_access(access.clone());
+        core.set_font_scale(config.environment.font_scale);
+        core.set_class_environment(class_environment(&config.environment));
+        core.set_header_heights(config.header_heights.0, config.header_heights.1);
+        core.set_safe_area(insets(&config.environment));
+        core.set_environment(ui_environment(&config.environment, config.viewport));
+        // WebAssembly has no threads for a runtime: tasks' timers are
+        // `nsh_core::time`'s there, fired by the driver.
+        #[cfg(not(target_arch = "wasm32"))]
+        core.set_task_runtime(config.runtime.clone().unwrap_or_else(shared_runtime));
+        // A Rust app's theme and fonts come with its root (a JS app's from
+        // its bundle).
+        if let App::Rust(root) = &config.app {
+            if let Some(theme) = root.theme_ref() {
+                core.set_theme(theme.clone());
+            }
+            for font in root.fonts() {
+                if let Err(err) = core.register_font(font) {
+                    log::error!("font failed: {err}");
+                    sink.report_error(&format!("font failed: {err}"));
+                }
+            }
+        }
+        // A task woken on any thread wakes the loop.
+        let wake = tx.clone();
+        core.set_task_notify(Arc::new(move || {
+            let _ = wake.send(Message::Wake);
+        }));
+        let state = State {
+            core,
+            frame_requested: false,
+            ops: Vec::new(),
+            binds: Vec::new(),
+            events: Vec::new(),
+            trace: config.trace,
+            committed_since_gc: false,
+            hot: Vec::new(),
+            scroll_events: FxHashMap::default(),
+            touch_move: None,
+            net: Net {
+                network: config.network.clone(),
+                tx,
+                queue: NetworkQueue::default(),
+                inflight: FxHashMap::default(),
+                access: access.clone(),
+                hops: 0,
+            },
+        };
+
+        let mut environment = config.environment;
+        environment.window = (config.viewport.width, config.viewport.height);
+        let start = Instant::now();
+        let mut driver = Driver {
+            state,
+            script: None,
+            sink: sink.clone(),
+            assets: config.assets.clone(),
+            stopped: false,
+            last_gc: Instant::now(),
+        };
+        let eval_us = match &config.app {
+            App::Js(bundle) => {
+                let (script, eval_us) = Script::start(
+                    bundle,
+                    config.limits,
+                    &config.ui_sets,
+                    &environment,
+                    text_engine,
+                    stop,
+                    sink,
+                )?;
+                driver.script = Some(script);
+                eval_us
+            }
+            App::Rust(root) => {
+                driver.state.core.mount_root(root);
+                0
+            }
+        };
+        let Driver {
+            state,
+            script,
+            sink,
+            assets,
+            ..
+        } = &mut driver;
+        let script = script.as_ref();
+        state.load_fonts(script, assets.as_deref(), &**sink);
+        if let Some(batch) = state.commit(script) {
+            if state.trace {
+                log::info!(
+                    target: "nsh::perf",
+                    "first frame: eval {eval_us}µs, total {}µs",
+                    start.elapsed().as_micros()
+                );
+            }
+            sink.submit(batch);
+        }
+        state.net.pump(script);
+        state.request_frame(script, &**sink);
+        driver.check_stopped();
+        Some(driver)
+    }
+
+    /// When the next timer, idle collection or throttled scroll event is
+    /// due.
+    fn deadline(&self) -> Option<Instant> {
+        let script = self.script.as_ref();
+        let gc_deadline = (script.is_some() && self.state.committed_since_gc)
+            .then(|| self.last_gc + IDLE_GC_INTERVAL);
+        #[cfg(target_arch = "wasm32")]
+        let task_timer = nsh_core::time::next_timer();
+        #[cfg(not(target_arch = "wasm32"))]
+        let task_timer = None;
+        [
+            script.and_then(Script::next_timer),
+            gc_deadline,
+            self.state.next_scroll_event(),
+            task_timer,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// Handles one message; false on shutdown.
+    fn handle(&mut self, message: Message) -> bool {
+        handle(self.script.as_ref(), &mut self.state, message)
+    }
+
+    /// Runs what the handled messages and the time made due, and submits
+    /// the frame.
+    fn turn(&mut self) {
+        let Driver {
+            state,
+            script,
+            sink,
+            assets,
+            ..
+        } = self;
+        let script = script.as_ref();
         state.dispatch_touch_move(script);
         state.dispatch_scroll_events(script);
         let hot = std::mem::take(&mut state.hot);
         if let Some(script) = script {
             for update in hot {
-                script.hot_update(update, &*sink);
+                script.hot_update(update, &**sink);
             }
             script.run_timers(Instant::now());
         }
+        #[cfg(target_arch = "wasm32")]
+        nsh_core::time::fire_timers(Instant::now());
         state.core.run_component_tasks();
-        state.load_fonts(script, config.assets.as_deref(), &*sink);
+        state.load_fonts(script, assets.as_deref(), &**sink);
         if let Some(batch) = state.commit(script) {
             sink.submit(batch);
         }
         state.net.pump(script);
-        state.request_frame(script, &*sink);
-        check_stopped(script);
-        if let Some(script) = script
-            && state.committed_since_gc
-            && rx.is_empty()
-            && last_gc.elapsed() >= IDLE_GC_INTERVAL
+        state.request_frame(script, &**sink);
+        self.check_stopped();
+    }
+
+    /// Collects cycles when the engine has been idle long enough, so
+    /// released nodes free their views.
+    fn collect_if_idle(&mut self) {
+        if let Some(script) = &self.script
+            && self.state.committed_since_gc
+            && self.last_gc.elapsed() >= IDLE_GC_INTERVAL
         {
-            // Idle: collect cycles so released nodes free their views.
             script.collect_garbage();
-            last_gc = Instant::now();
-            state.committed_since_gc = false;
-            if let Some(batch) = state.commit(Some(script)) {
-                sink.submit(batch);
+            self.last_gc = Instant::now();
+            self.state.committed_since_gc = false;
+            if let Some(batch) = self.state.commit(Some(script)) {
+                self.sink.submit(batch);
             }
+        }
+    }
+
+    fn check_stopped(&mut self) {
+        if let Some(script) = &self.script
+            && !self.stopped
+            && let Some(reason) = script.fatal()
+        {
+            self.stopped = true;
+            script.report(&*self.sink, "stopped", &reason);
         }
     }
 }

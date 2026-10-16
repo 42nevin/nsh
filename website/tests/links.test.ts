@@ -1,0 +1,89 @@
+import { expect, test } from 'bun:test';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
+// Every internal link of a finished build (`bun run build` first) must reach
+// a file of the same build. Anchors are checked against the target page's ids.
+
+const dist = join(import.meta.dir, '..', process.env.SITE_TEST_DIST ?? 'dist');
+const base = `/${(process.env.PUBLIC_SITE_BASE ?? '/').replace(/^\/+|\/+$/g, '')}/`.replace(/^\/\/$/, '/');
+
+function htmlFiles(directory: string): string[] {
+  return readdirSync(directory).flatMap((name) => {
+    if (name === 'pagefind' || name === '_astro') return [];
+    const path = join(directory, name);
+    return statSync(path).isDirectory() ? htmlFiles(path) : path.endsWith('.html') ? [path] : [];
+  });
+}
+
+const decode = (value: string) => value.replace(/&amp;/g, '&').replace(/&#x2F;/gi, '/').replace(/&quot;/g, '"');
+
+/** The built file a site path is served from, if any. */
+function resolveFile(path: string): string | undefined {
+  const clean = decodeURIComponent(path).replace(/\/+$/, '');
+  const file = join(dist, clean);
+  return [file, `${file}.html`, join(file, 'index.html')].find((c) => existsSync(c) && statSync(c).isFile());
+}
+
+const built = existsSync(dist);
+const pages = built ? htmlFiles(dist) : [];
+const ids = new Map<string, Set<string>>();
+const idsOf = (file: string) => {
+  let set = ids.get(file);
+  if (!set) {
+    set = new Set([...readFileSync(file, 'utf8').matchAll(/\sid="([^"]+)"/g)].map((m) => decode(m[1])));
+    ids.set(file, set);
+  }
+  return set;
+};
+
+test('the site is built', () => {
+  expect(built).toBe(true);
+  expect(pages.length).toBeGreaterThan(3);
+  for (const file of ['index.html', 'zh-CN/index.html', '404.html', 'llms.txt', 'llms-full.txt', 'sitemap.xml', 'robots.txt']) {
+    expect(existsSync(join(dist, file))).toBe(true);
+  }
+});
+
+test('internal links reach a built page and anchor', () => {
+  const broken: string[] = [];
+  for (const page of pages) {
+    const html = readFileSync(page, 'utf8');
+    const from = page.slice(dist.length);
+    for (const [, raw] of html.matchAll(/<a\s[^>]*?href="([^"]*)"/g)) {
+      const href = decode(raw);
+      if (/^[a-z][a-z\d+.-]*:/i.test(href) || href.startsWith('//')) continue;
+      if (href.startsWith('#')) {
+        const id = decodeURIComponent(href.slice(1));
+        if (id && !idsOf(page).has(id)) broken.push(`${from} → ${href}`);
+        continue;
+      }
+      if (!href.startsWith('/')) {
+        broken.push(`${from} → ${href} (relative)`);
+        continue;
+      }
+      if (!href.startsWith(base) && `${href}/` !== base) {
+        broken.push(`${from} → ${href} (outside ${base})`);
+        continue;
+      }
+      const [pathAndQuery, hash] = href.split('#');
+      const path = pathAndQuery.split('?')[0].slice(base.length - 1);
+      const file = resolveFile(path || '/');
+      if (!file) {
+        broken.push(`${from} → ${href}`);
+        continue;
+      }
+      // The player's hash names a demo, not an element.
+      if (hash && !path.startsWith('/play/') && file.endsWith('.html') && !idsOf(file).has(decodeURIComponent(hash))) broken.push(`${from} → ${href} (no #${hash})`);
+    }
+  }
+  expect(broken).toEqual([]);
+});
+
+test('every content page has its Markdown twin', () => {
+  const missing = pages
+    .map((page) => page.slice(dist.length).replace(/\/index\.html$/, ''))
+    .filter((route) => /^\/(?:zh-CN\/)?(?:docs|elements|components|modules)(?:\/|$)/.test(route))
+    .filter((route) => !existsSync(join(dist, `${route}.md`)));
+  expect(missing).toEqual([]);
+});

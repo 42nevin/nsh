@@ -1,0 +1,102 @@
+name: Website
+
+# Builds the documentation site with its live demos (the WebAssembly runtime,
+# `cargo xtask web`) and publishes it to GitHub Pages at native-shell.com
+# (`website/public/CNAME`).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "rust-toolchain.toml"
+      - ".github/workflows/website.yml"
+  pull_request:
+    paths:
+      - "website/**"
+      - "crates/nsh-platform-web/**"
+      - ".github/workflows/website.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Pages takes one deployment at a time; queue rather than cancel, so the
+# latest push always ends up deployed.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # QuickJS is C: clang compiles it for wasm32 (llvm-ar archives it), and
+      # bindgen needs libclang for the host build of the nsh CLI.
+      - name: Install clang and LLVM
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libclang-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-website-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-website-cargo-
+
+      - name: Install website dependencies
+        working-directory: website
+        run: bun install
+
+      # `build` runs `cargo xtask web` first: nsh.wasm, the player and every
+      # demo in website/demos, into website/public/play.
+      - name: Build website
+        working-directory: website
+        env:
+          NSH_REQUIRE_PLAY: "1"
+          AR_wasm32_unknown_unknown: llvm-ar
+        run: bun run build
+
+      - name: Test website
+        working-directory: website
+        run: bun run test
+
+      - uses: actions/configure-pages@v5
+        if: github.event_name != 'pull_request'
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
+        with:
+          path: website/dist
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

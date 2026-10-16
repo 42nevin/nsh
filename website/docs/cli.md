@@ -1,0 +1,233 @@
+---
+title: CLI
+description: Every nsh subcommand and flag - init, build, trace, dev, run, package, and the signing commands keygen, certify, publish, verify and revoke.
+order: 5
+---
+
+# CLI
+
+`nsh` is the only tool an nsh app needs. Every subcommand that builds an app takes `[ENTRY]`: the entry module, or the app's directory, whose `App.tsx` is the entry (default: the current directory, so `cd my-app && nsh run` works). It reads `nsh.json` next to the entry and refreshes the type declarations in `.nsh/types`.
+
+```text
+nsh <COMMAND>
+
+  init     Create an app
+  build    Bundle an app and compile it to QuickJS bytecode
+  trace    Run an app headless and print the mount instructions and timings
+  dev      Serve an app to dev hosts (simulators, devices) and push rebuilds
+  run      Like dev, and also run the app in a development host
+  package  Package an installable app from the prebuilt runtime
+  keygen   Create a signing key
+  certify  Certify a release key with a root key
+  publish  Build an app in release mode and sign it into a package (.nshpkg)
+  verify   Verify a package
+  revoke   Sign a revocation list
+```
+
+`nsh <command> --help` prints the flags of a command; `nsh --version` prints the version.
+
+## nsh init
+
+```sh
+nsh init [DIR] [--name <NAME>]
+```
+
+Creates an app in `DIR` (default: the current directory, created if missing): `App.tsx`, `nsh.json`, `tsconfig.json`, `.gitignore` and `.nsh/types`. Files that exist are kept; it fails only if all of them exist already.
+
+| Flag | Description |
+|---|---|
+| `--name <NAME>` | Display name written to `nsh.json`. Default: the directory's name. The id becomes `com.example.<name>` (letters and digits only, lower case). |
+
+## nsh run
+
+```sh
+nsh run [ENTRY] [--target catalyst|ios|android] [--device <DEVICE>] [--port <PORT>] [--release] [--trace]
+```
+
+Starts the dev server (as `nsh dev`), launches a development host that loads the app from it, and rebuilds on every save. Hot module replacement patches the running app in place; logs and errors from the app are printed in the terminal. Stop it with Ctrl-C (or by closing the Catalyst window).
+
+| Flag | Default | Description |
+|---|---|---|
+| `--target <TARGET>` | `catalyst` | `catalyst`: the Mac Catalyst host, an iPhone-sized window (390×844). `ios`: the host in an iOS simulator. `android`: the host on an Android device or emulator. |
+| `--device <DEVICE>` | | iOS simulator to use, by name (`"iPhone 16 Pro"`) or UDID. Default: a booted one, else the newest iPhone, which is booted. |
+| `--port <PORT>` | `8790` | Dev server port. If it is taken, the next free one is used. |
+| `--release` | | Minify and strip debug info. Release bundles have no hot module replacement: every save reloads the app. |
+| `--trace` | | The host logs the timing of every commit (JS, layout, mount items) to the terminal. |
+
+With `--target android`, the first device `adb devices` lists is used; the dev server's port is forwarded to it with `adb reverse`. See [Getting started](./getting-started.md#run-it) and [Dev server and debugging](./dev-server-and-debugging.md).
+
+## nsh dev
+
+```sh
+nsh dev [ENTRY] [--port <PORT>] [--release]
+```
+
+Runs only the dev server: it builds the app, watches the entry's directory, and pushes every rebuild to the hosts connected to it. It prints the URL for hosts on this machine and one per LAN address for devices:
+
+```text
+ info dev server: ws://127.0.0.1:8790/ws
+ info devices on this network: ws://192.168.1.20:8790/ws
+```
+
+Use it with hosts you start yourself, for example an app that embeds the development SDK (`NativeShellDev.xcframework`, `nsh-dev.aar`). Flags as for `nsh run`.
+
+## nsh trace
+
+```sh
+nsh trace [ENTRY] [--taps <N>] [--idle-ms <MS>] [--scroll <POINTS>] [--width <W>] [--height <H>]
+```
+
+Runs the app headless, in the CLI's own process with the same core and runtime as a device but no views, and prints every mount instruction (create, insert, style, frame, text) and the time of each commit. Then it taps the first pressable view and prints what each tap changed. Use it to check that an app starts without errors, to count the work an interaction causes, and in CI ([Testing and trace](./testing-and-trace.md)).
+
+```text
+bundled in 12.6 ms (3255 B)
+ info nsh::perf commit: 56 ops, 412µs (list js 6µs), 49 mount items, 21 nodes
+── initial render: 49 items
+   Create { id: 2, kind: View }
+   ...
+── tap #1 on view 20: 3 items
+   Text { id: 14, text: "1", content: 71x77 @ 0,0 }
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--taps <N>` | `2` | Taps sent to the first pressable view. A tap that changes nothing is an error (exit code 1). |
+| `--idle-ms <MS>` | `1200` | Idle time before tapping. The default lets the engine's idle garbage collection run first, so retention bugs show up. |
+| `--scroll <POINTS>` | | Scrolls the first scroll view or list by this many points, 10 points per frame, and prints each frame's batch. |
+| `--width <W>` | `390` | Viewport width in points. |
+| `--height <H>` | `844` | Viewport height in points. |
+
+`nsh trace` behaves as iOS: `Platform.OS` is `"ios"`, and `ios:` classes and `ios={{…}}` props apply.
+
+## nsh build
+
+```sh
+nsh build [ENTRY] [-o <OUT>] [--release]
+```
+
+Bundles the app and compiles it to QuickJS bytecode, for apps that embed nsh and ship the bundle themselves.
+
+| Flag | Default | Description |
+|---|---|---|
+| `-o, --out <OUT>` | `out` | Output directory. |
+| `--release` | | Minify and strip debug info. |
+
+It writes:
+
+| File | Content |
+|---|---|
+| `bundle.js` | The bundle as JavaScript |
+| `bundle.js.map` | Its source map (stack traces are mapped back to your sources) |
+| `bundle.qbc` | The bundle as QuickJS bytecode: what apps load |
+| `capabilities.json` | The `capabilities` of `nsh.json`, if declared (removed otherwise) |
+| `assets/` | Every imported image and font, at its path relative to the app root |
+
+## nsh package
+
+```sh
+nsh package [ENTRY] --target ios|ios-simulator|android [-o <OUT>] [flags]
+```
+
+Builds an installable app from the prebuilt runtime, in release mode. No Rust and no Xcode project or Gradle build are involved: nsh assembles the app bundle itself and uses Xcode's `actool` and `codesign` (iOS) or the SDK's `aapt2`, `zipalign` and `apksigner` (Android). Metadata comes from `nsh.json`, overridden by the flags.
+
+| Flag | Description |
+|---|---|
+| `--target <TARGET>` | Required. `ios`: iOS devices, a signed `.ipa` (or an unsigned `.app` without `--sign`). `ios-simulator`: an ad hoc signed `.app`. `android`: a signed `.apk`. |
+| `-o, --out <OUT>` | Output directory (default `out`). |
+| `--name <NAME>` | Display name. |
+| `--id <ID>` | Bundle identifier, e.g. `com.example.app`. |
+| `--app-version <VERSION>` | Version, e.g. `1.2.0`. |
+| `--build <BUILD>` | Build number. |
+| `--icon <ICON>` | App icon: a square PNG, ideally 1024×1024. |
+| `--sign <IDENTITY>` | iOS devices: code signing identity, e.g. `"Apple Development: …"`. |
+| `--profile <FILE>` | iOS devices: provisioning profile (`.mobileprovision`). Entitlements come from it. |
+| `--keystore <FILE>` | Android: release keystore. Default: the debug key in `~/.android/debug.keystore` (created if missing). |
+| `--key-alias <ALIAS>` | Android: key alias in the keystore. |
+| `--keystore-password <PASSWORD>` | Android: keystore password. Also read from `NSH_KEYSTORE_PASSWORD`. |
+| `--run` | Install and launch the app afterwards: in the simulator (`ios-simulator`) or on the connected Android device. |
+
+```sh
+nsh package App.tsx --target ios-simulator --run
+nsh package App.tsx --target ios --sign "Apple Development: Jane Doe (ABCDE12345)" --profile dev.mobileprovision
+nsh package App.tsx --target android --keystore release.jks --key-alias upload
+```
+
+See [Packaging](./packaging.md).
+
+## Signing commands
+
+These commands make and check signed packages (`.nshpkg`): app bundles that apps embedding nsh download and verify before running them. [Signed packages](./signed-packages.md) explains the model (an offline root key certifies release keys for some app ids).
+
+### nsh keygen
+
+```sh
+nsh keygen <NAME>
+```
+
+Creates an Ed25519 key pair: `<NAME>.secret` and `<NAME>.pub` (e.g. `nsh keygen keys/root`). Keep a root's `.secret` offline; apps trust its `.pub`.
+
+### nsh certify
+
+```sh
+nsh certify --root <ROOT.secret> --key <KEY.pub> --apps <PATTERN>... [--days <DAYS>] -o <OUT>
+```
+
+Certifies a release key with a root key for some app ids and a time window; packages carry the certificate.
+
+| Flag | Description |
+|---|---|
+| `--root <ROOT>` | The root's secret key. |
+| `--key <KEY>` | The release key's public key. |
+| `--apps <APPS>` | App ids it may sign for: `*`, `com.example.*` or an id. Repeatable. |
+| `--days <DAYS>` | How long it may sign, from now (default 365). |
+| `-o, --out <OUT>` | The certificate to write. |
+
+### nsh publish
+
+```sh
+nsh publish [ENTRY] --key <KEY.secret> --cert <CERT> [-o <OUT>] [--id <ID>] [--app-version <V>] [--build <N>]
+```
+
+Builds the app in release mode and signs it into a package. Metadata comes from `nsh.json`, overridden by the flags.
+
+| Flag | Description |
+|---|---|
+| `--key <KEY>` | The release key's secret key. |
+| `--cert <CERT>` | Its certificate (`nsh certify`). |
+| `-o, --out <OUT>` | The package to write. Default: `out/<id>-<build>.nshpkg`. |
+| `--id <ID>` | App id. |
+| `--app-version <VERSION>` | Version. |
+| `--build <BUILD>` | Build number: must grow with every release. |
+
+### nsh verify
+
+```sh
+nsh verify <PACKAGE> [--root <ROOT.pub>]... [--revocations <LIST>]
+```
+
+Verifies a package as an app trusting the given roots would. Without `--root`, only the package's own signature is checked. It prints the package's SHA-256, which `nsh revoke --package` takes.
+
+### nsh revoke
+
+```sh
+nsh revoke --root <ROOT.secret> [--extend <LIST>] [--sequence <N>] [--key <ID>]... [--package <SHA256>]... -o <OUT>
+```
+
+Signs a revocation list: release keys and packages that must not load any more.
+
+| Flag | Description |
+|---|---|
+| `--root <ROOT>` | The root's secret key. |
+| `--extend <EXTEND>` | Keep the entries of this list (the last one published). |
+| `--sequence <N>` | The list's number, higher than any published before. Default with `--extend`: that list's plus one. |
+| `--key <ID>` | A release key id to revoke. Repeatable. |
+| `--package <SHA256>` | A package SHA-256 to revoke. Repeatable. |
+| `-o, --out <OUT>` | The list to write. |
+
+## Environment variables
+
+| Variable | Used by | Description |
+|---|---|---|
+| `ANDROID_HOME`, `ANDROID_SDK_ROOT` | Android targets | The Android SDK. Fallback: `~/Library/Android/sdk`. |
+| `NSH_KEYSTORE_PASSWORD` | `package --target android` | The keystore password. |
+| `NSH_RUNTIME` | `run`, `package` | A runtime directory to use instead of the one next to the CLI. |

@@ -1,0 +1,11 @@
+---
+// The mark: a phone outline holding a shell prompt — native views, driven by
+// the `nsh` shell. Inline so its two strokes follow the theme tokens.
+export interface Props { class?: string }
+const { class: className = '' } = Astro.props;
+---
+<svg class:list={['logo', className]} viewBox="0 0 32 32" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <rect class="logo__frame" x="6.5" y="2.5" width="19" height="27" rx="5" stroke-width="2.6" />
+  <path class="logo__prompt" d="m11.5 12.5 3.5 3.5-3.5 3.5" stroke-width="2.6" />
+  <path class="logo__frame" d="M17.5 19.5h3.5" stroke-width="2.6" />
+</svg>

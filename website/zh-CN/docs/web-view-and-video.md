@@ -1,0 +1,260 @@
+---
+title: 网页视图与视频
+description: 用 WebView 显示网页、用 Video 播放视频：来源、页面与应用之间的消息、导航、播放控制、ref 以及能力声明。
+order: 21
+---
+
+# 网页视图与视频
+
+`nsh/webview` 中的 `WebView` 和 `nsh/video` 中的 `Video` 把平台自己的网页引擎和媒体播放器作为普通视图嵌入。由于 nsh 用原生视图渲染，它们在布局中与其他元素无异：随父视图滚动、支持圆角和裁剪，其他视图可以覆盖在它们上面而不会出现层级问题。
+
+| 组件 | iOS | Android |
+|---|---|---|
+| `WebView` | WKWebView | `android.webkit.WebView` |
+| `Video` | AVPlayerLayer；设置 `controls` 时为 AVPlayerViewController | TextureView 上的 MediaPlayer；设置 `controls` 时为 MediaController |
+
+它们背后的框架（WebKit、AVFoundation）在应用第一次用到时才加载，所以从不显示网页或视频的应用不会在启动时为它们付出代价。两者也可以作为内置元素 `<web-view>` 和 `<video>` 使用；导入组件可以获得它们的类型。
+
+## WebView
+
+```tsx
+import { mount } from "nsh";
+import { WebView } from "nsh/webview";
+
+function App() {
+  return <WebView source="https://en.m.wikipedia.org/wiki/Swift_(programming_language)" style={{ flex: 1 }} />;
+}
+
+mount(App);
+```
+
+### 来源
+
+| `source` | 显示内容 |
+|---|---|
+| `"https://…"` 或 `{ uri: "https://…" }` | 一个网页。 |
+| `{ html: "<!doctype html>…" }` | 字符串形式的 HTML。 |
+| `{ html, baseUrl: "https://example.com/" }` | 相对 URL 以 `baseUrl` 为基准解析的 HTML。 |
+
+改变 `source` 会加载新的页面。
+
+### 属性
+
+| 属性 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `source` | `string \| { uri } \| { html, baseUrl? }` | | 要显示的内容。 |
+| `injectedJavaScript` | `string` | | 每个页面加载完成后运行。 |
+| `injectedJavaScriptBeforeContentLoaded` | `string` | | 在每个页面自己的脚本之前运行。 |
+| `javaScriptEnabled` | `boolean` | `true` | 页面可以运行脚本。 |
+| `scrollEnabled` | `boolean` | `true` | 用户可以滚动页面。 |
+| `userAgent` | `string` | | 浏览器的 user agent 字符串。 |
+| `ios={{ allowsBackForwardNavigationGestures }}` | `boolean` | | iOS：滑动在页面历史中前进后退。 |
+
+事件：
+
+| 事件 | 参数 | 触发时机 |
+|---|---|---|
+| `onLoadStart` | `WebViewNavigation` | 页面开始加载。 |
+| `onLoad` | `WebViewNavigation` | 页面加载完成。 |
+| `onError` | `{ message }` | 加载失败。 |
+| `onNavigationStateChange` | `WebViewNavigation` | URL、标题、加载状态或历史改变。 |
+| `onMessage` | `{ data: string }` | 页面发来消息（见下文）。 |
+
+`WebViewNavigation` 为 `{ url, title, loading, canGoBack, canGoForward }`。
+
+### 带前进后退的浏览器
+
+ref 提供 `reload()`、`goBack()`、`goForward()`、`stopLoading()`、`injectJavaScript(script)` 和 `postMessage(data)`：
+
+```tsx
+import { mount, signal, type YNode } from "nsh";
+import { WebView, type WebViewNavigation } from "nsh/webview";
+
+function Browser() {
+  let web!: YNode;
+  const nav = signal<WebViewNavigation | null>(null);
+  const button = (label: string, enabled: boolean, action: () => void) => (
+    <text onPress={enabled ? action : undefined} style={{ padding: 12, color: enabled ? "#0969da" : "#8c959f" }}>
+      {label}
+    </text>
+  );
+  return (
+    <view style={{ flex: 1, paddingTop: 50 }}>
+      <text numberOfLines={1} style={{ paddingHorizontal: 12, color: "#57606a" }}>
+        {nav()?.loading ? "Loading…" : nav()?.title ?? ""}
+      </text>
+      <WebView
+        ref={web}
+        source="https://developer.mozilla.org/"
+        style={{ flex: 1 }}
+        onNavigationStateChange={(n) => nav.set(n)}
+        ios={{ allowsBackForwardNavigationGestures: true }}
+      />
+      <view style={{ flexDirection: "row", justifyContent: "space-around" }}>
+        {button("Back", !!nav()?.canGoBack, () => web.goBack())}
+        {button("Forward", !!nav()?.canGoForward, () => web.goForward())}
+        {button("Reload", true, () => web.reload())}
+      </view>
+    </view>
+  );
+}
+
+mount(Browser);
+```
+
+### 页面与应用之间的消息
+
+页面通过 `window.ReactNativeWebView.postMessage(string)` 向应用发消息，应用收到 `onMessage`。应用通过 ref 的 `postMessage(string)` 向页面发消息，页面在 `window` 上收到 `message` 事件。消息是字符串；结构化数据请发送 JSON。
+
+```tsx
+import { mount, signal, type YNode } from "nsh";
+import { WebView } from "nsh/webview";
+
+const page = `<!doctype html>
+<html><head><meta name="viewport" content="width=device-width"></head>
+<body style="font-family: -apple-system, sans-serif; margin: 16px">
+  <button onclick="window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'hello', at: Date.now() }))">
+    Post to the app
+  </button>
+  <p id="got">Nothing from the app yet.</p>
+  <script>
+    window.addEventListener("message", (e) => {
+      document.getElementById("got").textContent = "The app says: " + e.data;
+    });
+  </script>
+</body></html>`;
+
+function App() {
+  let web!: YNode;
+  const last = signal("");
+  return (
+    <view style={{ flex: 1, paddingTop: 50, gap: 12 }}>
+      <WebView
+        ref={web}
+        source={{ html: page }}
+        style={{ height: 240 }}
+        onMessage={(e) => last.set(JSON.parse(e.data).type)}
+      />
+      <text onPress={() => web.postMessage("hi from nsh")} style={{ padding: 16, color: "#0969da" }}>
+        Post to the page
+      </text>
+      <text style={{ paddingHorizontal: 16 }}>Last message: {last()}</text>
+    </view>
+  );
+}
+
+mount(App);
+```
+
+`window.ReactNativeWebView` 与 React Native 使用的名称相同，所以为 React Native 应用编写的网页无需修改即可使用。
+
+`injectJavaScript(script)` 可以随时在当前页面中运行代码；`injectedJavaScript` 和 `injectedJavaScriptBeforeContentLoaded` 在每次页面加载时运行，分别在页面自己的脚本之后或之前，适合用来安装钩子：
+
+```tsx
+<WebView
+  source="https://example.com"
+  injectedJavaScriptBeforeContentLoaded={`window.isNativeApp = true;`}
+  injectedJavaScript={`window.ReactNativeWebView.postMessage(document.title);`}
+  onMessage={(e) => console.log("title", e.data)}
+/>
+```
+
+### 网页视图可以显示哪些网站
+
+如果 `nsh.json` 声明了 `"capabilities"`，网页视图只能显示并导航到 `webview` 下列出的主机：
+
+```json
+{
+  "capabilities": {
+    "webview": { "hosts": ["example.com", "*.example.com"] }
+  }
+}
+```
+
+检查覆盖网页视图的 `source` 以及页面发起的每一次顶层导航（链接、重定向、修改 `location`）；它在平台询问能否继续导航时由原生决定。页面自己的子资源（脚本、图片、iframe）属于网页内容自身的事情，不做检查。`*.example.com` 只匹配子域名；要包括裸域名，还需列出 `example.com`。没有 `"capabilities"` 键的应用可以显示任何页面。见[沙箱与能力声明](./sandbox-and-capabilities.md)。
+
+## Video
+
+```tsx
+import { mount, signal, type YNode } from "nsh";
+import { Video } from "nsh/video";
+
+function Player() {
+  let video!: YNode;
+  const paused = signal(true);
+  const time = signal("");
+  return (
+    <view style={{ flex: 1, justifyContent: "center", padding: 16, gap: 12 }}>
+      <Video
+        ref={video}
+        source="https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4"
+        paused={paused()}
+        repeat
+        resizeMode="contain"
+        style={{ height: 220, borderRadius: 12, overflow: "hidden", backgroundColor: "#000000" }}
+        onProgress={(e) => time.set(`${e.currentTime.toFixed(1)} / ${e.duration.toFixed(1)} s`)}
+        onEnd={() => paused.set(true)}
+      />
+      <view style={{ flexDirection: "row", gap: 16, alignItems: "center" }}>
+        <text onPress={() => paused.set(!paused())} style={{ color: "#0969da", fontWeight: "600" }}>
+          {paused() ? "Play" : "Pause"}
+        </text>
+        <text onPress={() => video.seek(0)} style={{ color: "#0969da" }}>
+          Restart
+        </text>
+        <text style={{ color: "#57606a" }}>{time()}</text>
+      </view>
+    </view>
+  );
+}
+
+mount(Player);
+```
+
+播放由属性控制：用 signal 设置 `paused`、`muted`、`volume` 和 `rate`，播放器随之变化。ref 提供 `seek(seconds)`。
+
+| 属性 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `source` | `string \| { uri }` | | 视频的 URL。 |
+| `paused` | `boolean` | `false` | 暂停播放。 |
+| `muted` | `boolean` | `false` | 静音。 |
+| `volume` | `number` | `1` | 0..1。 |
+| `rate` | `number` | `1` | 播放速度。 |
+| `repeat` | `boolean` | `false` | 播放到结尾后从头再播。 |
+| `resizeMode` | `"cover" \| "contain" \| "stretch" \| "center"` | | 画面如何适应视图。 |
+| `controls` | `boolean` | `false` | 显示平台的播放控件。 |
+| `progressUpdateInterval` | `number` | `250` | 两次 `onProgress` 之间的毫秒数。 |
+
+| 事件 | 参数 | 触发时机 |
+|---|---|---|
+| `onLoadStart` | | 开始加载。 |
+| `onLoad` | `{ duration, width, height }` | 视频就绪：时长（秒）与尺寸。 |
+| `onProgress` | `{ currentTime, duration }` | 播放期间，每 `progressUpdateInterval` 毫秒一次。 |
+| `onBuffer` | `{ isBuffering }` | 因等待数据而暂停，或恢复播放。 |
+| `onEnd` | | 播放到结尾。 |
+| `onError` | `{ message }` | 加载或播放失败。 |
+
+设置 `controls` 时，平台会绘制自己的播放按钮、进度条和全屏按钮。不设置时，用视图在视频上方或下方画你自己的控件；由于视频是布局中的原生视图，覆盖层可以自然地叠在上面：
+
+```tsx
+<view style={{ height: 220 }}>
+  <Video source={url} paused={paused()} style={{ flex: 1 }} />
+  <view
+    onPress={() => paused.set(!paused())}
+    style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, alignItems: "center", justifyContent: "center" }}
+  >
+    <if when={paused()}>
+      <text style={{ fontSize: 48, color: "#ffffff" }}>▶</text>
+    </if>
+  </view>
+</view>
+```
+
+视频来源是网络请求：声明了能力时，视频所在的主机必须在 `nsh.json` 的 `network` 下得到允许，与 `fetch` 和远程图片相同。被拒绝的来源不显示任何内容，并且会记录一次日志，指出需要添加的键。
+
+## 相关内容
+
+- [`web-view`](../elements/web-view.md) 与 [`video`](../elements/video.md)：元素参考。
+- [`nsh/webview`](../modules/nsh-webview.md) 与 [`nsh/video`](../modules/nsh-video.md)。
+- [沙箱与能力声明](./sandbox-and-capabilities.md)：`webview` 与 `network` 授权。
+- [原生组件](./native-components.md)：嵌入宿主应用提供的其他原生视图。

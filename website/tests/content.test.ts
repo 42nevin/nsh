@@ -1,0 +1,84 @@
+import { expect, test } from 'bun:test';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+
+// Content rules that the build cannot check on its own: frontmatter parses and
+// has what the schema needs, the Chinese pages mirror the English ones, and
+// every `demo:` names a file in demos/.
+
+const ROOT = join(import.meta.dir, '..');
+const SECTIONS = ['docs', 'elements', 'components', 'modules'];
+
+interface Front { title?: unknown; description?: unknown; order?: unknown; demo?: unknown }
+
+function pagesOf(dir: string): Map<string, Front | Error> {
+  const out = new Map<string, Front | Error>();
+  if (!existsSync(dir)) return out;
+  for (const name of readdirSync(dir).filter((n) => n.endsWith('.md')).sort()) {
+    const text = readFileSync(join(dir, name), 'utf8');
+    const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    try {
+      if (!match) throw new Error('no frontmatter');
+      out.set(name, (Bun.YAML.parse(match[1]) ?? {}) as Front);
+    } catch (error) {
+      out.set(name, error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+  return out;
+}
+
+const english = Object.fromEntries(SECTIONS.map((s) => [s, pagesOf(join(ROOT, s))]));
+const chinese = Object.fromEntries(SECTIONS.map((s) => [s, pagesOf(join(ROOT, 'zh-CN', s))]));
+
+test('frontmatter parses and has a title and description', () => {
+  const problems: string[] = [];
+  for (const [locale, sections] of [['', english], ['zh-CN/', chinese]] as const) {
+    for (const section of SECTIONS) {
+      for (const [name, front] of sections[section]) {
+        const file = `${locale}${section}/${name}`;
+        if (front instanceof Error) problems.push(`${file}: ${front.message.split('\n')[0]}`);
+        else {
+          if (typeof front.title !== 'string' || !front.title) problems.push(`${file}: missing title`);
+          if (typeof front.description !== 'string' || !front.description) problems.push(`${file}: missing description`);
+          if (front.order !== undefined && typeof front.order !== 'number') problems.push(`${file}: order is not a number`);
+        }
+      }
+    }
+  }
+  expect(problems).toEqual([]);
+});
+
+test('every English page has a Chinese counterpart with the same order and demo', () => {
+  const problems: string[] = [];
+  for (const section of SECTIONS) {
+    for (const [name, en] of english[section]) {
+      const zh = chinese[section].get(name);
+      if (!zh) {
+        problems.push(`zh-CN/${section}/${name}: missing`);
+        continue;
+      }
+      if (en instanceof Error || zh instanceof Error) continue;
+      if (en.order !== zh.order) problems.push(`zh-CN/${section}/${name}: order ${zh.order} ≠ ${en.order}`);
+      if (en.demo !== zh.demo) problems.push(`zh-CN/${section}/${name}: demo ${zh.demo} ≠ ${en.demo}`);
+    }
+    for (const name of chinese[section].keys()) {
+      if (!english[section].has(name)) problems.push(`zh-CN/${section}/${name}: no English page`);
+    }
+  }
+  expect(problems).toEqual([]);
+});
+
+test('every demo named in frontmatter exists in demos/', () => {
+  const missing: string[] = [];
+  for (const [locale, sections] of [['', english], ['zh-CN/', chinese]] as const) {
+    for (const section of SECTIONS) {
+      for (const [name, front] of sections[section]) {
+        if (front instanceof Error || front.demo === undefined) continue;
+        if (typeof front.demo !== 'string' || !existsSync(join(ROOT, 'demos', `${front.demo}.tsx`))) {
+          missing.push(`${locale}${section}/${name}: demo ${String(front.demo)}`);
+        }
+      }
+    }
+  }
+  expect(missing).toEqual([]);
+});

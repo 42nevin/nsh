@@ -1,9 +1,6 @@
-use std::{
-    cmp::Reverse,
-    collections::BinaryHeap,
-    time::{Duration, Instant},
-};
+use std::{cmp::Reverse, collections::BinaryHeap, time::Duration};
 
+use nsh_core::time::Instant;
 use rquickjs::{Function, Persistent};
 use rustc_hash::FxHashMap;
 

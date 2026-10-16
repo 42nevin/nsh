@@ -1,0 +1,165 @@
+---
+title: 打包
+description: 用 nsh package 为 iOS 真机、iOS 模拟器和 Android 构建可安装的应用，包括应用元数据、图标和签名。
+order: 29
+---
+
+# 打包
+
+`nsh package` 把应用变成可以安装的产物：用于 iOS 模拟器的 `.app`、用于 iOS 真机的已签名 `.ipa`，或用于 Android 的已签名
+`.apk`。它把应用的 release 构建与 nsh 自带的**预构建运行时**组合在一起，因此不需要 Rust 工具链，不需要 Xcode 项目，也不需要 Gradle。
+
+```sh
+nsh package App.tsx --target ios-simulator --run     # build, install and launch in the simulator
+nsh package App.tsx --target android --run           # build, install and launch on a device or emulator
+nsh package App.tsx --target ios --sign "Apple Development: Jane Doe (ABCDE12345)" --profile Dev.mobileprovision
+```
+
+应用以 release 模式构建（压缩并编译为 QuickJS 字节码），与 `nsh build --release` 的构建结果完全相同。除非传入 `--out`，否则输出到
+`out/`。
+
+> [!NOTE]
+> 如果想把 nsh 放*进*现有的原生应用，请参阅[嵌入 iOS 应用](./embedding-ios.md)和[嵌入 Android 应用](./embedding-android.md)。如果想发布由应用下载并验证的更新，请参阅[签名包](./signed-packages.md)。
+
+## 应用元数据：`nsh.json`
+
+`nsh package` 读取入口文件同目录下的 `nsh.json`。`nsh init` 会生成一个：
+
+```json
+{
+  "name": "Gallery",
+  "id": "com.example.gallery",
+  "version": "1.0.0",
+  "build": 1,
+  "icon": "icon.png"
+}
+```
+
+| 键 | 类型 | 默认值 | 用途 |
+|---|---|---|---|
+| `name` | string | 入口文件所在目录的名称 | 图标下方显示的名称（`CFBundleDisplayName`、Android 的 `android:label`），也用作输出文件名。 |
+| `id` | string | `com.example.<name>` | Bundle identifier / Android 包名。 |
+| `version` | string | `"1.0.0"` | 用户可见的版本号（`CFBundleShortVersionString`、`versionName`）。 |
+| `build` | number | `1` | 构建号（`CFBundleVersion`、`versionCode`）。每次上传新版本都要递增。 |
+| `icon` | string | 无 | 一张正方形 PNG，最好是 1024×1024，路径相对于 `nsh.json`。 |
+
+`nsh.json` 还可以包含 `tailwind`（见 [Tailwind](./tailwind.md)）和 `capabilities`（见[沙箱与能力](./sandbox-and-capabilities.md)）；它们由打包器读取。未知的键会导致报错。
+
+每个键都可以在命令行上覆盖，这在 CI 中很方便：
+
+```sh
+nsh package App.tsx --target android --app-version 1.4.0 --build 42
+```
+
+## 选项
+
+| 参数 | 说明 |
+|---|---|
+| `--target <ios \| ios-simulator \| android>` | 构建目标（必填）。 |
+| `-o, --out <dir>` | 输出目录。默认为 `out`。 |
+| `--name <name>` | 显示名称。 |
+| `--id <id>` | Bundle identifier，如 `com.example.app`。 |
+| `--app-version <version>` | 版本号，如 `1.2.0`。 |
+| `--build <n>` | 构建号。 |
+| `--icon <png>` | 应用图标：一张正方形 PNG，最好是 1024×1024。 |
+| `--sign <identity>` | iOS：用于真机的代码签名身份。 |
+| `--profile <file>` | iOS：用于真机的描述文件（`.mobileprovision`）。 |
+| `--keystore <file>` | Android：release keystore（默认使用 debug 密钥）。 |
+| `--key-alias <alias>` | Android：keystore 中的密钥别名。 |
+| `--keystore-password <password>` | Android：keystore 密码；也可从 `NSH_KEYSTORE_PASSWORD` 读取。 |
+| `--run` | 构建完成后安装并启动：在 iOS 模拟器中，或在 `adb` 能看到的 Android 设备或模拟器上。不适用于 `--target ios`。 |
+
+## iOS 模拟器
+
+```sh
+nsh package App.tsx --target ios-simulator --run
+```
+
+写出 `out/<Name>.app`，使用 ad hoc 签名（模拟器需要签名，但不需要签名身份）。加上 `--run` 时，如果没有正在运行的模拟器，它会先启动一个，再安装并启动应用。需要安装 Xcode。
+
+## iOS 真机
+
+```sh
+nsh package App.tsx --target ios \
+  --sign "Apple Distribution: Example Inc (ABCDE12345)" \
+  --profile AppStore.mobileprovision
+```
+
+写出 `out/<Name>.ipa`，可用于 TestFlight、App Store 上传工具或直接安装（取决于描述文件）。具体过程如下：
+
+- 描述文件以 `embedded.mobileprovision` 的名称复制进应用。
+- entitlements 取自描述文件。nsh 会检查描述文件的 application identifier 是否覆盖应用的 `id`（`TEAMID.*` 或
+  `TEAMID.com.example.*` 这样的通配描述文件也可以），不覆盖则报错退出。
+- 用 `codesign` 以指定身份签名应用，再压缩成 `.ipa`（`Payload/<Name>.app`）。
+
+查看可用的签名身份：
+
+```sh
+security find-identity -v -p codesigning
+```
+
+如果没有传 `--sign` 和 `--profile`，nsh 会写出一个未签名的 `out/<Name>.app` 并给出提示；它无法直接安装到真机上。
+
+应用支持 iPhone 和 iPad，支持竖屏和横屏（倒置竖屏仅限 iPad），要求 iOS 15.0 或更高版本。
+
+## Android
+
+```sh
+nsh package App.tsx --target android --run
+```
+
+写出 `out/<Name>.apk`。APK 直接用 SDK 的构建工具（`aapt2`、`zipalign`、`apksigner`）组装，不经过 Gradle。要求：
+
+- Android SDK，通过 `ANDROID_HOME`（或 `ANDROID_SDK_ROOT`，或 `~/Library/Android/sdk`）查找，需要安装 build tools 和
+  `platforms;android-35` 包。缺少时 nsh 会告诉你对应的 `sdkmanager` 命令。
+- 一个 JDK，用于首次创建 debug keystore。
+
+应用的目标 API 为 35，要求 API 28（Android 9）或更高版本；包含适用于 `arm64-v8a` 和 `x86_64` 的原生代码。
+
+### 发布签名
+
+不传 `--keystore` 时，APK 使用标准的 debug 密钥（`~/.android/debug.keystore`，不存在时自动创建）签名，nsh
+会警告它不能用于应用商店发布。正式发布时，先创建一次 keystore，然后传入：
+
+```sh
+keytool -genkeypair -v -keystore release.jks -alias upload -keyalg RSA -keysize 2048 -validity 10000
+
+NSH_KEYSTORE_PASSWORD=… nsh package App.tsx --target android \
+  --keystore release.jks --key-alias upload
+```
+
+建议使用环境变量而不是 `--keystore-password`，以免密码留在 shell 历史记录中。
+
+## 图标
+
+在 `nsh.json` 中（`"icon": "icon.png"`）或通过 `--icon` 提供一张正方形 PNG，最好是 1024×1024：
+
+- **iOS：** 由 Xcode 的 `actool` 编译进应用的资源目录（`Assets.car`），iOS 所需的各种尺寸都由它生成。
+- **Android：** 缩放到 192×192，用作启动器图标（`mipmap-xxxhdpi`）。
+
+没有图标时，系统显示默认图标。
+
+## 包里有什么
+
+包中包含应用的字节码、`capabilities.json`（当应用声明了能力时）以及应用导入的资源，与预构建运行时放在一起：
+
+| 目标 | 运行时 | 你的应用 |
+|---|---|---|
+| iOS | `nsh-ios-app` 可执行文件 | `<Name>.app/nsh/bundle.qbc`、`nsh/assets/…` |
+| Android | `classes.dex`、`lib/<abi>/libnsh.so`（不压缩存储，16 KB 对齐） | `assets/nsh/bundle.qbc`、`assets/nsh/assets/…` |
+
+打包出的应用不注册任何[原生组件](./native-components.md)；如需使用原生组件，请把 nsh 嵌入你自己的应用。
+
+## 查找运行时
+
+`nsh package` 会在 CLI 旁边查找预构建运行时（发行包中的 `bin/../runtime`）。在 nsh 的源码仓库中，它使用
+`target/<triple>/<profile>` 和 `target/android/<profile>`，profile 与 CLI 自身一致（debug 版 CLI 使用 debug 版运行时）：用
+`cargo build -p nsh-ios-app --target aarch64-apple-ios-sim`（真机用 `aarch64-apple-ios`）和 `cargo xtask android`
+构建它们（release 版 CLI 需加上 `--release`）。环境变量 `NSH_RUNTIME` 可以让 CLI 改用另一个目录，其结构与发行包的
+`runtime/` 相同（`ios/iphoneos`、`ios/iphonesimulator`、`android/release` 等）。
+
+## 另请参阅
+
+- [CLI](./cli.md)：所有命令
+- [签名包](./signed-packages.md)：应用下载的更新
+- [项目结构](./project-structure.md)：`nsh.json` 与应用的各个文件

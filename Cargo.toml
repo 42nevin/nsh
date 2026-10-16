@@ -63,7 +63,7 @@ taffy = { version = "0.15", default-features = false, features = ["std", "taffy_
 tokio = { version = "1", default-features = false }
 
 # `full` is avoided on purpose: it enables `dyn-load` (dlopen2), which does not build for iOS / Catalyst.
-rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "bindgen"] }
+rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
 
 rolldown = "=1.2.13"
 rolldown_common = "=1.2.13"

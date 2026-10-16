@@ -2,4 +2,6 @@
 
 - [`dev/`](dev/README.md): for developers of native-shell itself — architecture, internals, decisions, pitfalls.
 
-Documentation for app developers (guides, API reference) will live next to it in this directory.
+Documentation for app developers (guides, the element, component and API reference, in English and Chinese) is the
+website in [`../website`](../website/README.md): Markdown pages under `website/docs`, `elements`, `components`,
+`modules` and `zh-CN/`, with live demos.

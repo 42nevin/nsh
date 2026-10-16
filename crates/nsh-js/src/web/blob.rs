@@ -168,9 +168,7 @@ fn bag(ctx: Ctx, options: Raw) -> R<(String, bool, Option<f64>)> {
 
 /// Milliseconds since the epoch.
 pub(crate) fn now_ms() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_millis() as f64)
+    nsh_core::time::unix_ms().trunc()
 }
 
 /// A new `Blob` object.

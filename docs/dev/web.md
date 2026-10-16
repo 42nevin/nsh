@@ -1,0 +1,53 @@
+# The web runtime (WebAssembly)
+
+`crates/nsh-platform-web` runs nsh apps in a browser page, rendering to the DOM. It exists for the website's live
+demos (`website/demos/*.tsx`), not as a target platform: it reports `Platform.OS` as `"ios"` and has no network stack.
+User-facing page: `website/docs/web.md`.
+
+## Building
+
+`cargo xtask web` builds `nsh.wasm` (`--target wasm32-unknown-unknown --release`), copies `web/nsh.js` and
+`web/index.html` (the player), and bundles each demo with `nsh build --release` into `website/public/play/` (generated,
+ignored by git). Check the crate with `cargo clippy -p nsh-platform-web --target wasm32-unknown-unknown`: off
+WebAssembly it is empty. `.cargo/config.toml` gives wasm32 an 8 MiB stack (QuickJS recursion).
+
+## What WebAssembly changes in the shared crates
+
+- **No threads.** `nsh_engine::LocalEngine` drives the engine from the host's event loop: `pump()` handles what was
+  sent through its `EngineControl`, runs timers and tasks, commits, and returns its next deadline. The threaded
+  `Engine` and `LocalEngine` share `Driver` (setup, `deadline`, `handle`, `turn`, idle collection); `Engine` and the
+  shared tokio runtime are `cfg(not(target_arch = "wasm32"))`.
+- **No clock.** `std::time::Instant::now` panics on `wasm32-unknown-unknown`. Shared code uses
+  `nsh_core::time::Instant` (std's elsewhere; `performance.now()` through the `nsh.now_ms` import there) and
+  `nsh_core::time::unix_ms`. Rust components' `cx.timer()` returns `nsh_core::time::Sleep` there, whose wakers the
+  driver fires (`next_timer`, `fire_timers`); `background` / `blocking` do not exist.
+- **QuickJS** uses rquickjs' pregenerated bindings (its bindgen run misses `JS_ToCStringLen2` for wasm32) and its
+  vendored wasi-libc; the only libc import is `env.__rquickjs_host_now_us`.
+- **32-bit pointers.** The reactive graph packs node handles into QuickJS opaque pointers: 32 bits of id and 32 of
+  generation on 64-bit targets, 20 and 11 (under a set top bit) on 32-bit ones (`reactive.rs`, `pack`). Anything that
+  stores more than a pointer's worth of bits in an opaque must do the same.
+- `nsh-package` cannot generate keys there (no `getrandom`); verifying works.
+
+## The protocol
+
+Exports are `nsh_*` functions (`src/lib.rs`); imports are module `nsh` (`src/ffi.rs`). Every export that reaches
+the engine pumps it and returns the next delay in milliseconds (-1: none), which `nsh.js` turns into a `setTimeout`.
+The engine is not reentrant: `nsh.js` routes every call through `Player.call`, which defers calls made while a
+batch is being applied (a batch arrives inside a wasm call).
+
+A commit becomes one JSON array (`src/encode.rs`): `["c", id, kind]`, `["f", id, x, y, w, h]`, `["s", id, css,
+borderCss, tint]`, `["t", id, ...content, runs, styles, selectable]`, and so on; `nsh.js` has one `op_<name>` method per
+item. Views are absolutely positioned at the core's frames; borders are an overlay element (as UIKit draws layer
+borders) so they never move the content the core placed. Native animation items stay in Rust (`src/anim.rs`, a port
+of the Android animator); bound properties go out as `["a", id, prop, value]` after each batch and each
+`requestAnimationFrame` tick.
+
+Text (`src/text.rs`) is broken into lines here, with widths and font metrics from the `measure_text`,
+`font_ascent` and `font_descent` imports (canvas `measureText`, cached per font and string); runs are drawn at the
+positions computed here with a line height equal to the font's ascent + descent, so the baseline lands where layout
+put it.
+
+## Not implemented
+
+Networking, refresh controls, zooming scroll views, registered native components, the status bar and other
+platform services, fonts that are usable before `FontFace` finishes loading.

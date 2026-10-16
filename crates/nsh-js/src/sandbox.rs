@@ -14,9 +14,9 @@
 //! nothing in JS is trusted: limits and checks are enforced here, in Rust,
 //! never in JS.
 
-use std::{cell::Cell, rc::Rc, time::Instant};
+use std::{cell::Cell, rc::Rc};
 
-use nsh_core::js::Limits;
+use nsh_core::{js::Limits, time::Instant};
 use rquickjs::Ctx;
 
 /// The kind of call into JS, which decides its budget.

@@ -46,13 +46,19 @@ crates/
                        `include/nsh.h`) under the `NativeShell` Swift module (`swift/NativeShell.swift`) iOS apps embed nsh with
   nsh-platform-android/ Android backend: `libnsh.so` (JNI glue, StaticLayout text engine, batch encoding, UI-thread animator) + the Java
                        runtime in `java/com/longbridge/nsh` (NshView, Mounter, views, images, networking); feature `dev` as above
+  nsh-platform-web/    WebAssembly backend (the website's live demos): the engine on the page's main thread (`LocalEngine`), text
+                       laid out with browser font metrics, batches as JSON + CSS for the DOM runtime in `web/nsh.js`, the
+                       animator on requestAnimationFrame; `web/index.html` is the demo player (`cargo xtask web`)
   nsh-ios-host/        Development host app (Catalyst / iOS simulator); connects to a dev server or runs a local bundle
   nsh-ios-app/         Release runner: the executable of iOS apps built by `nsh package`
   nsh-cli/             The `nsh` command line (a library: `main_with(ui_sets)`): init / build / trace / dev / run / package; keygen /
                        certify / publish / verify / revoke; apps with Rust components of their own (`rust_app.rs`,
                        docs/dev/tooling.md)
-  xtask/               Maintainer tasks: `cargo xtask android` (Android runtime), `ios-embed` (the iOS SDK), `dist` (the distribution)
+  xtask/               Maintainer tasks: `cargo xtask android` (Android runtime), `ios-embed` (the iOS SDK), `dist` (the distribution),
+                       `web` (the WebAssembly runtime and the website's demos)
 docs/                 Documentation; `docs/dev/`: for developers of nsh (architecture, internals, decisions, pitfalls)
+website/              The documentation site (Astro; guides, element / component / API reference in English and zh-CN) and its
+                      runnable demos (`website/demos/*.tsx`, live on the site through the WebAssembly runtime); see its README
 examples/             Example apps (gallery: a demo index, one module per demo; gallery-rs: the same in Rust, the app's crate in
                       `native/`; counter), embedding samples (embed-ios, embed-android)
                       and the app they run (embedded: uses a native component the samples register); bench: component benchmarks
@@ -77,11 +83,13 @@ on any platform or JS crate.
 | VM limits, capabilities, signed packages | `docs/dev/sandbox.md`, `signed-packages.md` |
 | packaging, the iOS / Android SDKs, native components | `docs/dev/embedding.md` |
 | `.nsh/types`, the dev server, hot reload | `docs/dev/tooling.md` |
+| the web runtime (`nsh-platform-web`), the website's demos | `docs/dev/web.md`, `website/README.md` |
 | a hot path | `docs/dev/performance.md` (baselines) |
 | anything platform-specific | `docs/dev/pitfalls.md` (verified constraints, by area) |
 | components (`nsh/ui/mobile`) | `docs/dev/components.md`, `crates/nsh-ui-mobile/README.md` |
 
-Keep them current: a change that alters documented behavior updates its page (or the module doc) in the same commit.
+Keep them current: a change that alters documented behavior updates its page (or the module doc) in the same commit,
+including the user-facing pages in `website/` (English and `zh-CN`).
 
 ## Commands
 
@@ -115,6 +123,9 @@ cargo +nightly fmt --all                                                        
 cargo clippy --workspace --all-targets
 cargo clippy -p nsh-platform-ios -p nsh-ios-host -p nsh-ios-app --target aarch64-apple-ios-macabi --features nsh-platform-ios/embed,nsh-platform-ios/dev
 cargo xtask ios-embed                                                           # NativeShell(Dev).xcframework into dist/nsh/embed/ios
+cargo xtask web                                                                 # nsh.wasm + player + website demos into website/public/play
+cargo clippy -p nsh-platform-web --target wasm32-unknown-unknown                # the web backend (empty off WebAssembly)
+cd website && bun run dev                                                       # the documentation site (builds the player too)
 ```
 
 `nsh-platform-ios` only compiles for `target_os = "ios"` (iOS devices, the iOS simulator and Catalyst); on a macOS

@@ -9,7 +9,7 @@ use std::{
     marker::PhantomData,
     rc::Rc,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use rustc_hash::FxHashMap;
@@ -27,6 +27,7 @@ use crate::{
     AccessibilityProp, AccessibilityRole, AccessibilityState, Command, Dialog, EdgeInsets,
     EventKind, EventPayload, ImageSource, JsonValue, LayoutAnimation, ListContentStyle, NativeProp,
     NodeId, PointerEvents, Prop, Rect, Size, StatusBarSetting, Tag, TouchEvent, style::Color,
+    time::Instant,
 };
 
 /// A handler of `E` on an element, made by [`RenderCx::listener`]: it runs

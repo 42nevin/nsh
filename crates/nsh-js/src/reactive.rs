@@ -206,13 +206,37 @@ fn graph_of_runtime<'a>(rt: *mut qjs::JSRuntime) -> Option<&'a mut Graph> {
 
 /// Packs a node id and its generation into an opaque pointer (never null:
 /// generations start at 1).
+#[cfg(target_pointer_width = "64")]
 fn pack(id: u32, generation: u32) -> *mut c_void {
     (((generation as u64) << 32) | id as u64) as usize as *mut c_void
 }
 
+#[cfg(target_pointer_width = "64")]
 fn unpack(p: *mut c_void) -> (u32, u32) {
     let v = p as usize as u64;
     (v as u32, (v >> 32) as u32)
+}
+
+/// The bits of a generation an opaque pointer keeps.
+#[cfg(target_pointer_width = "64")]
+const GENERATION_MASK: u32 = u32::MAX;
+
+/// 32-bit pointers (WebAssembly) hold 20 bits of id and the low 11 bits of
+/// the generation, under a set top bit (never null). Stale handles are
+/// still caught unless a node was reused a multiple of 2048 times.
+#[cfg(target_pointer_width = "32")]
+const GENERATION_MASK: u32 = 0x7ff;
+
+#[cfg(target_pointer_width = "32")]
+fn pack(id: u32, generation: u32) -> *mut c_void {
+    debug_assert!(id < 1 << 20, "node ids fit in 20 bits");
+    ((1 << 31) | ((generation & GENERATION_MASK) << 20) | (id & 0xf_ffff)) as usize as *mut c_void
+}
+
+#[cfg(target_pointer_width = "32")]
+fn unpack(p: *mut c_void) -> (u32, u32) {
+    let v = p as usize as u32;
+    (v & 0xf_ffff, (v >> 20) & GENERATION_MASK)
 }
 
 impl Graph {
@@ -259,9 +283,9 @@ impl Graph {
 
     /// Whether handle (`id`, `generation`) still names its node.
     fn live(&self, id: u32, generation: u32) -> bool {
-        self.nodes
-            .get(id as usize)
-            .is_some_and(|n| n.generation == generation && n.kind != Kind::Free)
+        self.nodes.get(id as usize).is_some_and(|n| {
+            n.generation & GENERATION_MASK == generation & GENERATION_MASK && n.kind != Kind::Free
+        })
     }
 
     fn track(&mut self, id: u32) {

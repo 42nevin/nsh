@@ -1,0 +1,135 @@
+import { getCollection, type CollectionEntry } from 'astro:content';
+import { url, type Lang } from './site';
+
+export type SectionId = 'docs' | 'elements' | 'components' | 'modules';
+
+export interface Section {
+  id: SectionId;
+  label: Record<Lang, string>;
+  blurb: Record<Lang, string>;
+}
+
+/** The four content sections, in navigation order. Their directories are `website/<id>`. */
+export const SECTIONS: Section[] = [
+  {
+    id: 'docs',
+    label: { en: 'Guide', 'zh-CN': '指南' },
+    blurb: {
+      en: 'Install the toolchain, write a first app, and learn how state, layout, styles and navigation work.',
+      'zh-CN': '安装工具链、编写第一个应用，了解状态、布局、样式与导航的工作方式。',
+    },
+  },
+  {
+    id: 'elements',
+    label: { en: 'Elements', 'zh-CN': '元素' },
+    blurb: {
+      en: 'The host elements every UI is built from — view, text, image, scroll views, lists — and their props.',
+      'zh-CN': '构成所有界面的宿主元素——view、text、image、滚动视图、列表——及其属性。',
+    },
+  },
+  {
+    id: 'components',
+    label: { en: 'Components', 'zh-CN': '组件' },
+    blurb: {
+      en: 'nsh/ui/mobile: buttons, cards, sheets and the rest, written in Rust and identical on iOS and Android.',
+      'zh-CN': 'nsh/ui/mobile：按钮、卡片、弹层等组件，用 Rust 编写，在 iOS 与 Android 上表现一致。',
+    },
+  },
+  {
+    id: 'modules',
+    label: { en: 'API', 'zh-CN': 'API' },
+    blurb: {
+      en: 'The modules apps import: nsh, nsh/animated, navigation, storage, the platform modules and the web APIs.',
+      'zh-CN': '应用导入的模块：nsh、nsh/animated、导航、存储、平台模块与 Web API。',
+    },
+  },
+];
+
+export interface Page {
+  section: SectionId;
+  lang: Lang;
+  /** The file name without `.md`; `index` is the section's own page. */
+  slug: string;
+  title: string;
+  description: string;
+  order?: number;
+  demo?: string;
+  /** Route without the base: `/docs`, `/zh-CN/elements/view`. */
+  route: string;
+  /** Link to the page, base included. */
+  href: string;
+  /** Source path relative to the website directory, e.g. `docs/index.md`. */
+  filePath: string;
+  entry: CollectionEntry<any>;
+}
+
+function collectionName(section: SectionId, lang: Lang) {
+  return (lang === 'zh-CN' ? `zh-${section}` : section) as any;
+}
+
+export function routeOf(section: SectionId, slug: string, lang: Lang): string {
+  return `/${lang === 'zh-CN' ? 'zh-CN/' : ''}${section}${slug === 'index' ? '' : `/${slug}`}`;
+}
+
+const cache = new Map<Lang, Promise<Page[]>>();
+
+async function load(lang: Lang): Promise<Page[]> {
+  const all: Page[] = [];
+  for (const section of SECTIONS) {
+    const entries = await getCollection(collectionName(section.id, lang));
+    // A Chinese page sorts by its English counterpart, so both locales list
+    // the same pages in the same order whatever the translated titles are.
+    const english = lang === 'en' ? entries : await getCollection(collectionName(section.id, 'en'));
+    const key = (entry: CollectionEntry<any>) => {
+      const source = english.find((e) => e.id === entry.id) ?? entry;
+      return { order: source.data.order ?? 999, title: source.data.title as string };
+    };
+    const sorted = [...entries].sort((a, b) => {
+      if (a.id === 'index' || b.id === 'index') return a.id === 'index' ? -1 : 1;
+      const ka = key(a);
+      const kb = key(b);
+      return ka.order - kb.order || ka.title.localeCompare(kb.title, 'en', { sensitivity: 'base' });
+    });
+    for (const entry of sorted) {
+      const route = routeOf(section.id, entry.id, lang);
+      all.push({
+        section: section.id,
+        lang,
+        slug: entry.id,
+        title: entry.data.title,
+        description: entry.data.description,
+        order: entry.data.order,
+        demo: entry.data.demo,
+        route,
+        href: url(route),
+        filePath: (entry.filePath ?? `${lang === 'zh-CN' ? 'zh-CN/' : ''}${section.id}/${entry.id}.md`).replace(/^\.\//, ''),
+        entry,
+      });
+    }
+  }
+  return all;
+}
+
+/** Every page of a locale: sections in navigation order, each sorted for its sidebar. */
+export function pages(lang: Lang): Promise<Page[]> {
+  let pending = cache.get(lang);
+  if (!pending) {
+    pending = load(lang);
+    cache.set(lang, pending);
+  }
+  return pending;
+}
+
+/** Where a section's link in the bar goes: its index page, else its first page. */
+export async function sectionHref(section: SectionId, lang: Lang): Promise<string> {
+  const own = (await pages(lang)).find((page) => page.section === section);
+  if (own) return own.href;
+  // A section not translated yet falls back to the English one.
+  const english = (await pages('en')).find((page) => page.section === section);
+  return english?.href ?? url(`${lang === 'zh-CN' ? 'zh-CN/' : ''}${section}`);
+}
+
+export async function sectionHrefs(lang: Lang): Promise<Record<SectionId, string>> {
+  const entries = await Promise.all(SECTIONS.map(async (s) => [s.id, await sectionHref(s.id, lang)] as const));
+  return Object.fromEntries(entries) as Record<SectionId, string>;
+}
