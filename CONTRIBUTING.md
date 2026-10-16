@@ -116,7 +116,18 @@ the two platform-specific clippy runs above.
 ### Run the examples
 
 `examples/gallery` has a demo for every area of nsh. If you change an existing feature, run the related demo on the
-platforms it touches:
+platforms it touches. `make dev` builds the CLI and the development host, runs the gallery in the iOS simulator with
+hot reload for JS and TSX, and rebuilds and restarts it whenever Rust code under `crates/` changes (components are
+Rust; this needs `cargo install cargo-watch`):
+
+```sh
+make dev                                       # the gallery in the iOS simulator
+make dev TARGET=android                        # on an Android device or emulator
+make dev TARGET=catalyst                       # in the Mac Catalyst window
+make dev APP=examples/counter/App.tsx DEVICE="iPhone 17 Pro"
+```
+
+Or step by step:
 
 ```sh
 cargo build -p nsh-cli

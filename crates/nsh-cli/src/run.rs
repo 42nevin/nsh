@@ -300,8 +300,31 @@ pub(crate) fn simulator(wanted: Option<&str>) -> anyhow::Result<String> {
     // Apps launched before the boot completes are sent to the background
     // when SpringBoard comes up.
     simctl(&["bootstatus", &device.udid, "-b"])?;
-    let _ = Command::new("open").args(["-a", "Simulator"]).status();
+    show_simulators();
     Ok(device.udid.clone())
+}
+
+/// Brings up the simulators' window: Simulator.app, or DeviceHub.app in
+/// Xcode versions that replaced it.
+fn show_simulators() {
+    let quiet = |cmd: &mut Command| {
+        cmd.stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if quiet(Command::new("open").args(["-b", "com.apple.iphonesimulator"])) {
+        return;
+    }
+    let developer = Command::new("xcode-select").arg("-p").output();
+    if let Ok(out) = developer {
+        let developer = String::from_utf8_lossy(&out.stdout);
+        let hub = Path::new(developer.trim()).join("../Applications/DeviceHub.app");
+        if hub.exists() && quiet(Command::new("open").arg(&hub)) {
+            return;
+        }
+    }
+    eprintln!("no Simulator or DeviceHub app found: the simulator runs without a window");
 }
 
 fn info_plist(target: Target) -> String {

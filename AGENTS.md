@@ -83,6 +83,7 @@ Keep them current: a change that alters documented behavior updates its page (or
 ## Commands
 
 ```sh
+make dev [TARGET=ios|android|catalyst] [APP=...] [DEVICE=...]                      # gallery with hot reload; rebuilds and restarts on Rust changes
 cargo build -p nsh-cli                                                             # build the nsh CLI
 ./target/debug/nsh init my-app                                                     # new app: App.tsx, nsh.json, tsconfig.json, .nsh/types
 cargo build -p nsh-ios-host --target aarch64-apple-ios-macabi                          # build the Catalyst development host (needed by nsh run)
