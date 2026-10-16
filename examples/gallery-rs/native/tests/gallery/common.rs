@@ -3,10 +3,14 @@
 
 #![allow(dead_code, unreachable_pub)]
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crossbeam_channel::Receiver;
-use nsh_core::{ApproxTextEngine, EventKind, EventPayload, MountBatch, MountItem, Size, ui::Root};
+use nsh_core::{
+    ApproxTextEngine, AttributedText, Command, EventKind, EventMask, EventPayload, GestureValues,
+    MountBatch, MountItem, ROOT_ID, Size, TouchEvent, TouchPhase, TouchPoint, canvas::Drawing,
+    ui::Root,
+};
 use nsh_engine::{App, Engine, EngineConfig, Environment, MountSink};
 
 pub struct Sink(crossbeam_channel::Sender<MountBatch>);
@@ -21,8 +25,23 @@ impl MountSink for Sink {
 #[derive(Default)]
 pub struct Screen {
     pub texts: Vec<(u32, String)>,
+    /// The text blocks as built: spans, links, attachments.
+    pub blocks: Vec<(u32, Arc<AttributedText>)>,
     pub titles: Vec<(u32, String)>,
     pub parents: std::collections::HashMap<u32, u32>,
+    /// The native events each view listens to.
+    pub events: std::collections::HashMap<u32, EventMask>,
+    /// Each canvas's drawing.
+    pub drawings: std::collections::HashMap<u32, Arc<Drawing>>,
+    /// The native values gestures drive, by view.
+    pub gestures: std::collections::HashMap<u32, GestureValues>,
+    /// The commands sent, in order.
+    pub commands: Vec<(u32, Command)>,
+    /// Scroll views' and lists' settings, as last sent.
+    pub scrolls: std::collections::HashMap<u32, MountItem>,
+    pub behaviors: std::collections::HashMap<u32, nsh_core::ScrollBehavior>,
+    /// Lists with sticky cells.
+    pub sticky: std::collections::HashSet<u32>,
 }
 
 impl Screen {
@@ -32,6 +51,8 @@ impl Screen {
                 MountItem::Text { id, text, .. } => {
                     self.texts.retain(|t| t.0 != *id);
                     self.texts.push((*id, text.text.clone()));
+                    self.blocks.retain(|t| t.0 != *id);
+                    self.blocks.push((*id, text.clone()));
                 }
                 MountItem::ScreenConfig { id, config } => {
                     self.titles.retain(|t| t.0 != *id);
@@ -42,8 +63,30 @@ impl Screen {
                 MountItem::Insert { parent, child, .. } => {
                     self.parents.insert(*child, *parent);
                 }
+                MountItem::Events { id, events } => {
+                    self.events.insert(*id, *events);
+                }
+                MountItem::Canvas { id, drawing } => {
+                    self.drawings.insert(*id, drawing.clone());
+                }
+                MountItem::Gestures { id, values } => {
+                    self.gestures.insert(*id, *values);
+                }
+                MountItem::Command { id, command } => {
+                    self.commands.push((*id, command.clone()));
+                }
+                MountItem::ScrollConfig { id, .. } => {
+                    self.scrolls.insert(*id, item.clone());
+                }
+                MountItem::ScrollBehavior { id, behavior } => {
+                    self.behaviors.insert(*id, (**behavior).clone());
+                }
+                MountItem::StickyCells { id, cells } if !cells.is_empty() => {
+                    self.sticky.insert(*id);
+                }
                 MountItem::Delete { id } => {
                     self.texts.retain(|t| t.0 != *id);
+                    self.blocks.retain(|t| t.0 != *id);
                     self.titles.retain(|t| t.0 != *id);
                 }
                 _ => {}
@@ -51,9 +94,47 @@ impl Screen {
         }
     }
 
+    /// The views listening to touches.
+    pub fn touch_listeners(&self) -> Vec<u32> {
+        let mut ids: Vec<u32> = self
+            .events
+            .iter()
+            .filter(|(_, e)| e.contains(EventKind::Touch))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
     /// The pressable node around text `label` (the text or a parent).
     pub fn find(&self, label: &str) -> Option<u32> {
         self.texts.iter().find(|t| t.1 == label).map(|t| t.0)
+    }
+
+    /// The scroll view or list `id` is in (its nearest one).
+    pub fn scroll_of(&self, mut id: u32) -> Option<u32> {
+        loop {
+            id = *self.parents.get(&id)?;
+            if self.scrolls.contains_key(&id) || self.behaviors.contains_key(&id) {
+                return Some(id);
+            }
+        }
+    }
+
+    /// The text block showing `text`.
+    pub fn block(&self, text: &str) -> Option<&AttributedText> {
+        self.blocks.iter().find(|b| b.1.text == text).map(|b| &*b.1)
+    }
+
+    /// The span node of the link `label` in a text block.
+    pub fn link(&self, label: &str) -> Option<u32> {
+        self.blocks.iter().find_map(|(_, block)| {
+            let units: Vec<u16> = block.text.encode_utf16().collect();
+            block.links.iter().find_map(|l| {
+                let range = units.get(l.start as usize..l.end as usize)?;
+                (String::from_utf16_lossy(range) == label).then_some(l.node)
+            })
+        })
     }
 }
 
@@ -142,5 +223,62 @@ pub fn press_text(engine: &Engine, rx: &Receiver<MountBatch>, screen: &mut Scree
     engine
         .control()
         .dispatch_event(text, EventKind::Press, EventPayload::None);
+    drain(rx, screen);
+}
+
+/// Sends `kind` to the link `label` inside a text block (its span), and
+/// waits for what it changes.
+pub fn press_link(
+    engine: &Engine,
+    rx: &Receiver<MountBatch>,
+    screen: &mut Screen,
+    label: &str,
+    kind: EventKind,
+) {
+    let link = screen
+        .link(label)
+        .unwrap_or_else(|| panic!("no link {label}: {:?}", screen.texts));
+    engine
+        .control()
+        .dispatch_event(link, kind, EventPayload::None);
+    drain(rx, screen);
+}
+
+/// One finger at `(x, y)` in the view it went down on (`path[0]`; the
+/// surface position is 100 pt further right and down), reported on the
+/// root as the platform does, with the listening views around it
+/// (`path`, innermost first); waits for what it changes.
+pub fn touch(
+    engine: &Engine,
+    rx: &Receiver<MountBatch>,
+    screen: &mut Screen,
+    phase: TouchPhase,
+    path: &[u32],
+    (x, y): (f32, f32),
+    timestamp: f64,
+) {
+    let event = TouchEvent {
+        phase,
+        timestamp,
+        points: vec![TouchPoint {
+            id: 1,
+            target: path[0],
+            path: if phase == TouchPhase::Start {
+                path.to_vec()
+            } else {
+                Vec::new()
+            },
+            page_x: x + 100.0,
+            page_y: y + 100.0,
+            location_x: x,
+            location_y: y,
+            changed: true,
+        }],
+    };
+    engine.control().dispatch_event(
+        ROOT_ID,
+        EventKind::Touch,
+        EventPayload::Touch(Box::new(event)),
+    );
     drain(rx, screen);
 }

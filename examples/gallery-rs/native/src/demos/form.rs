@@ -381,7 +381,6 @@ impl Form {
 }
 
 impl Component for Form {
-    const NAME: &'static str = "gallery.form";
     type Props = ();
     type Event = NoEvent;
 
@@ -426,7 +425,6 @@ struct AutoGrow {
 }
 
 impl Component for AutoGrow {
-    const NAME: &'static str = "gallery.form.auto_grow";
     type Props = ();
     type Event = NoEvent;
 
@@ -459,11 +457,14 @@ fn utf16_slice(text: &str, start: u32, end: u32) -> String {
     String::from_utf16_lossy(&units[start..end])
 }
 
-/// The selection and the keys of an input, and selecting from code.
+/// The selection and the keys of an input, and selecting from code: the
+/// controlled `selection` ("Select all") and the ref's `set_selection`.
 #[derive(Debug, Default)]
 struct SelectionDemo {
     text: String,
     range: Selection,
+    /// The selection the render sets (TS: the `selection` prop's signal).
+    selection: Option<Selection>,
     /// The last keys pressed.
     keys: Vec<String>,
     input: Option<ElementRef>,
@@ -476,7 +477,6 @@ impl SelectionDemo {
 }
 
 impl Component for SelectionDemo {
-    const NAME: &'static str = "gallery.form.selection";
     type Props = ();
     type Event = NoEvent;
 
@@ -504,6 +504,8 @@ impl Component for SelectionDemo {
                     }))
                     .on_selection_change(cx.listener(|this: &mut Self, s: &Selection, cx| {
                         this.range = *s;
+                        // The input has it: "Select all" sets it again.
+                        this.selection = None;
                         cx.notify();
                     }))
                     .on_key_press(cx.listener(|this: &mut Self, key: &str, cx| {
@@ -512,7 +514,8 @@ impl Component for SelectionDemo {
                         this.keys.drain(..extra);
                         cx.notify();
                     }))
-                    .auto_fill(AutoFill::Off),
+                    .auto_fill(AutoFill::Off)
+                    .when_some(self.selection, |input, s| input.selection(s.start, s.end)),
             )
             .child(caption(format!(
                 "Selection {start}–{end}: \"{}\"",
@@ -527,9 +530,10 @@ impl Component for SelectionDemo {
                         view()
                             .flex_1()
                             .child(button("Select all", colors::accent()).on_press(cx.listener(
-                                |this: &mut Self, _, _| {
-                                    let length = this.text.encode_utf16().count() as u32;
-                                    this.input().set_selection(0, length);
+                                |this: &mut Self, _, cx| {
+                                    let end = this.text.encode_utf16().count() as u32;
+                                    this.selection = Some(Selection { start: 0, end });
+                                    cx.notify();
                                 },
                             ))),
                     )
@@ -569,7 +573,6 @@ impl MessageBar {
 }
 
 impl Component for MessageBar {
-    const NAME: &'static str = "gallery.form.message_bar";
     type Props = ();
     type Event = NoEvent;
 

@@ -26,6 +26,10 @@ mod package;
 mod platform;
 mod rust_anim;
 mod rust_app;
+mod rust_lists;
+mod rust_platform;
+mod rust_styles;
+mod rust_touch;
 mod shutdown;
 
 /// Hands the engine's batches to the test.

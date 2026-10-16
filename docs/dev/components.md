@@ -8,7 +8,7 @@ back. One implementation draws the same on iOS and Android, is laid out in the s
 | Where | What |
 |---|---|
 | `crates/nsh-core/src/ui/` | The API (`nsh_core::ui`, `prelude`): `Component`, `Module`, elements, `Styled`, `Theme`, `Registry`, the status bar's layers (`status_bar.rs`), the declarations generator `typescript` |
-| `crates/nsh-macros` | `#[derive(Props)]`, `#[derive(PropEnum)]`, `#[derive(Event)]`, `#[derive(JsObject)]`; `#[methods]`, `#[module]`; `style_helpers!` (the spacing methods of `Styled`) |
+| `crates/nsh-macros` | `#[derive(Props)]`, `#[derive(PropEnum)]`, `#[derive(Event)]`, `#[derive(JsObject)]`; `#[methods]`, `#[module]`; `#[native_module("…")]` (an app crate's set: `docs/dev/tooling.md`); `style_helpers!` (the spacing methods of `Styled`) |
 | `crates/nsh-core/src/core/components.rs` | The core side: instances, expansion, diffing, children and slots, events |
 | `crates/nsh-ui-mobile` | The mobile set's components, one file each (`README.md`: how to write one) |
 | `crates/nsh-js/src/components.rs` | The JS face of components and modules, made from their specs when a bundle imports the set |
@@ -39,8 +39,7 @@ pub enum ButtonEvent {
     Press,                               // `onPress?: () => void`
 }
 
-impl Component for Button {
-    const NAME: &'static str = "nsh.button";       // JS export: `Button`
+impl Component for Button {                // JS export: `Button`, the type's name
     type Props = ButtonProps;
     type Event = ButtonEvent;
 
@@ -58,6 +57,14 @@ impl Component for Button {
 }
 ```
 
+- **Names come from the type**: `Registry::register::<Button>()` registers it under `std::any::type_name`
+  (`nsh_ui_mobile::button::Button`: the key the JS face sets as the host's `component` prop and the core finds it
+  by, only compared within one binary) and exports it as the type's own name (`Button`; a generic type's without
+  its arguments). A second registration of a type, two types of the same name (two versions of a crate) or two
+  components of one set with the same export panic at registration (`Registry::merged` likewise for the sets a
+  host serves, also for modules of the same name); components of different sets may share an export. A test
+  pins `nsh/ui/mobile`'s exports (`nsh-ui-mobile` `the_exports_are_pinned`). A module's JS name is its type's
+  too (`#[module] impl Alert`: `Alert`).
 - **Props** are a struct, **events** an enum; the derives produce the decoding of `$name` values from JS, defaults,
   and the TypeScript types (doc comments included). Field and variant names become camel case in JS. Value types
   implement `JsValue` (numbers, `bool`, strings, `Color`, `Option`, `Vec`, `JsonValue`, `ui::Style` (an inline
@@ -70,31 +77,41 @@ impl Component for Button {
     places it (the closure styles the slot's own node).
   - `children: Children`: `.child(props.children)` puts them all at one place among the render's own children;
     `.children_each(props.children, |child, at| view().py_3().child(child))` wraps each one (it runs again when
-    the children change; `at` is a `Position`: `index`, `count`, `is_first()`, `is_last()`, what an `<each>` row knows
+    the children change; `at` is a `Position`: `index`, `count`, `is_first()`, `is_last()`, what an `<Each>` row knows
     from its index and the data).
   - `items: Items`: virtualized rows. In JS the component takes `List`'s data props (`each`, the row renderer as
     children, `keyExtractor`, `onEndReached`, `ListHeaderComponent`, ... : `ListItemsProps<T>`, so the component is
     generic over the row type). `.list(props.items, |l| l.flex_1().estimated_item_size(48.0), |row, at|
     view().px_4().when(at.is_last(), |v| v.rounded_b(px(16.0))).child(row))` places the list, lays it out (size, columns, padding, gaps, direction) and wraps each
     row; only rows near the viewport exist and cells are recycled as with `List`.
-- **Elements** are `view()`, `text(..)`, `image(..)`, the other host elements (`input()`, `scroll()`, `stack()` of
+- **Elements** are `view()`, `text(..)` (its `.child(..)`ren are spans, as nested `<Text>`s: texts with styles and
+  presses of their own, strings, inline views and images; the core merges them into one paragraph), `image(..)`, the
+  other host elements (`input()`, `scroll()`, `stack()` of
   `screen()`s, `modal()`,
-  `canvas(drawing)`, `web_view(url)`, `video(url)`, `native(name)` for the embedder's components; `ui/host.rs`),
+  `canvas(drawing)`, `web_view(url)` / `web_view_html(html, base_url)`, `video(url)`,
+  `input_accessory_view(native_id)` (iOS's bar over the keyboard; empty on Android), `native(name)` for the
+  embedder's components; `ui/host.rs`),
   strings (as texts) and other components (`Button::element(props)`, whose `.on_event(cx.listener(..))` handles their
   typed events instead of the app; `.child(..)` / `.children(..)` pass it content and `.fill("header", ..)` fills a
   slot, as JSX children and slot props do: the content is nodes of this render, placed where the nested component's
   render places the app's). Their abilities are traits: `Styled`, `Accessible`, `Interactive` (`active` /
   `hover` / `focus` styles, `disabled`, `hit_slop`, and the typed events every element has: `on_press`,
-  `on_long_press`, `on_layout(Rect)`, `on_touch(TouchEvent)`, `on_pan_start`, ...), `ParentElement`, `FluentBuilder`
+  `on_long_press`, `on_layout(Rect)`, `on_touch(TouchEvent)`, `on_pan_start`, ..., the touch responder: below),
+  `ParentElement`, `FluentBuilder`
   (`when`, `when_some`, `map`). Each host element has its own props and typed events (`input().value(..)
-  .on_change_text(cx.listener(|this, text: &str, cx| ..))`, `scroll().on_scroll(..)`, `modal().on_request_close(..)`);
+  .on_change_text(cx.listener(|this, text: &str, cx| ..))`, `scroll().on_scroll(..)`, `modal().on_request_close(..)`;
+  how scroll views and lists scroll is `Scrollable`, shared by `scroll()`, `virtual_list(..)` and a placed
+  `ListElement`: snapping, `scroll_enabled`, `keyboard_dismiss_mode`, `scroll_value(&v)`, refresh, the scroll events);
   `on(kind, listener)` takes any native event with its raw payload. Host props are the core's `Prop`s, kept one per
   property and diffed by kind: one a render stops setting goes back to its default, as when JS clears it. A modal
   is presented while it is in the render, a screen pushed while it is in its stack (keyed by its route, so the
   screens below keep their state; `on_dismiss` reports a native pop, and the render leaves the screen out). A
   component's root is a view (its host node), so a component cannot render its own screen: the screen's options
   belong to whoever renders the stack (state they depend on goes in a global or a context; `examples/gallery-rs`). Canvases draw a `Drawing`, recorded with `Painter` (the Canvas 2D
-  operations); a new drawing replaces the old one. Props that take a plain color (an input's placeholder color)
+  operations: `.fill_style(..)` / `.stroke_style(..)` take colors, `CanvasGradient::linear` / `radial` / `conic`
+  and native values; `.stroke_path(&canvas::svg_path(d))`; `cx.measure_text(font, text)` in the render is
+  `measureText`; operations built by hand take `painter.num(&v)` / `.paint(..)` and go in with `.op(..)`); a new
+  drawing replaces the old one. Props that take a plain color (an input's placeholder color)
   take `cx.color(theme.muted_foreground)`: the theme color for the appearance now.
 - **State** is `Self`, written like a TSX component where Rust allows:
 
@@ -107,22 +124,41 @@ impl Component for Button {
   | async work | `cx.spawn(|this, cx| async move { .. this.update(..).await })`; the component's tasks end with it |
   | `cleanup` | `fn cleanup(&mut self, props, cx)` (with a `Context`: it can still use the platform's services), and `Drop` |
   | `windowSize()`, `safeArea()`, `keyboard()`, `colorScheme()`, ... | `cx.window()`, `cx.safe_area()`, `cx.keyboard_height()`, `cx.dark()`, ... in the render: reading subscribes |
+  | `PixelRatio.get()`, `roundToNearestPixel`, `Platform.OS` / `Version` / `isPad` | `cx.pixel_ratio()`, `cx.round_to_nearest_pixel(v)`, `cx.os()`, `cx.os_version()`, `cx.idiom()` in the render |
+  | `requestAnimationFrame(cb)`, `cancelAnimationFrame` | `cx.request_animation_frame(\|this, at, cx\| ..)` returns a `Task` (dropping it cancels); in a task `cx.next_frame().await` (an `Instant`), once per frame in a loop |
+  | `I18nManager.forceRTL` / `allowRTL` | `cx.force_rtl(bool)` / `cx.allow_rtl(bool)`: the root's direction at once, `cx.rtl()` readers render again |
+  | `import logo from "./logo@2x.png"`, `import font from "./a.ttf"` | `const LOGO: ImageAsset = asset!("logo@2x.png");` (`image(LOGO)` lays out at its natural size), `const A: FontAsset = asset!("a.ttf");` (`.font_family(A.family)`), with `registry.assets(assets!())` (below) |
+  | `Image.getSize(uri)`, `Image.prefetch(uri)` | `cx.image_size(uri)` / `cx.prefetch_image(uri)`: answers to await in a task |
+  | `AccessibilityInfo.announceForAccessibility`, `setAccessibilityFocus(ref)` | `cx.announce_for_accessibility(msg)`, `self.note.set_accessibility_focus()` (an `ElementRef`) |
+  | `Toast.show(msg, "long")` (`nsh/android`) | `cx.toast(msg, ToastDuration::Long)` (nothing happens off Android) |
   | an effect on the environment | `fn environment_changed(&mut self, props, old, new, cx)` |
   | `useSafeAreaInsets()` | `cx.insets()` in the render: the insets where the component renders (the nearest screen's or modal's, else the surface's safe area) |
   | a signal or store at module level | `cx.global::<G>()` in the render (subscribes); `cx.update_global::<G, _>(..)` in listeners, tasks' updates and modules renders the readers again |
   | `context(default)` / `<Ctx.Provider value>` / `Ctx()` | `cx.provide(value)` in the render; `cx.context::<T>()` below it (the nearest provider up the node tree, through the app's elements too; subscribes) |
-  | `createNativeValue`, `Animated.spring`, `interpolate` | `cx.native_value(0.0)` (in `setup`, kept in a field); `.bind_translate_y(&v)` / `.bind_opacity(..)` / `.bind_background(..)` / `.bind_scale(..)` / `.bind_rotate(..)`, `.pan_values(..)` (drags move it natively), `scroll().scroll_value(&v)`, canvas arguments (`Painter::new().fill_rect(0.0, 0.0, &v, 4.0)`); `v.spring(to, Spring::default())` / `.timing(to, ms, easing)` / `.timing_with(to, Timing { delay_ms, .. })` / `.decay(..)` return an `AnimationEnd` to await; `v.interpolate(..)`, `.interpolate_with(.., Interpolation { extrapolate_left, extrapolate_right, easing })`, `.add(..)`, `.diff_clamp(..)` derive nodes |
+  | `createNativeValue`, `Animated.spring`, `interpolate` | `cx.native_value(0.0)` (in `setup`, kept in a field); `.bind_translate_y(&v)` / `.bind_opacity(..)` / `.bind_background(..)` / `.bind_scale(..)` / `.bind_rotate(..)`, `.pan_values(..)` (drags move it natively), `.pinch_value(&scale)` / `.rotation_value(&angle)` (TS `pinch={{ scale }}`, `rotation={{ angle }}`), `scroll().scroll_value(&v)`, canvas arguments (`Painter::new().fill_rect(0.0, 0.0, &v, 4.0)`); `v.spring(to, Spring::default())` / `.timing(to, ms, easing)` / `.timing_with(to, Timing { delay_ms, .. })` / `.decay(..)` return an `AnimationEnd` to await; `v.interpolate(..)`, `.interpolate_with(.., Interpolation { extrapolate_left, extrapolate_right, easing })`, `.add(..)`, `.diff_clamp(..)` derive nodes |
   | `Animated.sequence / parallel / stagger / delay / loop`, `.start(cb)` / `.stop()` / `.reset()` | `Animation::sequence([Animation::timing(&v, to, Timing::new(ms, easing)), Animation::delay(ms), Animation::spring(..)])`, `::parallel(..)` (`.stop_together(false)`), `::stagger(ms, ..)`, `.looped(iterations)` (`.reset_before_iteration(false)`), built in `setup` and kept in a field; `a.start()` returns an `AnimationEnd`, `a.stop()`, `a.reset()` |
   | `BackHandler.addEventListener("hardwareBackPress", f)`, `.remove()` | `cx.on_back_press(|this, cx| -> bool)` (in `setup`, kept in a field) returns a `BackSubscription`; dropping it removes the listener. After modals and stacks, the components' listeners run newest first, then JS's; when none returns true the app exits (`ui/back.rs`) |
   | an error boundary (TS has none) | `fn catch_error(&mut self, error, cx) -> bool`: the nearest component above one whose code panicked (render, listener, method, task) handles it, typically keeping `error`, rendering a fallback and clearing it to try again; the failed one renders nothing until it renders again; unhandled errors are logged (`js` target) |
   | a portal | none (TS has none either); overlays are `modal().transparent(true)` |
   | `ref={el}`, `el.focus()` | `cx.element_ref()` (in `setup`, kept in a field), `.element_ref(&self.field)` on the element each render, `self.field.focus()` / `.scroll_to(..)` / `.seek(..)` / `.command(..)` from listeners and tasks |
+  | `onStartShouldSetResponder`, `onMoveShouldSetResponder(Capture)`, `PanResponder.create` | `.claim_touches(TouchClaim::on_start())` (`::on_move()`, `.capture()`, `.ask(cx.listener(\|this, request: &ClaimRequest, cx\| request.claim()))` to decide with state and the gesture, `.block_native(false)`), `.keep_touches(true)` (`onResponderTerminationRequest` → false); `.on_responder_grant` / `_move` / `_release` / `_terminate` / `_start` / `_end` / `_reject` get a `ResponderEvent` (the finger's `location_x`, `page_x`, ... and `gesture: PanGesture`: `dx`, `dy`, `vx`, `vy`, the centroid; `PanGesture::begin` / `update` follow one from `on_touch`) |
+  | a ref to a component, `await stepper.value()`, `stepper.setValue(5)` | `cx.component_ref::<Stepper>()` (in `setup`, kept in a field), `Stepper::element(..).component_ref(&self.field)`, `self.field.update(\|s, cx\| s.set_value(5.0, cx))`: its `#[methods]` called directly, right after the listener; await the `Updated` for the result |
+  | `<List ListHeaderComponent ListFooterComponent ListEmptyComponent ItemSeparatorComponent stickyHeaderIndices viewabilityConfig onViewableItemsChanged onEndReachedThreshold initialScrollIndex>` | `virtual_list(n, row).header(..).footer(..).empty(..).separator(\|\| ..).sticky_header_indices(..).viewability(..).minimum_view_time(..).on_viewable_items_changed(..).end_reached_threshold(..).initial_scroll_index(..)`: the header, footer and empty view are part of the render (the component's state and handlers), never recycled |
+  | `<ListView each={rows} keyExtractor ListHeaderComponent={Header}>{row}</ListView>` | `ListView::element(props).items(virtual_list(n, row).keys(ids).header(..))` |
+  | `<Text>a <Text style={link} onPress={f}>b</Text> <View/></Text>` | `text("a ").child(link("b").on_press(..)).child(" ").child(view())`: one paragraph, links and inline views |
+  | `class="group"`, `group-active:`, `dark:`, `disabled:` | `.group()`, `.group_active(\|s\| ..)`, `.dark(\|s\| ..)`, `.disabled_style(\|s\| ..)` (native, no render) |
+  | `bg-sky-500` (the palette) | `.bg(palette::SKY.shade(500))` |
 
   `render(&self)` cannot change state. Timers are tasks: a `tokio::time` sleep, then an update.
 - **Platform services** are on `Context` (setup, listeners, updates, methods), `ModuleCx` and `AsyncCx`:
   `cx.dialog(Dialog)` shows an alert or action sheet and returns a future of the index chosen (-1: dismissed; the
   answer is the root's `Dialog` event, which the core resolves; JS never sees it);
-  `dismiss_keyboard()`, `animate_layout(..)`, and the status bar (below). `cx.update_global::<G, _>(|g, cx| ..)` is
+  `dismiss_keyboard()`, `animate_layout(..)`, `announce_for_accessibility(..)`, `toast(..)`, `force_rtl` /
+  `allow_rtl`, the image information (`image_size`, `prefetch_image`: on `Context` and `AsyncCx`), display frames
+  (`Context::request_animation_frame`, `AsyncCx::next_frame`: the core keeps the waiting tasks' answers, the engine
+  asks the platform for a frame while one waits, `MountSink::request_frame`, and delivers it at
+  `EngineControl::frame`), and the status bar (below); they are actions the core applies in order with the
+  component's other changes (`ui/services.rs`, `core/services.rs`). `cx.update_global::<G, _>(|g, cx| ..)` is
   state the surface's components and modules share.
 - **Native values** (`ui/animated.rs`) are nodes of the platform's animation graph with odd ids (JS's are even,
   like node ids: the graph indexes nodes by id, so both must stay dense; ids from 2^31 are the graph's own
@@ -165,7 +201,8 @@ mobile UI's navigation: `navigation.rs`).
 The runtime has modules of its own the same way (`crates/nsh-core/src/runtime/`, `runtime::registries()`): one
 `Registry` per JS module (`Registry::runtime("nsh/android")`), whose functions JS calls as `nsh/android:Toast.show` so
 they never clash with a UI set's; the core looks a call up in the set's registry, then the runtime's. Runtime modules
-use the core's internal actions (toasts, announcements, `ImageInfo` requests) instead of public context methods.
+use the same services as components (`cx.toast`, `cx.announce_for_accessibility`, `cx.image_size`), and the core's
+internal actions for the rest (exiting the app, a ref's accessibility focus).
 `#[module(flat)]` exports functions one by one (`setStatusBarBackgroundColor`); a function returning `Result` rejects
 the promise with the error; a `NodeRef` parameter is a `YNode` in TS (sent as `{ $node: id }`).
 
@@ -193,14 +230,41 @@ component cancels all of its own.
 ## Environment
 
 The engine hands the core what components may read (`ui::Environment`: window, safe area, keyboard height, appearance,
-font scale, reduced motion, screen reader, direction). A render records what it read (`RenderCx::window()` and the
-like); when the environment changes, only the components that read a changed part render again.
+font scale, reduced motion, screen reader, direction, pixel ratio, OS, its version, idiom). A render records what it
+read (`RenderCx::window()` and the like); when the environment changes, only the components that read a changed part
+render again. The direction components read is the surface's: its root's (`Prop::LayoutDirection`, which JS's
+`I18nManager` sets), else the platform's; once a component sets a policy (`force_rtl` / `allow_rtl`), and from the
+start in a Rust app, the core sets the root's direction from it and the language (in an app whose JS sets it too,
+the last one wins; JS's `isRTL` does not hear Rust's).
+
+## Assets
+
+A crate ships files in its `assets/` directory, as TS imports them: `asset!("logo@2x.png")` (`nsh-macros`, the path
+relative to `assets/`) reads the file at compile time and is an `ImageAsset { uri, width, height }` (the natural size
+in points: `@2x` / `@3x` divide the pixels), a `FontAsset { uri, family }` (`.ttf`, `.otf`: the family from the
+font's name table) or a `FileAsset { uri }`; a missing or unreadable file fails the build, a changed one builds the
+crate again (`include_bytes!`). The URI is `asset:/@<package>/<path>`, apart from the app's own files. The registry
+ships the directory: `registry.assets(assets!())` lists every file (`AssetFile`: URI, the file where the crate was
+built, kind), which the app's command line (`rust_app.rs`, the registry is in-process) serves in development and
+copies into packages next to the imported assets, and whose fonts the engine registers before the first render
+(`EngineConfig::ui_sets`, read through `EngineConfig::assets`).
 
 ## Styles
 
 `Styled` methods are named as in GPUI and Tailwind (`.flex_row()`, `.items_center()`, `.p_4()` = 16pt, `.gap(px(6.0))`,
 `.rounded_xl()`, `.border_1()`, `.shadow_md()`, `.text_sm()`, `.font_weight(FontWeight::SEMIBOLD)`, ...); spacing steps
-follow Tailwind's default scale, independent of the app's Tailwind theme. A render records declarations
+follow Tailwind's default scale, independent of the app's Tailwind theme. They cover what classes and styles do:
+per-side borders and colors (`.border_t(6.0).border_t_color(..)`), `.border_dashed()`, per-corner and start / end
+radii (`.rounded_tl(..)`, `.rounded_ss(..)`), `.border_curve(BorderCurve::Continuous)`; shadows of their own
+(`.shadow([BoxShadow { .. }])`, React Native's `.shadow_opacity(..).shadow_radius(..).shadow_offset(..)`,
+`.shadow_color(..)` for both and the presets), `.inset_shadow_sm()`, rings, outlines, text shadows; 3D transforms and
+skews, `.transform_origin(..)` / `.origin_top_left()`, `.backface_hidden()`; decorations (`.underline().line_through()`
+draw both, `.text_decoration_wavy()`, `.text_decoration_color(..)`), `.uppercase()`, `.tabular_nums()`,
+`.writing_direction(..)`; gradients (`.bg_linear_to_br().gradient_from(..).gradient_via(..).gradient_to(..)`,
+`.bg_radial()`, `.bg_conic(..)`), filters and backdrop filters (`.grayscale(1.0)`, `.backdrop_blur(12.0)`),
+`.mix_blend_mode(..)`, transitions (`.transition_colors().duration(150.0).ease_out()`), keyframes (`.animate_spin()`),
+grids (`.grid_cols(3)`, `.col_span(2)`), `.flex_grow(n)`. Tailwind's palette is typed too
+(`ui::palette::SKY.shade(500)`). A render records declarations
 (`StyleRefinement`); the core lowers them into the same rules Tailwind classes compile to (`ClassList`), cached and
 shared between elements with the same styles, and only when an element's styles changed. There is no string to
 parse and no `.class()`.
@@ -208,8 +272,10 @@ parse and no `.class()`.
 - Theme colors are `AdaptiveColor`s (a light and a dark value) and lower into one declaration that picks by
   appearance (`Decl::Adaptive`): the platform's appearance switch restyles natively, without a render, and the app's
   plain classes still win over it.
-- `.active(|s| ..)`, `.hover(..)`, `.focus(..)` lower into rules on the view's interaction states (Tailwind's ranks):
-  press feedback is native.
+- `.active(|s| ..)`, `.hover(..)`, `.focus(..)`, `.disabled_style(..)` lower into rules on the view's interaction
+  states (Tailwind's ranks): press feedback is native. `.group()` makes a view a group and `.group_active(|s| ..)`
+  (`_hover`, `_focus_within`, `_named` for `group/name`) styles what is inside it by the group's states;
+  `.dark(|s| ..)` styles what is not a color in dark appearance. Nested variants all have to hold.
 - What a render knows (a variant, `disabled`) is plain Rust: `.when(props.disabled, |v| v.opacity(0.5))`.
 - The app's `class` / `classList` on a component (Tailwind) is merged after the root's rules; at equal rank it wins.
   The styles of a nested component element merge the same way.
@@ -227,7 +293,8 @@ sends it to the root (`uiTheme`) before anything renders; a new theme renders ev
 
 ## The host node and ids
 
-In JS a component is a `<view>` with a `component` prop naming it (`nsh.button`): its **host**. `Core::apply` sees the
+In JS a component is a view (the host element `view`) with a `component` prop naming it (its registered name,
+`nsh_ui_mobile::button::Button`): its **host**. `Core::apply` sees the
 prop, creates an instance and from then on intercepts the ops on the host (`intercept`): the host is the root of the
 component's expansion, the elements its render returns below the root become nodes the core creates itself. Apps
 without components pay one check per op.
@@ -264,6 +331,14 @@ never sees the expanded nodes; their events are the component's (below).
   row function, which runs again when the cell shows another row and when the component renders. With keys, rows
   removed or inserted before others leave their cells and sizes alone. Rows' handlers run with the component's
   state (also for the wrappers of the app's rows); a row passes its index with `listener.map(move |_: &()| index)`.
+  The header, footer and empty view are cells of the render (their `CellSlot`s), outside the recycling; a
+  separator goes into each row's cell, after the row (before it, inverted).
+- Another component's rows (`ComponentElement::items(virtual_list(..))`): the list is content of the nested
+  component, as `.child` is: a node of this render (its rows, header and handlers are this component's), the
+  slot of the nested component's `Items` prop, which places and lays it out as it places JS's list (its layout
+  and styles, so the list's own are left out). Each cell is then the placing component's row wrapper
+  (`Inner::Row`) around a node rendering the row (`Inner::VirtualRow`), so each part's handlers run with its own
+  component.
 - Named slots: the JS face creates one holder view per slot **the app passes** (`componentSlot`), filled with that prop's
   JSX. The render's `Slot` element *is* that holder: its styles and handlers apply to it, the core places it but never
   releases it (it is JS's). Filling or emptying a holder renders the component again.
@@ -272,6 +347,11 @@ never sees the expanded nodes; their events are the component's (below).
 
 - Handlers sit on the elements; the native event of an expanded node, or of the host, goes to the component first
   (`Core::component_event`, called by the engine before JS). Events of expanded nodes never reach JS.
+- A slot's node (JS's holder, the app's list of an `Items` prop, or another component's content) gets the
+  handlers of the component it is a slot of, then its maker's: JS's (the app's `onEndReached` on a `ListView`)
+  or the rendering component's.
+- A component's own list reports its viewable rows to it in the core, waiting for `minimum_view_time` when set
+  (a task of the list's owner).
 - `cx.emit(event)` sends a `NativeEvent` on the host (`{ name, data }`, from the `Event` derive); the JS face calls
   the app's `on<Name>(data)`. A nested component's events go to the `on_event` listener of the component that rendered it,
   typed, instead.
@@ -289,6 +369,17 @@ directly** and sending the ones that changed, no `split` / `merge` / `spread` (t
 the former JS runtime, cost more JS than the TSX component it replaced), no node for an absent slot, no event listener
 when no handler is passed. Benchmarks against the same Button in TSX: `docs/dev/performance.md` (`examples/bench`,
 `component_bench`).
+
+## Touches and the responder
+
+The platform reports touches on the root, each finger with the listening nodes around it (`docs/dev/elements.md`).
+The core takes the components' nodes on that path (`core/touch.rs`): their `on_touch` handlers hear the touches from
+the finger outwards, then the responder is negotiated among their `claim_touches` as `nsh-js` does among JS's
+handlers (captures from the outermost in, then from the finger outwards; with a responder, only the nodes around it;
+`keep_touches` refuses to hand over), and the responder's listeners get the events with the gesture. Claims without
+`ask` are decided from the element, running no component code. The event goes on to JS for its own nodes; each side
+negotiates its own responder, and the core sends both sides' `SetJsResponder` / `ClearJsResponder` (the one that
+blocked last wins while both do, and the other's block comes back when it lets go).
 
 ## Native components of the embedder
 

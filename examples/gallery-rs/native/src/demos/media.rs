@@ -72,7 +72,6 @@ fn controls(content: impl IntoIterator<Item = AnyElement>) -> AnyElement {
 }
 
 impl Component for Media {
-    const NAME: &'static str = "gallery.media";
     type Props = ();
     type Event = NoEvent;
 
@@ -92,8 +91,7 @@ impl Component for Media {
         let inline = section(
             "Web view",
             [
-                web_view("about:blank")
-                    .html(PAGE, None)
+                web_view_html(PAGE, None)
                     .element_ref(&web)
                     .h(px(200.0))
                     .rounded_lg()

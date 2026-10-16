@@ -12,18 +12,26 @@
 //!   methods of the component's ref in JS (`ref.setValue(5)`,
 //!   `await ref.value()`).
 //!
+//! - `asset!("logo@2x.png")` / `assets!()`: the files a crate ships in its
+//!   `assets/` directory, read at compile time.
+//!
+//! - `#[native_module("gallery/native")]` on a function of an app's crate:
+//!   the UI set it registers, which nsh's generated workspace links.
+//!
 //! The code they generate names `::nsh_core::ui`. `style_helpers!` is
 //! internal to `nsh-core`: the spacing and sizing methods of `Styled`.
 
+mod assets;
 mod host_props;
 mod js_ops;
+mod native_module;
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::{
-    Attribute, Data, DeriveInput, Expr, Fields, FnArg, GenericArgument, Ident, ImplItem, ItemImpl,
-    LitStr, Pat, PathArguments, ReturnType, Token, Type, bracketed, parse::Parse,
+    Attribute, Data, DeriveInput, Expr, Fields, FnArg, GenericArgument, Ident, ImplItem, ItemFn,
+    ItemImpl, LitStr, Pat, PathArguments, ReturnType, Token, Type, bracketed, parse::Parse,
     parse_macro_input, punctuated::Punctuated, spanned::Spanned,
 };
 
@@ -210,6 +218,7 @@ fn props(input: DeriveInput) -> syn::Result<TokenStream2> {
     let mut slot_arms = Vec::new();
     let mut children = None;
     let mut items: Option<Ident> = None;
+    let mut items_js: Option<String> = None;
     for field in &fields.named {
         let ident = field.ident.as_ref().expect("named");
         let ty = &field.ty;
@@ -298,6 +307,7 @@ fn props(input: DeriveInput) -> syn::Result<TokenStream2> {
                     }
                 });
                 items = Some(ident.clone());
+                items_js = Some(js.clone());
             }
             Kind::Children => {
                 if children.is_some() || items.is_some() {
@@ -330,6 +340,10 @@ fn props(input: DeriveInput) -> syn::Result<TokenStream2> {
             false
         }),
     };
+    let items_const = match &items_js {
+        Some(js) => quote!(::core::option::Option::Some(#js)),
+        None => quote!(::core::option::Option::None),
+    };
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     Ok(quote! {
         /// Every prop at its default (`..Default::default()` when Rust
@@ -341,6 +355,8 @@ fn props(input: DeriveInput) -> syn::Result<TokenStream2> {
         }
 
         impl #impl_generics #ui::Props for #name #ty_generics #where_clause {
+            const ITEMS: ::core::option::Option<&'static str> = #items_const;
+
             fn doc() -> &'static str {
                 #doc
             }
@@ -686,6 +702,81 @@ const STEPS: &[(&str, f32)] = &[
     ("80", 320.0),
     ("96", 384.0),
 ];
+
+/// A file of the crate's `assets/` directory (`asset!("logo@2x.png")`, the
+/// path relative to it), as TS imports one: an image is an `ImageAsset`
+/// with its natural size in points (`@2x` / `@3x` in the name divide its
+/// pixels), a font (`.ttf`, `.otf`) a `FontAsset` with its family name,
+/// anything else a `FileAsset`. Read at compile time: a missing or broken
+/// file fails the build, and a changed one builds the crate again. The
+/// registry ships the files (`Registry::assets(assets!())`).
+#[proc_macro]
+pub fn asset(input: TokenStream) -> TokenStream {
+    let lit = parse_macro_input!(input as LitStr);
+    assets::asset(lit)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Every file of the crate's `assets/` directory, as `&'static
+/// [AssetFile]`: what `Registry::assets` ships with the app (`nsh run`
+/// serves them, `nsh package` copies them; the engine registers the
+/// fonts).
+#[proc_macro]
+pub fn assets(input: TokenStream) -> TokenStream {
+    if !input.is_empty() {
+        return syn::Error::new(
+            Span::call_site(),
+            "`assets!()` takes no arguments: it lists the crate's `assets/` directory",
+        )
+        .into_compile_error()
+        .into();
+    }
+    assets::assets(Span::call_site())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// `#[native_module("gallery/native")]` on `fn native(registry: &mut
+/// Registry)` at the root of an app's crate (`nsh.json` `"rust"`): the UI
+/// set the app's TSX imports by that specifier. The function registers the
+/// crate's components, modules and assets into the set's registry
+/// (`Registry::ui_set("gallery/native")`), which the command line, hosts
+/// and Android library nsh builds for the app serve:
+///
+/// ```ignore
+/// #[native_module("gallery/native")]
+/// fn native(registry: &mut Registry) {
+///     registry.register::<Gallery>();
+///     registry.assets(assets!());
+/// }
+/// ```
+///
+/// The specifier is checked at compile time: a bare import specifier
+/// (`my-app/native`, `@acme/ui`), not a path, and not nsh's own (`nsh`,
+/// `nsh/...`). A crate has one, at its root: it generates a hidden entry
+/// of a fixed name the generated workspace calls, so a second one fails as
+/// that name defined twice, one in a module as not at the root, and a
+/// crate without one fails the generated workspace's build saying what to
+/// add.
+#[proc_macro_attribute]
+pub fn native_module(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let specifier = match syn::parse::<LitStr>(attr) {
+        Ok(lit) => lit,
+        Err(_) => {
+            return syn::Error::new(
+                Span::call_site(),
+                "`#[native_module]` takes the specifier the app imports the set by: `#[native_module(\"my-app/native\")]`",
+            )
+            .into_compile_error()
+            .into();
+        }
+    };
+    let item = parse_macro_input!(item as ItemFn);
+    native_module::expand(specifier, item)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
 
 /// Internal to `nsh-core`: `name => [StyleKey, ...]` lines become a method
 /// `name(length)` and one method per spacing step (`p_4()` is 16pt) of

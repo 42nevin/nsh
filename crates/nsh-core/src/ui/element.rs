@@ -139,6 +139,8 @@ pub(crate) struct RenderScope<'a> {
     pub(crate) globals: &'a Globals,
     /// The nearest provided value of a type above the component.
     pub(crate) context: &'a dyn Fn(TypeId) -> Option<Rc<dyn Any>>,
+    /// The width of a line of text in a canvas font (the text engine's).
+    pub(crate) measure: &'a dyn Fn(&crate::canvas::CanvasFont, &str) -> f32,
 }
 
 /// A value a render provides to the components below it.
@@ -295,6 +297,45 @@ impl<'a, C: Component> RenderCx<'a, C> {
         self.read(env::RTL).rtl
     }
 
+    /// The width of `text` on one line in `font` (the CSS `font` shorthand,
+    /// as [`super::Painter::font`] takes it; an invalid one measures in the
+    /// canvas default, `10px sans-serif`), measured by the platform's text
+    /// engine (TS: a canvas's `measureText(text).width`).
+    pub fn measure_text(&self, font: &str, text: &str) -> f32 {
+        let font = crate::canvas::CanvasFont::parse(font).unwrap_or_default();
+        (self.scope.measure)(&font, text)
+    }
+
+    /// Device pixels per point (TS: `PixelRatio.get()`); one device pixel
+    /// is `1.0 / cx.pixel_ratio()` points.
+    pub fn pixel_ratio(&self) -> f32 {
+        self.read(env::PIXEL_RATIO).pixel_ratio
+    }
+
+    /// `points` rounded to whole device pixels (TS:
+    /// `PixelRatio.roundToNearestPixel`).
+    pub fn round_to_nearest_pixel(&self, points: f32) -> f32 {
+        let ratio = self.pixel_ratio().max(f32::MIN_POSITIVE);
+        (points * ratio).round() / ratio
+    }
+
+    /// The operating system (TS: `Platform.OS`).
+    pub fn os(&self) -> crate::platform::Os {
+        self.scope.environment.os
+    }
+
+    /// The OS version: major and minor on iOS, the API level and 0 on
+    /// Android (TS: `Platform.Version`).
+    pub fn os_version(&self) -> (u16, u16) {
+        self.scope.environment.os_version
+    }
+
+    /// The kind of device (TS: `Platform.isPad`, `isTV`,
+    /// `isMacCatalyst`).
+    pub fn idiom(&self) -> crate::platform::Idiom {
+        self.scope.environment.idiom
+    }
+
     /// A handler for an element of this render: `f` gets the component (its
     /// state), the event and a [`Context`] to change state, emit events and
     /// start timers.
@@ -407,6 +448,59 @@ impl<'a, C: Component> Context<'a, C> {
         ));
     }
 
+    /// The screen reader reads `message` (TS:
+    /// `AccessibilityInfo.announceForAccessibility`).
+    pub fn announce_for_accessibility(&mut self, message: impl Into<String>) {
+        self.inner
+            .actions
+            .push(super::services::announce(message.into()));
+    }
+
+    /// Shows `message` at the bottom of the screen (Android's toasts, TS:
+    /// `Toast.show`); nothing happens elsewhere.
+    pub fn toast(&mut self, message: impl Into<String>, duration: super::ToastDuration) {
+        self.inner
+            .actions
+            .push(super::services::toast(message.into(), duration));
+    }
+
+    /// The size in pixels of the image at `uri` (TS: `Image.getSize`), to
+    /// await in a task; its bytes stay loaded for the views that show it
+    /// next.
+    pub fn image_size(
+        &mut self,
+        uri: impl Into<String>,
+    ) -> task::Answer<Result<task::ImageSize, String>> {
+        let (answer, action) = super::services::image_size(uri.into());
+        self.inner.actions.push(action);
+        answer
+    }
+
+    /// Loads the image at `uri` ahead of showing it (TS: `Image.prefetch`):
+    /// await it in a task for whether it loaded.
+    pub fn prefetch_image(&mut self, uri: impl Into<String>) -> super::Prefetch {
+        let (answer, action) = super::services::prefetch(uri.into());
+        self.inner.actions.push(action);
+        answer
+    }
+
+    /// Lays the surface out right to left whatever the user's language
+    /// (TS: `I18nManager.forceRTL`), at once: the components that read
+    /// [`RenderCx::rtl`] render again. `false` follows the language again.
+    pub fn force_rtl(&mut self, force: bool) {
+        self.inner
+            .actions
+            .push(Action::Direction(super::services::Direction::Force(force)));
+    }
+
+    /// Whether a right-to-left language lays the surface out right to left
+    /// (TS: `I18nManager.allowRTL`; true by default).
+    pub fn allow_rtl(&mut self, allow: bool) {
+        self.inner
+            .actions
+            .push(Action::Direction(super::services::Direction::Allow(allow)));
+    }
+
     /// A native animation value starting at `value` (TS:
     /// `createNativeValue`): keep it in a field, bind it to styles, drags,
     /// scroll offsets or drawings, and animate it from listeners and tasks.
@@ -419,6 +513,14 @@ impl<'a, C: Component> Context<'a, C> {
     /// commands from listeners and tasks.
     pub fn element_ref(&self) -> super::ElementRef {
         super::ElementRef::new(&self.inner.executor)
+    }
+
+    /// A handle for a component of the render (TS: a `ref` to a component,
+    /// `stepper.value()`): keep it in a field, put it on the component with
+    /// [`ComponentElement::component_ref`], call its methods with
+    /// [`super::ComponentRef::update`] from listeners and tasks.
+    pub fn component_ref<T: Component>(&self) -> super::ComponentRef<T> {
+        super::ComponentRef::new(&self.inner.executor)
     }
 
     /// Starts a task: `f(this, cx)` builds a future run on the engine
@@ -473,6 +575,20 @@ impl<'a, C: Component> Context<'a, C> {
         })
     }
 
+    /// Runs `f` when the next display frame starts, with its time (TS:
+    /// `requestAnimationFrame`; dropping the task is
+    /// `cancelAnimationFrame`). Ask again from `f` for the frame after; a
+    /// task awaiting [`AsyncCx::next_frame`] in a loop runs every frame.
+    pub fn request_animation_frame(
+        &mut self,
+        f: impl FnOnce(&mut C, Instant, &mut Context<'_, C>) + 'static,
+    ) -> Task<()> {
+        self.spawn(move |this, cx| async move {
+            let at = cx.next_frame().await;
+            this.update(move |this, cx| f(this, at, cx)).await;
+        })
+    }
+
     /// Runs `f` every `period` (TS: `setInterval`; dropping the task is
     /// `clearInterval`). Late wakes do not pile up runs.
     pub fn set_interval(
@@ -508,7 +624,7 @@ pub struct Attrs {
     pub(crate) pointer_events: PointerEvents,
     pub(crate) active_opacity: Option<f32>,
     pub(crate) number_of_lines: u32,
-    pub(crate) src: Option<SharedString>,
+    pub(crate) src: Option<super::ImageSrc>,
     pub(crate) inset_padding: Option<EdgeInsets>,
     pub(crate) inset_margin: Option<EdgeInsets>,
     /// An inline style from JS (a `StyleProp` prop), over the styles.
@@ -563,9 +679,9 @@ impl Attrs {
             out.push(Prop::NumberOfLines(self.number_of_lines));
         }
         if self.src != old.src {
-            out.push(Prop::Source(self.src.as_ref().map(|uri| ImageSource {
-                uri: uri.to_arc(),
-                size: None,
+            out.push(Prop::Source(self.src.as_ref().map(|src| ImageSource {
+                uri: src.uri.to_arc(),
+                size: src.size,
             })));
         }
         if self.inset_padding != old.inset_padding {
@@ -718,6 +834,9 @@ pub(crate) enum ElKind {
     List(Box<ListEl>),
     /// A list of the component's own rows ([`super::virtual_list`]).
     VirtualList(Box<super::virtual_list::VirtualListEl>),
+    /// A piece of a text's content among its spans (a raw text node, as
+    /// JS's strings in a `<text>`).
+    Raw,
     Component(ComponentEl),
 }
 
@@ -732,6 +851,8 @@ pub struct ElNode {
     pub(crate) attrs: Attrs,
     pub(crate) style: StyleRefinement,
     pub(crate) handlers: Vec<(EventKind, Listener<EventPayload>)>,
+    /// Its part in the touch responder's negotiation.
+    pub(crate) responder: Option<Rc<super::responder::ResponderEl>>,
     pub(crate) children: Vec<ElNode>,
     pub(crate) kind: ElKind,
 }
@@ -750,6 +871,7 @@ impl ElNode {
             attrs: Attrs::default(),
             style: StyleRefinement::default(),
             handlers: Vec::new(),
+            responder: None,
             children: Vec::new(),
             kind: ElKind::Plain,
         }
@@ -1054,9 +1176,75 @@ pub trait Interactive: Element {
         self.on(EventKind::Layout, events::typed(listener, events::layout))
     }
 
-    /// Touches on it or inside it, every phase (custom gestures).
+    /// Touches on it or inside it, every phase (custom gestures): the
+    /// elements around the finger hear them from it outwards. To have them
+    /// alone, claim them ([`Interactive::claim_touches`]).
     fn on_touch(self, listener: Listener<TouchEvent>) -> Self {
         self.on(EventKind::Touch, events::typed(listener, events::touch))
+    }
+
+    /// Claims the touches of a gesture as `claim` says (TS:
+    /// `onStartShouldSetResponder`, `PanResponder`): as the responder it
+    /// hears them alone (`on_responder_*`), and native scroll views around
+    /// it stop taking them over. Several claims may be given.
+    fn claim_touches(mut self, claim: super::TouchClaim) -> Self {
+        super::responder::of(self.node()).claims.push(claim);
+        self
+    }
+
+    /// As the responder, refuses to hand the touches over to an element
+    /// around it that claims them (TS: `onResponderTerminationRequest`
+    /// returning false); a native scroll view that started dragging first
+    /// still takes them.
+    fn keep_touches(mut self, keep: bool) -> Self {
+        super::responder::of(self.node()).keep = keep;
+        self
+    }
+
+    /// It became the responder (TS: `onResponderGrant`).
+    fn on_responder_grant(mut self, listener: Listener<super::ResponderEvent>) -> Self {
+        super::responder::of(self.node()).grant = Some(listener);
+        self
+    }
+
+    /// It claimed the touches, but the responder kept them (TS:
+    /// `onResponderReject`).
+    fn on_responder_reject(mut self, listener: Listener<super::ResponderEvent>) -> Self {
+        super::responder::of(self.node()).reject = Some(listener);
+        self
+    }
+
+    /// As the responder, a finger went down (the first one too, after the
+    /// grant; TS: `onResponderStart`).
+    fn on_responder_start(mut self, listener: Listener<super::ResponderEvent>) -> Self {
+        super::responder::of(self.node()).start = Some(listener);
+        self
+    }
+
+    /// As the responder, the fingers moved (TS: `onResponderMove`).
+    fn on_responder_move(mut self, listener: Listener<super::ResponderEvent>) -> Self {
+        super::responder::of(self.node()).moved = Some(listener);
+        self
+    }
+
+    /// As the responder, a finger lifted (TS: `onResponderEnd`).
+    fn on_responder_end(mut self, listener: Listener<super::ResponderEvent>) -> Self {
+        super::responder::of(self.node()).end = Some(listener);
+        self
+    }
+
+    /// The last finger lifted: it is no longer the responder (TS:
+    /// `onResponderRelease`).
+    fn on_responder_release(mut self, listener: Listener<super::ResponderEvent>) -> Self {
+        super::responder::of(self.node()).release = Some(listener);
+        self
+    }
+
+    /// Another element or a native gesture took the touches over, or the
+    /// system cancelled them (TS: `onResponderTerminate`).
+    fn on_responder_terminate(mut self, listener: Listener<super::ResponderEvent>) -> Self {
+        super::responder::of(self.node()).terminate = Some(listener);
+        self
     }
 
     /// Drags move these values natively (by the drag's translation from
@@ -1075,6 +1263,27 @@ pub trait Interactive: Element {
         let bound = &mut self.node().attrs.bound;
         bound.extend(x);
         bound.extend(y);
+        self
+    }
+
+    /// Two-finger pinches scale `scale` natively (multiplying the value it
+    /// has when the pinch starts; TS: `pinch={{ scale }}`); bind it to its
+    /// transform ([`Element::bind_scale`]). `on_pinch_start` /
+    /// `on_pinch_end` report the pinches.
+    fn pinch_value(mut self, scale: &super::NativeValue) -> Self {
+        let node = scale.node().clone();
+        super::host::set(self.node(), Prop::PinchValue(Some(node.id())));
+        self.node().attrs.bound.push(node);
+        self
+    }
+
+    /// Two-finger rotations turn `angle` natively, in degrees (added to
+    /// the value it has when the rotation starts; TS: `rotation={{ angle
+    /// }}`); bind it to its transform ([`Element::bind_rotate`]).
+    fn rotation_value(mut self, angle: &super::NativeValue) -> Self {
+        let node = angle.node().clone();
+        super::host::set(self.node(), Prop::RotationValue(Some(node.id())));
+        self.node().attrs.bound.push(node);
         self
     }
 
@@ -1179,21 +1388,28 @@ pub trait Interactive: Element {
     /// Styles while pressed (native: no render).
     fn active(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
         let s = f(StyleRefinement::default());
-        self.style().extend_as(Variant::Active, s);
+        self.style().extend_as(Variant::ACTIVE, s);
         self
     }
 
     /// Styles while a pointer hovers it (iPad, Mac, mice).
     fn hover(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
         let s = f(StyleRefinement::default());
-        self.style().extend_as(Variant::Hover, s);
+        self.style().extend_as(Variant::HOVER, s);
         self
     }
 
     /// Styles while focused.
     fn focus(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
         let s = f(StyleRefinement::default());
-        self.style().extend_as(Variant::Focus, s);
+        self.style().extend_as(Variant::FOCUS, s);
+        self
+    }
+
+    /// Styles while [`Interactive::disabled`] (Tailwind's `disabled:`).
+    fn disabled_style(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        let s = f(StyleRefinement::default());
+        self.style().extend_as(Variant::DISABLED, s);
         self
     }
 
@@ -1272,6 +1488,40 @@ impl Interactive for SlotElement {}
 impl Interactive for Text {}
 impl Interactive for Image {}
 
+/// A text's children are its spans, as nested `<text>`s in JS: texts with
+/// styles and presses of their own (a link inside a sentence), strings,
+/// and views and images placed inline, wrapping with the words. The core
+/// merges them into one paragraph.
+impl ParentElement for Text {
+    fn child(mut self, child: impl IntoElement) -> Self {
+        self.0.children.push(span(child.into_element().0));
+        self
+    }
+
+    fn children(mut self, children: impl IntoIterator<Item = impl IntoElement>) -> Self {
+        self.0
+            .children
+            .extend(children.into_iter().map(|c| span(c.into_element().0)));
+        self
+    }
+}
+
+/// A child of a text: a bare string (a text with nothing of its own) is a
+/// piece of its content, anything else a span or an inline element.
+fn span(mut el: ElNode) -> ElNode {
+    if el.tag == Tag::Text
+        && matches!(el.kind, ElKind::Plain)
+        && el.key.is_none()
+        && el.children.is_empty()
+        && el.handlers.is_empty()
+        && el.style.is_empty()
+        && el.attrs == Attrs::default()
+    {
+        el.kind = ElKind::Raw;
+    }
+    el
+}
+
 impl Text {
     /// At most `lines` lines (0: no limit), the last one truncated.
     pub fn number_of_lines(mut self, lines: u32) -> Self {
@@ -1297,6 +1547,20 @@ impl Text {
         super::host::set(&mut self.0, Prop::MinimumFontScale(min_scale));
         self
     }
+
+    /// Whether its fonts follow the system's text size (true by default;
+    /// TS: `allowFontScaling`).
+    pub fn allow_font_scaling(mut self, allow: bool) -> Self {
+        super::host::set(&mut self.0, Prop::AllowFontScaling(allow));
+        self
+    }
+
+    /// At most this multiple of its fonts' sizes with the system's text
+    /// size (TS: `maxFontSizeMultiplier`; 0: no limit).
+    pub fn max_font_size_multiplier(mut self, multiplier: f32) -> Self {
+        super::host::set(&mut self.0, Prop::MaxFontSizeMultiplier(multiplier));
+        self
+    }
 }
 
 impl Image {
@@ -1306,15 +1570,24 @@ impl Image {
         self
     }
 
-    /// Shown until it loads (a URL or an asset).
-    pub fn placeholder(mut self, src: &str) -> Self {
+    /// Shown until it loads (a URL, an `asset:/` URI or an
+    /// [`super::ImageAsset`]).
+    pub fn placeholder(mut self, src: impl Into<super::ImageSrc>) -> Self {
+        let src = src.into();
         super::host::set(
             &mut self.0,
             Prop::Image(crate::ImageProp::DefaultSource(Some(ImageSource {
-                uri: src.into(),
-                size: None,
+                uri: src.uri.to_arc(),
+                size: src.size,
             }))),
         );
+        self
+    }
+
+    /// Draws its opaque pixels in `color` (a template image, an icon).
+    pub fn tint_color(mut self, color: impl Into<super::AdaptiveColor>) -> Self {
+        self.style()
+            .color(&[crate::StyleKey::TintColor], color.into());
         self
     }
 
@@ -1355,7 +1628,18 @@ impl Image {
     pub fn on_load_end(self, listener: Listener<()>) -> Self {
         self.on(EventKind::LoadEnd, events::typed(listener, events::unit))
     }
+
+    /// Its download went on: bytes so far and in all (at most every 100
+    /// ms; none for images already in memory).
+    pub fn on_progress(self, listener: Listener<events::ImageProgress>) -> Self {
+        self.on(
+            EventKind::Progress,
+            events::typed(listener, events::image_progress),
+        )
+    }
 }
+
+impl super::Scrollable for ListElement {}
 
 impl super::ListLayout for ListElement {
     fn config(&mut self) -> &mut ListConfig {
@@ -1437,15 +1721,18 @@ pub fn view() -> View {
     View(ElNode::new(Tag::View))
 }
 
-/// A text block showing `content`.
+/// A text block showing `content`, then its children (spans:
+/// [`ParentElement`] for [`Text`]).
 pub fn text(content: impl Into<SharedString>) -> Text {
     let mut node = ElNode::new(Tag::Text);
     node.text = Some(content.into());
     Text(node)
 }
 
-/// An image loading `src` (a URL or an asset).
-pub fn image(src: impl Into<SharedString>) -> Image {
+/// An image loading `src`: a URL, a file path or `asset:/` URI, or an
+/// [`super::ImageAsset`] (`asset!("logo@2x.png")`), which lays out at its
+/// natural size before it loads.
+pub fn image(src: impl Into<super::ImageSrc>) -> Image {
     let mut node = ElNode::new(Tag::Image);
     node.attrs.src = Some(src.into());
     Image(node)
@@ -1488,7 +1775,7 @@ impl<C: Component> ComponentElement<C> {
     pub(crate) fn new(props: C::Props) -> Self {
         let mut node = ElNode::new(Tag::View);
         node.kind = ElKind::Component(ComponentEl {
-            name: C::NAME,
+            name: super::component::name_of::<C>(),
             make: super::component::make_instance::<C>,
             spec: ComponentSpec::of::<C>,
             props: Box::new(props),
@@ -1510,6 +1797,29 @@ impl<C: Component> ComponentElement<C> {
         holder.key = Some(format!("slot:{slot}").into());
         holder.children.push(content.into_element().0);
         self.node.children.push(holder);
+        self
+    }
+
+    /// Fills its `Items` prop with rows of this render (TS: `each` and the
+    /// row renderer, `keyExtractor`, `ListHeaderComponent`, ...): the rows,
+    /// their keys, header, footer, empty view, separators, sticky rows,
+    /// viewability, the refresh and the end reached are `list`'s, rendered
+    /// and handled by this component; the layout and the styles are the
+    /// placing component's ([`ParentElement::list`]), so `list`'s own are
+    /// left out.
+    pub fn items(mut self, list: super::VirtualList) -> Self {
+        match <C::Props as super::Props>::ITEMS {
+            Some(name) => self.node.children.push(list.into_items(name)),
+            None => {
+                log::error!(target: "js", "{} has no `Items` prop to fill", super::component::name_of::<C>())
+            }
+        }
+        self
+    }
+
+    /// Puts `handle` on this component: its updates go to it.
+    pub fn component_ref(mut self, handle: &super::ComponentRef<C>) -> Self {
+        self.node.attrs.element_ref = Some(handle.element().clone());
         self
     }
 

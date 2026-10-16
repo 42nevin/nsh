@@ -3,12 +3,13 @@
 ## TypeScript
 
 - Every command that builds an app writes `.nsh/types` next to its entry (only changed files; files nsh no longer writes
-  are removed). None of it is checked in: `nsh_js::type_definitions(ui_sets)` makes the declarations of everything nsh
-  serves (`nsh-js` `declarations.rs`), and `nsh_bundler::type_definitions(elements)` the app's part. The files:
-  `nsh/index.d.ts` (`nsh`), one per module (`nsh/list.d.ts`, `nsh/ui/mobile.d.ts`, ...), `nsh/types.d.ts` (the
-  styles, the elements' props and events, `YNode`, the JSX element type; `nsh` exports them), `nsh/globals.d.ts`
-  (console, timers, frames and the web APIs), and from the bundler `nsh/jsx-runtime.d.ts` (the built-in elements and
-  the app's kebab-case components, rewritten after every build: `native-pipeline.md`) and `nsh/assets.d.ts` (what
+  are removed). None of it is checked in, and nothing in it depends on the app's code: `nsh_js::type_definitions(ui_sets)`
+  makes the declarations of everything nsh serves (`nsh-js` `declarations.rs`), and `nsh_bundler::type_definitions()`
+  the asset imports. The files: `nsh/index.d.ts` (`nsh`), one per module (`nsh/list.d.ts`, `nsh/ui/mobile.d.ts`,
+  ...), `nsh/types.d.ts` (the styles, the elements' props and events, `YNode`, the JSX namespace; `nsh` exports them),
+  `nsh/jsx-runtime.d.ts` (where `jsxImportSource` finds `JSX`: no intrinsic elements, so every tag is checked as the
+  component it names and generic ones are inferred: `native-pipeline.md`), `nsh/globals.d.ts` (console, timers,
+  frames, the web APIs and the control flow components `If` / `Each`), and from the bundler `nsh/assets.d.ts` (what
   image and font imports give). Each file declares its own names; the `import type` lines between them are worked out
   from the names each uses. `nsh init` writes a `tsconfig.json` mapping `nsh` and `nsh/*` there (`jsxImportSource:
   "nsh"`, no DOM library), so editors type-check apps without `node_modules`.
@@ -59,10 +60,28 @@
 
 ## Apps with Rust components of their own (`nsh.json` `"rust"`)
 
-`"rust": "<crate dir>"` names a library crate of the app whose `registry()` returns its UI set: a
-`nsh_core::ui::Registry::ui_set("<specifier>")` of Rust components and modules, which the app's TSX imports by that
-specifier (`examples/gallery-rs`: `import { Gallery } from "gallery/native"`). The prebuilt toolchain cannot know
-them, so `nsh` builds the app its own (`crates/nsh-cli/src/rust_app.rs`):
+`"rust": "<crate dir>"` names a library crate of the app with a `#[native_module("<specifier>")]` function at its
+root, which registers the crate's Rust components, modules and assets into its UI set, imported by the app's TSX by
+that specifier (`examples/gallery-rs`: `import { Gallery } from "gallery/native"`):
+
+```rust
+use nsh_core::ui::prelude::*;
+
+#[native_module("gallery/native")]
+fn native(registry: &mut Registry) {
+    registry.register::<Gallery>();
+    registry.assets(assets!());
+}
+```
+
+The attribute (`nsh-macros` `native_module.rs`) checks the specifier at compile time (a bare import specifier, not
+`nsh` or `nsh/...`) and makes a hidden entry of a fixed name, `__nsh_native_module() -> Registry`
+(`Registry::ui_set(specifier)`, then the function), which the generated code below calls. A second one in the crate
+fails as that name defined twice; one outside the crate's root fails at the attribute (a glob of `crate::*` in a
+block finds the entry or a stand-in whose bound reports where it goes: `#[diagnostic::on_unimplemented]`). A crate
+without one fails the generated workspace's build with what to add, the same way: the generated code glob-imports
+the app's crate in a block, which shadows its import of nsh's stand-in (`nsh_core::ui::__private`). The prebuilt
+toolchain cannot know the set, so `nsh` builds the app its own (`crates/nsh-cli/src/rust_app.rs`):
 
 - A Cargo workspace in `<app>/.nsh/rust`, written on every command (files only when they change): `cli` (the
   command line, `nsh_cli::main_with` of the mobile UI and the app's set), `ios-host` / `ios-app` (the development
@@ -77,8 +96,13 @@ them, so `nsh` builds the app its own (`crates/nsh-cli/src/rust_app.rs`):
   path, which falls back to `node_modules`), `nsh trace` renders it. The hosts `run` and `package` need are built
   for the app instead of taken from the runtime (iOS `--target` triples; Android: the prebuilt `classes.dex` with
   the app's `libnsh.so` for each ABI of the prebuilt runtime, cross-compiled with the NDK).
-- `nsh dev` / `nsh run` watch the crate too: a change to its `.rs` files or `Cargo.toml` ends the app's command line
-  with exit code 75, and `nsh` builds it and runs the command again (the app restarts; JS and TSX edits stay hot).
+- `nsh dev` / `nsh run` watch the crate too: a change to its `.rs` files, `Cargo.toml` or `assets/` ends the app's
+  command line with exit code 75, and `nsh` builds it and runs the command again (the app restarts; JS and TSX edits
+  stay hot).
+- The files the sets' crates ship (`Registry::assets(assets!())`: a crate's `assets/` directory, published as
+  `asset:/@<package>/<path>`) go with the app's imported assets: the dev server serves them
+  (`DevServer::serve_files`), `nsh build` / `package` / `publish` copy them (`build::Built::assets`: each file's path
+  and where it is), `nsh trace` reads them; the engine registers their fonts before the first render.
 
 ## Finding the runtimes
 

@@ -1,6 +1,6 @@
 # Canvas
 
-- **Canvas** (`Canvas` component, `<canvas>` element): an HTML Canvas 2D subset, recorded and replayed natively
+- **Canvas** (`Canvas` from `nsh/canvas`, the `canvas` host element): an HTML Canvas 2D subset, recorded and replayed natively
   (`nsh_core::canvas`: `Drawing { ops, slots }`). `draw={(ctx, { width, height }) => ...}` runs again when the signals it reads
   change (sizes come from `onLayout`). `CanvasRenderingContext2D`: state (`save` / `restore`, `globalAlpha`,
   `globalCompositeOperation`, line styles and dashes, shadows, `font` (CSS shorthand), `textAlign` / `textBaseline`),
@@ -20,5 +20,8 @@
   (`nsh_core::js::canvas::decode`) reads the recorded list. Recording costs: `docs/dev/performance.md`. iOS replays
   into the `drawRect:` context, keeping its own transform and path in view space; Android `CanvasBox.java` interprets an `int[]` (`encode.rs`). Not
   supported: `getImageData` / `putImageData`, filters, `isPointInPath`, SVG images.
+
+Rust components record drawings with `ui::Painter` (the same operations; `docs/dev/components.md`) and measure text
+with `RenderCx::measure_text`, on the core's text engine.
 
 The drawing format is documented in `crates/nsh-core/src/canvas.rs`.

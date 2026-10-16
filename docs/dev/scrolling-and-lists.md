@@ -6,7 +6,7 @@
   `EndDrag`, `onMomentumScrollBegin` / `End` (a glide caught by a new drag ends with `onMomentumScrollEnd`). Snapping is decided
   by `ScrollBehavior::snap_target` (core) on iOS and its Java port on Android, from the release offset, the projected glide and
   the velocity. Lists keep the visible rows in place when items are inserted above them (`splice`).
-- **Zooming** (`<scroll>`, not lists): `maximumZoomScale` above `minimumZoomScale` makes the content zoomable; `zoomScale`
+- **Zooming** (`<Scroll>`, not lists): `maximumZoomScale` above `minimumZoomScale` makes the content zoomable; `zoomScale`
   zooms when it changes, `bouncesZoom`, `pinchGestureEnabled`, `centerContent` (content smaller than the viewport is centered);
   ref `zoomTo({ scale, x, y, animated })` (content point `x`, `y` in the middle); `onScroll` reports `zoomScale` and the zoomed
   content size. iOS: the children live in a `NshZoomView` (`zoom.rs`) that UIKit scales (`viewForZoomingInScrollView:`), its
@@ -23,3 +23,5 @@
   `refreshing` / `onRefresh`, `scrollValue`. Positions, columns, sticky travel and viewability are all computed in the core; sticky cells
   are pinned natively on every scroll (`MountItem::StickyCells`: translate by `clamp(offset - start, 0, end - start)`).
 - **List internals** (the window, binding cells, recycling): `crates/nsh-core/src/core/list.rs`.
+- **Rust components**: the same props are `Scrollable`'s methods (`scroll()`, `virtual_list(..)`) and
+  `VirtualList`'s (header, footer, empty view, separators, sticky rows, viewability); `docs/dev/components.md`.

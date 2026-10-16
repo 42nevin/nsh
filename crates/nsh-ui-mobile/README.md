@@ -7,7 +7,8 @@ colors, the core lays it out in the same pass as everything else, and its intera
 stays native. JS only gets the events the component emits.
 
 - **One file per component** (`src/button.rs`), registered in `registry()` (`src/lib.rs`). Start with
-  `use nsh_core::ui::prelude::*;`.
+  `use nsh_core::ui::prelude::*;`. The JS export is the type's name (`pub struct Button` is `Button`): no name is
+  written by hand, and `the_exports_are_pinned` (`src/lib.rs`) lists them all.
 - **Props are a struct** (`#[derive(Clone, PartialEq, Props)]`), **events an enum** (`#[derive(Event)]`, or `NoEvent`),
   choices an enum (`#[derive(PropEnum)]`). The bundler generates the `nsh/ui/mobile` export and its TypeScript
   declarations from them, doc comments included, so apps write `<Button title="Save" onPress={save} />` with full
@@ -26,13 +27,15 @@ stays native. JS only gets the events the component emits.
   `.children_each(props.children, |child, at| ..)` to wrap each), `items: Items` for virtualized rows
   (`.list(props.items, |l| l.estimated_item_size(48.0), |row, at| ..)`; in JS `each` and a row renderer, like `List`).
   `at` tells the index, the count, first and last.
-  `Group` and `ListView` are the examples.
+  `Group` and `ListView` are the examples. A Rust component fills them the same way: `.child(..)`, `.fill("header",
+  ..)`, and `ListView::element(props).items(virtual_list(n, row).header(..))` for the rows.
 - **State** lives in the component's fields, set up from the first props in `setup` and adjusted in `props_changed`;
   listeners (`cx.listener(|this, event, cx| ..)`) get `&mut Self` and emit with `cx.emit(ButtonEvent::Press)`. Timers
   and async work are tasks (`cx.set_interval`, `cx.spawn` with tokio inside); keep the `Task` in a field and drop it to
   stop. Read the environment in the render (`cx.safe_area()`): it renders again when that changes. `Stepper` is the
   example, also of methods: `#[methods] impl Stepper { pub fn set_value(..), pub fn value(&self) -> f64 }` are
-  `ref.setValue(5)` and `await ref.value()` in JS.
+  `ref.setValue(5)` and `await ref.value()` in JS, and `r.update(|s, cx| s.set_value(5.0, cx))` on a
+  `ComponentRef<Stepper>` in Rust.
 - **Every host element is there**: `input()`, `scroll()`, `modal()`, `canvas(Painter::new()..)`, `web_view(url)`,
   `video(url)`, `native(name)`, with typed props and events (`on_change_text(cx.listener(|this, text: &str, cx| ..))`,
   `on_layout`, `on_pan_end`, `on_scroll`). Props that take a plain color take `cx.color(theme.x)`.
@@ -41,9 +44,10 @@ stays native. JS only gets the events the component emits.
   clearing it).
 - **Native values** move styles without renders: `cx.native_value(0.0)`, `.bind_translate_y(&v)`, `.pan_values(..)`
   (drags move it natively), `v.spring(..)` (await its `AnimationEnd` in a task). `Sheet` is the example.
-- **The component's own rows**: `virtual_list(count, move |i, at| row)` with `.keys(ids)`; rows' handlers are the
-  component's (`listener.map(move |_: &()| i)` passes the index). `SelectList` is the example. Rows outlive the
-  render: move what they read into them (copies of theme colors, an `Rc` of the data).
+- **The component's own rows**: `virtual_list(count, move |i, at| row)` with `.keys(ids)` (and `.header(..)`,
+  `.footer(..)`, `.empty(..)`, `.separator(..)`, `.sticky_header_indices(..)`, the `Scrollable` behavior); rows'
+  handlers are the component's (`listener.map(move |_: &()| i)` passes the index). `SelectList` is the example.
+  Rows outlive the render: move what they read into them (copies of theme colors, an `Rc` of the data).
 - **Shared state**: `cx.global::<G>()` in the render subscribes, `update_global` renders the readers; `cx.provide(v)` /
   `cx.context::<T>()` pass values down the tree. `catch_error` makes a component an error boundary.
 - **Modules are functions without a component**: `#[module] impl Alert { pub async fn alert(title: String, ..,

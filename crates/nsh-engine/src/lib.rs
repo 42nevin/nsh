@@ -314,7 +314,8 @@ pub trait MountSink: Send + 'static {
     /// them on screen.
     fn report_error(&self, _message: &str) {}
 
-    /// JS asked for a display frame (`requestAnimationFrame`): call
+    /// JS or a component's task asked for a display frame
+    /// (`requestAnimationFrame`, `AsyncCx::next_frame`): call
     /// [`EngineControl::frame`] at the next vsync. Requests are not repeated
     /// until that call.
     fn request_frame(&self) {}
@@ -524,7 +525,7 @@ impl EngineControl {
     }
 
     /// A display frame began, after [`MountSink::request_frame`]: runs the
-    /// `requestAnimationFrame` callbacks.
+    /// `requestAnimationFrame` callbacks and the tasks waiting for it.
     pub fn frame(&self) {
         let _ = self.tx.send(Message::Frame);
     }
@@ -749,6 +750,23 @@ impl<M: TextEngine + 'static> Driver<M> {
                     log::error!("font failed: {err}");
                     sink.report_error(&format!("font failed: {err}"));
                 }
+            }
+        }
+        // The fonts the UI sets' crates ship, before anything is measured.
+        let fonts = config
+            .ui_sets
+            .iter()
+            .flat_map(nsh_core::ui::Registry::asset_files)
+            .filter(|file| file.kind == nsh_core::ui::AssetKind::Font);
+        for font in fonts {
+            let result = match config.assets.as_deref() {
+                Some(assets) => assets.read(font.uri),
+                None => Err("this host cannot load assets".to_owned()),
+            }
+            .and_then(|data| core.register_font(&data));
+            if let Err(err) = result {
+                log::error!("font failed: {}: {err}", font.uri);
+                sink.report_error(&format!("font failed: {}: {err}", font.uri));
             }
         }
         // A task woken on any thread wakes the loop.
@@ -1137,9 +1155,12 @@ impl<M: TextEngine> State<M> {
         }
     }
 
-    /// Asks the platform for a frame when JS waits for one.
+    /// Asks the platform for a frame when JS or a component's task waits
+    /// for one.
     fn request_frame(&mut self, script: Option<&Script>, sink: &dyn MountSink) {
-        if !self.frame_requested && script.is_some_and(Script::wants_frame) {
+        if !self.frame_requested
+            && (script.is_some_and(Script::wants_frame) || self.core.wants_frame())
+        {
             self.frame_requested = true;
             sink.request_frame();
         }
@@ -1270,6 +1291,10 @@ fn ui_environment(env: &Environment, window: Size) -> nsh_core::ui::Environment 
         reduce_motion: env.reduce_motion,
         screen_reader: env.screen_reader,
         rtl: env.rtl,
+        pixel_ratio: env.pixel_ratio,
+        os: env.os,
+        os_version: env.os_version,
+        idiom: env.idiom,
     }
 }
 
@@ -1369,6 +1394,7 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
         Message::RootSize(id, size, insets) => state.core.set_root_size(id, size, insets),
         Message::Frame => {
             state.frame_requested = false;
+            state.core.run_frame(Instant::now());
             if let Some(script) = script {
                 script.run_frame();
             }

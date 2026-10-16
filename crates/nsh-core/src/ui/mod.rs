@@ -26,6 +26,7 @@
 //! `docs/dev/components.md`.
 
 pub(crate) mod animated;
+mod asset;
 mod back;
 mod component;
 mod element;
@@ -34,6 +35,10 @@ pub(crate) mod env;
 mod events;
 pub(crate) mod host;
 mod module;
+pub mod palette;
+pub(crate) mod responder;
+mod scrollable;
+pub(crate) mod services;
 pub(crate) mod status_bar;
 mod style;
 pub(crate) mod task;
@@ -42,13 +47,16 @@ mod value;
 pub(crate) mod virtual_list;
 
 pub use nsh_anim::{Curve, EaseMode, Easing, Extrapolate, Output as AnimOutput};
-pub use nsh_macros::{Event, JsObject, PropEnum, Props, methods, module};
+pub use nsh_macros::{
+    Event, JsObject, PropEnum, Props, asset, assets, methods, module, native_module,
+};
 
 pub use self::{
     animated::{
         AnimOperand, Animated, Animation, AnimationEnd, Interpolation, NativeNode, NativeValue,
         Spring, Timing,
     },
+    asset::{AssetFile, AssetKind, FileAsset, FontAsset, ImageAsset, ImageSrc},
     back::BackSubscription,
     component::{
         Component, ComponentError, ComponentSpec, Event, EventSpec, Method, MethodSpec, NoEvent,
@@ -59,26 +67,33 @@ pub use self::{
         FluentBuilder, Image, Interactive, IntoElement, Items, ListConfig, ListElement, Listener,
         ParentElement, Position, RenderCx, Slot, SlotElement, Style, Text, View, image, text, view,
     },
-    element_ref::ElementRef,
+    element_ref::{ComponentRef, ElementRef},
     env::Environment,
     events::{
-        GestureEvent, NativeEvent, PanEvent, ScrollEvent, ScrollOffset, Selection, VideoInfo,
-        VideoProgress, WebNavigation,
+        GestureEvent, ImageProgress, NativeEvent, PanEvent, ScrollEvent, ScrollOffset, Selection,
+        VideoInfo, VideoProgress, WebNavigation,
     },
     host::{
-        CanvasArg, CanvasView, Input, Modal, NativeView, Painter, Screen, Scroll, Stack, Video,
-        WebView, canvas, input, modal, native, screen, scroll, stack, video, web_view,
+        CanvasArg, CanvasPaint, CanvasView, Input, InputAccessoryView, Modal, NativeView,
+        Orientation, Painter, Screen, Scroll, Stack, Video, WebView, canvas, input,
+        input_accessory_view, modal, native, screen, scroll, stack, video, web_view, web_view_html,
     },
     module::{
         Function, FunctionCall, FunctionSpec, Module, ModuleCx, ModuleFuture, ModuleParam,
         ModuleSpec,
     },
+    responder::{ClaimRequest, PanGesture, ResponderEvent, TouchClaim},
+    scrollable::Scrollable,
+    services::{Prefetch, ToastDuration},
     status_bar::StatusBarEntry,
-    style::{AdaptiveColor, FontWeight, Length, StyleRefinement, Styled, px, relative, rgb, rgba},
+    style::{
+        AdaptiveColor, BorderCurve, FontWeight, Length, StyleRefinement, Styled, WritingDirection,
+        px, relative, rgb, rgba,
+    },
     task::{Answer, AsyncCx, DialogAnswer, ImageSize, Task, Updated, WeakComponent},
     theme::{Theme, ThemeColors, ThemeError},
     value::{JsValue, NodeRef, PropError, SharedString, TsType, TsTypes},
-    virtual_list::{ListLayout, VirtualList, virtual_list},
+    virtual_list::{ListLayout, ViewableItems, VirtualList, virtual_list},
 };
 pub(crate) use self::{
     back::BackListener,
@@ -87,12 +102,14 @@ pub(crate) use self::{
     task::{Action, AnswerSlot, Executor},
 };
 pub use crate::{
-    AccessibilityRole, AccessibilityState, AutoCapitalize, AutoFill, Dialog, DialogButton,
-    DialogButtonStyle, EdgeInsets, EllipsizeMode, EventKind, EventPayload, KeyboardDismissMode,
-    KeyboardTaps, KeyboardType, LayoutAnimation, LayoutCurve, LayoutProperty, LayoutTransition,
-    ModalAnimation, ModalPresentation, PointerEvents, ResizeMode, ReturnKeyType, ScreenAnimation,
-    SnapAlignment, StatusBarConfig, StatusBarSetting, StatusBarStyle, TouchEvent, TransformKind,
-    style::Color,
+    AccessibilityRole, AccessibilityState, AutoCapitalize, AutoFill, BlendMode, BoxShadow, Dialog,
+    DialogButton, DialogButtonStyle, EdgeInsets, EllipsizeMode, EventKind, EventPayload,
+    KeyboardDismissMode, KeyboardTaps, KeyboardType, LayoutAnimation, LayoutCurve, LayoutProperty,
+    LayoutTransition, ModalAnimation, ModalPresentation, PointerEvents, ResizeMode, ReturnKeyType,
+    ScreenAnimation, SnapAlignment, StatusBarConfig, StatusBarSetting, StatusBarStyle, TouchEvent,
+    TransformKind, TransformOrigin, Viewability,
+    platform::{Idiom, Os},
+    style::{Color, OriginLen},
 };
 
 /// Everything a component's module needs: `use nsh_core::ui::prelude::*;`.
@@ -110,13 +127,18 @@ pub mod prelude {
         // Host elements and their settings.
         AutoCapitalize,
         BackSubscription,
+        BlendMode,
+        BorderCurve,
+        BoxShadow,
         CanvasView,
         Child,
         Children,
+        ClaimRequest,
         Color,
         Component,
         ComponentElement,
         ComponentError,
+        ComponentRef,
         Context,
         Curve,
         DialogAnswer,
@@ -132,16 +154,22 @@ pub mod prelude {
         EventPayload,
         Extrapolate,
         FluentBuilder,
+        FontAsset,
         FontWeight,
         // Typed events.
         GestureEvent,
+        ImageAsset,
         Input,
+        InputAccessoryView,
         Interactive,
         Interpolation,
         IntoElement,
         Items,
         JsObject,
         JsValue,
+        // Scrolling and lists.
+        KeyboardDismissMode,
+        KeyboardTaps,
         KeyboardType,
         Length,
         ListLayout,
@@ -156,24 +184,30 @@ pub mod prelude {
         NativeValue,
         NativeView,
         NoEvent,
+        Orientation,
         Painter,
         PanEvent,
+        PanGesture,
         ParentElement,
         PointerEvents,
         Position,
         PropEnum,
         Props,
+        Registry,
         RenderCx,
         ResizeMode,
+        ResponderEvent,
         ReturnKeyType,
         Screen,
         ScreenAnimation,
         Scroll,
         ScrollEvent,
         ScrollOffset,
+        Scrollable,
         Selection,
         SharedString,
         Slot,
+        SnapAlignment,
         Spring,
         Stack,
         Styled,
@@ -181,21 +215,30 @@ pub mod prelude {
         Text,
         Theme,
         Timing,
+        ToastDuration,
+        TouchClaim,
         Video,
         VideoInfo,
         VideoProgress,
         View,
+        Viewability,
+        ViewableItems,
         VirtualList,
         WeakComponent,
         WebNavigation,
         WebView,
+        WritingDirection,
+        asset,
+        assets,
         canvas,
         image,
         input,
+        input_accessory_view,
         methods,
         modal,
         module,
         native,
+        native_module,
         px,
         relative,
         rgb,
@@ -208,11 +251,45 @@ pub mod prelude {
         view,
         virtual_list,
         web_view,
+        web_view_html,
     };
 }
 
-/// What the derive macros' code names.
+/// What the macros' code and nsh's generated workspace name.
 #[doc(hidden)]
 pub mod __private {
     pub use serde_json::Map as JsonMap;
+
+    /// Implemented by nothing: what the generated workspace of an app
+    /// calls when the app's crate has no `#[native_module]`
+    /// ([`no_native_module`]) fails the build with this message.
+    #[diagnostic::on_unimplemented(
+        message = "the app's crate (nsh.json \"rust\") has no `#[native_module(\"…\")]` at its root",
+        label = "the app's UI set",
+        note = "add to the crate's lib.rs, with the specifier its TSX imports the set by: `#[native_module(\"my-app/native\")] fn native(registry: &mut Registry) {{ registry.register::<MyComponent>(); }}` (`use nsh_core::ui::prelude::*`)"
+    )]
+    pub trait NoNativeModule {}
+
+    /// Implemented by nothing: `#[native_module]` in a module other than
+    /// the crate's root fails with this message.
+    #[diagnostic::on_unimplemented(
+        message = "`#[native_module]` goes at the root of the crate (lib.rs)",
+        label = "nsh's generated workspace calls the entry it makes there",
+        note = "move the function with `#[native_module(\"…\")]` to the crate's lib.rs"
+    )]
+    pub trait NotAtRoot {}
+
+    /// Stands in for the entry `#[native_module]` makes
+    /// (`app::__nsh_native_module`) when the app's crate has none: a glob
+    /// import of the crate in a block shadows it, so it is only called, and
+    /// fails to compile, without the entry.
+    pub fn no_native_module<R: NoNativeModule>() -> R {
+        unreachable!("never compiles")
+    }
+
+    /// Stands in for `crate::__nsh_native_module` when `#[native_module]`
+    /// is not at the crate's root (as [`no_native_module`]).
+    pub fn native_module_not_at_root<R: NotAtRoot>() -> R {
+        unreachable!("never compiles")
+    }
 }

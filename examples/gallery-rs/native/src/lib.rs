@@ -4,19 +4,20 @@
 //! nsh's Rust component API. The app imports the set as `gallery/native`
 //! (`nsh.json` `"rust"`).
 
+mod assets;
 mod demos;
 mod nav;
 mod ui;
 
-use nsh_core::ui::{Registry, prelude::*};
+use nsh_core::ui::prelude::*;
 
 use crate::nav::Routes;
 
 /// The UI set of the gallery: what `App.tsx` imports from `gallery/native`.
-pub fn registry() -> Registry {
-    let mut registry = Registry::ui_set("gallery/native");
+#[native_module("gallery/native")]
+fn native(registry: &mut Registry) {
     registry.register::<Gallery>();
-    registry
+    registry.assets(assets!());
 }
 
 /// The gallery: a native stack of its index and the screens pushed on it.
@@ -26,7 +27,6 @@ pub struct Gallery {
 }
 
 impl Component for Gallery {
-    const NAME: &'static str = "gallery.gallery";
     type Props = ();
     type Event = NoEvent;
 

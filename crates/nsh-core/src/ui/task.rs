@@ -25,7 +25,7 @@ use std::{
 use rustc_hash::FxHashMap;
 use tokio::runtime::Handle;
 
-use super::{Component, Context, element::ErasedCx};
+use super::{Component, Context, Prefetch, ToastDuration, element::ErasedCx, services};
 use crate::{Command, Dialog, JsonValue, NodeId, ROOT_ID, StatusBarSetting, time::Instant};
 
 type LocalFuture = Pin<Box<dyn Future<Output = ()>>>;
@@ -87,6 +87,13 @@ pub(crate) enum Action {
         animation: nsh_anim::AnimId,
         end: AnswerSlot<bool>,
     },
+    /// A component's own list reports the rows viewable now (they stayed
+    /// so for its minimum view time).
+    ReportViewable(NodeId),
+    /// The start of the next display frame resolves the slot.
+    Frame(AnswerSlot<Instant>),
+    /// Changes the layout direction's policy.
+    Direction(super::services::Direction),
 }
 
 /// An image's size in pixels (`Image.getSize`).
@@ -437,6 +444,55 @@ impl AsyncCx {
         self.act(status_bar(patch));
     }
 
+    /// The screen reader reads `message` (TS:
+    /// `AccessibilityInfo.announceForAccessibility`).
+    pub fn announce_for_accessibility(&self, message: impl Into<String>) {
+        self.act(services::announce(message.into()));
+    }
+
+    /// Shows `message` at the bottom of the screen (Android's toasts, TS:
+    /// `Toast.show`); nothing happens elsewhere.
+    pub fn toast(&self, message: impl Into<String>, duration: ToastDuration) {
+        self.act(services::toast(message.into(), duration));
+    }
+
+    /// The size in pixels of the image at `uri` (TS: `Image.getSize`); its
+    /// bytes stay loaded for the views that show it next.
+    pub fn image_size(&self, uri: impl Into<String>) -> Answer<Result<ImageSize, String>> {
+        let (answer, action) = services::image_size(uri.into());
+        self.act(action);
+        answer
+    }
+
+    /// Loads the image at `uri` ahead of showing it (TS: `Image.prefetch`).
+    pub fn prefetch_image(&self, uri: impl Into<String>) -> Prefetch {
+        let (answer, action) = services::prefetch(uri.into());
+        self.act(action);
+        answer
+    }
+
+    /// Completes when the next display frame starts, with its time (TS:
+    /// what `requestAnimationFrame` waits for). Awaited in a loop, it runs
+    /// once per frame.
+    pub fn next_frame(&self) -> Answer<Instant> {
+        let (answer, action) = services::frame();
+        self.act(action);
+        answer
+    }
+
+    /// Lays the surface out right to left whatever the user's language
+    /// (TS: `I18nManager.forceRTL`), at once; `false` follows the language
+    /// again.
+    pub fn force_rtl(&self, force: bool) {
+        self.act(Action::Direction(services::Direction::Force(force)));
+    }
+
+    /// Whether a right-to-left language lays the surface out right to left
+    /// (TS: `I18nManager.allowRTL`; true by default).
+    pub fn allow_rtl(&self, allow: bool) {
+        self.act(Action::Direction(services::Direction::Allow(allow)));
+    }
+
     /// Completes after `delay` (TS: what `setTimeout` waits for):
     /// `tokio::time::sleep`.
     #[cfg(not(target_arch = "wasm32"))]
@@ -511,6 +567,14 @@ impl<C> Clone for WeakComponent<C> {
 }
 
 impl<C: Component> WeakComponent<C> {
+    pub(crate) fn new(host: NodeId, executor: Weak<Executor>) -> Self {
+        Self {
+            host,
+            executor,
+            _component: PhantomData,
+        }
+    }
+
     /// Changes the component's state: `f` runs on the engine thread right
     /// after this poll, with the component and a [`Context`]
     /// (`cx.notify()` renders it again). Await it for `f`'s result, `None`
@@ -577,6 +641,31 @@ impl<R> Future for Updated<R> {
 /// Starts `future` as a task of `host`, to run to its end.
 pub(crate) fn spawn_raw(executor: &Rc<Executor>, host: NodeId, future: LocalFuture) -> u64 {
     executor.spawn(host, future)
+}
+
+/// Applies `action` after `delay`, as a task of `host` (dropping the task
+/// cancels it).
+pub(crate) fn act_after(
+    executor: &Rc<Executor>,
+    host: NodeId,
+    delay: Duration,
+    action: Action,
+) -> Task<()> {
+    let weak = Rc::downgrade(executor);
+    let cx = AsyncCx::new(weak.clone());
+    let id = executor.spawn(
+        host,
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            cx.act(action);
+        }),
+    );
+    Task {
+        executor: weak,
+        id,
+        output: Rc::new(RefCell::new(Output::default())),
+        detached: false,
+    }
 }
 
 /// Starts `f(this, cx)` as a task of component `host`.

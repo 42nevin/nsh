@@ -21,7 +21,8 @@ crates/
                        mount items; CSS values (`css.rs`: colors, lengths, shadows, gradients, filters), effects (`effects.rs`), Tailwind (`tailwind/`);
                        Rust components (`ui/`: elements, typed styles, the theme; `core/components.rs`); the runtime's Rust
                        modules (`runtime/`: `nsh/android`'s Toast, `nsh/image`, ...; their JS face is made from their specs)
-  nsh-macros/          Derives of Rust components (`Props`, `PropEnum`, `Event`, `JsObject`), `#[methods]`, `#[module]`, `Styled`'s spacing methods;
+  nsh-macros/          Derives of Rust components (`Props`, `PropEnum`, `Event`, `JsObject`), `#[methods]`, `#[module]`,
+                       `#[native_module("…")]` (an app crate's UI set, which `rust_app.rs`'s generated code calls), `Styled`'s spacing methods;
                        `HostProps` (the host elements' props: decoding, defaults and TS), `JsOps` (recorded operations: canvas)
   nsh-ui-mobile/       The components and modules of `nsh/ui/mobile` (Button, SafeAreaView, StatusBar, Alert, ...), written in Rust; their JS
                        face is made from their specs (nsh-js `components.rs`), their TypeScript declarations generated
@@ -41,10 +42,10 @@ crates/
                        imports of the native modules stay imports (`plugin.rs`), so a bundle holds only the app's code;
                        the app's themes (nsh.json `tailwind` / `theme`, checked, handed to the renderer by the entry) and the
                        unknown-class check (`classes.rs`);
-                       development bundles with hot module replacement (`hot.rs`); the app's part of `.nsh/types` (`types.rs`:
-                       its kebab-case components' JSX types, asset imports); feature `bundle` (default off in the workspace;
-                       the CLI turns it on) is all of that, without it only `compile_module` (`compile.rs`: one module, no
-                       rolldown) is left, which also builds for WebAssembly (the website's playground)
+                       development bundles with hot module replacement (`hot.rs`); the bundler's part of `.nsh/types`
+                       (`types.rs`: asset imports); feature `bundle` (default off in the workspace; the CLI turns it on) is
+                       all of that, without it only `compile_module` (`compile.rs`: one module, no rolldown) is left, which
+                       also builds for WebAssembly (the website's playground)
   nsh-dev/             Dev tooling: dev server protocol, server (CLI, feature `server`), client (host, feature `client`)
   nsh-platform-ios/    UIKit backend (iOS / simulator / Mac Catalyst): native view mounting, CoreText text engine, input, AppView, standalone app;
                        feature `dev`: dev server client, log forwarding, error overlay; feature `embed`: the C ABI (`embed.rs`,
@@ -58,8 +59,8 @@ crates/
   nsh-ios-host/        Development host app (Catalyst / iOS simulator); connects to a dev server or runs a local bundle
   nsh-ios-app/         Release runner: the executable of iOS apps built by `nsh package`
   nsh-cli/             The `nsh` command line (a library: `main_with(ui_sets)`): init / build / trace / dev / run / package; keygen /
-                       certify / publish / verify / revoke; apps with Rust components of their own (`rust_app.rs`,
-                       docs/dev/tooling.md)
+                       certify / publish / verify / revoke; apps with Rust components of their own (`rust_app.rs`: the crate
+                       nsh.json `"rust"` names has a `#[native_module("…")]` fn; docs/dev/tooling.md)
   xtask/               Maintainer tasks: `cargo xtask android` (Android runtime), `ios-embed` (the iOS SDK), `dist` (the distribution),
                        `web` (the WebAssembly runtime and the website's demos)
 docs/                 Documentation; `docs/dev/`: for developers of nsh (architecture, internals, decisions, pitfalls)
@@ -178,6 +179,12 @@ host it is an empty crate, so always run clippy on platform code with the Cataly
 ## Code conventions
 
 - Formatting: `cargo +nightly fmt --all`, configured in `.rustfmt.toml`.
+- TSX tags are PascalCase, everywhere (examples, docs, tests): every tag names a binding in scope, only `<If>` and
+  `<Each>` are globals that need no import. The primitives have one home each: `View`, `Text`, `Scroll`, `Input` from
+  `nsh`, `Image` from `nsh/image`, `List` from `nsh/list`, `Canvas` from `nsh/canvas`, `WebView` from `nsh/webview`,
+  `Video` from `nsh/video`, `Modal` from `nsh/ui/mobile`, `InputAccessoryView` from `nsh/ios`; the compiler makes
+  their tags in place (`jsx::PRIMITIVES`). Lowercase tags are compile errors: TypeScript checks a lowercase tag
+  against one global type per name, so generic components (`List`, `Each`) and local ones would lose their types.
 - Workspace lints: `missing_docs = warn`, `unreachable_pub = deny`, `private_interfaces = deny`. New crates must set `[lints] workspace = true`.
   They cover nsh's own Rust crates only: not the Java / Swift / TS sources, and never the apps built with nsh.
   - Every public API has a doc comment.

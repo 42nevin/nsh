@@ -15,7 +15,8 @@ use crate::{Command, Dialog, JsonValue, LayoutAnimation, ROOT_ID, StatusBarSetti
 
 /// A JS object of functions (`#[module]` implements it).
 pub trait Module {
-    /// Its JS name (the struct's: `Alert`).
+    /// Its JS name: the type's own (`#[module] impl Alert`: `Alert`), which
+    /// `#[module]` writes; JS calls its functions by it (`Alert.alert`).
     const NAME: &'static str;
     /// Documentation (the `impl` block's doc comment).
     const DOC: &'static str;
@@ -171,6 +172,38 @@ impl<'a> ModuleCx<'a> {
             ROOT_ID,
             Command::LayoutAnimation(animation),
         ));
+    }
+
+    /// The screen reader reads `message` (TS:
+    /// `AccessibilityInfo.announceForAccessibility`).
+    pub fn announce_for_accessibility(&mut self, message: impl Into<String>) {
+        self.inner
+            .actions
+            .push(super::services::announce(message.into()));
+    }
+
+    /// Shows `message` at the bottom of the screen (Android's toasts);
+    /// nothing happens elsewhere.
+    pub fn toast(&mut self, message: impl Into<String>, duration: super::ToastDuration) {
+        self.inner
+            .actions
+            .push(super::services::toast(message.into(), duration));
+    }
+
+    /// Lays the surface out right to left whatever the user's language
+    /// (TS: `I18nManager.forceRTL`); `false` follows the language again.
+    pub fn force_rtl(&mut self, force: bool) {
+        self.inner
+            .actions
+            .push(Action::Direction(super::services::Direction::Force(force)));
+    }
+
+    /// Whether a right-to-left language lays the surface out right to left
+    /// (TS: `I18nManager.allowRTL`; true by default).
+    pub fn allow_rtl(&mut self, allow: bool) {
+        self.inner
+            .actions
+            .push(Action::Direction(super::services::Direction::Allow(allow)));
     }
 
     /// Asks the platform for `action` (the runtime's own modules).

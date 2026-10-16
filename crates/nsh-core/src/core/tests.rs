@@ -2910,7 +2910,6 @@ mod components {
     }
 
     impl Component for Tally {
-        const NAME: &'static str = "test.tally";
         type Props = TallyProps;
         type Event = TallyEvent;
 
@@ -2989,7 +2988,7 @@ mod components {
                 },
                 Op::SetProp {
                     id: 2,
-                    prop: Prop::Component("test.tally".into()),
+                    prop: Prop::Component(std::any::type_name::<Tally>().into()),
                 },
                 prop("label", json!("Hits")),
                 Op::Create {
@@ -3109,7 +3108,6 @@ mod components {
     }
 
     impl Component for Card {
-        const NAME: &'static str = "test.card";
         type Props = CardProps;
         type Event = NoEvent;
 
@@ -3138,7 +3136,7 @@ mod components {
                 },
                 Op::SetProp {
                     id: 2,
-                    prop: Prop::Component("test.card".into()),
+                    prop: Prop::Component(std::any::type_name::<Card>().into()),
                 },
                 // The glue's node for `header`, then its JSX.
                 Op::Create {
@@ -3238,7 +3236,6 @@ mod components {
     }
 
     impl Component for Outer {
-        const NAME: &'static str = "test.outer";
         type Props = OuterProps;
         type Event = OuterEvent;
 
@@ -3277,7 +3274,7 @@ mod components {
                 },
                 Op::SetProp {
                     id: 2,
-                    prop: Prop::Component("test.outer".into()),
+                    prop: Prop::Component(std::any::type_name::<Outer>().into()),
                 },
                 Op::Insert {
                     parent: ROOT_ID,
@@ -3331,7 +3328,7 @@ mod components {
                 },
                 Op::SetProp {
                     id: 2,
-                    prop: Prop::Component("test.tally".into()),
+                    prop: Prop::Component(std::any::type_name::<Tally>().into()),
                 },
                 Op::SetProp {
                     id: 2,
@@ -3386,7 +3383,6 @@ mod components {
     struct SwatchProps {}
 
     impl Component for Swatch {
-        const NAME: &'static str = "test.swatch";
         type Props = SwatchProps;
         type Event = NoEvent;
 
@@ -3414,7 +3410,7 @@ mod components {
                 },
                 Op::SetProp {
                     id: 2,
-                    prop: Prop::Component("test.swatch".into()),
+                    prop: Prop::Component(std::any::type_name::<Swatch>().into()),
                 },
                 Op::Insert {
                     parent: ROOT_ID,
@@ -3460,7 +3456,6 @@ mod components {
     }
 
     impl Component for Rows {
-        const NAME: &'static str = "test.rows";
         type Props = RowsProps;
         type Event = NoEvent;
 
@@ -3494,7 +3489,7 @@ mod components {
             },
             Op::SetProp {
                 id: 2,
-                prop: Prop::Component("test.rows".into()),
+                prop: Prop::Component(std::any::type_name::<Rows>().into()),
             },
         ];
         ops.extend(child(4));
@@ -3595,7 +3590,6 @@ mod components {
     }
 
     impl Component for Clock {
-        const NAME: &'static str = "test.clock";
         type Props = ClockProps;
         type Event = ClockEvent;
 
@@ -3647,7 +3641,6 @@ mod components {
     struct LoaderProps {}
 
     impl Component for Loader {
-        const NAME: &'static str = "test.loader";
         type Props = LoaderProps;
         type Event = NoEvent;
 
@@ -3721,7 +3714,7 @@ mod components {
                 ],
             )
         };
-        mount(&mut c, 2, "test.clock");
+        mount(&mut c, 2, std::any::type_name::<Clock>());
         assert_eq!(texts(&c.commit().unwrap()), ["0 narrow"]);
 
         // The interval (a task: a timer, then an update) ticks to 3,
@@ -3762,12 +3755,12 @@ mod components {
         assert!(texts(&c.commit().unwrap()).contains(&"10 wide".to_owned()));
 
         // A task with background work and a tokio timer.
-        mount(&mut c, 4, "test.loader");
+        mount(&mut c, 4, std::any::type_name::<Loader>());
         assert!(texts(&c.commit().unwrap()).contains(&"loading".to_owned()));
         run_until(&mut c, |s| s.iter().any(|t| t == "loaded 3628800"));
 
         // A released component's tasks end with it.
-        mount(&mut c, 6, "test.clock");
+        mount(&mut c, 6, std::any::type_name::<Clock>());
         c.commit();
         assert_eq!(c.components.executor.task_count(), 1);
         apply(
@@ -3794,7 +3787,6 @@ mod components {
     }
 
     impl Component for Form {
-        const NAME: &'static str = "test.form";
         type Props = FormProps;
         type Event = NoEvent;
 
@@ -3855,7 +3847,7 @@ mod components {
                 },
                 Op::SetProp {
                     id: 2,
-                    prop: Prop::Component("test.form".into()),
+                    prop: Prop::Component(std::any::type_name::<Form>().into()),
                 },
                 Op::Insert {
                     parent: ROOT_ID,
@@ -3965,7 +3957,6 @@ mod components {
     }
 
     impl Component for Theming {
-        const NAME: &'static str = "test.theming";
         type Props = WithChildren;
         type Event = NoEvent;
 
@@ -3986,7 +3977,6 @@ mod components {
     struct AccentSwatch;
 
     impl Component for AccentSwatch {
-        const NAME: &'static str = "test.accent_swatch";
         type Props = FormProps;
         type Event = NoEvent;
 
@@ -4018,13 +4008,13 @@ mod components {
                 },
             ]
         };
-        let mut ops = host(2, "test.theming");
+        let mut ops = host(2, std::any::type_name::<Theming>());
         ops.push(Op::Create {
             id: 4,
             tag: Tag::View,
         });
-        ops.extend(host(6, "test.accent_swatch"));
-        ops.extend(host(8, "test.accent_swatch"));
+        ops.extend(host(6, std::any::type_name::<AccentSwatch>()));
+        ops.extend(host(8, std::any::type_name::<AccentSwatch>()));
         for (parent, child) in [(4, 6), (2, 4), (ROOT_ID, 2), (ROOT_ID, 8)] {
             ops.push(Op::Insert {
                 parent,
@@ -4058,7 +4048,6 @@ mod components {
     }
 
     impl Component for Sheet {
-        const NAME: &'static str = "test.sheet";
         type Props = FormProps;
         type Event = NoEvent;
 
@@ -4110,7 +4099,7 @@ mod components {
                 },
                 Op::SetProp {
                     id: 2,
-                    prop: Prop::Component("test.sheet".into()),
+                    prop: Prop::Component(std::any::type_name::<Sheet>().into()),
                 },
                 Op::Insert {
                     parent: ROOT_ID,
@@ -4208,7 +4197,6 @@ mod components {
     }
 
     impl Component for Inbox {
-        const NAME: &'static str = "test.inbox";
         type Props = FormProps;
         type Event = NoEvent;
 
@@ -4256,7 +4244,7 @@ mod components {
                 },
                 Op::SetProp {
                     id: 2,
-                    prop: Prop::Component("test.inbox".into()),
+                    prop: Prop::Component(std::any::type_name::<Inbox>().into()),
                 },
                 Op::Insert {
                     parent: ROOT_ID,
@@ -4305,7 +4293,6 @@ mod components {
     }
 
     impl Component for Boundary {
-        const NAME: &'static str = "test.boundary";
         type Props = WithChildren;
         type Event = NoEvent;
 
@@ -4339,7 +4326,6 @@ mod components {
     }
 
     impl Component for Faulty {
-        const NAME: &'static str = "test.faulty";
         type Props = FaultyProps;
         type Event = NoEvent;
 
@@ -4366,12 +4352,12 @@ mod components {
                 },
             ]
         };
-        let mut ops = host(2, "test.boundary");
+        let mut ops = host(2, std::any::type_name::<Boundary>());
         ops.push(Op::Create {
             id: 4,
             tag: Tag::View,
         });
-        ops.extend(host(6, "test.faulty"));
+        ops.extend(host(6, std::any::type_name::<Faulty>()));
         for (parent, child) in [(4, 6), (2, 4), (ROOT_ID, 2)] {
             ops.push(Op::Insert {
                 parent,
@@ -4384,7 +4370,13 @@ mod components {
 
         // A listener panics: the boundary shows its fallback.
         assert!(c.component_event(6, EventKind::Press, &EventPayload::None));
-        assert_eq!(texts(&c.commit().unwrap()), ["oops: test.faulty (pressed)"]);
+        assert_eq!(
+            texts(&c.commit().unwrap()),
+            [format!(
+                "oops: {} (pressed)",
+                std::any::type_name::<Faulty>()
+            )]
+        );
         // Again: the content is back.
         assert!(c.component_event(2, EventKind::Press, &EventPayload::None));
         c.commit();
@@ -4399,7 +4391,481 @@ mod components {
         );
         assert_eq!(
             texts(&c.commit().unwrap()),
-            ["oops: test.faulty (exploded)"]
+            [format!(
+                "oops: {} (exploded)",
+                std::any::type_name::<Faulty>()
+            )]
         );
+    }
+
+    /// A sentence with a link, a bold span and a badge inside it.
+    #[derive(Default)]
+    struct Sentence {
+        taps: u32,
+        long: bool,
+    }
+
+    impl Component for Sentence {
+        type Props = ();
+        type Event = NoEvent;
+
+        fn render(&self, _: &(), cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            view().child(
+                text(format!("Tapped {} ", self.taps))
+                    .text_size(px(16.0))
+                    .child(text("the link").underline().on_press(cx.listener(
+                        |this: &mut Self, _, cx| {
+                            this.taps += 1;
+                            this.long = true;
+                            cx.notify();
+                        },
+                    )))
+                    .child(", ")
+                    .child(text("bold").font_weight(FontWeight::BOLD))
+                    .when(self.long, |t| t.child(" and more"))
+                    .child(view().size(px(10.0)).bg(rgb(0xff0000))),
+            )
+        }
+    }
+
+    #[test]
+    fn rust_texts_nest_spans_links_and_inline_views() {
+        let mut c = core();
+        c.mount_root(&crate::ui::Root::new::<Sentence>(|| ()));
+        let batch = c.commit().unwrap();
+        let text = |batch: &MountBatch| {
+            batch.items.iter().find_map(|i| match i {
+                MountItem::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+        };
+        let t = text(&batch).expect("one paragraph");
+        assert_eq!(t.text, "Tapped 0 the link, bold\u{fffc}");
+        assert_eq!(t.attachments.len(), 1, "the view sits in the text");
+        assert!(t.spans.iter().any(|s| s.style.font_weight == 700));
+        let link = t.links[0];
+        assert_eq!((link.start, link.end), (9, 17));
+        // Only the block and the inline view have native views.
+        let views = batch
+            .items
+            .iter()
+            .filter(|i| matches!(i, MountItem::Create { .. }))
+            .count();
+        assert_eq!(views, 3, "the root's host, the text and the view");
+        // The link takes the press; the content changes in place.
+        assert!(c.component_event(link.node, EventKind::Press, &EventPayload::None));
+        let t = text(&c.commit().unwrap()).expect("built again");
+        // A piece added between a span and the view goes in its place.
+        assert_eq!(t.text, "Tapped 1 the link, bold and more\u{fffc}");
+    }
+}
+
+/// Rust components' touches and responder (`touch.rs`).
+mod touch {
+    use super::*;
+    use crate::{
+        TouchEvent, TouchPhase, TouchPoint,
+        ui::{ClaimRequest, ResponderEvent, TouchClaim, prelude::*},
+    };
+
+    /// An outer view taking horizontal swipes from an inner one that claims
+    /// touches on start.
+    #[derive(Default)]
+    struct Pad {
+        log: Vec<String>,
+    }
+
+    #[derive(Clone, PartialEq, Props)]
+    struct PadProps {
+        #[prop(default)]
+        keep: bool,
+    }
+
+    impl Pad {
+        fn note(
+            cx: &RenderCx<'_, Self>,
+            what: &'static str,
+            f: fn(&ResponderEvent) -> String,
+        ) -> Listener<ResponderEvent> {
+            cx.listener(move |this: &mut Self, e: &ResponderEvent, cx| {
+                this.log.push(format!("{what}{}", f(e)));
+                cx.notify();
+            })
+        }
+    }
+
+    impl Component for Pad {
+        type Props = PadProps;
+        type Event = NoEvent;
+
+        fn render(&self, props: &PadProps, cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            let none = |_: &ResponderEvent| String::new();
+            view()
+                .on_touch(cx.listener(|this: &mut Self, t: &TouchEvent, _| {
+                    this.log.push(format!("touch {:?}", t.phase));
+                }))
+                .claim_touches(TouchClaim::on_move().capture().ask(cx.listener(
+                    |_: &mut Self, r: &ClaimRequest, _| {
+                        if r.event.gesture.dx.abs() > 50.0 {
+                            r.claim();
+                        }
+                    },
+                )))
+                .on_responder_grant(Self::note(cx, "outer grant", none))
+                .on_responder_reject(Self::note(cx, "outer reject", none))
+                .child(
+                    view()
+                        .size(px(100.0))
+                        .claim_touches(TouchClaim::on_start())
+                        .keep_touches(props.keep)
+                        .on_responder_grant(Self::note(cx, "grant at ", |e| {
+                            format!("{},{}", e.location_x, e.location_y)
+                        }))
+                        .on_responder_move(Self::note(cx, "move ", |e| {
+                            format!("{},{}", e.gesture.dx, e.gesture.dy)
+                        }))
+                        .on_responder_release(Self::note(cx, "release ", |e| {
+                            format!("{:.2}", e.gesture.vx)
+                        }))
+                        .on_responder_terminate(Self::note(cx, "terminate", none)),
+                )
+                .child(text(self.log.join("|")))
+        }
+    }
+
+    fn touch(phase: TouchPhase, path: &[NodeId], x: f32, t: f64) -> EventPayload {
+        EventPayload::Touch(Box::new(TouchEvent {
+            phase,
+            timestamp: t,
+            points: vec![TouchPoint {
+                id: 7,
+                target: path[0],
+                path: if phase == TouchPhase::Start {
+                    path.to_vec()
+                } else {
+                    Vec::new()
+                },
+                page_x: x,
+                page_y: 100.0,
+                location_x: x - 10.0,
+                location_y: 5.0,
+                changed: true,
+            }],
+        }))
+    }
+
+    fn log(batch: &MountBatch) -> Option<String> {
+        batch.items.iter().rev().find_map(|i| match i {
+            MountItem::Text { text, .. } => Some(text.text.clone()),
+            _ => None,
+        })
+    }
+
+    fn commands(batch: &MountBatch) -> Vec<(NodeId, Command)> {
+        batch
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::Command { id, command } => Some((*id, command.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The pad mounted: the core, the outer node and the inner one (both
+    /// listen to touches).
+    fn pad(keep: bool) -> (Core<FakeEngine>, NodeId, NodeId) {
+        let mut c = core();
+        c.mount_root(&crate::ui::Root::new::<Pad>(move || PadProps { keep }));
+        let batch = c.commit().unwrap();
+        let listening: Vec<NodeId> = batch
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::Events { id, events } if events.contains(EventKind::Touch) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let [outer, inner] = listening[..] else {
+            panic!("two listening views: {listening:?}");
+        };
+        (c, outer, inner)
+    }
+
+    #[test]
+    fn an_element_claims_the_touches_on_start_and_blocks_scrolling() {
+        let (mut c, outer, inner) = pad(false);
+        let path = [inner, outer];
+        // The root's touches: the components hear theirs, JS still gets
+        // the event for its own nodes.
+        assert!(!c.component_event(
+            ROOT_ID,
+            EventKind::Touch,
+            &touch(TouchPhase::Start, &path, 20.0, 0.0)
+        ));
+        let batch = c.commit().unwrap();
+        assert_eq!(log(&batch).unwrap(), "touch Start|grant at 10,5");
+        assert_eq!(
+            commands(&batch),
+            [(inner, Command::SetJsResponder { block: true })]
+        );
+        c.component_event(
+            ROOT_ID,
+            EventKind::Touch,
+            &touch(TouchPhase::Move, &path, 40.0, 16.0),
+        );
+        let batch = c.commit().unwrap();
+        assert_eq!(
+            log(&batch).unwrap(),
+            "touch Start|grant at 10,5|touch Move|move 20,0"
+        );
+        c.component_event(
+            ROOT_ID,
+            EventKind::Touch,
+            &touch(TouchPhase::End, &path, 40.0, 32.0),
+        );
+        let batch = c.commit().unwrap();
+        assert!(log(&batch).unwrap().ends_with("|touch End|release 0.88"));
+        assert_eq!(commands(&batch), [(ROOT_ID, Command::ClearJsResponder)]);
+    }
+
+    #[test]
+    fn a_capturing_claim_takes_the_touches_over_unless_they_are_kept() {
+        let (mut c, outer, inner) = pad(false);
+        let path = [inner, outer];
+        let send = |c: &mut Core<FakeEngine>, phase, x, t| {
+            c.component_event(ROOT_ID, EventKind::Touch, &touch(phase, &path, x, t));
+        };
+        send(&mut c, TouchPhase::Start, 0.0, 0.0);
+        send(&mut c, TouchPhase::Move, 30.0, 16.0);
+        // Far enough sideways: the outer view asks and claims.
+        send(&mut c, TouchPhase::Move, 80.0, 32.0);
+        let batch = c.commit().unwrap();
+        let text = log(&batch).unwrap();
+        assert!(
+            text.ends_with("move 30,0|touch Move|terminate|outer grant"),
+            "{text}"
+        );
+        assert_eq!(
+            commands(&batch).last(),
+            Some(&(outer, Command::SetJsResponder { block: true }))
+        );
+
+        // An inner responder that keeps the touches rejects the claim.
+        let (mut c, outer, inner) = pad(true);
+        let path = [inner, outer];
+        let send = |c: &mut Core<FakeEngine>, phase, x, t| {
+            c.component_event(ROOT_ID, EventKind::Touch, &touch(phase, &path, x, t));
+        };
+        send(&mut c, TouchPhase::Start, 0.0, 0.0);
+        send(&mut c, TouchPhase::Move, 80.0, 16.0);
+        let text = log(&c.commit().unwrap()).unwrap();
+        assert!(text.ends_with("|outer reject|move 80,0"), "{text}");
+        // A cancel (a native gesture took over) terminates it.
+        send(&mut c, TouchPhase::Cancel, 80.0, 32.0);
+        let batch = c.commit().unwrap();
+        assert!(log(&batch).unwrap().ends_with("|terminate"));
+        assert_eq!(commands(&batch), [(ROOT_ID, Command::ClearJsResponder)]);
+    }
+
+    #[test]
+    fn js_and_component_responders_share_the_native_block() {
+        let (mut c, outer, inner) = pad(false);
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+                Op::Command {
+                    id: 2,
+                    command: Command::SetJsResponder { block: true },
+                },
+            ],
+        );
+        assert_eq!(
+            commands(&c.commit().unwrap()),
+            [(2, Command::SetJsResponder { block: true })]
+        );
+        // A component's responder blocks around itself while it has the
+        // touches; when it lets go, JS's block is back.
+        c.component_event(
+            ROOT_ID,
+            EventKind::Touch,
+            &touch(TouchPhase::Start, &[inner, outer], 0.0, 0.0),
+        );
+        assert_eq!(
+            commands(&c.commit().unwrap()),
+            [(inner, Command::SetJsResponder { block: true })]
+        );
+        c.component_event(
+            ROOT_ID,
+            EventKind::Touch,
+            &touch(TouchPhase::End, &[inner, outer], 0.0, 16.0),
+        );
+        assert_eq!(
+            commands(&c.commit().unwrap()),
+            [(2, Command::SetJsResponder { block: true })]
+        );
+        apply(
+            &mut c,
+            vec![Op::Command {
+                id: ROOT_ID,
+                command: Command::ClearJsResponder,
+            }],
+        );
+        assert_eq!(
+            commands(&c.commit().unwrap()),
+            [(ROOT_ID, Command::ClearJsResponder)]
+        );
+    }
+
+    /// A card scaled and turned by two-finger gestures.
+    #[derive(Default)]
+    struct Card {
+        scale: Option<NativeValue>,
+        angle: Option<NativeValue>,
+    }
+
+    impl Component for Card {
+        type Props = ();
+        type Event = NoEvent;
+
+        fn setup(&mut self, _: &(), cx: &mut Context<'_, Self>) {
+            self.scale = Some(cx.native_value(1.0));
+            self.angle = Some(cx.native_value(0.0));
+        }
+
+        fn render(&self, _: &(), _: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            let (Some(scale), Some(angle)) = (&self.scale, &self.angle) else {
+                unreachable!("set up")
+            };
+            view()
+                .pinch_value(scale)
+                .rotation_value(angle)
+                .bind_scale(scale)
+                .bind_rotate(angle)
+        }
+    }
+
+    #[test]
+    fn pinches_and_rotations_drive_native_values() {
+        let mut c = core();
+        c.mount_root(&crate::ui::Root::new::<Card>(|| ()));
+        let batch = c.commit().unwrap();
+        let values = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Gestures { values, .. } => Some(*values),
+                _ => None,
+            })
+            .expect("gesture values");
+        let created: Vec<_> = batch
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::Anim(AnimOp::CreateValue { node, .. }) => Some(*node),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(values.pinch, Some(created[0]));
+        assert_eq!(values.rotation, Some(created[1]));
+    }
+}
+
+/// Rust components' drawings (`ui::Painter`).
+mod painter {
+    use super::*;
+    use crate::{
+        canvas::{CanvasGradient, CanvasOp, FillRule, GradientShape, Num, Paint, svg_path},
+        ui::prelude::*,
+    };
+
+    /// A label placed by its measured width, gradients, a stroked SVG path
+    /// and an operation built by hand reading a native value.
+    #[derive(Default)]
+    struct Label {
+        offset: Option<NativeValue>,
+    }
+
+    impl Component for Label {
+        type Props = ();
+        type Event = NoEvent;
+
+        fn setup(&mut self, _: &(), cx: &mut Context<'_, Self>) {
+            self.offset = Some(cx.native_value(3.0));
+        }
+
+        fn render(&self, _: &(), cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            let Some(offset) = &self.offset else {
+                unreachable!("set up")
+            };
+            let width = cx.measure_text("600 20px system-ui", "100%");
+            let mut p = Painter::new()
+                .stroke_style(
+                    CanvasGradient::conic(0.0, 50.0, 50.0)
+                        .add_color_stop(1.0, rgb(0x6366f1))
+                        .add_color_stop(0.0, rgb(0x22d3ee)),
+                )
+                .stroke_path(&svg_path("M20 6L9 17l-5-5"))
+                .fill_style(CanvasGradient::radial(0.0, 0.0, 4.0, 0.0, 0.0, 40.0))
+                .fill_path(&svg_path("M0 0h10v10z"), FillRule::EvenOdd)
+                .fill_text("100%", 50.0 - width, 20.0);
+            let x = p.num(offset);
+            p = p.op(CanvasOp::LineDashOffset(x));
+            view().child(canvas(p))
+        }
+    }
+
+    #[test]
+    fn rust_drawings_measure_text_and_use_every_paint() {
+        let mut c = core();
+        c.mount_root(&crate::ui::Root::new::<Label>(|| ()));
+        let batch = c.commit().unwrap();
+        let drawing = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Canvas { drawing, .. } => Some(drawing.clone()),
+                _ => None,
+            })
+            .expect("a drawing");
+        let ops = &drawing.ops;
+        // Stops sorted by offset, whatever order they came in.
+        let CanvasOp::StrokeStyle(Paint::Gradient(ring)) = &ops[0] else {
+            panic!("{:?}", ops[0])
+        };
+        assert!(matches!(
+            ring.shape,
+            GradientShape::Conic([0.0, 50.0, 50.0])
+        ));
+        assert_eq!(ring.stops[0], (0.0, rgb(0x22d3ee)));
+        assert!(matches!(&ops[1], CanvasOp::Stroke(Some(path)) if path.len() == 3));
+        assert!(matches!(
+            &ops[2],
+            CanvasOp::FillStyle(Paint::Gradient(g)) if matches!(g.shape, GradientShape::Radial(_))
+        ));
+        assert!(matches!(
+            &ops[3],
+            CanvasOp::Fill(Some(_), FillRule::EvenOdd)
+        ));
+        // 8pt per character in the fake engine.
+        assert!(matches!(
+            &ops[4],
+            CanvasOp::FillText {
+                x: Num::Const(18.0),
+                ..
+            }
+        ));
+        // The native value is a slot of the drawing.
+        assert_eq!(ops[5], CanvasOp::LineDashOffset(Num::Slot(0)));
+        assert_eq!(drawing.slots.len(), 1);
     }
 }
