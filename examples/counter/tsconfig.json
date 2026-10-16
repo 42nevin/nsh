@@ -13,7 +13,8 @@
     "types": [],
     "paths": {
       "nsh": ["./.nsh/types/nsh/index.d.ts"],
-      "nsh/*": ["./.nsh/types/nsh/*.d.ts"]
+      "nsh/*": ["./.nsh/types/nsh/*.d.ts"],
+      "*": ["./.nsh/types/*.d.ts"]
     }
   },
   "include": ["**/*.ts", "**/*.tsx", ".nsh/types/nsh/globals.d.ts", ".nsh/types/nsh/assets.d.ts"]

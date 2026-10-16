@@ -15,6 +15,8 @@
 //! In a cargo checkout, the same files come from `target/<triple>/<profile>`
 //! (with the profile of this CLI), and are built with cargo first, so a run
 //! never uses a missing or stale host. `NSH_RUNTIME` overrides the root.
+//! An app with a Rust crate of its own gets hosts built for it instead
+//! (`rust_app.rs`).
 
 use std::{
     env,
@@ -57,6 +59,15 @@ impl Platform {
 /// The Android runtime directory (`classes.dex`, `lib/<abi>/libnsh.so`),
 /// with development support or not.
 pub(crate) fn android(dev: bool) -> anyhow::Result<PathBuf> {
+    let prebuilt = prebuilt_android(dev)?;
+    match crate::rust_app::current() {
+        // The app's own library with the prebuilt Java runtime.
+        Some(app) => app.android(&prebuilt, dev),
+        None => Ok(prebuilt),
+    }
+}
+
+fn prebuilt_android(dev: bool) -> anyhow::Result<PathBuf> {
     let variant = if dev { "dev" } else { "release" };
     if let Some(root) = env::var_os("NSH_RUNTIME") {
         return android_existing(PathBuf::from(root).join("android").join(variant), dev);
@@ -106,8 +117,12 @@ fn android_existing(dir: PathBuf, dev: bool) -> anyhow::Result<PathBuf> {
     )
 }
 
-/// Path of runtime file `name` (`nsh-ios-app`, `nsh-ios-host`) for `platform`.
+/// Path of runtime file `name` (`nsh-ios-app`, `nsh-ios-host`) for `platform`:
+/// for an app with a Rust crate, its own build.
 pub(crate) fn file(platform: Platform, name: &str) -> anyhow::Result<PathBuf> {
+    if let Some(app) = crate::rust_app::current() {
+        return app.ios(platform, name == "nsh-ios-app");
+    }
     if let Some(root) = env::var_os("NSH_RUNTIME") {
         return existing(
             PathBuf::from(root).join(platform.dir()).join(name),

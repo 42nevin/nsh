@@ -56,6 +56,7 @@ fn start(app: &str) -> (Engine, crossbeam_channel::Receiver<MountBatch>) {
     let bundle = nsh_bundler::bundle(&nsh_bundler::BundleOptions {
         entry,
         minify: false,
+        ui_sets: vec![nsh_ui_mobile::registry()],
     })
     .unwrap();
     let bytecode =
@@ -72,7 +73,7 @@ fn start(app: &str) -> (Engine, crossbeam_channel::Receiver<MountBatch>) {
         environment: Default::default(),
         header_heights: (44.0, 96.0),
         limits: nsh_engine::Limits::default(),
-        components: nsh_ui_mobile::registry(),
+        ui_sets: vec![nsh_ui_mobile::registry()],
         runtime: None,
     };
     (

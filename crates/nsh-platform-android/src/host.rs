@@ -95,7 +95,7 @@ impl Host {
             // Android's toolbar is 56dp; it has no large titles.
             header_heights: (56.0, 56.0),
             limits: *self.limits.lock().expect("limits"),
-            components: nsh_ui_mobile::registry(),
+            ui_sets: crate::ui_sets(),
             runtime: None,
         };
         let density = self.density;

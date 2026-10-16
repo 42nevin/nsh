@@ -108,6 +108,7 @@ fn fetch_round_trips_through_the_platform_network() {
     let bundle = nsh_bundler::bundle(&nsh_bundler::BundleOptions {
         entry,
         minify: false,
+        ui_sets: vec![nsh_ui_mobile::registry()],
     })
     .unwrap();
     let network = Arc::new(EchoNetwork::default());
@@ -125,7 +126,7 @@ fn fetch_round_trips_through_the_platform_network() {
         environment: Default::default(),
         header_heights: (44.0, 96.0),
         limits: nsh_engine::Limits::default(),
-        components: Default::default(),
+        ui_sets: Vec::new(),
         runtime: None,
     };
     let _engine = Engine::start(config, || ApproxTextEngine, Sink(tx)).unwrap();
@@ -206,6 +207,7 @@ fn fetch_stays_within_the_capabilities() {
     let bundle = nsh_bundler::bundle(&nsh_bundler::BundleOptions {
         entry,
         minify: false,
+        ui_sets: vec![nsh_ui_mobile::registry()],
     })
     .unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -224,7 +226,7 @@ fn fetch_stays_within_the_capabilities() {
         environment: Default::default(),
         header_heights: (44.0, 96.0),
         limits: nsh_engine::Limits::default(),
-        components: Default::default(),
+        ui_sets: Vec::new(),
         runtime: None,
     };
     let _engine = Engine::start(config, || ApproxTextEngine, Sink(tx)).unwrap();

@@ -48,6 +48,7 @@ fn start() -> (Engine, Receiver<MountBatch>) {
     let bundle = nsh_bundler::bundle(&nsh_bundler::BundleOptions {
         entry: dir.join("App.tsx"),
         minify: true,
+        ui_sets: vec![nsh_ui_mobile::registry()],
     })
     .unwrap();
     assert!(!bundle.code.contains("solid"), "only the app's code");
@@ -64,7 +65,7 @@ fn start() -> (Engine, Receiver<MountBatch>) {
         environment: Default::default(),
         header_heights: (44.0, 96.0),
         limits: nsh_engine::Limits::default(),
-        components: Default::default(),
+        ui_sets: Vec::new(),
         runtime: None,
     };
     (
@@ -181,6 +182,7 @@ fn start_app(app: &str) -> (Engine, Receiver<MountBatch>) {
     let bundle = nsh_bundler::bundle(&nsh_bundler::BundleOptions {
         entry: dir.join("App.tsx"),
         minify: false,
+        ui_sets: vec![nsh_ui_mobile::registry()],
     })
     .unwrap();
     let bytecode =
@@ -196,7 +198,7 @@ fn start_app(app: &str) -> (Engine, Receiver<MountBatch>) {
         environment: Default::default(),
         header_heights: (44.0, 96.0),
         limits: nsh_engine::Limits::default(),
-        components: nsh_ui_mobile::registry(),
+        ui_sets: vec![nsh_ui_mobile::registry()],
         runtime: None,
     };
     (

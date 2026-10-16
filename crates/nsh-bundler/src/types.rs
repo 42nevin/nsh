@@ -4,8 +4,9 @@
 //! imports the bundler loads (`assets.d.ts`). Apps find them through their
 //! `tsconfig.json` ([`TSCONFIG`]) and need no `node_modules`.
 
-/// `tsconfig.json` of a new app (`nsh init`): resolves `nsh` to
-/// `.nsh/types`, and JSX to nsh's elements.
+/// `tsconfig.json` of a new app (`nsh init`): resolves `nsh` and the app's
+/// own native modules (`nsh.json` `"rust"`) to `.nsh/types` (other imports
+/// fall back to `node_modules`), and JSX to nsh's elements.
 pub const TSCONFIG: &str = r#"{
   "compilerOptions": {
     "target": "ES2023",
@@ -21,7 +22,8 @@ pub const TSCONFIG: &str = r#"{
     "types": [],
     "paths": {
       "nsh": ["./.nsh/types/nsh/index.d.ts"],
-      "nsh/*": ["./.nsh/types/nsh/*.d.ts"]
+      "nsh/*": ["./.nsh/types/nsh/*.d.ts"],
+      "*": ["./.nsh/types/*.d.ts"]
     }
   },
   "include": ["**/*.ts", "**/*.tsx", ".nsh/types/nsh/globals.d.ts", ".nsh/types/nsh/assets.d.ts"]

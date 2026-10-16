@@ -9,7 +9,8 @@
   `delay` / `loop` build a `Composite` tree that runs entirely natively (`AnimOp::StartComposite`): each step starts at the exact end
   time of the previous one (no frame gaps), `stop()` / `reset()` (back to the values at start) / `start(cb)` report `finished` once
   for the whole tree; leaf animations get internal ids (`LEAF_IDS`) that never reach JS. Composites are released when JS
-  lets go of them (their finalizers queue `ReleaseComposite`).
+  lets go of them (their finalizers queue `ReleaseComposite`). Rust components build the same trees with
+  `nsh_core::ui::Animation` (composite keys odd, JS's even).
   Bindable: `opacity`, `backgroundColor`, and the translate / scale / rotate parts of `transform`. Driven on the main thread by `CADisplayLink`,
   paused while nothing animates. `scrollValue` writes the scroll offset into a native value in the same frame; `pan` lets drags drive native values
   directly, and JS receives the velocity when the drag ends. Native values referenced by a view's style (or `pan`, `scrollValue`, ...) are kept by its node

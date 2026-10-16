@@ -131,6 +131,8 @@ pub(crate) struct Executor {
     anim_ids: std::cell::Cell<u32>,
     /// Live derived nodes, for renders deriving them again.
     derived: RefCell<super::animated::Derived>,
+    /// The components' listeners of the back button.
+    pub(crate) back: Rc<RefCell<super::back::BackListeners>>,
 }
 
 impl Executor {

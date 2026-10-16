@@ -25,7 +25,7 @@ fn dropping_an_engine_aborts_running_js() {
         environment: Default::default(),
         header_heights: (44.0, 96.0),
         limits: nsh_engine::Limits::default(),
-        components: Default::default(),
+        ui_sets: Vec::new(),
         runtime: None,
     };
     let engine = Engine::start(config, || ApproxTextEngine, NullSink).unwrap();

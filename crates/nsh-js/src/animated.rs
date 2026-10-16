@@ -36,8 +36,8 @@ pub(crate) struct Animations {
     classes: Cell<Option<Classes>>,
     /// The prototypes (owned): node, value, composite.
     protos: Cell<[JsValue; 3]>,
-    /// Even ids: the core gives Rust components' nodes and animations odd
-    /// ones.
+    /// Even ids: the core gives Rust components' nodes, animations and
+    /// composites odd ones.
     next_node: Cell<u32>,
     next_animation: Cell<u32>,
     next_composite: Cell<u32>,
@@ -59,7 +59,7 @@ impl Default for Animations {
             protos: Cell::new([UNDEFINED; 3]),
             next_node: Cell::new(2),
             next_animation: Cell::new(2),
-            next_composite: Cell::new(1),
+            next_composite: Cell::new(2),
             ends: RefCell::new(FxHashMap::default()),
         }
     }
@@ -632,7 +632,7 @@ fn composite(ctx: *mut JsContext, spec: JsValue, values: Vec<JsValue>) -> JsValu
     let c = classes(ctx);
     let a = animations(ctx);
     let key = a.next_composite.get();
-    a.next_composite.set(key + 1);
+    a.next_composite.set(key + 2);
     let data = Box::into_raw(Box::new(CompositeData {
         key,
         running: 0,

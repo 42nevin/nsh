@@ -44,6 +44,9 @@ pub struct BundleOptions {
     pub entry: PathBuf,
     /// Minify the output (release builds).
     pub minify: bool,
+    /// The UI sets the hosts serve (`nsh_ui_mobile::registry()`, the app's
+    /// own): their modules stay imports.
+    pub ui_sets: Vec<nsh_core::ui::Registry>,
 }
 
 /// A failed build, formatted for people.
@@ -227,6 +230,7 @@ pub async fn bundle_async(options: &BundleOptions) -> Result<Bundle, BundleError
             entry: entry.clone(),
             elements: elements.clone(),
             natives: Arc::default(),
+            modules: Arc::new(plugin::NativeModules::new(&options.ui_sets)),
         })],
     )
     .map_err(|e| BundleError::new(e.into_vec()))?;
@@ -410,16 +414,22 @@ fn append_module(
 }
 
 /// Bundles an app for development with hot module replacement, blocking
-/// the current thread.
-pub fn bundle_hot(entry: &std::path::Path) -> Result<HotBundle, BundleError> {
+/// the current thread (`ui_sets` as in [`BundleOptions::ui_sets`]).
+pub fn bundle_hot(
+    entry: &std::path::Path,
+    ui_sets: &[nsh_core::ui::Registry],
+) -> Result<HotBundle, BundleError> {
     tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(BundleError::other)?
-        .block_on(bundle_hot_async(entry))
+        .block_on(bundle_hot_async(entry, ui_sets))
 }
 
 /// Bundles an app for development with hot module replacement.
-pub async fn bundle_hot_async(entry: &std::path::Path) -> Result<HotBundle, BundleError> {
+pub async fn bundle_hot_async(
+    entry: &std::path::Path,
+    ui_sets: &[nsh_core::ui::Registry],
+) -> Result<HotBundle, BundleError> {
     let start = Instant::now();
     let entry = entry
         .canonicalize()
@@ -464,6 +474,7 @@ pub async fn bundle_hot_async(entry: &std::path::Path) -> Result<HotBundle, Bund
             entry: entry.clone(),
             elements: elements.clone(),
             natives: natives.clone(),
+            modules: Arc::new(plugin::NativeModules::new(ui_sets)),
         })],
     )
     .map_err(|e| BundleError::new(e.into_vec()))?;

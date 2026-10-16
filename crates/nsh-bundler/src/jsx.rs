@@ -189,13 +189,15 @@ pub(crate) fn transform<'a>(
     scoping: &Scoping,
     source: &str,
     prologue: Option<&str>,
-    components: &[&str],
+    modules: &crate::plugin::NativeModules,
 ) -> Result<Vec<KebabUse>, String> {
+    let components: Vec<&str> = modules.components.iter().map(String::as_str).collect();
+    let components = components.as_slice();
     let origins = Origins::of(program);
     let native_objects = origins
         .imports
         .iter()
-        .filter(|(_, (module, name))| crate::plugin::native_object(module, name))
+        .filter(|(_, (module, name))| modules.object(module, name))
         .map(|(local, _)| local.clone())
         .collect();
     let mut compiler = Compiler {
@@ -1171,6 +1173,7 @@ mod tests {
             source,
             None,
             None,
+            &crate::plugin::NativeModules::new(&[nsh_ui_mobile::registry()]),
         )
         .map(|(code, ..)| code)
     }

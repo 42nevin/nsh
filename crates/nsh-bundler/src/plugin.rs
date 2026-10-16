@@ -45,6 +45,8 @@ pub(crate) struct NshPlugin {
     pub(crate) elements: Arc<Mutex<Vec<crate::AppElement>>>,
     /// The native modules the app imports.
     pub(crate) natives: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    /// The native modules there are.
+    pub(crate) modules: Arc<NativeModules>,
 }
 
 /// The `"tailwind"` and `"theme"` of the app's `nsh.json`.
@@ -97,36 +99,53 @@ fn density(path: &Path) -> f64 {
     }
 }
 
-/// Whether `spec` is a native module: nsh's own,
-/// the mobile UI's or a runtime registry's.
-fn native_module(spec: &str) -> bool {
-    nsh_core::js::NATIVE_MODULES.contains(&spec)
-        || spec == nsh_ui_mobile::SPECIFIER
-        || nsh_core::runtime::registries()
-            .iter()
-            .any(|r| r.specifier() == Some(spec))
+/// What the bundler knows of the native modules a host serves: nsh's own,
+/// the runtime's registries and the UI sets (`BundleOptions::ui_sets`).
+#[derive(Debug, Default)]
+pub(crate) struct NativeModules {
+    specifiers: std::collections::BTreeSet<String>,
+    /// (specifier, export) of the objects of functions (`Image` of
+    /// `nsh/image`), which are no components.
+    objects: std::collections::BTreeSet<(String, String)>,
+    /// The UI sets' components, for hints about tags they would be.
+    pub(crate) components: Vec<String>,
 }
 
-/// Whether export `name` of `spec` is one of nsh's objects of functions
-/// (`Image` of `nsh/image`), not a component.
-pub(crate) fn native_object(spec: &str, name: &str) -> bool {
-    static UI: std::sync::OnceLock<nsh_core::ui::Registry> = std::sync::OnceLock::new();
-    std::iter::once(UI.get_or_init(nsh_ui_mobile::registry))
-        .chain(nsh_core::runtime::registries())
-        .filter(|r| r.specifier() == Some(spec))
-        .any(|r| r.module_specs().iter().any(|m| !m.flat && m.name == name))
-}
+impl NativeModules {
+    pub(crate) fn new(ui_sets: &[nsh_core::ui::Registry]) -> Self {
+        let mut out = Self {
+            specifiers: nsh_core::js::NATIVE_MODULES
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+            ..Self::default()
+        };
+        for r in nsh_core::runtime::registries().iter().chain(ui_sets) {
+            let Some(spec) = r.specifier() else {
+                continue;
+            };
+            out.specifiers.insert(spec.to_owned());
+            for m in r.module_specs().iter().filter(|m| !m.flat) {
+                out.objects.insert((spec.to_owned(), m.name.to_owned()));
+            }
+        }
+        for r in ui_sets {
+            out.components
+                .extend(r.specs().iter().map(|s| s.export.clone()));
+        }
+        out
+    }
 
-/// The components of the mobile UI, for hints about tags they would be.
-fn ui_components() -> &'static [String] {
-    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    NAMES.get_or_init(|| {
-        nsh_ui_mobile::registry()
-            .specs()
-            .iter()
-            .map(|s| s.export.clone())
-            .collect()
-    })
+    /// Whether `spec` is a native module.
+    fn contains(&self, spec: &str) -> bool {
+        self.specifiers.contains(spec)
+    }
+
+    /// Whether export `name` of `spec` is an object of functions, not a
+    /// component.
+    pub(crate) fn object(&self, spec: &str, name: &str) -> bool {
+        self.objects.contains(&(spec.to_owned(), name.to_owned()))
+    }
 }
 
 impl NshPlugin {
@@ -180,7 +199,7 @@ impl Plugin for NshPlugin {
         args: &HookResolveIdArgs<'_>,
     ) -> HookResolveIdReturn {
         let spec = args.specifier;
-        if native_module(spec) {
+        if self.modules.contains(spec) {
             self.natives
                 .lock()
                 .expect("natives lock")
@@ -306,6 +325,7 @@ impl Plugin for NshPlugin {
             args.code,
             prologue.as_deref(),
             hot_key.as_deref(),
+            &self.modules,
         )
         .map_err(|detail| self.fail(path, &detail))?;
         let module = path
@@ -375,6 +395,7 @@ pub(crate) fn compile_native(
     source: &str,
     prologue: Option<&str>,
     hot_key: Option<&str>,
+    modules: &NativeModules,
 ) -> Result<(String, SourceMap<'static>, Vec<crate::jsx::KebabUse>), String> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
@@ -405,14 +426,13 @@ pub(crate) fn compile_native(
         // Before the JSX goes: components are the functions with JSX.
         crate::hot::transform(&allocator, &mut program, source, key);
     }
-    let components: Vec<&str> = ui_components().iter().map(String::as_str).collect();
     let uses = crate::jsx::transform(
         &allocator,
         &mut program,
         &ret.scoping,
         source,
         prologue,
-        &components,
+        modules,
     )?;
     elide_unused_imports(&mut program);
     let out = Codegen::new()

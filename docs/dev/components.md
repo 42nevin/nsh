@@ -13,7 +13,7 @@ back. One implementation draws the same on iOS and Android, is laid out in the s
 | `crates/nsh-ui-mobile` | The mobile set's components, one file each (`README.md`: how to write one) |
 | `crates/nsh-js/src/components.rs` | The JS face of components and modules, made from their specs when a bundle imports the set |
 | `crates/nsh-js/src/declarations.rs` | `nsh/ui/mobile.d.ts`: the declarations generated from `nsh_ui_mobile::registry()` (`nsh_core::ui::declarations`) with the re-exports and the navigation |
-| `nsh_engine::EngineConfig::components` | The registry a surface renders from (the platforms and `nsh trace` pass `nsh_ui_mobile::registry()`) |
+| `nsh_engine::EngineConfig::ui_sets` | The registries a surface serves (the platforms' `set_ui_sets`, by default `nsh_ui_mobile::registry()`; an app's own set: `docs/dev/tooling.md`) |
 
 A desktop set will be a crate of its own (`nsh-ui-desktop`, on GPUI), not an abstraction over both.
 
@@ -77,17 +77,23 @@ impl Component for Button {
     generic over the row type). `.list(props.items, |l| l.flex_1().estimated_item_size(48.0), |row, at|
     view().px_4().when(at.is_last(), |v| v.rounded_b(px(16.0))).child(row))` places the list, lays it out (size, columns, padding, gaps, direction) and wraps each
     row; only rows near the viewport exist and cells are recycled as with `List`.
-- **Elements** are `view()`, `text(..)`, `image(..)`, the other host elements (`input()`, `scroll()`, `modal()`,
+- **Elements** are `view()`, `text(..)`, `image(..)`, the other host elements (`input()`, `scroll()`, `stack()` of
+  `screen()`s, `modal()`,
   `canvas(drawing)`, `web_view(url)`, `video(url)`, `native(name)` for the embedder's components; `ui/host.rs`),
   strings (as texts) and other components (`Button::element(props)`, whose `.on_event(cx.listener(..))` handles their
-  typed events instead of the app). Their abilities are traits: `Styled`, `Accessible`, `Interactive` (`active` /
+  typed events instead of the app; `.child(..)` / `.children(..)` pass it content and `.fill("header", ..)` fills a
+  slot, as JSX children and slot props do: the content is nodes of this render, placed where the nested component's
+  render places the app's). Their abilities are traits: `Styled`, `Accessible`, `Interactive` (`active` /
   `hover` / `focus` styles, `disabled`, `hit_slop`, and the typed events every element has: `on_press`,
   `on_long_press`, `on_layout(Rect)`, `on_touch(TouchEvent)`, `on_pan_start`, ...), `ParentElement`, `FluentBuilder`
   (`when`, `when_some`, `map`). Each host element has its own props and typed events (`input().value(..)
   .on_change_text(cx.listener(|this, text: &str, cx| ..))`, `scroll().on_scroll(..)`, `modal().on_request_close(..)`);
   `on(kind, listener)` takes any native event with its raw payload. Host props are the core's `Prop`s, kept one per
   property and diffed by kind: one a render stops setting goes back to its default, as when JS clears it. A modal
-  is presented while it is in the render. Canvases draw a `Drawing`, recorded with `Painter` (the Canvas 2D
+  is presented while it is in the render, a screen pushed while it is in its stack (keyed by its route, so the
+  screens below keep their state; `on_dismiss` reports a native pop, and the render leaves the screen out). A
+  component's root is a view (its host node), so a component cannot render its own screen: the screen's options
+  belong to whoever renders the stack (state they depend on goes in a global or a context; `examples/gallery-rs`). Canvases draw a `Drawing`, recorded with `Painter` (the Canvas 2D
   operations); a new drawing replaces the old one. Props that take a plain color (an input's placeholder color)
   take `cx.color(theme.muted_foreground)`: the theme color for the appearance now.
 - **State** is `Self`, written like a TSX component where Rust allows:
@@ -105,7 +111,9 @@ impl Component for Button {
   | `useSafeAreaInsets()` | `cx.insets()` in the render: the insets where the component renders (the nearest screen's or modal's, else the surface's safe area) |
   | a signal or store at module level | `cx.global::<G>()` in the render (subscribes); `cx.update_global::<G, _>(..)` in listeners, tasks' updates and modules renders the readers again |
   | `context(default)` / `<Ctx.Provider value>` / `Ctx()` | `cx.provide(value)` in the render; `cx.context::<T>()` below it (the nearest provider up the node tree, through the app's elements too; subscribes) |
-  | `createNativeValue`, `Animated.spring`, `interpolate` | `cx.native_value(0.0)` (in `setup`, kept in a field); `.bind_translate_y(&v)` / `.bind_opacity(..)` / `.bind_background(..)` / `.bind_scale(..)` / `.bind_rotate(..)`, `.pan_values(..)` (drags move it natively), `scroll().scroll_value(&v)`, canvas arguments (`Painter::new().fill_rect(0.0, 0.0, &v, 4.0)`); `v.spring(to, Spring::default())` / `.timing(..)` / `.decay(..)` return an `AnimationEnd` to await; `v.interpolate(..)`, `.add(..)`, `.diff_clamp(..)` derive nodes |
+  | `createNativeValue`, `Animated.spring`, `interpolate` | `cx.native_value(0.0)` (in `setup`, kept in a field); `.bind_translate_y(&v)` / `.bind_opacity(..)` / `.bind_background(..)` / `.bind_scale(..)` / `.bind_rotate(..)`, `.pan_values(..)` (drags move it natively), `scroll().scroll_value(&v)`, canvas arguments (`Painter::new().fill_rect(0.0, 0.0, &v, 4.0)`); `v.spring(to, Spring::default())` / `.timing(to, ms, easing)` / `.timing_with(to, Timing { delay_ms, .. })` / `.decay(..)` return an `AnimationEnd` to await; `v.interpolate(..)`, `.interpolate_with(.., Interpolation { extrapolate_left, extrapolate_right, easing })`, `.add(..)`, `.diff_clamp(..)` derive nodes |
+  | `Animated.sequence / parallel / stagger / delay / loop`, `.start(cb)` / `.stop()` / `.reset()` | `Animation::sequence([Animation::timing(&v, to, Timing::new(ms, easing)), Animation::delay(ms), Animation::spring(..)])`, `::parallel(..)` (`.stop_together(false)`), `::stagger(ms, ..)`, `.looped(iterations)` (`.reset_before_iteration(false)`), built in `setup` and kept in a field; `a.start()` returns an `AnimationEnd`, `a.stop()`, `a.reset()` |
+  | `BackHandler.addEventListener("hardwareBackPress", f)`, `.remove()` | `cx.on_back_press(|this, cx| -> bool)` (in `setup`, kept in a field) returns a `BackSubscription`; dropping it removes the listener. After modals and stacks, the components' listeners run newest first, then JS's; when none returns true the app exits (`ui/back.rs`) |
   | an error boundary (TS has none) | `fn catch_error(&mut self, error, cx) -> bool`: the nearest component above one whose code panicked (render, listener, method, task) handles it, typically keeping `error`, rendering a fallback and clearing it to try again; the failed one renders nothing until it renders again; unhandled errors are logged (`js` target) |
   | a portal | none (TS has none either); overlays are `modal().transparent(true)` |
   | `ref={el}`, `el.focus()` | `cx.element_ref()` (in `setup`, kept in a field), `.element_ref(&self.field)` on the element each render, `self.field.focus()` / `.scroll_to(..)` / `.seek(..)` / `.command(..)` from listeners and tasks |
@@ -121,7 +129,9 @@ impl Component for Button {
   composite steps); the last handle released frees the node. Deriving the same node again (a render calling
   `interpolate` each time) gets the live one, so bindings stay as they are. Bound style properties go into the
   element's inline style, before the app's `style` on a host (the core keeps the app's and composes the two). The
-  animations' ends come back through `Core::animations_finished` (the engine hands JS the rest).
+  animations' ends come back through `Core::animations_finished` (the engine hands JS the rest). An `Animation` is
+  sent whole as one `AnimOp::StartComposite` and runs in the graph step after step; its composite key (odd, JS's
+  even) is what `reset()` restores by, and dropping the last handle releases it (a run going on goes on).
 - **Element refs** (`ui/element_ref.rs`) hold the node of the element that carries them, set when the render is
   applied and cleared when the element goes; their commands go out through the executor, and an event's handling
   applies them right after its own changes, so they keep their order.

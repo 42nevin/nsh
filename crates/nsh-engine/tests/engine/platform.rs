@@ -33,6 +33,7 @@ fn first_frame(os: Os) -> (Vec<String>, Vec<String>) {
     let bundle = nsh_bundler::bundle(&nsh_bundler::BundleOptions {
         entry,
         minify: false,
+        ui_sets: vec![nsh_ui_mobile::registry()],
     })
     .unwrap();
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -48,7 +49,7 @@ fn first_frame(os: Os) -> (Vec<String>, Vec<String>) {
         },
         header_heights: (44.0, 96.0),
         limits: nsh_engine::Limits::default(),
-        components: Default::default(),
+        ui_sets: Vec::new(),
         runtime: None,
     };
     let _engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();

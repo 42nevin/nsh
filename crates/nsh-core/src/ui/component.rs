@@ -655,6 +655,28 @@ impl Registry {
         self
     }
 
+    /// The components and modules of all of `sets`, for finding them by
+    /// name (the core's view of the sets a host serves; names are unique
+    /// across them). Not a module of its own.
+    pub fn merged(sets: &[Registry]) -> Self {
+        let mut out = Self::default();
+        for set in sets {
+            let types = Arc::make_mut(&mut out.types);
+            for (name, ty) in set.types.iter() {
+                if types.insert(name, ty.clone()).is_some() {
+                    log::warn!("two UI sets register component `{name}`");
+                }
+            }
+            let modules = Arc::make_mut(&mut out.modules);
+            for (name, m) in set.modules.iter() {
+                if modules.insert(name, m.clone()).is_some() {
+                    log::warn!("two UI sets register module `{name}`");
+                }
+            }
+        }
+        out
+    }
+
     /// The registry of a UI set apps import as `specifier`
     /// (`nsh/ui/mobile`).
     pub fn ui_set(specifier: &'static str) -> Self {

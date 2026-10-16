@@ -94,7 +94,7 @@ pub(crate) fn write_types(dir: &Path) {
 /// after a build).
 pub(crate) fn write_types_with(dir: &Path, elements: &[nsh_bundler::AppElement]) {
     let types = dir.join(".nsh/types");
-    let mut definitions = nsh_js::type_definitions(&[nsh_ui_mobile::registry()]);
+    let mut definitions = nsh_js::type_definitions(crate::ui_sets());
     definitions.extend(nsh_bundler::type_definitions(elements));
     remove_stale(&types, &types, &definitions);
     for (path, contents) in definitions {

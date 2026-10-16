@@ -845,12 +845,17 @@ impl<M: TextEngine> Core<M> {
     /// Applies one op from JS.
     pub fn apply(&mut self, op: Op) -> Result<(), ApplyError> {
         // Ops on a component's host go to its component, calls of a UI
-        // set's modules to the module.
+        // set's modules to the module; the components learn whether JS
+        // listens to the back button.
         if self.components.instances.is_empty()
             && !matches!(
                 op,
                 Op::Command {
                     command: Command::Native { .. },
+                    ..
+                } | Op::Listen {
+                    id: ROOT_ID,
+                    event: EventKind::BackPress,
                     ..
                 }
             )
@@ -1018,6 +1023,7 @@ impl<M: TextEngine> Core<M> {
     fn commit_round(&mut self) {
         // Components whose props or state changed render first.
         self.render_components();
+        self.sync_back();
         // Platforms animate the frames, insertions and removals that follow
         // in the batch; ops may already have queued some.
         if let Some(animation) = self.layout_animation.take() {

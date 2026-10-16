@@ -967,6 +967,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gallery-native"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "log",
+ "nsh-core",
+ "nsh-engine",
+ "nsh-ui-mobile",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

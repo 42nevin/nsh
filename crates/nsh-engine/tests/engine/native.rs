@@ -52,6 +52,7 @@ fn start(app: &str) -> (Engine, Receiver<MountBatch>) {
     let bundle = nsh_bundler::bundle(&nsh_bundler::BundleOptions {
         entry,
         minify: false,
+        ui_sets: vec![nsh_ui_mobile::registry()],
     })
     .unwrap();
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -64,7 +65,7 @@ fn start(app: &str) -> (Engine, Receiver<MountBatch>) {
         environment: Default::default(),
         header_heights: (44.0, 96.0),
         limits: nsh_engine::Limits::default(),
-        components: Default::default(),
+        ui_sets: Vec::new(),
         runtime: None,
     };
     (

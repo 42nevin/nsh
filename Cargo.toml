@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "examples/gallery-rs/native"]
 # `cargo run` runs the gallery (`crates/xtask/src/run.rs`).
 default-members = ["crates/xtask"]
 

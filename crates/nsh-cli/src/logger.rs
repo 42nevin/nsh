@@ -66,7 +66,13 @@ impl Log for Logger {
     fn log(&self, record: &Record<'_>) {
         if self.enabled(record.metadata()) {
             let target = record.target();
-            let source = target.strip_prefix("nsh_").unwrap_or(target);
+            // The command line's own modules as `nsh::build`, other crates
+            // as `bundler::...`.
+            let source = match target.strip_prefix("nsh_cli") {
+                Some(rest) => format!("nsh{rest}"),
+                None => target.strip_prefix("nsh_").unwrap_or(target).to_owned(),
+            };
+            let source = source.as_str();
             write_line(
                 self.color,
                 record.level(),

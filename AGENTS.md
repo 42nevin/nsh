@@ -48,10 +48,13 @@ crates/
                        runtime in `java/com/longbridge/nsh` (NshView, Mounter, views, images, networking); feature `dev` as above
   nsh-ios-host/        Development host app (Catalyst / iOS simulator); connects to a dev server or runs a local bundle
   nsh-ios-app/         Release runner: the executable of iOS apps built by `nsh package`
-  nsh-cli/             The `nsh` command line: init / build / trace / dev / run / package; keygen / certify / publish / verify / revoke
+  nsh-cli/             The `nsh` command line (a library: `main_with(ui_sets)`): init / build / trace / dev / run / package; keygen /
+                       certify / publish / verify / revoke; apps with Rust components of their own (`rust_app.rs`,
+                       docs/dev/tooling.md)
   xtask/               Maintainer tasks: `cargo xtask android` (Android runtime), `ios-embed` (the iOS SDK), `dist` (the distribution)
 docs/                 Documentation; `docs/dev/`: for developers of nsh (architecture, internals, decisions, pitfalls)
-examples/             Example apps (gallery: a demo index, one module per demo; counter), embedding samples (embed-ios, embed-android)
+examples/             Example apps (gallery: a demo index, one module per demo; gallery-rs: the same in Rust, the app's crate in
+                      `native/`; counter), embedding samples (embed-ios, embed-android)
                       and the app they run (embedded: uses a native component the samples register); bench: component benchmarks
 ```
 

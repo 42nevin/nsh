@@ -57,6 +57,29 @@
 - Stacks are symbolicated with source maps: bundling produces a hidden source map (the TSX→JSX→JS maps are composed with
   `rolldown_sourcemap::collapse_sourcemaps`), sent along with the bundle; the engine rewrites `bundle.js:L:C` to `App.tsx:L:C` before reporting.
 
+## Apps with Rust components of their own (`nsh.json` `"rust"`)
+
+`"rust": "<crate dir>"` names a library crate of the app whose `registry()` returns its UI set: a
+`nsh_core::ui::Registry::ui_set("<specifier>")` of Rust components and modules, which the app's TSX imports by that
+specifier (`examples/gallery-rs`: `import { Gallery } from "gallery/native"`). The prebuilt toolchain cannot know
+them, so `nsh` builds the app its own (`crates/nsh-cli/src/rust_app.rs`):
+
+- A Cargo workspace in `<app>/.nsh/rust`, written on every command (files only when they change): `cli` (the
+  command line, `nsh_cli::main_with` of the mobile UI and the app's set), `ios-host` / `ios-app` (the development
+  host and the release runner: `nsh_platform_ios::set_ui_sets`, then `nsh_ios_host::main` / `nsh_ios_app::main`) and
+  `android` (the app's `libnsh.so`: `nsh::ui_sets!`, which the Android runtime looks up when an engine starts). They
+  build against nsh's sources (the checkout the running `nsh` was built in, or `NSH_SOURCE`) with nsh's `Cargo.lock`
+  and target directory, so only the app's code and what links it compile; the binaries are named after the app
+  (`nsh-app-<package>-cli`).
+- A command on the app (`build`, `trace`, `dev`, `run`, `package`, `publish`) builds `cli` and runs again in it
+  (`NSH_RUST_APP` names the workspace). Everything then knows the app's set: the bundler keeps its imports, bytecode
+  links against its exports, `.nsh/types` declares it (`.nsh/types/<specifier>.d.ts`, found through tsconfig's `"*"`
+  path, which falls back to `node_modules`), `nsh trace` renders it. The hosts `run` and `package` need are built
+  for the app instead of taken from the runtime (iOS `--target` triples; Android: the prebuilt `classes.dex` with
+  the app's `libnsh.so` for each ABI of the prebuilt runtime, cross-compiled with the NDK).
+- `nsh dev` / `nsh run` watch the crate too: a change to its `.rs` files or `Cargo.toml` ends the app's command line
+  with exit code 75, and `nsh` builds it and runs the command again (the app restarts; JS and TSX edits stay hot).
+
 ## Finding the runtimes
 
 The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distribution layout) or, in a checkout, in

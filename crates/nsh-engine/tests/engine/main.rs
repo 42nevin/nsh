@@ -24,6 +24,7 @@ mod list_bench;
 mod native;
 mod package;
 mod platform;
+mod rust_anim;
 mod rust_app;
 mod shutdown;
 

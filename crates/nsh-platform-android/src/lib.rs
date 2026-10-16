@@ -30,6 +30,50 @@ mod text;
 use std::ffi::c_void;
 
 pub use host::run_root;
+/// What [`ui_sets!`] gives.
+pub use nsh_core::ui::Registry;
+
+/// The UI sets apps import ([`set_ui_sets`]; by default the mobile UI).
+static UI_SETS: std::sync::RwLock<Option<Vec<nsh_core::ui::Registry>>> =
+    std::sync::RwLock::new(None);
+
+/// Sets the UI sets the engines started from now on serve: the mobile UI
+/// and an app's own Rust components (`nsh.json` `"rust"`), which a host
+/// built for the app passes before it starts.
+pub fn set_ui_sets(sets: Vec<nsh_core::ui::Registry>) {
+    *UI_SETS.write().unwrap_or_else(|e| e.into_inner()) = Some(sets);
+}
+
+/// The UI sets engines serve: [`set_ui_sets`]'s, else those of an app
+/// library built with [`ui_sets!`], else the mobile UI.
+fn ui_sets() -> Vec<nsh_core::ui::Registry> {
+    if let Some(sets) = UI_SETS.read().unwrap_or_else(|e| e.into_inner()).clone() {
+        return sets;
+    }
+    // SAFETY: looks up a symbol of the loaded libraries; [`ui_sets!`]
+    // defines it with this signature, in a library built with this crate.
+    let app = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"nsh_app_ui_sets".as_ptr()) };
+    if !app.is_null() {
+        // SAFETY: as above.
+        let sets: fn() -> Vec<nsh_core::ui::Registry> = unsafe { std::mem::transmute(app) };
+        return sets();
+    }
+    vec![nsh_ui_mobile::registry()]
+}
+
+/// Makes this library an app's `libnsh.so` that serves `$sets` (an
+/// expression giving the `Vec<Registry>` of the mobile UI and the app's
+/// own Rust components): `nsh run` builds one for apps with `"rust"` in
+/// `nsh.json`.
+#[macro_export]
+macro_rules! ui_sets {
+    ($sets:expr) => {
+        #[unsafe(no_mangle)]
+        fn nsh_app_ui_sets() -> ::std::vec::Vec<$crate::Registry> {
+            $sets
+        }
+    };
+}
 /// The JNI bindings [`main`] expands to.
 pub use jni;
 use jni::{JavaVM, sys::jint};

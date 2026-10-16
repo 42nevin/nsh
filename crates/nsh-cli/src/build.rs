@@ -55,6 +55,7 @@ pub(crate) fn compile(entry: &Path, release: bool) -> Result<Built, BuildError> 
     let bundle = nsh_bundler::bundle(&BundleOptions {
         entry: entry.to_path_buf(),
         minify: release,
+        ui_sets: crate::ui_sets().to_vec(),
     })?;
     if let Some(dir) = entry
         .canonicalize()
@@ -64,8 +65,7 @@ pub(crate) fn compile(entry: &Path, release: bool) -> Result<Built, BuildError> 
         crate::init::write_types_with(&dir, &bundle.elements);
     }
     let start = Instant::now();
-    let bytecode =
-        nsh_js::compile_bytecode_with(&bundle.code, release, &[nsh_ui_mobile::registry()])?;
+    let bytecode = nsh_js::compile_bytecode_with(&bundle.code, release, crate::ui_sets())?;
     log::info!(
         "built {} ({} B js in {:.1} ms, {} B bytecode in {:.1} ms)",
         entry.display(),
@@ -86,7 +86,7 @@ pub(crate) fn compile(entry: &Path, release: bool) -> Result<Built, BuildError> 
 /// Bundles `entry` for development with hot module replacement: the whole
 /// app (source and bytecode) plus the modules, to compute later updates.
 pub(crate) fn compile_hot(entry: &Path) -> Result<(Built, nsh_bundler::HotBundle), BuildError> {
-    let hot = nsh_bundler::bundle_hot(entry)?;
+    let hot = nsh_bundler::bundle_hot(entry, crate::ui_sets())?;
     if let Some(dir) = entry
         .canonicalize()
         .ok()
@@ -96,7 +96,7 @@ pub(crate) fn compile_hot(entry: &Path) -> Result<(Built, nsh_bundler::HotBundle
     }
     let (code, source_map) = hot.script();
     let start = Instant::now();
-    let bytecode = nsh_js::compile_bytecode_with(&code, false, &[nsh_ui_mobile::registry()])?;
+    let bytecode = nsh_js::compile_bytecode_with(&code, false, crate::ui_sets())?;
     log::info!(
         "built {} ({} B js in {:.1} ms, {} B bytecode in {:.1} ms)",
         entry.display(),

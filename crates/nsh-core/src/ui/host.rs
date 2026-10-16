@@ -1,6 +1,6 @@
 //! The host elements beyond views, texts and images: inputs, scroll views,
-//! modals, canvases, web views, videos and the embedder's native
-//! components, with their props and typed events. Their props are the
+//! navigation stacks and their screens, modals, canvases, web views, videos
+//! and the embedder's native components, with their props and typed events. Their props are the
 //! core's [`Prop`]s, kept per element and diffed by kind: a prop a render
 //! no longer sets goes back to its default, as when JS clears it.
 
@@ -15,9 +15,10 @@ use super::{
     },
 };
 use crate::{
-    AutoCapitalize, AutoFill, Color, EdgeInsets, EventKind, JsonValue, KeyboardDismissMode,
-    KeyboardTaps, KeyboardType, ModalAnimation, ModalPresentation, ModalProp, NativeProp, Prop,
-    ResizeMode, ReturnKeyType, ScrollProp, Size, SnapAlignment, Tag, WebSource,
+    AutoCapitalize, AutoFill, Color, EdgeInsets, EventKind, HeaderSlot, JsonValue,
+    KeyboardDismissMode, KeyboardTaps, KeyboardType, ModalAnimation, ModalPresentation, ModalProp,
+    NativeProp, Prop, ResizeMode, ReturnKeyType, ScreenAnimation, ScreenProp, ScrollProp, Size,
+    SnapAlignment, Tag, WebSource,
     canvas::{
         CanvasFont, CanvasGradient, CanvasImage, CanvasOp, CanvasTextAlign, CanvasTextBaseline,
         Composite, Drawing, FillRule, GradientShape, LineCap, LineJoin, Num, Paint, Path, PathOp,
@@ -116,6 +117,20 @@ host_element! {
 }
 
 host_element! {
+    /// A native navigation stack (`<stack>`), made by [`stack`]:
+    /// UINavigationController on iOS (swipe back, native header), a stack
+    /// with a toolbar and predictive back on Android. Its children are its
+    /// [`Screen`]s, bottom to top.
+    Stack
+}
+
+host_element! {
+    /// One screen of a [`Stack`] (`<screen>`), made by [`screen`]: its
+    /// header options and its content (its children).
+    Screen
+}
+
+host_element! {
     /// A modal (`<modal>`), made by [`modal`]: presented while it is in the
     /// render, over everything else; its children are its content.
     Modal
@@ -143,6 +158,8 @@ host_element! {
 }
 
 impl ParentElement for Scroll {}
+impl ParentElement for Stack {}
+impl ParentElement for Screen {}
 impl ParentElement for Modal {}
 
 /// A text field.
@@ -153,6 +170,22 @@ pub fn input() -> Input {
 /// A vertical scroll view ([`Scroll::horizontal`] for a horizontal one).
 pub fn scroll() -> Scroll {
     Scroll(ElNode::new(Tag::Scroll))
+}
+
+/// A native navigation stack of [`screen`]s: put a screen in to push it,
+/// leave it out to pop it. Give each screen a [`Element::key`] (its route)
+/// so the screens below keep their state.
+pub fn stack() -> Stack {
+    Stack(ElNode::new(Tag::Stack))
+}
+
+/// A screen of a [`stack`]. What it renders reads its insets below the
+/// header ([`super::RenderCx::insets`]).
+pub fn screen() -> Screen {
+    let mut node = ElNode::new(Tag::Screen);
+    // Its insets come with this event.
+    node.handlers.push((EventKind::Insets, Listener::noop()));
+    Screen(node)
 }
 
 /// A modal presenting its children. Put it in the render to present it,
@@ -447,6 +480,110 @@ impl Scroll {
     /// It came to rest.
     pub fn on_scroll_end(self, listener: Listener<ScrollOffset>) -> Self {
         self.listen(EventKind::ScrollEnd, listener, events::offset)
+    }
+}
+
+impl Screen {
+    fn header_item(mut self, slot: HeaderSlot, key: &'static str, item: impl IntoElement) -> Self {
+        let mut node = ElNode::new(Tag::HeaderItem);
+        node.key = Some(key.into());
+        set(&mut node, Prop::HeaderSlot(slot));
+        node.children.push(item.into_element().0);
+        self.0.children.push(node);
+        self
+    }
+
+    fn screen(self, prop: ScreenProp) -> Self {
+        self.set(Prop::Screen(prop))
+    }
+
+    /// The header's title.
+    pub fn title(self, title: impl Into<Arc<str>>) -> Self {
+        self.screen(ScreenProp::Title(Some(title.into())))
+    }
+
+    /// Whether the header shows (default true).
+    pub fn header_shown(self, shown: bool) -> Self {
+        self.screen(ScreenProp::HeaderShown(shown))
+    }
+
+    /// A large title (iOS); the content scrolls under the header.
+    pub fn header_large_title(self, large: bool) -> Self {
+        self.screen(ScreenProp::HeaderLargeTitle(large))
+    }
+
+    /// The content extends under the header.
+    pub fn header_transparent(self, transparent: bool) -> Self {
+        self.screen(ScreenProp::HeaderTransparent(transparent))
+    }
+
+    /// The back button's and bar buttons' color.
+    pub fn header_tint_color(self, color: impl Into<Color>) -> Self {
+        self.screen(ScreenProp::HeaderTintColor(Some(color.into())))
+    }
+
+    /// The header's background.
+    pub fn header_background_color(self, color: impl Into<Color>) -> Self {
+        self.screen(ScreenProp::HeaderBackgroundColor(Some(color.into())))
+    }
+
+    /// The title's color.
+    pub fn header_title_color(self, color: impl Into<Color>) -> Self {
+        self.screen(ScreenProp::HeaderTitleColor(Some(color.into())))
+    }
+
+    /// The label of the back button leading back to this screen (iOS).
+    pub fn header_back_title(self, title: impl Into<Arc<str>>) -> Self {
+        self.screen(ScreenProp::HeaderBackTitle(Some(title.into())))
+    }
+
+    /// Whether the back button shows (default true).
+    pub fn header_back_visible(self, visible: bool) -> Self {
+        self.screen(ScreenProp::HeaderBackVisible(visible))
+    }
+
+    /// The interactive back gesture (iOS swipe back, Android predictive
+    /// back); the back buttons pop either way (default true).
+    pub fn gesture_enabled(self, enabled: bool) -> Self {
+        self.screen(ScreenProp::GestureEnabled(enabled))
+    }
+
+    /// The user cannot leave the screen: no swipe back, and the back
+    /// buttons report [`Self::on_back_request`] instead of popping. Decided
+    /// natively when the system asks, so set it before the user acts.
+    pub fn prevent_back(self, prevent: bool) -> Self {
+        self.screen(ScreenProp::PreventBack(prevent))
+    }
+
+    /// How the screen enters and leaves.
+    pub fn animation(self, animation: ScreenAnimation) -> Self {
+        self.screen(ScreenProp::Animation(animation))
+    }
+
+    /// An element at the header's start (instead of the back button).
+    pub fn header_left(self, item: impl IntoElement) -> Self {
+        self.header_item(HeaderSlot::Left, "header-left", item)
+    }
+
+    /// An element at the header's end.
+    pub fn header_right(self, item: impl IntoElement) -> Self {
+        self.header_item(HeaderSlot::Right, "header-right", item)
+    }
+
+    /// An element replacing the title.
+    pub fn header_title(self, item: impl IntoElement) -> Self {
+        self.header_item(HeaderSlot::Title, "header-title", item)
+    }
+
+    /// The user popped the screen natively (back button, swipe): leave it
+    /// out of the next render.
+    pub fn on_dismiss(self, listener: Listener<()>) -> Self {
+        self.listen(EventKind::Dismiss, listener, events::unit)
+    }
+
+    /// The user tried to leave a screen that [`Self::prevent_back`]s.
+    pub fn on_back_request(self, listener: Listener<()>) -> Self {
+        self.listen(EventKind::BackRequest, listener, events::unit)
     }
 }
 

@@ -47,6 +47,26 @@ mod zoom;
 
 pub use nsh_engine::Bundle;
 
+/// The UI sets apps import ([`set_ui_sets`]; by default the mobile UI).
+static UI_SETS: std::sync::RwLock<Option<Vec<nsh_core::ui::Registry>>> =
+    std::sync::RwLock::new(None);
+
+/// Sets the UI sets the engines started from now on serve: the mobile UI
+/// and an app's own Rust components (`nsh.json` `"rust"`), which a host
+/// built for the app passes before it starts.
+pub fn set_ui_sets(sets: Vec<nsh_core::ui::Registry>) {
+    *UI_SETS.write().unwrap_or_else(|e| e.into_inner()) = Some(sets);
+}
+
+/// The UI sets engines serve.
+fn ui_sets() -> Vec<nsh_core::ui::Registry> {
+    UI_SETS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(|| vec![nsh_ui_mobile::registry()])
+}
+
 pub use crate::{
     app::{AppOptions, AppSource, in_app_bundle, run_app},
     component::{ComponentContext, ComponentFactory, Components, NativeComponent},

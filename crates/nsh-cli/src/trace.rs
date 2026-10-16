@@ -45,6 +45,7 @@ pub(crate) fn trace(
     let bundle = nsh_bundler::bundle(&BundleOptions {
         entry: entry.to_path_buf(),
         minify: false,
+        ui_sets: crate::ui_sets().to_vec(),
     })
     .map_err(|e| anyhow::anyhow!("{}", e.colored))?;
     eprintln!(
@@ -52,8 +53,7 @@ pub(crate) fn trace(
         bundle.elapsed_ms,
         bundle.code.len()
     );
-    let bytecode =
-        nsh_js::compile_bytecode_with(&bundle.code, false, &[nsh_ui_mobile::registry()])?;
+    let bytecode = nsh_js::compile_bytecode_with(&bundle.code, false, crate::ui_sets())?;
     // SAFETY: compiled just now by this runtime.
     let bytecode = unsafe { Bundle::bytecode(bytecode) };
 
@@ -72,7 +72,7 @@ pub(crate) fn trace(
         environment: Default::default(),
         header_heights: (44.0, 96.0),
         limits: nsh_engine::Limits::default(),
-        components: nsh_ui_mobile::registry(),
+        ui_sets: crate::ui_sets().to_vec(),
         runtime: None,
     };
     let control = Arc::new(OnceLock::new());

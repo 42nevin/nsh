@@ -101,7 +101,8 @@ of that kind: with a listener the press is taken, and JS exits the app when no l
   (Android: resource id). Views without a label read their texts.
 - **Frames**: `requestAnimationFrame` / `cancelAnimationFrame` follow the display (CADisplayLink / Choreographer).
 - **Back button** (`nsh/android`): `BackHandler.addEventListener("hardwareBackPress", ...)`, after modals and stacks; the app exits
-  when nothing handles it.
+  when nothing handles it. Rust components listen with `cx.on_back_press(..)`, before JS's listeners; the root wants
+  the button while either side listens (`docs/dev/components.md`).
 - **System UI**: `StatusBar` (component and static functions; the last mounted wins, prop by prop, over what the
   functions set: the core layers them, `docs/dev/components.md`), `Alert.alert` and `ActionSheet.show` (promises of
   the index chosen, -1 when dismissed; a list dialog on Android), `Toast` (`nsh/android`). Answers come back as the

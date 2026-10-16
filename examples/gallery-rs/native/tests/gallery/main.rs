@@ -1,0 +1,22 @@
+//! The Rust gallery on a headless engine: the index, and each demo in a
+//! module of its own (one test binary: each links the whole engine).
+
+mod common;
+
+mod animations;
+mod canvas;
+mod components;
+mod form;
+mod gestures;
+mod images;
+mod index;
+mod lists;
+mod media;
+mod mobile_ui;
+mod photos;
+mod physics;
+mod scrolling;
+mod styles;
+mod system;
+mod text_demo;
+mod typed_styles;

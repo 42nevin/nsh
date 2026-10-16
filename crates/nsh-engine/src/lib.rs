@@ -383,9 +383,10 @@ pub struct EngineConfig {
     pub header_heights: (f32, f32),
     /// The JS VM's resource limits (a JS app's; Rust code has none).
     pub limits: Limits,
-    /// The Rust components JS can render by name (`nsh_ui_mobile::registry()`
-    /// on mobile); a Rust app's components need no registration.
-    pub components: nsh_core::ui::Registry,
+    /// The UI sets JS imports (`nsh_ui_mobile::registry()` on mobile, the
+    /// app's own): their Rust components and modules. A Rust app's
+    /// components need no registration.
+    pub ui_sets: Vec<nsh_core::ui::Registry>,
     /// The tokio runtime the components' async tasks use (timers, IO,
     /// background work); `None`: one shared by the engines of the process.
     pub runtime: Option<tokio::runtime::Handle>,
@@ -420,7 +421,7 @@ impl std::fmt::Debug for EngineConfig {
             .field("environment", &self.environment)
             .field("header_heights", &self.header_heights)
             .field("limits", &self.limits)
-            .field("components", &self.components)
+            .field("ui_sets", &self.ui_sets)
             .finish()
     }
 }
@@ -616,7 +617,7 @@ fn run<M: TextEngine + 'static, S: MountSink>(
         App::Rust(_) => Policy::default().access(),
     });
     let mut core = Core::new(text_engine.clone(), config.viewport);
-    core.set_components(config.components.clone());
+    core.set_components(nsh_core::ui::Registry::merged(&config.ui_sets));
     if let App::Js(_) = &config.app {
         // Only JS is limited (Rust code is as trusted as the platform).
         core.set_max_nodes(config.limits.max_nodes);
@@ -675,7 +676,7 @@ fn run<M: TextEngine + 'static, S: MountSink>(
         App::Js(bundle) => match Script::start(
             bundle,
             config.limits,
-            &config.components,
+            &config.ui_sets,
             &environment,
             text_engine,
             stop,
@@ -971,7 +972,6 @@ impl<M: TextEngine> State<M> {
 
     /// Sends the `onScroll` events that are due.
     fn dispatch_scroll_events(&mut self, script: Option<&Script>) {
-        let Some(script) = script else { return };
         if self.scroll_events.is_empty() {
             return;
         }
@@ -987,19 +987,21 @@ impl<M: TextEngine> State<M> {
             e.pending = false;
             e.last = Some(now);
             let n = |v: f32| PayloadValue::Number(v as f64);
-            script.dispatch_event(
-                id,
-                EventKind::Scroll,
-                &EventPayload::Map(vec![
-                    ("x", n(e.x)),
-                    ("y", n(e.y)),
-                    ("contentWidth", n(e.content.width)),
-                    ("contentHeight", n(e.content.height)),
-                    ("width", n(e.viewport.width)),
-                    ("height", n(e.viewport.height)),
-                    ("zoomScale", n(e.zoom)),
-                ]),
-            );
+            let payload = EventPayload::Map(vec![
+                ("x", n(e.x)),
+                ("y", n(e.y)),
+                ("contentWidth", n(e.content.width)),
+                ("contentHeight", n(e.content.height)),
+                ("width", n(e.viewport.width)),
+                ("height", n(e.viewport.height)),
+                ("zoomScale", n(e.zoom)),
+            ]);
+            // A Rust component's scroll view is the component's.
+            if !self.core.component_event(id, EventKind::Scroll, &payload)
+                && let Some(script) = script
+            {
+                script.dispatch_event(id, EventKind::Scroll, &payload);
+            }
         }
     }
 
@@ -1044,20 +1046,27 @@ impl<M: TextEngine> State<M> {
         for _ in 0..MAX_LIST_ROUNDS {
             // Requests from the previous round (or frame) first.
             let js_start = Instant::now();
-            // Without JS, lists bind and events go nowhere (Rust components
-            // get theirs in the core).
+            // Without JS, lists bind nowhere (Rust components' lists bind in
+            // the core).
             let binds = self.binds.drain(..);
-            let events = self.events.drain(..);
             if let Some(script) = script {
                 for bind in binds {
                     script.bind_list(bind.list, &bind.binds);
                 }
-                for (id, event, payload) in events {
+            } else {
+                drop(binds);
+            }
+            // The core's events (layouts, ends reached, ...) on a Rust
+            // component's nodes are the component's; the rest are JS's.
+            for (id, event, payload) in self.events.drain(..) {
+                if !self.core.component_event(id, event, &payload)
+                    && let Some(script) = script
+                {
                     script.dispatch_event(id, event, &payload);
                 }
+            }
+            if let Some(script) = script {
                 script.take_ops(&mut self.ops);
-            } else {
-                drop((binds, events));
             }
             js += js_start.elapsed();
             op_count += self.ops.len();

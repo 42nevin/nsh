@@ -52,6 +52,39 @@ impl Sdk {
         self.root.join("platform-tools/adb")
     }
 
+    /// A cargo command set up to cross-compile for `triple` with the NDK
+    /// (`ANDROID_NDK_HOME`, else the newest NDK of the SDK): an app's own
+    /// `libnsh.so` (`rust_app.rs`).
+    pub(crate) fn ndk_cargo(&self, triple: &str) -> anyhow::Result<Command> {
+        let ndk = match env::var_os("ANDROID_NDK_HOME") {
+            Some(ndk) => PathBuf::from(ndk),
+            None => newest(&self.root.join("ndk"))
+                .context("no NDK in the SDK: install it with `sdkmanager \"ndk;<version>\"`")?,
+        };
+        // The NDK's "darwin-x86_64" toolchain is universal.
+        let host = if cfg!(target_os = "macos") {
+            "darwin-x86_64"
+        } else {
+            "linux-x86_64"
+        };
+        let toolchain = ndk.join("toolchains/llvm/prebuilt").join(host);
+        let bin = toolchain.join("bin");
+        let clang = bin.join(format!("{triple}{MIN_SDK}-clang"));
+        let env_triple = triple.replace('-', "_");
+        let mut cmd = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+        cmd.env(format!("CC_{env_triple}"), &clang)
+            .env(format!("AR_{env_triple}"), bin.join("llvm-ar"))
+            .env(
+                format!("CARGO_TARGET_{}_LINKER", env_triple.to_uppercase()),
+                &clang,
+            )
+            .env(
+                format!("BINDGEN_EXTRA_CLANG_ARGS_{env_triple}"),
+                format!("--sysroot={}", toolchain.join("sysroot").display()),
+            );
+        Ok(cmd)
+    }
+
     fn tool(&self, name: &str) -> PathBuf {
         self.build_tools.join(name)
     }

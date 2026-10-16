@@ -85,6 +85,13 @@ impl DevSession {
             })?;
         watcher.watch(&self.src_dir, RecursiveMode::Recursive)?;
         log::info!("watching {}", self.src_dir.display());
+        // The app's Rust code: a change builds the app's hosts again.
+        let rust = crate::rust_app::current();
+        if let Some(app) = &rust
+            && !app.crate_dir().starts_with(&self.src_dir)
+        {
+            watcher.watch(app.crate_dir(), RecursiveMode::Recursive)?;
+        }
         loop {
             if stop()? {
                 return Ok(());
@@ -92,6 +99,11 @@ impl DevSession {
             let Ok(event) = rx.recv_timeout(Duration::from_millis(200)) else {
                 continue;
             };
+            if let Some(app) = &rust
+                && event.paths.iter().any(|p| app.is_rust(p))
+            {
+                return Err(crate::rust_app::Restart.into());
+            }
             if !is_source(&event) {
                 continue;
             }

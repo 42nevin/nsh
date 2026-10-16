@@ -238,6 +238,8 @@ pub(super) struct Components {
     virtual_lists: FxHashMap<NodeId, VirtualListState>,
     /// The insets screens and modals reported (`onInsets`).
     insets: FxHashMap<NodeId, EdgeInsets>,
+    /// JS listens to the back button (`BackHandler`) on the root.
+    js_back: bool,
     next_id: NodeId,
     dirty: Vec<NodeId>,
     /// Reused buffers.
@@ -267,6 +269,7 @@ impl Default for Components {
             animations: FxHashMap::default(),
             virtual_lists: FxHashMap::default(),
             insets: FxHashMap::default(),
+            js_back: false,
             // Odd: JS allocates the even ids (1 is the root).
             next_id: 3,
             dirty: Vec::new(),
@@ -697,6 +700,21 @@ impl<M: TextEngine> Core<M> {
                 inst.class_list = list;
                 self.update_user_class(id);
                 Ok(None)
+            }
+            // The root listens to the back button while JS or a component
+            // does.
+            Op::Listen {
+                id: crate::ROOT_ID,
+                event: EventKind::BackPress,
+                enabled,
+            } => {
+                self.components.js_back = enabled;
+                let rust = !self.components.executor.back.borrow().list.is_empty();
+                Ok(Some(Op::Listen {
+                    id: crate::ROOT_ID,
+                    event: EventKind::BackPress,
+                    enabled: enabled || rust,
+                }))
             }
             // The component's events come from the core, not from the view.
             Op::Listen {
@@ -1440,8 +1458,19 @@ impl<M: TextEngine> Core<M> {
                 }
             }
         }
+        // Content of a nested component (`.child`, `.fill`): it leaves and
+        // joins the nested host as JS children and slots do, so the nested
+        // render places it.
+        let nested = parent != host && self.is_host(parent);
         for o in old.into_iter().flatten() {
+            if nested {
+                self.leave_nested(parent, o.id);
+            }
             self.release_expanded(o);
+        }
+        if nested {
+            self.join_nested(parent, &out);
+            return out;
         }
         if let Some(at) = placeholder {
             inst.children_at = Placement::At(parent, out.get(at + 1).map(|e| e.id));
@@ -1486,6 +1515,55 @@ impl<M: TextEngine> Core<M> {
             }
         }
         out
+    }
+
+    /// Node `child` of this render is no longer content of the nested
+    /// component hosted by `nested`.
+    fn leave_nested(&mut self, nested: NodeId, child: NodeId) {
+        if self.components.slot_names.remove(&child).is_some() {
+            self.unslot(child);
+        } else if let Ok(Some(op)) = self.intercept(Op::Remove {
+            parent: nested,
+            child,
+        }) {
+            let _ = self.apply_op(op);
+        }
+    }
+
+    /// The content `out` of the nested component hosted by `nested`, in
+    /// order: its children as the host's JS children, its slots' holders
+    /// in their slots (inserted only when that changed).
+    fn join_nested(&mut self, nested: NodeId, out: &[Expanded]) {
+        let insert = |core: &mut Self, child: NodeId, before: Option<NodeId>| {
+            if let Ok(Some(op)) = core.intercept(Op::Insert {
+                parent: nested,
+                child,
+                before,
+            }) {
+                let _ = core.apply_op(op);
+            }
+        };
+        let (slots, children): (Vec<NodeId>, Vec<NodeId>) = out
+            .iter()
+            .map(|e| e.id)
+            .partition(|id| self.components.slot_names.contains_key(id));
+        for slot in slots {
+            if self.components.slot_hosts.get(&slot) != Some(&nested) {
+                insert(self, slot, None);
+            }
+        }
+        let same = self
+            .components
+            .instances
+            .get(&nested)
+            .is_some_and(|i| i.js_children == children);
+        if !same {
+            let mut before = None;
+            for &child in children.iter().rev() {
+                insert(self, child, before);
+                before = Some(child);
+            }
+        }
     }
 
     /// Whether `child` is a child of `parent` right before `next` (the last
@@ -1596,6 +1674,11 @@ impl<M: TextEngine> Core<M> {
             if let Some(listener) = c.on_event {
                 inst.event_handlers.push((id, listener));
             }
+            // The content this render passes it (`.child`, `.fill`): nodes of
+            // this render, inserted into its host as JS inserts its children,
+            // so the nested component places them where its render says.
+            let content = std::mem::take(&mut el.children);
+            let children = self.reconcile_children(id, old_children, content, host, inst);
             return Expanded {
                 id,
                 tag: el.tag,
@@ -1607,7 +1690,7 @@ impl<M: TextEngine> Core<M> {
                 events: EventMask::default(),
                 list: ListConfig::default(),
                 part,
-                children: Vec::new(),
+                children,
             };
         }
         self.apply_attrs(id, &el.attrs, &old_attrs);
@@ -1853,6 +1936,8 @@ impl<M: TextEngine> Core<M> {
         }
         // Its tasks and timers end with it.
         self.components.executor.cancel_host(host);
+        let listeners = self.components.executor.back.borrow_mut().remove_host(host);
+        drop(listeners);
         for &child in &inst.js_children {
             self.detach_id(child);
         }
@@ -1908,21 +1993,8 @@ impl<M: TextEngine> Core<M> {
         else {
             return false;
         };
-        // A list row's handlers are the component's whose list it is.
-        let owner = match &inst.inner {
-            Inner::Component(_) => host,
-            Inner::VirtualRow { list, .. } => match self.components.virtual_lists.get(list) {
-                Some(state) => state.owner,
-                None => return false,
-            },
-            Inner::Row { .. } => match self
-                .list_of(host)
-                .and_then(|l| self.components.slot_hosts.get(&l))
-            {
-                Some(&owner) => owner,
-                None => return false,
-            },
-            Inner::Missing => return false,
+        let Some(owner) = self.state_owner(host) else {
+            return false;
         };
         if owner != host {
             cx = self.erased_cx(owner);
@@ -1940,6 +2012,22 @@ impl<M: TextEngine> Core<M> {
             self.component_failed(owner, message);
         }
         true
+    }
+
+    /// The component whose state `host`'s handlers change: its own, or for
+    /// a list row the component's whose list it is.
+    fn state_owner(&self, host: NodeId) -> Option<NodeId> {
+        match &self.components.instances.get(&host)?.inner {
+            Inner::Component(_) => Some(host),
+            Inner::VirtualRow { list, .. } => {
+                self.components.virtual_lists.get(list).map(|s| s.owner)
+            }
+            Inner::Row { .. } => self
+                .list_of(host)
+                .and_then(|l| self.components.slot_hosts.get(&l))
+                .copied(),
+            Inner::Missing => None,
+        }
     }
 
     /// The code of `host`'s component panicked: the nearest component above
@@ -2079,6 +2167,23 @@ impl<M: TextEngine> Core<M> {
                     .deliver(number("index").unwrap_or(-1.0) as i32);
                 true
             }
+            EventKind::BackPress if id == crate::ROOT_ID => {
+                let listeners = self.components.executor.back.borrow().newest_first();
+                for (host, listener) in listeners {
+                    if self.back_pressed(host, &listener) {
+                        return true;
+                    }
+                }
+                // JS's listeners run next (and exit when none handles it).
+                if self.components.js_back {
+                    return false;
+                }
+                let _ = self.apply_op(Op::Command {
+                    id: crate::ROOT_ID,
+                    command: Command::ExitApp,
+                });
+                true
+            }
             EventKind::ImageInfo if id == crate::ROOT_ID => {
                 let Some(request) = number("id") else {
                     return false;
@@ -2112,6 +2217,45 @@ impl<M: TextEngine> Core<M> {
             }
             _ => false,
         }
+    }
+
+    /// Runs a back listener of component `host`: whether it handled the
+    /// press.
+    fn back_pressed(&mut self, host: NodeId, listener: &crate::ui::BackListener) -> bool {
+        let mut cx = self.erased_cx(host);
+        let Some(inst) = self.components.instances.get_mut(&host) else {
+            return false;
+        };
+        let Inner::Component(inner) = &mut inst.inner else {
+            return false;
+        };
+        let (state, props) = inner.parts();
+        let result = caught(|| listener(state, props, &mut cx));
+        self.finish_event(host, cx);
+        match result {
+            Ok(handled) => handled,
+            Err(message) => {
+                self.component_failed(host, message);
+                false
+            }
+        }
+    }
+
+    /// The root listens to the back button while JS or a component does:
+    /// follows the components' listeners coming and going.
+    pub(super) fn sync_back(&mut self) {
+        let rust = {
+            let mut back = self.components.executor.back.borrow_mut();
+            if !std::mem::take(&mut back.changed) {
+                return;
+            }
+            !back.list.is_empty()
+        };
+        let _ = self.apply_op(Op::Listen {
+            id: crate::ROOT_ID,
+            event: EventKind::BackPress,
+            enabled: rust || self.components.js_back,
+        });
     }
 
     /// The nearest `type_id` provided by a component above `host` (through
@@ -2231,18 +2375,23 @@ impl<M: TextEngine> Core<M> {
         for event in cx.emits {
             match self.components.owners.get(&host).copied() {
                 // A nested component: the component that rendered it gets
-                // the event, if it handles it.
+                // the event, if it handles it (a list row's handlers run
+                // with the component whose list it is).
                 Some(parent) => {
-                    let mut cx = self.erased_cx(parent);
-                    let Some(inst) = self.components.instances.get_mut(&parent) else {
-                        continue;
-                    };
-                    let Some(listener) = inst
-                        .event_handlers
-                        .iter()
-                        .find(|(n, _)| *n == host)
+                    let Some(listener) = self
+                        .components
+                        .instances
+                        .get(&parent)
+                        .and_then(|inst| inst.event_handlers.iter().find(|(n, _)| *n == host))
                         .map(|(_, l)| l.clone())
                     else {
+                        continue;
+                    };
+                    let Some(parent) = self.state_owner(parent) else {
+                        continue;
+                    };
+                    let mut cx = self.erased_cx(parent);
+                    let Some(inst) = self.components.instances.get_mut(&parent) else {
                         continue;
                     };
                     let mut failed = None;
