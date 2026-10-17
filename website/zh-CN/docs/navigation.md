@@ -1,7 +1,8 @@
 ---
 title: 导航
 description: 用 createNavigator、Stack 和 Screen 构建原生导航栈，标题栏选项，用 preventBack 把用户留在当前页面，模态视图，以及 Android 返回键。
-order: 17
+order: 41
+group: ui
 ---
 
 # 导航

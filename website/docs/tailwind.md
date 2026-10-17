@@ -1,7 +1,8 @@
 ---
 title: Tailwind
 description: Style elements with Tailwind CSS classes resolved natively - class and classList, variants for pressed states, dark mode and breakpoints, the theme in nsh.json, and the build-time class check.
-order: 9
+order: 33
+group: ui
 demo: guide-tailwind
 ---
 

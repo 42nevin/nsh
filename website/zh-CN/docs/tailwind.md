@@ -1,7 +1,8 @@
 ---
 title: Tailwind
 description: 用原生解析的 Tailwind CSS 类给元素加样式：class 与 classList，按下状态、深色模式和断点等变体，nsh.json 中的主题，以及构建时的类名检查。
-order: 9
+order: 33
+group: ui
 demo: guide-tailwind
 ---
 

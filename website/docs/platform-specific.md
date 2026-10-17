@@ -1,12 +1,13 @@
 ---
 title: Platform-specific code
-description: Writing one app for iOS and Android - platform-only props in ios={{}} / android={{}} / desktop={{}}, the nsh/ios and nsh/android modules, Platform.OS and Platform.select, and platform Tailwind variants.
-order: 25
+description: Writing one app for phones and desktops - platform-only props in ios={{}} / android={{}} / desktop={{}}, the nsh/ios and nsh/android modules, Platform.OS and Platform.select, and platform Tailwind variants.
+order: 17
+group: platforms
 ---
 
 # Platform-specific code
 
-One nsh bundle runs on iOS, Android and Mac Catalyst. Most of an app needs no platform checks at all: elements, styles, layout, components and modules behave the same everywhere, and the components of `nsh/ui/mobile` are drawn by nsh rather than borrowed from each platform, so they look the same on both. When something really is specific to one platform, nsh gives it a clear place, so platform code stays visible and contained:
+One nsh bundle runs on iOS, Android, macOS, Windows and Linux (and in Mac Catalyst). Most of an app needs no platform checks at all: elements, styles, layout, components and modules behave the same everywhere, and the components of `nsh/ui/mobile` are drawn by nsh rather than borrowed from each platform, so they look the same everywhere. When something really is specific to one platform, nsh gives it a clear place, so platform code stays visible and contained:
 
 | Where | For |
 |---|---|

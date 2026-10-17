@@ -15,7 +15,9 @@ back. One implementation draws the same on iOS and Android, is laid out in the s
 | `crates/nsh-js/src/declarations.rs` | `nsh/ui/mobile.d.ts`: the declarations generated from `nsh_ui_mobile::registry()` (`nsh_core::ui::declarations`) with the re-exports and the navigation |
 | `nsh_engine::EngineConfig::ui_sets` | The registries a surface serves (the platforms' `set_ui_sets`, by default `nsh_ui_mobile::registry()`; an app's own set: `docs/dev/tooling.md`) |
 
-A desktop set will be a crate of its own (`nsh-ui-desktop`, on GPUI), not an abstraction over both.
+A desktop set is planned as a crate of its own (`nsh-ui-desktop`, on GPUI), not an abstraction over both. It does not exist
+yet: on macOS, Windows and Linux apps use `nsh/ui/mobile`, whose components render there as on phones, or their own
+layouts from the primitives.
 
 ## The API
 
