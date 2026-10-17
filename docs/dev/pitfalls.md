@@ -171,6 +171,35 @@ Things that were found the hard way. Read the section of the area you change bef
   so a line is wider than its sum of advances; `TextLayouts.Prepared.desired` adds the largest negative spacing back, or text laid
   out at its natural width wraps (`tracking-tight`).
 
+## Linux, GTK
+
+- **inotify reports reads** (`Access` events), FSEvents does not: file watchers (`nsh dev`, `cargo run`'s xtask) ignore
+  `Access` events, or the build's own reads of the sources start the next build, forever. inotify also reports paths
+  under the watched one as given: watch a canonical path (a `..` in it makes every path look like a dot entry).
+- **GDK frame times are microseconds** (`FrameClock::frame_time`); `nsh_anim::Graph::tick` takes seconds and the
+  scroll and transition code milliseconds: convert at each call site.
+- **A widget's accessible role is effectively fixed** once its AT context is realized: GTK refuses to change it (with a
+  critical), and nothing tells whether it is. Roles are decided when the view is created, from the batch that creates
+  it (`access::prepare`); a later change detaches the view and puts it back.
+- **`gtk_snapshot_append_repeating_radial_gradient` does not repeat** on GTK 4.22: append a
+  `gsk::RepeatingRadialGradientNode` made with its constructor.
+- **Bitmap fonts (color emoji) describe their strike's size**: a run's font description from
+  `describe_with_absolute_size` names the bitmap size, not the size asked for; set the absolute size again before the
+  main thread loads the font by description.
+- **GDK decodes only PNG, JPEG and TIFF by itself**; GIF and WebP need gdk-pixbuf loaders many systems lack, so the
+  `image` crate decodes them (their first frame).
+- **GTK 4.22 damages a translation with a whole `dx` and a fractional `dy` wrongly**: `gsk_transform_node_diff` tests
+  `floorf (dy) != dy` (fixed upstream to `==`) and translates the damage by the truncated offsets, so the pixels of
+  what moved or shrank under a fractionally scrolled view stay on screen. `view.rs` places children at whole points
+  and moves a remaining translation off that path (`placement`). Check damage on screen (`import -window root`, `grim`),
+  not with `shot`, which renders a fresh frame; `GSK_DEBUG=full-redraw` tells a damage bug from a drawing one.
+- **GSK's cairo renderer paints text outside its node's bounds**: a text node is bounded by the unhinted ink, cairo
+  draws the glyphs hinted with the baseline on the pixel grid, a pixel or so beyond. A view with text (or a text field)
+  adds a clear node `TEXT_OVERHANG` around its bounds that changes with each `NshView::changed`, so its damage covers
+  that (`ViewState::draw_overhang`).
+- **Tiling window managers ignore the host's `--size`** (the window's default size): scripted screenshots have the size
+  the window got, and the script's `resize` too (it resizes on X11 and floating windows).
+
 ## Testing on simulators and emulators
 
 - **iOS simulator: launch apps only after `simctl bootstatus -b`**; apps launched while the simulator boots are sent to the
