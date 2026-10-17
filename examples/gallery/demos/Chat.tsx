@@ -1,6 +1,7 @@
 import { batch, computed, effect, Input, Scroll, signal, Text, View, type ViewStyle, type YNode } from "nsh";
 import { createNativeValue, LayoutAnimation } from "nsh/animated";
 import { Clipboard } from "nsh/clipboard";
+import { Platform } from "nsh/device";
 import { List } from "nsh/list";
 import { keyboard, KeyboardAvoidingView, useSafeAreaInsets } from "nsh/ui/mobile";
 import { Icon, type IconName } from "../icons";
@@ -713,6 +714,12 @@ export function Chat() {
               value={draft()}
               onChangeText={(v) => draft.set(v)}
               multiline
+              // Return sends on desktops, as in chat apps there (Shift+Return
+              // adds a line); phones keep return for line breaks.
+              submitBehavior={Platform.isDesktop ? "submit" : "newline"}
+              onSubmitEditing={() => {
+                if (!streaming()) send();
+              }}
               placeholder={`Message ${model()}`}
               placeholderTextColor={colors.faint}
               selectionColor={colors.accent}

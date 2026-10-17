@@ -85,7 +85,7 @@ server client, log forwarding, the error overlay: `dev.rs`). The runtime needs m
 | Canvas | `canvas.rs` | The recorded drawing replayed with Core Graphics (iOS); drawings that clear or composite go into a transparency layer, so they only touch the canvas's own pixels |
 | Scroll views | `scroll.rs` | Offsets of their own, shown by the container's bounds origin; trackpad scrolls follow the system's phases and momentum (rubber banding while the fingers are down, a spring back after), notched wheels move 10 points per line and stay on their view for 200 ms; mouse drags scroll as on Catalyst; snapping and paging glide from where the fingers lift; sticky cells; the indicator and refresh spinner in an overlay view that lets the mouse through; the keyboard scrolls as on Linux; a field that gets the focus is scrolled into view |
 | Input | `input.rs` | The root's `hitTest:` takes every mouse event over an app view, and nsh picks the view itself (transforms inverted, `overflow`, `pointerEvents`, hit slop, hidden screens, views animating out); a hosted view under the pointer gets the event from AppKit, even below `pointerEvents: none` overlays (`native_at`). Touches for the responder system, `panActivation` gates, presses, long presses, pressed and hovered states, cursors (`NSCursor`), native pans, trackpad pinch and rotation (Control + wheel pinches), the mouse's back button goes back |
-| Text inputs | `text_input.rs` | `NSTextField` / `NSSecureTextField`, multiline `NSTextView` in an `NSScrollView`, hosted at the content box in a view that fills the input (`InputPad`: a click on the padding, or beside a field's line, goes to the editor at the nearest point), borderless (the view draws the decoration); edit counts drop stale JS values; offsets are `NSString`'s UTF-16; a click outside a field that edits leaves the focus in it (the root refuses first responder during a mouse press), `blur()` and Escape hand it over |
+| Text inputs | `text_input.rs` | `NSTextField` / `NSSecureTextField`, multiline `NSTextView` in an `NSScrollView`, hosted at the content box in a view that fills the input (`InputPad`: a click on the padding, or beside a field's line, goes to the editor at the nearest point), borderless (the view draws the decoration); edit counts drop stale JS values; offsets are `NSString`'s UTF-16; a click outside a field that edits leaves the focus in it (the root refuses first responder during a mouse press), `blur()` and Escape hand it over; return does what `submitBehavior` says (see "Keyboard") |
 | Navigation | `navigation.rs` | Screens are child views, only the top one (and the one below during a transition) visible; headers are AppKit views (an `NSButton` back button with `chevron.left`, `NSTextField` titles, large titles, header items) of a fixed height reported to the core; a screen the app removes leaves as an image (`renderInContext`), since the core empties it in the next batches; Escape (unless a field has the focus), Option+Left, Cmd+[ and the mouse's back button pop natively (a stack inside the newest modal first, else that modal is asked to close) |
 | Modals | `navigation.rs` | Children of the root above the app's views, sliding up or fading in; page and form sheets are centered cards (720 / 540 points wide at most) over a scrim that dims the window, and clicking the scrim asks them to close |
 | Transitions | `transition.rs` | `LayoutAnimation`, style transitions and keyframes on frame callbacks (Linux's) |
@@ -99,6 +99,35 @@ server client, log forwarding, the error overlay: `dev.rs`). The runtime needs m
 | Networking | `net.rs` | `NSURLSession` (the iOS backend's) |
 | Dev | `dev.rs` | The dev server client on its own thread; a status line and the error overlay above the surface (opaque; code frames keep their lines and scroll sideways; a click that selects no text dismisses it, in an inactive window too); Cmd+R reloads the latest build |
 | Performance monitor | `fps.rs`, `gpu.rs` | `--fps` / `AppOptions::fps` / `AppView::set_fps_monitor`: a panel above the surface that lets the mouse through, redrawn twice a second from the surface's `nsh_engine::perf::PerfMonitor` (see below); GPU time from the IO registry (`accumulatedGPUTime` of the process' accelerator clients) |
+
+## Keyboard
+
+A key goes to the window's first responder: a field's editor (the window's shared field editor, an `NSTextView`), a
+multiline input's `NshTextView`, a hosted view, or the surface's root. Menus' key equivalents (`app.rs`: Cmd+Q / H /
+Opt+Cmd+H, the Edit menu's Z / Shift+Z / X / C / V / A, Cmd+M, Ctrl+Cmd+F, Cmd+W) come first, matched by AppKit on
+any layout; the dev host's Cmd+R is a local key monitor (`dev.rs`).
+
+- **In a field** (`text_input.rs`), AppKit's key bindings edit: Option / Cmd + arrows, their Shift variants,
+  Option+Delete, Cmd+Delete, Ctrl+A / E / K, undo and the Edit menu's commands (a secure field refuses Copy and
+  Cut). Changes pass `Ctx::should_change` (one `onKeyPress` per insertion or deletion, `maxLength` clipping, line
+  breaks of a single line become spaces: its cell is not in single-line mode, which would replace them in a second
+  edit). The delegates' `doCommandBySelector:` (`Ctx::command`) takes return (`insertNewline:`, as
+  `InputConfig::submit()` says; Shift+Return breaks the line of a multiline input that submits, and a return with
+  marked text only commits the composition), Option+Return and Ctrl+Return (a `\n` in a multiline input, nothing in
+  a single line; `insertLineBreak:` alone would insert U+2028), Option+Tab (a tab character in a multiline input
+  only), Tab / Shift+Tab / Ctrl+Tab (`tab`: the next field on screen within the newest modal, skipping the clip view
+  of a text view, which hands the focus back to it) and Escape (leaves the field). Keys a field uses never reach the
+  root, so Option+Left moves the caret and Cmd+[ does nothing there.
+- **At the root** (`view.rs` `keyDown:` → `input::key`): the selected text's Cmd+A / Cmd+C / Escape (`text.rs`;
+  also the root's `selectAll:` / `copy:` for the menu), going back (`navigation::key_pressed`: Escape, Option+Left,
+  Cmd+[), Tab / Shift+Tab into the fields, and scrolling the scroll view around the focused view or under the mouse:
+  arrows by a line, Page Up / Down, Option+Up / Down and Space / Shift+Space by a page, Home / End and Cmd+Up / Down
+  to the edges. The mouse's back button goes back from `input::event`.
+- Shortcuts nsh matches itself (Cmd+A / C / [ / R) read `input::shortcut_key`: the character without modifiers, or on
+  a layout that types none in ASCII the US layout's key, as menus do.
+
+`onKeyPress` reports what React Native's does: the inserted text (`"Enter"` for a line break), `"Backspace"` for a
+deletion (in an empty input too), and `"Escape"`; Tab and navigation keys are not reported.
 
 ## Measuring: the performance monitor
 
@@ -126,7 +155,8 @@ event every 16 ms (a real trackpad on ProMotion: every 8 ms). For where the time
 lines (`script.rs`, whose module doc lists them all): `wait <ms>`, `shot <file.png>`, `tap [mods] <x> <y> [count]`
 (`tap shift 10 20`: a shift-click), `down` / `up` (a held press, for pressed states), `rtap`,
 `drag <x0> <y0> <x1> <y1> [ms]`, `wheel <x> <y> <dx> <dy> [ms]` (a trackpad gesture), `notch` (a mouse wheel),
-`hover`, `type <text>`, `key <name>` (with modifiers: `cmd+a`, `shift+Tab`), `dark` / `light`, `resize <w> <h>`,
+`hover`, `type <text>`, `mark <text>` (an input method's marked text), `key <name>` (with modifiers: `cmd+a`,
+`shift+Tab`), `dark` / `light`, `resize <w> <h>`,
 `quit`. Mouse events are posted to the application's queue, so they take the path real ones take (and become
 `NSApp.currentEvent`).
 

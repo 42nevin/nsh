@@ -1662,6 +1662,54 @@ fn input_measures_its_placeholder_and_reports_its_content_box() {
 }
 
 #[test]
+fn inputs_resolve_what_return_does() {
+    use crate::{SubmitBehavior as S, mount::InputConfig};
+    let config = |multiline, blur_on_submit, submit_behavior| InputConfig {
+        multiline,
+        blur_on_submit,
+        submit_behavior,
+        ..InputConfig::default()
+    };
+    // React Native's defaults: one line submits and unfocuses, several
+    // lines take line breaks; `blurOnSubmit={false}` keeps the focus.
+    assert_eq!(config(false, true, None).submit(), S::BlurAndSubmit);
+    assert_eq!(config(false, false, None).submit(), S::Submit);
+    assert_eq!(config(true, true, None).submit(), S::Newline);
+    // `submitBehavior` wins; one line never takes line breaks.
+    assert_eq!(config(true, true, Some(S::Submit)).submit(), S::Submit);
+    assert_eq!(
+        config(false, false, Some(S::BlurAndSubmit)).submit(),
+        S::BlurAndSubmit
+    );
+    assert_eq!(
+        config(false, true, Some(S::Newline)).submit(),
+        S::BlurAndSubmit
+    );
+}
+
+#[test]
+fn inputs_take_their_submit_behavior() {
+    let mut c = input_core();
+    c.commit().unwrap();
+    apply(
+        &mut c,
+        vec![
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Multiline(true),
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::SubmitBehavior(Some(crate::SubmitBehavior::Submit)),
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    assert!(batch.items.iter().any(|i| matches!(i,
+        MountItem::Input { id: 2, config } if config.submit() == crate::SubmitBehavior::Submit)));
+}
+
+#[test]
 fn input_values_from_js_and_native_edits() {
     let mut c = input_core();
     c.commit();

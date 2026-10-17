@@ -18,6 +18,18 @@
 //! editors) report nothing. Lengths and offsets JS sees are UTF-16 units;
 //! GTK counts characters.
 //!
+//! Return follows the config's `submit()`: a single line `gtk::Text`
+//! reports it from its `activate` signal; in a multiline one whose return
+//! submits, a plain return (or Ctrl+Return) submits before the text view
+//! sees it, while Shift+Return and Alt+Return still insert a line break.
+//! The input method sees that return first
+//! (`gtk_text_view_im_context_filter_keypress`), so one that commits a
+//! composition (CJK input methods) submits nothing.
+//!
+//! `onKeyPress` reports what typing inserts and deletes, as UIKit does
+//! (nothing for pasted or undone text, no Backspace for a selection typed
+//! over), and Escape, as on macOS.
+//!
 //! Input accessory views (`inputAccessoryViewID`) belong over a software
 //! keyboard and have no meaning on the desktop: they are never shown.
 
@@ -29,7 +41,7 @@ use std::{
 use gtk4::{self as gtk, glib, prelude::*};
 use nsh_core::{
     AutoCapitalize, EventKind, EventPayload, InputConfig, KeyboardType, PayloadValue, Rect,
-    TextAlign, tailwind::state,
+    SubmitBehavior, TextAlign, tailwind::state,
 };
 
 use crate::{surface::Surface, view::NshView};
@@ -163,6 +175,11 @@ pub(crate) struct InputState {
     applying: Cell<bool>,
     /// A clipped insertion (`maxLength`) is being applied.
     clipping: Cell<bool>,
+    /// The key press being handled, until the main loop is idle again.
+    key: Cell<Option<(gtk::gdk::Key, gtk::gdk::ModifierType)>>,
+    /// A paste was asked for: its insertion (and the deletion of the
+    /// selection it replaces) types no key.
+    pasting: Cell<bool>,
     /// Focus as last reported.
     focused: Cell<bool>,
     /// Selection as last reported (UTF-16).
@@ -210,6 +227,30 @@ impl Ctx {
         };
         if listens {
             surface.event(id, kind, payload());
+        }
+    }
+
+    /// An insertion: reports the key that typed it, unless it was pasted
+    /// (or undone).
+    fn inserted(&self, input: &InputState, text: &str) {
+        let undo = input
+            .key
+            .get()
+            .is_some_and(|(key, modifiers)| undoes(key, modifiers));
+        if !input.pasting.replace(false) && !undo {
+            self.key_press(key_of(text));
+        }
+    }
+
+    /// A deletion: reports Backspace, unless typing (or pasting) replaces
+    /// the selection, or it is undone.
+    fn deleted(&self, input: &InputState) {
+        let quiet = input
+            .key
+            .get()
+            .is_some_and(|(key, modifiers)| types(key, modifiers) || undoes(key, modifiers));
+        if !quiet && !input.pasting.get() {
+            self.key_press("Backspace");
         }
     }
 
@@ -321,7 +362,8 @@ impl Ctx {
         self.send(kind, || EventPayload::None);
     }
 
-    /// Return in a single-line input.
+    /// Return submitted the input (`submitBehavior` `submit` or
+    /// `blurAndSubmit`).
     fn submitted(&self) {
         let Some(input) = self.input.upgrade() else {
             return;
@@ -333,7 +375,7 @@ impl Ctx {
             text,
             count,
         });
-        if input.config.borrow().blur_on_submit {
+        if input.config.borrow().submit() == SubmitBehavior::BlurAndSubmit {
             unfocus(&input.editor.borrow().widget());
         }
     }
@@ -418,6 +460,8 @@ pub(crate) fn create(surface: &Rc<Surface>, view: &NshView) {
         count: Cell::new(0),
         applying: Cell::new(false),
         clipping: Cell::new(false),
+        key: Cell::new(None),
+        pasting: Cell::new(false),
         focused: Cell::new(false),
         selection: Cell::new((0, 0)),
         ctx: std::cell::OnceCell::new(),
@@ -466,7 +510,7 @@ fn attach(ctx: &Ctx, editor: &Editor, input: &InputState) {
                 let Some(input) = c.user_edit() else { return };
                 let fit = c.allowed(|| t.text().into(), text);
                 if !fit.is_empty() {
-                    c.key_press(key_of(fit));
+                    c.inserted(&input, fit);
                 }
                 if fit.len() < text.len() {
                     t.stop_signal_emission_by_name("insert-text");
@@ -479,8 +523,16 @@ fn attach(ctx: &Ctx, editor: &Editor, input: &InputState) {
             });
             let c = ctx.clone();
             t.connect_delete_text(move |_, start, end| {
-                if start != end && c.user_edit().is_some() {
-                    c.key_press("Backspace");
+                if start != end
+                    && let Some(input) = c.user_edit()
+                {
+                    c.deleted(&input);
+                }
+            });
+            let c = ctx.clone();
+            t.connect_paste_clipboard(move |_| {
+                if let Some(input) = c.input.upgrade() {
+                    input.pasting.set(true);
                 }
             });
             let c = ctx.clone();
@@ -507,7 +559,7 @@ fn attach(ctx: &Ctx, editor: &Editor, input: &InputState) {
                     text,
                 );
                 if !fit.is_empty() {
-                    c.key_press(key_of(fit));
+                    c.inserted(&input, fit);
                 }
                 if fit.len() < text.len() {
                     b.stop_signal_emission_by_name("insert-text");
@@ -521,8 +573,16 @@ fn attach(ctx: &Ctx, editor: &Editor, input: &InputState) {
             });
             let c = ctx.clone();
             buffer.connect_delete_range(move |_, start, end| {
-                if start != end && c.user_edit().is_some() {
-                    c.key_press("Backspace");
+                if start != end
+                    && let Some(input) = c.user_edit()
+                {
+                    c.deleted(&input);
+                }
+            });
+            let c = ctx.clone();
+            view.connect_paste_clipboard(move |_| {
+                if let Some(input) = c.input.upgrade() {
+                    input.pasting.set(true);
                 }
             });
             let c = ctx.clone();
@@ -544,17 +604,53 @@ fn attach(ctx: &Ctx, editor: &Editor, input: &InputState) {
     widget.connect_map(move |w| c.watch_window(w));
 
     // Backspace in an empty input deletes nothing, so no deletion reports
-    // it.
+    // it. A return that submits a multiline input is taken here, before the
+    // text view inserts a line break.
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     let c = ctx.clone();
-    keys.connect_key_pressed(move |_, key, _, _| {
-        if key == gtk::gdk::Key::BackSpace
-            && let Some(input) = c.input.upgrade()
-            && input.config.borrow().editable
-            && input.editor.borrow().is_empty()
-        {
+    let area = match editor {
+        Editor::Area { view, .. } => Some(view.downgrade()),
+        Editor::Line(_) => None,
+    };
+    keys.connect_key_pressed(move |keys, key, _, modifiers| {
+        let Some(input) = c.input.upgrade() else {
+            return glib::Propagation::Proceed;
+        };
+        // A paste that inserted nothing (an empty clipboard) ends here.
+        input.pasting.set(false);
+        if input.key.replace(Some((key, modifiers))).is_none() {
+            let weak = c.input.clone();
+            glib::idle_add_local_once(move || {
+                if let Some(input) = weak.upgrade() {
+                    input.key.set(None);
+                }
+            });
+        }
+        let (editable, submit) = {
+            let config = input.config.borrow();
+            (config.editable, config.submit())
+        };
+        if key == gtk::gdk::Key::BackSpace && editable && input.editor.borrow().is_empty() {
             c.key_press("Backspace");
+        }
+        // Reported as on macOS; the window's keys then leave the field
+        // (`navigation::key_pressed`).
+        if key == gtk::gdk::Key::Escape {
+            c.key_press("Escape");
+        }
+        if editable
+            && is_return(key)
+            && submits(submit, modifiers)
+            && let Some(view) = area.as_ref().and_then(|v| v.upgrade())
+            && let Some(event) = keys.current_event()
+        {
+            // A return that commits a composition belongs to the input
+            // method, which has now seen it (the view must not again).
+            if !view.im_context_filter_keypress(&event) {
+                c.submitted();
+            }
+            return glib::Propagation::Stop;
         }
         glib::Propagation::Proceed
     });
@@ -944,6 +1040,35 @@ pub(crate) fn set_selection(view: &NshView, start: u32, end: u32) {
     );
 }
 
+/// Return or Enter.
+fn is_return(key: gtk::gdk::Key) -> bool {
+    use gtk::gdk::Key;
+    matches!(key, Key::Return | Key::KP_Enter | Key::ISO_Enter)
+}
+
+/// Whether a return with `modifiers` submits a multiline input whose
+/// return does `behavior`: Shift+Return and Alt+Return insert a line break
+/// all the same, as in desktop chat apps.
+fn submits(behavior: SubmitBehavior, modifiers: gtk::gdk::ModifierType) -> bool {
+    use gtk::gdk::ModifierType as M;
+    behavior != SubmitBehavior::Newline && !modifiers.intersects(M::SHIFT_MASK | M::ALT_MASK)
+}
+
+/// Whether `key` types (a character, or a line break), replacing the
+/// selection rather than deleting it.
+fn types(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType) -> bool {
+    use gtk::gdk::ModifierType as M;
+    let shortcut = modifiers.intersects(M::CONTROL_MASK | M::ALT_MASK | M::SUPER_MASK);
+    !shortcut && (is_return(key) || key.to_unicode().is_some_and(|c| !c.is_control()))
+}
+
+/// Whether `key` is Undo or Redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y), whose
+/// edits type no key.
+fn undoes(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType) -> bool {
+    use gtk::gdk::{Key, ModifierType as M};
+    modifiers.contains(M::CONTROL_MASK) && matches!(key.to_lower(), Key::z | Key::y)
+}
+
 /// The key an insertion reports (`onKeyPress`).
 fn key_of(text: &str) -> &str {
     if text == "\n" { "Enter" } else { text }
@@ -1021,6 +1146,30 @@ mod tests {
     fn keys() {
         assert_eq!(key_of("\n"), "Enter");
         assert_eq!(key_of("x"), "x");
+    }
+
+    #[test]
+    fn typing_keys() {
+        use gtk::gdk::{Key, ModifierType as M};
+        assert!(types(Key::a, M::empty()));
+        assert!(types(Key::A, M::SHIFT_MASK));
+        assert!(types(Key::Return, M::empty()));
+        assert!(!types(Key::BackSpace, M::empty()));
+        assert!(!types(Key::Delete, M::empty()));
+        assert!(!types(Key::x, M::CONTROL_MASK));
+        assert!(undoes(Key::z, M::CONTROL_MASK));
+        assert!(undoes(Key::Z, M::CONTROL_MASK | M::SHIFT_MASK));
+        assert!(!undoes(Key::z, M::empty()));
+    }
+
+    #[test]
+    fn returns_that_submit() {
+        use gtk::gdk::ModifierType as M;
+        assert!(submits(SubmitBehavior::Submit, M::empty()));
+        assert!(submits(SubmitBehavior::BlurAndSubmit, M::CONTROL_MASK));
+        assert!(!submits(SubmitBehavior::Submit, M::SHIFT_MASK));
+        assert!(!submits(SubmitBehavior::BlurAndSubmit, M::ALT_MASK));
+        assert!(!submits(SubmitBehavior::Newline, M::empty()));
     }
 
     #[test]

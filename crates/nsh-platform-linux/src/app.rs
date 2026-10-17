@@ -244,6 +244,7 @@ pub fn run_app(source: AppSource, options: AppOptions) -> glib::ExitCode {
             #[cfg(feature = "dev")]
             AppSource::DevServer(url) => crate::dev::start(&view, url),
         }
+        install_shortcuts(app, &window);
         if let Some(script) = &options.script {
             crate::script::run(&window, view.surface().clone(), script);
         }
@@ -253,6 +254,35 @@ pub fn run_app(source: AppSource, options: AppOptions) -> glib::ExitCode {
     });
     // GTK must not parse the host's own arguments.
     app.run_with_args::<&str>(&[])
+}
+
+/// GNOME's window shortcuts: Ctrl+W closes the window, Ctrl+Q quits, F11
+/// toggles full screen. Accelerators also match the keys of the layout's
+/// Latin group, so they work under Cyrillic or Greek layouts too.
+fn install_shortcuts(app: &gtk::Application, window: &gtk::ApplicationWindow) {
+    let quit = gtk::gio::SimpleAction::new("quit", None);
+    let weak = app.downgrade();
+    quit.connect_activate(move |_, _| {
+        // Closing the windows stops their apps; the last one ends the run.
+        if let Some(app) = weak.upgrade() {
+            for window in app.windows() {
+                window.close();
+            }
+        }
+    });
+    app.add_action(&quit);
+    app.set_accels_for_action("app.quit", &["<Control>q"]);
+    // GtkWindow's own action.
+    app.set_accels_for_action("window.close", &["<Control>w"]);
+    let fullscreen = gtk::gio::SimpleAction::new("fullscreen", None);
+    let weak = window.downgrade();
+    fullscreen.connect_activate(move |_, _| {
+        if let Some(window) = weak.upgrade() {
+            window.set_fullscreened(!window.is_fullscreen());
+        }
+    });
+    window.add_action(&fullscreen);
+    app.set_accels_for_action("win.fullscreen", &["F11"]);
 }
 
 /// Ties `view` to `window`'s lifetime.

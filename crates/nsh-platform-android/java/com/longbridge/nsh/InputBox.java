@@ -30,8 +30,9 @@ final class InputBox extends FrameLayout implements Node {
     /** The text as last reported or set. */
     private String known = "";
     private boolean multiline;
-    /** Return unfocuses a single-line input. */
-    private boolean blurOnSubmit = true;
+    /** What return does (`submitBehavior`, resolved by the core; encode.rs's codes). */
+    private static final int SUBMIT_AND_BLUR = 1, NEWLINE = 2;
+    private int submit = SUBMIT_AND_BLUR;
     private boolean applying;
     private boolean configured;
 
@@ -45,7 +46,7 @@ final class InputBox extends FrameLayout implements Node {
             public boolean onKeyUp(int code, android.view.KeyEvent event) {
                 // The up of an Enter whose down submitted another field (focus
                 // moved meanwhile) must not advance focus again.
-                if (code == android.view.KeyEvent.KEYCODE_ENTER && !multiline) return true;
+                if (code == android.view.KeyEvent.KEYCODE_ENTER && submit != NEWLINE) return true;
                 return super.onKeyUp(code, event);
             }
 
@@ -61,6 +62,9 @@ final class InputBox extends FrameLayout implements Node {
             @Override
             public InputConnection onCreateInputConnection(EditorInfo info) {
                 InputConnection connection = super.onCreateInputConnection(info);
+                // TextView hides the action key of multiline inputs; one that
+                // submits shows it, as React Native does.
+                if (multiline && submit != NEWLINE) info.imeOptions &= ~EditorInfo.IME_FLAG_NO_ENTER_ACTION;
                 return connection == null ? null : new KeyConnection(connection);
             }
 
@@ -96,14 +100,16 @@ final class InputBox extends FrameLayout implements Node {
             }
         });
         edit.setOnEditorActionListener((v, action, event) -> {
-            if (multiline && event != null) return false;
+            // A hardware Enter inserts a line break where return does, and
+            // with Shift or Alt in any multiline input.
+            if (multiline && event != null
+                    && (submit == NEWLINE || event.isShiftPressed() || event.isAltPressed())) return false;
             // The keyboard's action key (a hardware Enter reported its key).
             if (event == null) key("Enter");
             // A hardware Enter reports its down and its up: act once. (The up
             // would otherwise reach the next field, focused meanwhile.)
             if (event != null && event.getAction() != android.view.KeyEvent.ACTION_DOWN) return true;
-            mounter.event(id, Native.SUBMIT_EDITING, edit.getText().toString(), count, 0, 0);
-            if (!multiline && blurOnSubmit) blur();
+            submit();
             return true;
         });
         edit.setOnFocusChangeListener((v, focused) -> {
@@ -120,9 +126,10 @@ final class InputBox extends FrameLayout implements Node {
                    int align, String placeholder, boolean hasPlaceholderColor, int placeholderColor,
                    boolean secure, int keyboard, int returnKey, int capitalize, boolean autoCorrect,
                    boolean multiline, int maxLength, boolean editable, boolean autoFocus,
-                   boolean hasSelectionColor, int selectionColor, boolean blurOnSubmit) {
+                   boolean hasSelectionColor, int selectionColor, int submit) {
+        boolean restart = this.submit != submit && multiline && configured;
         this.multiline = multiline;
-        this.blurOnSubmit = blurOnSubmit;
+        this.submit = submit;
         edit.setTextSize(TypedValue.COMPLEX_UNIT_PX, fontSizeDp * mounter.density);
         edit.setTextColor(color);
         if (letterSpacingDp != 0) edit.setLetterSpacing(letterSpacingDp / fontSizeDp);
@@ -174,7 +181,7 @@ final class InputBox extends FrameLayout implements Node {
             case 3: ime = EditorInfo.IME_ACTION_NEXT; break;
             case 4: ime = EditorInfo.IME_ACTION_SEARCH; break;
             case 5: ime = EditorInfo.IME_ACTION_SEND; break;
-            default: ime = multiline ? EditorInfo.IME_ACTION_NONE : EditorInfo.IME_ACTION_DONE;
+            default: ime = multiline && submit == NEWLINE ? EditorInfo.IME_ACTION_NONE : EditorInfo.IME_ACTION_DONE;
         }
         edit.setImeOptions(ime);
         edit.setFilters(maxLength >= 0 ? new InputFilter[] {new InputFilter.LengthFilter(maxLength)} : new InputFilter[0]);
@@ -193,6 +200,17 @@ final class InputBox extends FrameLayout implements Node {
         boolean first = !configured;
         configured = true;
         if (first && autoFocus) post(this::focus);
+        // The keyboard reads the action key when the input connects.
+        if (restart && edit.hasFocus()) {
+            InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) imm.restartInput(edit);
+        }
+    }
+
+    /** Return submitted: `onSubmitEditing`, then unfocuses for `blurAndSubmit`. */
+    private void submit() {
+        mounter.event(id, Native.SUBMIT_EDITING, edit.getText().toString(), count, 0, 0);
+        if (submit == SUBMIT_AND_BLUR) blur();
     }
 
     /** `onKeyPress`. */
@@ -237,6 +255,12 @@ final class InputBox extends FrameLayout implements Node {
             composing = null;
             if (added.equals("\n")) key("Enter");
             else if (!added.isEmpty()) key(added);
+            // Keyboards that type return as a line break rather than as the
+            // action key: an input that submits takes no line break.
+            if (multiline && submit != NEWLINE && text.toString().equals("\n")) {
+                submit();
+                return true;
+            }
             return super.commitText(text, position);
         }
 

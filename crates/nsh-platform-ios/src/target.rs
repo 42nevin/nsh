@@ -3,7 +3,7 @@
 //! calls and display link ticks. Views are identified by their `tag` (the node id).
 
 use dispatch2::DispatchQueue;
-use nsh_core::{EventKind, EventPayload, KeyboardTaps, NodeId};
+use nsh_core::{EventKind, EventPayload, KeyboardTaps, NodeId, SubmitBehavior};
 use nsh_engine::EngineControl;
 use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
@@ -215,11 +215,15 @@ define_class!(
             range: NSRange,
             replacement: &NSString,
         ) -> bool {
-            let fits = input::fits(&view.text(), range, replacement, input::max_length(view));
-            if fits && let Some(key) = input::key_of(range, replacement) {
-                self.key_press(view.tag() as NodeId, key);
+            if self.area_submits(view, replacement) {
+                false
+            } else {
+                let fits = input::fits(&view.text(), range, replacement, input::max_length(view));
+                if fits && let Some(key) = input::key_of(range, replacement) {
+                    self.key_press(view.tag() as NodeId, key);
+                }
+                fits
             }
-            fits
         }
     }
 
@@ -489,6 +493,23 @@ impl EventTarget {
     }
 
     /// `onKeyPress` on input `id`.
+    /// A return typed in a text area that submits (`submitBehavior`):
+    /// reports it and submits instead of inserting the line break.
+    fn area_submits(&self, view: &UITextView, replacement: &NSString) -> bool {
+        let submits = matches!(
+            input::area_submit(view),
+            Some(SubmitBehavior::Submit | SubmitBehavior::BlurAndSubmit)
+        );
+        if !submits || replacement.to_string() != "\n" {
+            return false;
+        }
+        let id = view.tag() as NodeId;
+        self.key_press(id, "Enter".to_owned());
+        let text = view.text().to_string();
+        self.with_mounter(move |m| m.input_submitted(id, text));
+        true
+    }
+
     pub(crate) fn key_press(&self, id: NodeId, key: String) {
         self.with_mounter(move |m| {
             m.input_event(

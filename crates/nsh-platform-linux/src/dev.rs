@@ -130,6 +130,7 @@ pub(crate) fn start(view: &Rc<AppView>, url: String) {
     }));
     SESSIONS.with(|s| s.borrow_mut().insert(key, ui.clone()));
     show_status(&ui, &format!("Connecting to {url}…"));
+    install_reload_key(view, key);
 
     let surface = view.surface();
     surface.set_error_handler(Box::new(move |message| {
@@ -328,6 +329,44 @@ fn reload(ui: &Rc<RefCell<DevUi>>) {
     }
 }
 
+/// Loads the latest build from scratch (Ctrl+R).
+fn reload_latest(ui: &Rc<RefCell<DevUi>>) {
+    let (view, bundle) = {
+        let mut ui = ui.borrow_mut();
+        let Some((session, version, bundle)) = ui.latest.clone() else {
+            return;
+        };
+        ui.running = Some((session, version));
+        (ui.view.upgrade(), bundle)
+    };
+    if let Some(view) = view {
+        log::info!("reloading");
+        hide_error(ui);
+        view.load(App::Js(bundle));
+    }
+}
+
+/// Ctrl+R in the window of `view` loads the latest build again: a global
+/// shortcut, which the window handles wherever its focus is, and which
+/// matches the key of the layout's Latin group under other layouts.
+fn install_reload_key(view: &AppView, key: u64) {
+    let action = gtk::CallbackAction::new(move |_, _| match session(key) {
+        Some(ui) => {
+            reload_latest(&ui);
+            glib::Propagation::Stop
+        }
+        None => glib::Propagation::Proceed,
+    });
+    let shortcut = gtk::Shortcut::new(
+        gtk::ShortcutTrigger::parse_string("<Control>r"),
+        Some(action),
+    );
+    let controller = gtk::ShortcutController::new();
+    controller.set_scope(gtk::ShortcutScope::Global);
+    controller.add_shortcut(shortcut);
+    view.overlay().add_controller(controller);
+}
+
 /// Styles of the status line and the error overlay, once per process.
 fn install_css() {
     thread_local!(static INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
@@ -414,7 +453,7 @@ fn show_error(ui: &Rc<RefCell<DevUi>>, title: &str, message: &str, prose: bool) 
     text.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     content.append(&text);
 
-    let hint = gtk::Label::new(Some("Click to dismiss"));
+    let hint = gtk::Label::new(Some("Click to dismiss · Ctrl+R to reload"));
     hint.add_css_class("nsh-dev-hint");
     hint.set_xalign(0.0);
     content.append(&hint);

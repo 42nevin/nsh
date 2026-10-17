@@ -40,7 +40,8 @@ use std::{
 };
 
 use nsh_core::{
-    Color, EventKind, EventPayload, InputConfig, PayloadValue, Rect, TextAlign, tailwind::state,
+    Color, EventKind, EventPayload, InputConfig, PayloadValue, Rect, SubmitBehavior, TextAlign,
+    tailwind::state,
 };
 use objc2::{
     AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
@@ -50,10 +51,11 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSApplication, NSBorderType, NSColor, NSControl, NSControlTextEditingDelegate, NSEvent,
-    NSEventType, NSFocusRingType, NSFontAttributeName, NSForegroundColorAttributeName,
-    NSLineBreakMode, NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSResponder,
-    NSScrollView, NSSecureTextField, NSText, NSTextAlignment, NSTextDelegate, NSTextField,
-    NSTextFieldDelegate, NSTextView, NSTextViewDelegate, NSView, NSWritingDirection,
+    NSEventModifierFlags, NSEventType, NSFocusRingType, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSLineBreakMode, NSMutableParagraphStyle,
+    NSParagraphStyleAttributeName, NSResponder, NSScrollView, NSSecureTextField, NSText,
+    NSTextAlignment, NSTextDelegate, NSTextField, NSTextFieldDelegate, NSTextInputClient,
+    NSTextView, NSTextViewDelegate, NSView, NSWritingDirection,
 };
 use objc2_core_foundation::{CGFloat, CGSize};
 use objc2_foundation::{
@@ -220,6 +222,9 @@ pub(crate) struct InputState {
     pending_selection: Cell<Option<(u32, u32)>>,
     /// A field is taking the focus.
     focusing: Cell<bool>,
+    /// The modifiers of the key a text view is handling (its commands do
+    /// not say which were held).
+    key_mods: Cell<NSEventModifierFlags>,
     /// The animated text color applied.
     anim_color: Cell<Option<Color>>,
     ctx: Ctx,
@@ -357,8 +362,8 @@ impl Ctx {
         }
     }
 
-    /// Return in a single-line input.
-    fn submitted(&self) {
+    /// Return submitted the input (`blur`: and unfocuses it).
+    fn submitted(&self, blur: bool) {
         let Some(input) = self.input.upgrade() else {
             return;
         };
@@ -369,8 +374,37 @@ impl Ctx {
             text,
             count,
         });
-        if input.config.borrow().blur_on_submit {
+        if blur {
             self.unfocus();
+        }
+    }
+
+    /// What return (`insertNewline:`) does in the editor: true if it was
+    /// handled here, false to let the editor insert its line break.
+    fn return_key(&self, input: &InputState, text_view: &NSTextView, multiline: bool) -> bool {
+        let behavior = input.config.borrow().submit();
+        if text_view.hasMarkedText() {
+            // A return that commits a composition (CJK input methods) is
+            // the input method's and never gets here; one that comes
+            // anyway only commits it, as theirs does.
+            text_view.unmarkText();
+            return true;
+        }
+        // Shift+Return still breaks the line of a multiline input that
+        // submits on return (Option+Return and Control+Return are
+        // commands of their own: see `command`).
+        let shift = input.key_mods.get().contains(NSEventModifierFlags::Shift);
+        match behavior {
+            SubmitBehavior::Newline => false,
+            _ if multiline && shift => false,
+            SubmitBehavior::Submit => {
+                self.submitted(false);
+                true
+            }
+            SubmitBehavior::BlurAndSubmit => {
+                self.submitted(true);
+                true
+            }
         }
     }
 
@@ -396,8 +430,9 @@ impl Ctx {
     }
 
     /// The editor `text_view` is about to replace `range` with
-    /// `replacement`: reports the key and clips the insertion to
-    /// `maxLength`; false if it must not happen as it is.
+    /// `replacement`: reports the key, keeps line breaks out of a single
+    /// line and clips the insertion to `maxLength`; false if it must not
+    /// happen as it is.
     fn should_change(
         &self,
         text_view: &NSTextView,
@@ -411,12 +446,19 @@ impl Ctx {
             // Attribute changes only.
             return true;
         };
-        let text = replacement.to_string();
+        let mut text = replacement.to_string();
         if text.is_empty() {
             if range.length > 0 {
                 self.key_press("Backspace");
             }
             return true;
+        }
+        // A single line never holds a line break: pasted ones become
+        // spaces here, at once (the field editor would replace them in a
+        // second edit, reported twice).
+        let flattened = !input.config.borrow().multiline && text.contains(['\n', '\r']);
+        if flattened {
+            text = text.replace("\r\n", " ").replace(['\n', '\r'], " ");
         }
         let max = input.config.borrow().max_length;
         let fit = match max {
@@ -429,12 +471,12 @@ impl Ctx {
         if !fit.is_empty() {
             self.key_press(key_of(fit));
         }
-        if fit.len() == text.len() {
+        if fit.len() == text.len() && !flattened {
             return true;
         }
         if !fit.is_empty() {
-            // The clipped insertion, as a user edit (undo, change
-            // notifications), but not checked again.
+            // The clipped (or flattened) insertion, as a user edit (undo,
+            // change notifications), but not checked again.
             let fit = NSString::from_str(fit);
             input.clipping.set(true);
             if text_view.shouldChangeTextInRange_replacementString(range, Some(&fit)) {
@@ -452,8 +494,24 @@ impl Ctx {
         let Some(input) = self.input.upgrade() else {
             return false;
         };
-        if command == sel!(insertNewline:) && !multiline {
-            self.submitted();
+        if command == sel!(insertNewline:) {
+            return self.return_key(&input, text_view, multiline);
+        }
+        // Option+Return (`insertNewlineIgnoringFieldEditor:`) and
+        // Control+Return (`insertLineBreak:`): a line break in a multiline
+        // input whatever return does, a plain `\n` (a text view's
+        // `insertLineBreak:` inserts U+2028); nothing in a single line,
+        // which never holds one (a field editor would insert it).
+        if command == sel!(insertNewlineIgnoringFieldEditor:) || command == sel!(insertLineBreak:) {
+            if text_view.hasMarkedText() {
+                text_view.unmarkText();
+            } else if multiline {
+                // SAFETY: NSTextView's action; in a text view that is not a
+                // field editor it inserts a newline character.
+                let _: () = unsafe {
+                    msg_send![text_view, insertNewlineIgnoringFieldEditor: None::<&AnyObject>]
+                };
+            }
             return true;
         }
         if command == sel!(cancelOperation:) {
@@ -463,15 +521,21 @@ impl Ctx {
             self.unfocus();
             return true;
         }
-        if command == sel!(insertTab:) || command == sel!(insertBacktab:) {
-            // Tab moves the focus (in a text view too, as in a single-line
-            // field), within the newest modal.
+        // A tab character only goes into a multiline input, with
+        // Option+Tab (AppKit's binding).
+        if command == sel!(insertTabIgnoringFieldEditor:) {
+            return !multiline;
+        }
+        let backward = command == sel!(insertBacktab:) || command == sel!(selectPreviousKeyView:);
+        if backward || command == sel!(insertTab:) || command == sel!(selectNextKeyView:) {
+            // Tab and Control+Tab move the focus (in a text view too, as
+            // in a single-line field), within the newest modal.
             let from: Retained<NSView> = match &*input.editor.borrow() {
                 Editor::Line { field, .. } => Retained::from(&***field as &NSView),
                 Editor::Area { view, .. } => Retained::from(&***view as &NSView),
             };
             if let Some(surface) = self.surface.upgrade() {
-                tab(&surface, &from, command == sel!(insertBacktab:));
+                tab(&surface, &from, backward);
             }
             return true;
         }
@@ -517,7 +581,12 @@ pub(crate) fn tab(surface: &Surface, from: &NSView, backward: bool) -> bool {
         if &*next == from {
             return false;
         }
-        if next.isDescendantOf(&scope) && !crate::view::is_ours(&next) {
+        // A text view's clip view comes right before it in the loop and
+        // gives the focus back to it: skip the views around `from`.
+        if next.isDescendantOf(&scope)
+            && !crate::view::is_ours(&next)
+            && !from.isDescendantOf(&next)
+        {
             return window.makeFirstResponder(Some(&next));
         }
         at = next;
@@ -648,7 +717,7 @@ define_field!(
 
 define_class!(
     /// The text view of a multiline input: tells [`Ctx`] when it takes and
-    /// loses the focus.
+    /// loses the focus, and which modifiers its keys hold.
     #[unsafe(super(NSTextView, NSText, NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
     #[ivars = OnceCell<Ctx>]
@@ -663,6 +732,19 @@ define_class!(
         #[unsafe(method(acceptsFirstMouse:))]
         fn accepts_first_mouse(&self, _event: Option<&objc2_app_kit::NSEvent>) -> bool {
             true
+        }
+
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            let input = self.ivars().get().and_then(|ctx| ctx.input.upgrade());
+            if let Some(input) = &input {
+                input.key_mods.set(event.modifierFlags());
+            }
+            // SAFETY: NSTextView's own method.
+            let _: () = unsafe { msg_send![super(self), keyDown: event] };
+            if let Some(input) = &input {
+                input.key_mods.set(NSEventModifierFlags::empty());
+            }
         }
 
         #[unsafe(method(becomeFirstResponder))]
@@ -969,6 +1051,7 @@ pub(crate) fn create(surface: &Rc<Surface>, view: &NshView) {
             selection: Cell::new((0, 0)),
             pending_selection: Cell::new(None),
             focusing: Cell::new(false),
+            key_mods: Cell::new(NSEventModifierFlags::empty()),
             anim_color: Cell::new(None),
             ctx,
         }
@@ -1036,7 +1119,8 @@ fn new_editor(
         if let Some(cell) = field.cell() {
             cell.setScrollable(true);
             cell.setWraps(false);
-            cell.setUsesSingleLineMode(true);
+            // Not single-line mode: it replaces pasted line breaks in a
+            // second edit, which `Ctx::should_change` does at once.
             cell.setLineBreakMode(NSLineBreakMode::ByClipping);
         }
         // SAFETY: the delegate lives as long as the input that holds it.

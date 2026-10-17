@@ -22,8 +22,8 @@ use nsh_core::{
     DialogButtonStyle, InputConfig, KeyboardDismissMode, KeyboardTaps, KeyboardType, LayoutCurve,
     LayoutProperty, LayoutTransition, LiveRegion, ModalAnimation, ModalPresentation, MountBatch,
     MountItem, NativeProps, OriginLen, PointerEvents, ResizeMode, ReturnKeyType, ScreenAnimation,
-    ScreenConfig, SnapAlignment, StatusBarStyle, TextAlign, ViewKind, ViewProps, ViewStyle,
-    WebSource,
+    ScreenConfig, SnapAlignment, StatusBarStyle, SubmitBehavior, TextAlign, ViewKind, ViewProps,
+    ViewStyle, WebSource,
 };
 
 use crate::{
@@ -1076,7 +1076,12 @@ fn input(e: &mut Encoded, c: &InputConfig) {
     e.bool(c.auto_focus);
     e.bool(c.selection_color.is_some());
     e.int(c.selection_color.map_or(0, argb));
-    e.bool(c.blur_on_submit);
+    // What return does: 0 submit, 1 submit and unfocus, 2 a line break.
+    e.int(match c.submit() {
+        SubmitBehavior::Submit => 0,
+        SubmitBehavior::BlurAndSubmit => 1,
+        SubmitBehavior::Newline => 2,
+    });
     // Android autofill hints ("" for none).
     e.opt_string(match c.auto_fill {
         AutoFill::Default => None,

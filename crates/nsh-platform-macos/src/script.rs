@@ -16,6 +16,7 @@
 //! | `notch <x> <y> <dx> <dy>` | A mouse wheel: one event of `(dx, dy)` lines, without phases. Positive moves the content up / left. |
 //! | `hover <x> <y>` | Moves the pointer. |
 //! | `type <text>` | Types into the focused field. |
+//! | `mark <text>` | Sets the focused field's marked text, as an input method composing it does (a `key Return` then commits it). |
 //! | `key <name>` | Presses a key: `Return`, `Escape`, `Tab`, `BackSpace`, `Up`, `Down`, `Left`, `Right`, `Page_Up`, `Page_Down`, `Home`, `End`, `space`, or one character; with modifiers before it, as in `cmd+a`, `shift+Tab` (`cmd`, `shift`, `alt`, `ctrl`). Keys with `cmd` go through the application (menus, key monitors). |
 //! | `dark` / `light` | Switches the app's window to that appearance (as the system's would). |
 //! | `resize <w> <h>` | Resizes the window's content. |
@@ -62,6 +63,8 @@ enum Step {
     /// them): a point delta and a `CGScrollPhase`.
     WheelEvent(f64, f64, i32, i32, i64),
     Type(String),
+    /// Marked text: an input method's composition in progress.
+    Mark(String),
     Key(String),
     Appearance(bool),
     Resize(f64, f64),
@@ -106,6 +109,7 @@ fn parse(script: &str) -> Vec<Step> {
             ("notch", [x, y, dx, dy]) => Some(Step::Notch(*x, *y, *dx, *dy)),
             ("hover", [x, y]) => Some(Step::Hover(*x, *y)),
             ("type", _) => Some(Step::Type(rest.to_owned())),
+            ("mark", _) => Some(Step::Mark(rest.to_owned())),
             ("key", _) if !rest.is_empty() => Some(Step::Key(rest.to_owned())),
             ("dark", []) => Some(Step::Appearance(true)),
             ("light", []) => Some(Step::Appearance(false)),
@@ -243,6 +247,7 @@ fn run_step(runner: &Runner, step: Step) -> Option<u64> {
             wheel(window, x, y, dx.round() as i32, dy.round() as i32, None)
         }
         Step::Type(text) => type_text(window, &text),
+        Step::Mark(text) => mark(window, &text),
         Step::Key(name) => key(window, &name),
         Step::Appearance(dark) => {
             // SAFETY: immutable AppKit constants.
@@ -346,6 +351,30 @@ fn type_text(window: &NSWindow, text: &str) {
         let s = c.to_string();
         key_event(window, &s, 0, NSEventModifierFlags::empty());
     }
+}
+
+/// Sets `text` as the focused text view's marked text, as an input method
+/// composing it would (empty: unmarks it).
+fn mark(window: &NSWindow, text: &str) {
+    use objc2_app_kit::{NSTextInputClient, NSTextView};
+    use objc2_foundation::NSRange;
+    let Some(responder) = window.firstResponder() else {
+        return;
+    };
+    let Some(view) = responder.downcast_ref::<NSTextView>() else {
+        return log::error!("script: mark needs a focused text field");
+    };
+    let s = NSString::from_str(text);
+    let len = s.length();
+    // SAFETY: an NSString, as the protocol takes; the ranges are within it
+    // and NSNotFound replaces the current marked text or selection.
+    unsafe {
+        view.setMarkedText_selectedRange_replacementRange(
+            &s,
+            NSRange::new(len, 0),
+            NSRange::new(objc2_foundation::NSNotFound as usize, 0),
+        )
+    };
 }
 
 /// One modifier's flag.

@@ -556,6 +556,18 @@ pub enum ReturnKeyType {
     Send,
 }
 
+/// What return does in an input (`submitBehavior`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
+pub enum SubmitBehavior {
+    /// Reports `onSubmitEditing` and keeps the focus.
+    Submit,
+    /// Reports `onSubmitEditing` and unfocuses the input.
+    #[default]
+    BlurAndSubmit,
+    /// Inserts a line break (multiline inputs; a single line submits).
+    Newline,
+}
+
 /// Automatic capitalization (`autoCapitalize`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
 pub enum AutoCapitalize {
@@ -1209,9 +1221,18 @@ pub enum Prop {
     #[prop(js = "editable", default = true, on = INPUT)]
     Editable(bool),
     /// `blurOnSubmit`: return unfocuses a single-line input (default true); false
-    /// keeps the keyboard up, e.g. to send several messages.
+    /// keeps the keyboard up, e.g. to send several messages. `submitBehavior`
+    /// wins over it.
     #[prop(js = "blurOnSubmit", default = true, on = INPUT)]
     BlurOnSubmit(bool),
+    /// `submitBehavior`: what return does: `"submit"` (reports
+    /// `onSubmitEditing`, keeps the focus), `"blurAndSubmit"` (also
+    /// unfocuses), `"newline"` (inserts a line break; multiline inputs
+    /// only). Default: `"blurAndSubmit"` for one line, `"newline"` for
+    /// several. A multiline input that submits still takes line breaks
+    /// from Shift+Return or Option / Alt+Return on desktops.
+    #[prop(js = "submitBehavior", on = INPUT)]
+    SubmitBehavior(Option<SubmitBehavior>),
     /// `autoFocus`: focused when it appears.
     #[prop(js = "autoFocus", on = INPUT)]
     AutoFocus(bool),

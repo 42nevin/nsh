@@ -900,8 +900,11 @@ class Player {
           : config.keyboard === "url" ? "url"
             : config.keyboard === "phone-pad" ? "tel" : "text";
       field.inputMode = { "number-pad": "numeric", numeric: "decimal", "decimal-pad": "decimal", "numbers-and-punctuation": "text", "phone-pad": "tel", "email-address": "email", url: "url" }[config.keyboard] ?? "text";
-      field.enterKeyHint = { done: "done", go: "go", next: "next", search: "search", send: "send" }[config.returnKey] ?? "enter";
     }
+    // A textarea that submits shows the return key's action too.
+    if (!config.multiline || config.submit !== "newline") {
+      field.enterKeyHint = { done: "done", go: "go", next: "next", search: "search", send: "send" }[config.returnKey] ?? "enter";
+    } else field.removeAttribute("enterkeyhint");
     field.readOnly = !config.editable;
     field.autocapitalize = config.autoCapitalize === "none" ? "off" : config.autoCapitalize;
     field.spellcheck = config.autoCorrect;
@@ -934,10 +937,15 @@ class Player {
         const key = e.key === "Backspace" || e.key === "Enter" ? e.key : e.key.length === 1 ? e.key : null;
         if (key) this.event(el._id, "onKeyPress", { key });
       }
-      if (e.key === "Enter" && !el._config?.multiline && !e.isComposing) {
+      // Return submits unless it inserts a line break (`submitBehavior`);
+      // Shift / Alt+Return always do in a textarea, and a return that
+      // commits an input method's composition never submits.
+      const submit = el._config?.submit ?? "blurAndSubmit";
+      const lineBreak = field.tagName === "TEXTAREA" && (submit === "newline" || e.shiftKey || e.altKey);
+      if (e.key === "Enter" && !lineBreak && !e.isComposing && e.keyCode !== 229) {
         e.preventDefault();
         this.event(el._id, "onSubmitEditing", { text: field.value, count: field._count });
-        if (el._config?.blurOnSubmit !== false) field.blur();
+        if (submit === "blurAndSubmit") field.blur();
       }
     });
     field.addEventListener("focus", () => {

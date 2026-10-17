@@ -104,6 +104,25 @@ The environment is a desktop's: the safe area and the keyboard height are 0, `Pl
 `"desktop"`, `Platform.Version` is the kernel's major and minor version, and dark mode follows the desktop's setting
 (through the XDG settings portal) live. See [Device and environment](./device-and-environment.md).
 
+### Keyboard
+
+| Keys | Do |
+|---|---|
+| Return | In an `Input`, what `submitBehavior` says: submit (`onSubmitEditing`), submit and leave the field, or a new line (multiline inputs) |
+| Shift+Return, Alt+Return | A new line in a multiline input whose return submits (Ctrl+Return submits) |
+| Tab, Shift+Tab | The next / previous field in screen order, within the newest modal |
+| Escape | Leaves the focused field; else clears a text selection, then goes back or asks the newest modal to close |
+| Alt+Left, Back key, mouse back button | Go back (also from a field) |
+| Ctrl+arrows, Home / End, with Shift; Ctrl+Backspace / Delete | Move, select and delete by word and line in a field, as in every GTK app |
+| Ctrl+Z, Ctrl+Shift+Z, Ctrl+X / C / V / A | Undo, redo, cut, copy, paste, select all (a secure field refuses cut and copy); Ctrl+A / Ctrl+C select and copy `selectable` text |
+| Arrows; Page Up / Down, Space, Shift+Space; Home / End | Scroll the scroll view around the focused view or under the mouse by a line, a page, to the start / end (not while a field has the focus) |
+| Ctrl+W, F11, Ctrl+Q | Close the window, full screen, quit (`nsh package` and `nsh run` apps) |
+| Ctrl+R | Reloads the latest build (`nsh run`) |
+
+Shortcuts work with any keyboard layout (on a Cyrillic or Greek one, Ctrl+C is the key that types C on a US layout).
+A return that commits an input method's composition (Chinese, Japanese, ...) never submits. `onKeyPress` reports
+what React Native reports: the typed text, `"Enter"`, `"Backspace"`, and `"Escape"`; pasted text is not reported.
+
 Not supported:
 
 - **`WebView`**: it would need WebKitGTK; a web view shows a neutral placeholder.
@@ -111,7 +130,7 @@ Not supported:
 - **Zooming scroll views** (`zoomTo`, the zoom props).
 - **`mixBlendMode` and `backdropFilter`** (the background color still draws); `borderCurve: "continuous"` draws
   circular corners.
-- **Selectable text**, **input accessory views** and the **status bar** (no desktop equivalent).
+- **Input accessory views** and the **status bar** (no desktop equivalent).
 - **Accessibility**: `accessible` grouping, custom `accessibilityActions`; live regions are announced instead.
 
 ## See also

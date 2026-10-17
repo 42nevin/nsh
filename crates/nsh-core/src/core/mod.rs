@@ -2272,6 +2272,10 @@ impl<M: TextEngine> Core<M> {
                         c.blur_on_submit = on;
                         false
                     }
+                    Prop::SubmitBehavior(behavior) => {
+                        c.submit_behavior = behavior;
+                        false
+                    }
                     Prop::AutoFocus(on) => {
                         c.auto_focus = on;
                         false

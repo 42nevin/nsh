@@ -6,17 +6,17 @@ use std::cell::Cell;
 
 use nsh_core::{
     AutoCapitalize, AutoFill, Color, InputConfig, KeyboardAppearance, KeyboardType, NodeId, Rect,
-    ReturnKeyType, TextAlign,
+    ReturnKeyType, SubmitBehavior, TextAlign,
 };
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
     rc::Retained,
-    runtime::{AnyObject, Bool, ProtocolObject, Sel},
+    runtime::{AnyClass, AnyObject, Bool, ProtocolObject, Sel},
     sel,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_foundation::{
-    NSAttributedString, NSAttributedStringKey, NSDictionary, NSObject, NSRange, NSString,
+    NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSObject, NSRange, NSString,
 };
 use objc2_ui_kit::{
     NSFontAttributeName, NSForegroundColorAttributeName, NSTextAlignment, UIColor, UIControl,
@@ -35,6 +35,11 @@ pub(crate) struct InputIvars {
     max_length: Cell<Option<u32>>,
     /// `caretHidden`.
     caret_hidden: Cell<bool>,
+    /// What return does (`InputConfig::submit`).
+    submit: Cell<SubmitBehavior>,
+    /// A line break typed with a modifier (Shift / Option+Return) is being
+    /// inserted: it never submits.
+    line_break: Cell<bool>,
 }
 
 impl Default for InputIvars {
@@ -48,6 +53,8 @@ impl Default for InputIvars {
             }),
             max_length: Cell::new(None),
             caret_hidden: Cell::new(false),
+            submit: Cell::new(SubmitBehavior::Newline),
+            line_break: Cell::new(false),
         }
     }
 }
@@ -98,6 +105,57 @@ define_class!(
     }
 );
 
+impl Area {
+    /// Adds the line break commands to `inherited` while return submits.
+    fn with_line_breaks(
+        &self,
+        inherited: Option<Retained<NSArray<AnyObject>>>,
+    ) -> Option<Retained<NSArray<AnyObject>>> {
+        if self.ivars().submit.get() == SubmitBehavior::Newline {
+            return inherited;
+        }
+        let mut commands = inherited.map(|a| a.to_vec()).unwrap_or_default();
+        commands.extend(line_break_commands());
+        Some(NSArray::from_retained_slice(&commands))
+    }
+}
+
+/// `UIKeyCommand`s for Shift+Return and Option+Return that call
+/// `nshInsertLineBreak:`, ahead of the text view's own handling of return.
+fn line_break_commands() -> Vec<Retained<AnyObject>> {
+    // UIKeyModifierShift, UIKeyModifierAlternate.
+    const MODIFIERS: [isize; 2] = [1 << 17, 1 << 19];
+    let class = AnyClass::get(c"UIKeyCommand").expect("UIKeyCommand");
+    let input = NSString::from_str("\r");
+    MODIFIERS
+        .iter()
+        .map(|&modifiers| {
+            // SAFETY: UIKeyCommand's documented factory and its iOS 15
+            // `wantsPriorityOverSystemBehavior` (the deployment target).
+            unsafe {
+                let command: Retained<AnyObject> = msg_send![
+                    class,
+                    keyCommandWithInput: &*input,
+                    modifierFlags: modifiers,
+                    action: sel!(nshInsertLineBreak:)
+                ];
+                let _: () = msg_send![&command, setWantsPriorityOverSystemBehavior: true];
+                command
+            }
+        })
+        .collect()
+}
+
+/// What return does in the text area behind a delegate callback, or
+/// `None` when the line break comes from a modifier key (it never submits)
+/// or ends an input method's composition.
+pub(crate) fn area_submit(view: &UITextView) -> Option<SubmitBehavior> {
+    let area = view.downcast_ref::<Area>()?;
+    // SAFETY: UITextView adopts UITextInput.
+    let marked: Option<Retained<AnyObject>> = unsafe { msg_send![view, markedTextRange] };
+    (!area.ivars().line_break.get() && marked.is_none()).then(|| area.ivars().submit.get())
+}
+
 define_class!(
     /// A multi-line text area.
     #[unsafe(super(UITextView, UIView, UIResponder, NSObject))]
@@ -123,6 +181,25 @@ define_class!(
             if empty {
                 backspace_on_empty(self.as_ref());
             }
+        }
+
+        /// Shift+Return and Option+Return on a hardware keyboard insert a
+        /// line break in a text area whose return submits, as in chat
+        /// apps on desktops.
+        #[unsafe(method_id(keyCommands))]
+        fn key_commands(&self) -> Option<Retained<NSArray<AnyObject>>> {
+            // SAFETY: calling the superclass implementation.
+            let inherited: Option<Retained<NSArray<AnyObject>>> =
+                unsafe { msg_send![super(self), keyCommands] };
+            self.with_line_breaks(inherited)
+        }
+
+        #[unsafe(method(nshInsertLineBreak:))]
+        fn insert_line_break(&self, _sender: Option<&AnyObject>) {
+            self.ivars().line_break.set(true);
+            // SAFETY: UITextView adopts UIKeyInput.
+            let _: () = unsafe { msg_send![self, insertText: &*NSString::from_str("\n")] };
+            self.ivars().line_break.set(false);
         }
     }
 );
@@ -405,6 +482,7 @@ impl Input {
                 traits(view.as_ref(), &config);
                 view.ivars().max_length.set(config.max_length);
                 view.ivars().caret_hidden.set(config.caret_hidden);
+                view.ivars().submit.set(config.submit());
             }
         }
         crate::mount::mirror(self.editor_view(), config.rtl);
@@ -499,14 +577,11 @@ impl Input {
         }
     }
 
-    /// Whether the return key ends editing (single line) or adds a line.
-    pub(crate) fn multiline(&self) -> bool {
-        matches!(self.editor, Editor::Area { .. })
-    }
-
-    /// Whether return unfocuses the input (`blurOnSubmit`).
-    pub(crate) fn blur_on_submit(&self) -> bool {
-        self.config.as_ref().is_none_or(|c| c.blur_on_submit)
+    /// What return does (`submitBehavior`, resolved by the core).
+    pub(crate) fn submit(&self) -> SubmitBehavior {
+        self.config
+            .as_ref()
+            .map_or(SubmitBehavior::BlurAndSubmit, InputConfig::submit)
     }
 }
 

@@ -57,10 +57,11 @@ mount(App);
 | `autoCapitalize` | `"none" \| "sentences" \| "words" \| "characters"` | `"sentences"` | 自动大写。 |
 | `autoCorrect` | `boolean` | `true` | 系统的自动更正。 |
 | `autoComplete` | `AutoComplete` | | 输入框内容的类型，用于自动填充。 |
-| `multiline` | `boolean` | `false` | 多行；回车插入换行。 |
+| `multiline` | `boolean` | `false` | 多行；回车插入换行（`submitBehavior` 另有设置时除外）。 |
 | `maxLength` | `number` | | 用户最多能输入的字符数。 |
 | `editable` | `boolean` | `true` | 用户可以修改文本。 |
 | `autoFocus` | `boolean` | `false` | 出现时自动获得焦点。 |
+| `submitBehavior` | `"submit" \| "blurAndSubmit" \| "newline"` | 单行 `"blurAndSubmit"`，多行 `"newline"` | 回车键做什么：提交并保持焦点、提交后失去焦点，或插入换行（仅多行）。优先于 `blurOnSubmit`。 |
 | `blurOnSubmit` | `boolean` | `true` | 单行输入框按回车后失去焦点。 |
 | `caretHidden` | `boolean` | `false` | 不绘制光标。 |
 | `selectionColor` | `ColorValue` | | 光标和选区的颜色。 |
@@ -76,7 +77,7 @@ mount(App);
 | 事件 | 参数 | 触发时机 |
 |---|---|---|
 | `onChangeText` | `text: string` | 文本改变。 |
-| `onSubmitEditing` | `{ text }` | 按下回车键（单行）。 |
+| `onSubmitEditing` | `{ text }` | 在会提交的输入框中按下回车键（单行，或 `submitBehavior` 为 `"submit"` / `"blurAndSubmit"`）。 |
 | `onFocus` / `onBlur` | | 获得 / 失去焦点。 |
 | `onSelectionChange` | `{ start, end }` | 光标或选区移动（UTF-16 码元）。 |
 | `onKeyPress` | `{ key }` | 文本改变之前：`key` 是输入的文本、`"Backspace"` 或 `"Enter"`。 |
@@ -115,7 +116,15 @@ mount(App);
 
 ## 回车键与在字段间切换
 
-`returnKeyType` 设置回车键上的文字：`"default"`、`"done"`、`"go"`、`"next"`、`"search"` 或 `"send"`。在单行输入框中按下它会触发 `onSubmitEditing`，随后输入框失去焦点，除非设置了 `blurOnSubmit={false}`。
+`returnKeyType` 设置回车键上的文字：`"default"`、`"done"`、`"go"`、`"next"`、`"search"` 或 `"send"`。按下它做什么由 `submitBehavior` 决定：
+
+| `submitBehavior` | 回车 | 默认用于 |
+|---|---|---|
+| `"blurAndSubmit"` | 触发 `onSubmitEditing`，随后输入框失去焦点 | 单行输入框 |
+| `"submit"` | 触发 `onSubmitEditing`，输入框保持焦点 | 设置了 `blurOnSubmit={false}` 的单行输入框 |
+| `"newline"` | 插入换行（仅多行输入框） | 多行输入框 |
+
+设置了 `"submit"` 或 `"blurAndSubmit"` 的多行输入框像聊天输入框一样按回车发送，文本仍会自动换行；使用硬件键盘时（桌面、Mac、平板的外接键盘），Shift+Return 或 Option / Alt+Return 插入换行。用回车确认输入法的候选词（例如中文或日文输入）只会上屏，不会提交。
 
 要切换到下一个字段，保存输入框的 ref 并调用 `focus()`：
 
@@ -146,9 +155,9 @@ function SignIn() {
 mount(SignIn);
 ```
 
-第一个字段上的 `blurOnSubmit={false}` 让键盘在焦点切换时保持弹出，不会先收起再弹起。按回车发送并保持焦点的聊天输入框也使用这个属性。
+第一个字段上的 `blurOnSubmit={false}` 让键盘在焦点切换时保持弹出，不会先收起再弹起。按回车发送并保持焦点的聊天输入框使用 `submitBehavior="submit"`（见[下面](#滚动视图之外的内容keyboardavoidingview)的输入栏）。
 
-`maxLength` 和 `blurOnSubmit` 都在原生端执行：用户输入时，平台会询问"能否再加这个字符？"和"回车是否结束编辑？"，nsh 根据属性直接回答，不等待 JS。
+`maxLength` 和 `submitBehavior` 都在原生端执行：用户输入时，平台会询问"能否再加这个字符？"和"回车是否结束编辑？"，nsh 根据属性直接回答，不等待 JS。
 
 ## 从代码控制焦点
 
@@ -232,6 +241,10 @@ import { keyboard, KeyboardAvoidingView, useSafeAreaInsets } from "nsh/ui/mobile
 function ChatScreen() {
   const insets = useSafeAreaInsets();
   const draft = signal("");
+  const send = () => {
+    if (draft().trim()) console.log("send", draft());
+    draft.set("");
+  };
   return (
     <KeyboardAvoidingView style={{ flex: 1 }}>
       <Scroll style={{ flex: 1 }} keyboardDismissMode="interactive">
@@ -245,7 +258,16 @@ function ChatScreen() {
           paddingBottom: 8 + (keyboard().height > 0 ? 0 : insets().bottom),
         }}
       >
-        <Input value={draft()} onChangeText={(t) => draft.set(t)} placeholder="Message" style={{ flex: 1 }} />
+        <Input
+          value={draft()}
+          onChangeText={(t) => draft.set(t)}
+          multiline
+          submitBehavior="submit"
+          returnKeyType="send"
+          onSubmitEditing={send}
+          placeholder="Message"
+          style={{ flex: 1, maxHeight: 120 }}
+        />
       </View>
     </KeyboardAvoidingView>
   );

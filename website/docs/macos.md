@@ -131,6 +131,25 @@ point. `Alert` and `ActionSheet` show an `NSAlert` sheet on the window: up to tw
 button leftmost, the last regular one the default for Return), more buttons and an action sheet's options stacked in
 their order with the cancel button last and no default; Escape presses the cancel button.
 
+### Keyboard
+
+| Keys | Do |
+|---|---|
+| Return | In an `Input`, what `submitBehavior` says: submit (`onSubmitEditing`), submit and leave the field, or a new line (multiline inputs) |
+| Shift+Return, Option+Return, Ctrl+Return | A new line in a multiline input whose return submits |
+| Tab, Shift+Tab (Ctrl too) | The next / previous field in screen order, within the newest modal; Option+Tab types a tab in a multiline input |
+| Escape | Leaves the focused field; else clears a text selection, then goes back or asks the newest modal to close |
+| Option+Left, Cmd+[, mouse back button | Go back (not while a field has the focus: there Option+Left moves the caret) |
+| Option / Cmd + arrows, with Shift; Option+Delete, Cmd+Delete; Ctrl+A / E / K | Move, select and delete by word and line in a field, as in every Mac app |
+| Cmd+Z, Shift+Cmd+Z, Cmd+X / C / V / A | Undo, redo, cut, copy, paste, select all (a secure field refuses cut and copy); Cmd+A / Cmd+C select and copy `selectable` text |
+| Arrows; Page Up / Down, Space, Shift+Space, Option+Up / Down; Home / End, Cmd+Up / Down | Scroll the scroll view around the focused view or under the mouse by a line, a page, to the start / end (not while a field has the focus) |
+| Cmd+W, Cmd+M, Ctrl+Cmd+F, Cmd+H, Option+Cmd+H, Cmd+Q | Close, minimize, full screen, hide, hide others, quit (`nsh package` and `nsh run` apps' menus) |
+| Cmd+R | Reloads the latest build (`nsh run`) |
+
+Shortcuts work with any keyboard layout (on a Cyrillic or Greek one, Cmd+C is the key that types C on a US layout).
+A return that commits an input method's composition (Chinese, Japanese, ...) never submits. `onKeyPress` reports
+what React Native reports: the typed text, `"Enter"`, `"Backspace"`, and `"Escape"`.
+
 Not supported, or different:
 
 - **Zooming scroll views** (`zoomTo`, the zoom props).

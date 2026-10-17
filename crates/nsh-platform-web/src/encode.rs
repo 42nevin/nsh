@@ -588,7 +588,7 @@ fn input_json(c: &InputConfig) -> String {
     let mut s = String::from("{");
     let _ = write!(
         s,
-        "\"css\":{},\"placeholder\":{},\"secure\":{},\"keyboard\":{},\"returnKey\":{},\"multiline\":{},\"editable\":{},\"blurOnSubmit\":{},\"autoFocus\":{},\"autoCapitalize\":{},\"autoCorrect\":{}",
+        "\"css\":{},\"placeholder\":{},\"secure\":{},\"keyboard\":{},\"returnKey\":{},\"multiline\":{},\"editable\":{},\"submit\":{},\"autoFocus\":{},\"autoCapitalize\":{},\"autoCorrect\":{}",
         json_str(&text_css(&c.style, None)),
         json_str(&c.placeholder),
         c.secure,
@@ -596,7 +596,7 @@ fn input_json(c: &InputConfig) -> String {
         json_str(&enum_name(&c.return_key)),
         c.multiline,
         c.editable,
-        c.blur_on_submit,
+        json_str(&enum_name(&c.submit())),
         c.auto_focus,
         json_str(&enum_name(&c.auto_capitalize)),
         c.auto_correct,

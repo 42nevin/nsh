@@ -109,8 +109,8 @@ pub use crate::{
     KeyboardAppearance, KeyboardDismissMode, KeyboardTaps, KeyboardType, LayoutAnimation,
     LayoutCurve, LayoutProperty, LayoutTransition, Measurement, ModalAnimation, ModalPresentation,
     PanActivation, PointerEvents, ResizeMode, ReturnKeyType, ScreenAnimation, SnapAlignment,
-    StatusBarConfig, StatusBarSetting, StatusBarStyle, TouchEvent, TransformKind, TransformOrigin,
-    Viewability,
+    StatusBarConfig, StatusBarSetting, StatusBarStyle, SubmitBehavior, TouchEvent, TransformKind,
+    TransformOrigin, Viewability,
     platform::{Appearance, Idiom, Locale, Os},
     style::{Color, OriginLen},
 };
@@ -218,6 +218,7 @@ pub mod prelude {
         Spring,
         Stack,
         Styled,
+        SubmitBehavior,
         Task,
         Text,
         Theme,

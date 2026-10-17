@@ -1748,9 +1748,6 @@ impl Nav {
     }
 }
 
-/// Goes back (the newest modal, the innermost stack or the app's
-/// `onBackPress`): whether something took it. The mouse's back button
-/// calls it too.
 /// Where the keyboard focus may go: the newest presented modal (what is
 /// under it cannot be used), else the whole surface.
 pub(crate) fn focus_scope(surface: &Surface) -> Retained<NSView> {
@@ -1768,6 +1765,9 @@ pub(crate) fn focus_scope(surface: &Surface) -> Retained<NSView> {
         .unwrap_or_else(|| Retained::from(surface.root.ns()))
 }
 
+/// Goes back (the newest modal, the innermost stack or the app's
+/// `onBackPress`): whether something took it. The mouse's back button
+/// calls it too.
 pub(crate) fn go_back(surface: &Rc<Surface>) -> bool {
     match surface.nav.try_borrow_mut() {
         Ok(mut nav) => crate::surface::quiet(|| nav.go_back(surface)),
@@ -1814,11 +1814,7 @@ pub(crate) fn key_pressed(surface: &Rc<Surface>, event: &NSEvent) -> bool {
             | NSEventModifierFlags::Shift
             | NSEventModifierFlags::Command);
     let code = event.keyCode();
-    let bracket = || {
-        event
-            .charactersIgnoringModifiers()
-            .is_some_and(|c| c.to_string() == "[")
-    };
+    let bracket = || crate::input::shortcut_key(event) == Some('[');
     let escape = code == ESCAPE && mods.is_empty();
     let back = escape
         || (code == LEFT && mods == NSEventModifierFlags::Option)

@@ -213,10 +213,11 @@ function Chat() {
           value={draft()}
           onChangeText={(t) => draft.set(t)}
           onSubmitEditing={send}
-          blurOnSubmit={false}
+          multiline
+          submitBehavior="submit"
           returnKeyType="send"
           placeholder="Message"
-          style={{ flex: 1, borderWidth: 1, borderColor: "#d0d7de", borderRadius: 18, paddingHorizontal: 12, paddingVertical: 8 }}
+          style={{ flex: 1, maxHeight: 120, borderWidth: 1, borderColor: "#d0d7de", borderRadius: 18, paddingHorizontal: 12, paddingVertical: 8 }}
         />
       </View>
     </KeyboardAvoidingView>

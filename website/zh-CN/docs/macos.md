@@ -118,6 +118,24 @@ Escape、Option+Left、Cmd+[ 和鼠标的后退键会在栈中返回，或请求
 `Alert` 和 `ActionSheet` 以 `NSAlert` 表单的形式显示在窗口上：不超过两个按钮的提示框按钮排成一行（取消按钮在最左边，最后一个普通按钮是
 Return 的默认按钮）；更多按钮以及操作表的选项按顺序竖排，取消按钮在最后，没有默认按钮；Escape 按下取消按钮。
 
+### 键盘
+
+| 按键 | 作用 |
+|---|---|
+| Return | 在 `Input` 中按 `submitBehavior` 的设定：提交（`onSubmitEditing`）、提交并离开输入框，或换行（多行输入框） |
+| Shift+Return、Option+Return、Ctrl+Return | 在 Return 用于提交的多行输入框中换行 |
+| Tab、Shift+Tab（加 Ctrl 亦可） | 按屏幕顺序切换到下一个 / 上一个输入框，限于最新的模态视图内；Option+Tab 在多行输入框中输入制表符 |
+| Escape | 离开有焦点的输入框；否则清除文本选区，再返回或请求最新的模态视图关闭 |
+| Option+Left、Cmd+[、鼠标后退键 | 返回（输入框有焦点时不会：此时 Option+Left 移动光标） |
+| Option / Cmd + 方向键（可加 Shift）；Option+Delete、Cmd+Delete；Ctrl+A / E / K | 在输入框中按词和按行移动、选择和删除，与所有 Mac 应用一致 |
+| Cmd+Z、Shift+Cmd+Z、Cmd+X / C / V / A | 撤销、重做、剪切、复制、粘贴、全选（密码框拒绝剪切和复制）；Cmd+A / Cmd+C 选择并复制 `selectable` 文本 |
+| 方向键；Page Up / Down、Space、Shift+Space、Option+Up / Down；Home / End、Cmd+Up / Down | 滚动有焦点的视图所在或鼠标下方的滚动视图：一行、一页、到开头 / 结尾（输入框有焦点时不滚动） |
+| Cmd+W、Cmd+M、Ctrl+Cmd+F、Cmd+H、Option+Cmd+H、Cmd+Q | 关闭、最小化、全屏、隐藏、隐藏其他、退出（`nsh package` 和 `nsh run` 应用的菜单） |
+| Cmd+R | 重新加载最新的构建（`nsh run`） |
+
+快捷键在任何键盘布局下都可用（在西里尔或希腊字母布局下，Cmd+C 是美式布局中输入 C 的那个键）。确认输入法组字（中文、日文等）的
+Return 不会提交。`onKeyPress` 报告的内容与 React Native 一致：输入的文本、`"Enter"`、`"Backspace"` 以及 `"Escape"`。
+
 不支持或有所不同：
 
 - **可缩放的滚动视图**（`zoomTo`、缩放相关属性）。

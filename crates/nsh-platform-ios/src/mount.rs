@@ -8,8 +8,8 @@ use nsh_animation::{AnimationProp, AnimationValue};
 use nsh_core::{
     Color, Command, EventKind, EventMask, EventPayload, GestureValues, ImageSource,
     KeyboardDismissMode, LayoutAnimation, LayoutCurve, LayoutProperty, LayoutTransition,
-    MountBatch, MountItem, NodeId, PayloadValue, Rect, ResizeMode, StickyCell, ViewKind, ViewProps,
-    ViewStyle,
+    MountBatch, MountItem, NodeId, PayloadValue, Rect, ResizeMode, StickyCell, SubmitBehavior,
+    ViewKind, ViewProps, ViewStyle,
 };
 use nsh_engine::EngineControl;
 use objc2::{
@@ -1167,7 +1167,8 @@ impl Mounter {
         }
     }
 
-    /// Return pressed. Single-line inputs end editing, as in React Native.
+    /// Return pressed in an input that submits (`submitBehavior`): reports
+    /// `onSubmitEditing`, then ends editing for `blurAndSubmit`.
     pub(crate) fn input_submitted(&mut self, id: NodeId, text: String) {
         let Some(Slot {
             native: Native::Input(input),
@@ -1185,7 +1186,7 @@ impl Mounter {
                 EventPayload::Text { text, count },
             );
         }
-        if !input.multiline() && input.blur_on_submit() {
+        if input.submit() == SubmitBehavior::BlurAndSubmit {
             input.editor_view().resignFirstResponder();
         }
     }

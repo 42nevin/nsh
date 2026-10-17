@@ -257,9 +257,7 @@ fn reload_key(key: u64) -> Option<Retained<AnyObject>> {
             .modifierFlags()
             .intersection(NSEventModifierFlags::DeviceIndependentFlagsMask)
             == NSEventModifierFlags::Command;
-        let r = e
-            .charactersIgnoringModifiers()
-            .is_some_and(|c| c.to_string().eq_ignore_ascii_case("r"));
+        let r = crate::input::shortcut_key(e) == Some('r');
         if command
             && r
             && let Some(ui) = session(key)

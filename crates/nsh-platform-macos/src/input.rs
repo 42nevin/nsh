@@ -600,8 +600,9 @@ pub(crate) fn event(surface: &Rc<Surface>, event: &NSEvent) {
 
 /// A key went down (`down`) or up; true if it was handled: the text
 /// selection's keys, going back (Escape, Command+[, Option+Left) and
-/// keyboard scrolling (arrows by a line, Page Up / Page Down and Space /
-/// Shift+Space by a page, Home / End to the edges) of the innermost
+/// keyboard scrolling (arrows by a line, Page Up / Page Down, Option+Up /
+/// Option+Down and Space / Shift+Space by a page, Home / End and
+/// Command+Up / Command+Down to the edges) of the innermost
 /// scroll view around the focused view, or else under the mouse, that can
 /// move that way. Fields keep their keys (they reach the root only when
 /// they do not use them).
@@ -623,8 +624,22 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &NSEvent, down: bool) -> bool {
     let ctrl = flags.contains(NSEventModifierFlags::Control);
     let opt = flags.contains(NSEventModifierFlags::Option);
     let shift = flags.contains(NSEventModifierFlags::Shift);
-    let code = event.keyCode();
-    let Some((horizontal, m)) = crate::scroll::key_move(code, shift, cmd || ctrl || opt) else {
+    // Command+Up / Down go to the top / bottom and Option+Up / Down move
+    // by a page, as in AppKit's scroll views and Safari.
+    const HOME: u16 = 115;
+    const PAGE_UP: u16 = 116;
+    const END: u16 = 119;
+    const PAGE_DOWN: u16 = 121;
+    const DOWN: u16 = 125;
+    const UP: u16 = 126;
+    let (code, shortcut) = match (event.keyCode(), cmd, opt, ctrl) {
+        (UP, true, false, false) => (HOME, false),
+        (DOWN, true, false, false) => (END, false),
+        (UP, false, true, false) => (PAGE_UP, false),
+        (DOWN, false, true, false) => (PAGE_DOWN, false),
+        (code, ..) => (code, cmd || ctrl || opt),
+    };
+    let Some((horizontal, m)) = crate::scroll::key_move(code, shift, shortcut) else {
         return false;
     };
     let root = &surface.root;
@@ -656,18 +671,14 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &NSEvent, down: bool) -> bool {
     crate::scroll::key_scroll(surface, &hit.view, horizontal, m)
 }
 
-/// Tab / Shift+Tab with the root focused: moves into AppKit's key view
-/// loop (the fields), from the first or the last, so focus never gets
-/// stuck on the root.
+/// Tab / Shift+Tab (or with Control) with the root focused: moves into
+/// AppKit's key view loop (the fields), from the first or the last, so
+/// focus never gets stuck on the root.
 fn tab(surface: &Surface, event: &NSEvent) -> bool {
     const TAB: u16 = 48;
     let flags = event.modifierFlags();
     if event.keyCode() != TAB
-        || flags.intersects(
-            NSEventModifierFlags::Command
-                | NSEventModifierFlags::Control
-                | NSEventModifierFlags::Option,
-        )
+        || flags.intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Option)
     {
         return false;
     }
@@ -678,6 +689,38 @@ fn tab(surface: &Surface, event: &NSEvent) -> bool {
         flags.contains(NSEventModifierFlags::Shift),
     );
     true
+}
+
+/// The key of a shortcut (`event` with Command or Control): the character
+/// its key types without modifiers, in lower case; on a layout that types
+/// no ASCII there (Cyrillic, Greek, ...), the US layout's character of its
+/// key, as menus' key equivalents match it.
+pub(crate) fn shortcut_key(event: &NSEvent) -> Option<char> {
+    let typed = event
+        .charactersIgnoringModifiers()
+        .and_then(|s| s.to_string().chars().next())?;
+    if typed.is_ascii() {
+        return Some(typed.to_ascii_lowercase());
+    }
+    // The ANSI keyboard's virtual key codes (`kVK_ANSI_*`): its letters and
+    // brackets.
+    const KEYS: &[u8] = b"asdfhgzxcv\0bqweryt";
+    let code = usize::from(event.keyCode());
+    match code {
+        _ if code < KEYS.len() && KEYS[code] != b'\0' => Some(KEYS[code] as char),
+        30 => Some(']'),
+        31 => Some('o'),
+        32 => Some('u'),
+        33 => Some('['),
+        34 => Some('i'),
+        35 => Some('p'),
+        37 => Some('l'),
+        38 => Some('j'),
+        40 => Some('k'),
+        45 => Some('n'),
+        46 => Some('m'),
+        _ => None,
+    }
 }
 
 /// Where keys look for a scroll view: the mouse, or the middle.
@@ -1974,6 +2017,35 @@ pub(crate) fn native_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcut_keys_on_any_layout() {
+        let key = |chars: &str, code: u16| {
+            let s = objc2_foundation::NSString::from_str(chars);
+            let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                NSEventType::KeyDown,
+                objc2_foundation::NSPoint::new(0.0, 0.0),
+                NSEventModifierFlags::Command,
+                0.0,
+                0,
+                None,
+                &s,
+                &s,
+                false,
+                code,
+            )
+            .unwrap();
+            shortcut_key(&event)
+        };
+        // US, and Dvorak's own letters.
+        assert_eq!(key("C", 8), Some('c'));
+        assert_eq!(key("j", 8), Some('j'));
+        // Russian: the US layout's key.
+        assert_eq!(key("\u{441}", 8), Some('c'));
+        assert_eq!(key("\u{43a}", 15), Some('r'));
+        assert_eq!(key("\u{445}", 33), Some('['));
+        assert_eq!(key("\u{44d}", 39), None);
+    }
 
     #[test]
     fn velocity_over_recent_samples() {

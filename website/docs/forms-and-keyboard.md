@@ -57,10 +57,11 @@ An input is **uncontrolled** without `value`: it keeps its own text, starting at
 | `autoCapitalize` | `"none" \| "sentences" \| "words" \| "characters"` | `"sentences"` | Automatic capitalization. |
 | `autoCorrect` | `boolean` | `true` | The system's corrections. |
 | `autoComplete` | `AutoComplete` | | What the input holds, for autofill. |
-| `multiline` | `boolean` | `false` | Several lines; return inserts a line break. |
+| `multiline` | `boolean` | `false` | Several lines; return inserts a line break unless `submitBehavior` says otherwise. |
 | `maxLength` | `number` | | The most characters the user can enter. |
 | `editable` | `boolean` | `true` | The user can change the text. |
 | `autoFocus` | `boolean` | `false` | Focused when it appears. |
+| `submitBehavior` | `"submit" \| "blurAndSubmit" \| "newline"` | single line `"blurAndSubmit"`, multiline `"newline"` | What return does: submit and keep the focus, submit and unfocus, or insert a line break (multiline only). Wins over `blurOnSubmit`. |
 | `blurOnSubmit` | `boolean` | `true` | Return unfocuses a single-line input. |
 | `caretHidden` | `boolean` | `false` | No caret is drawn. |
 | `selectionColor` | `ColorValue` | | The caret and the selection. |
@@ -76,7 +77,7 @@ Events:
 | Event | Payload | When |
 |---|---|---|
 | `onChangeText` | `text: string` | The text changed. |
-| `onSubmitEditing` | `{ text }` | The return key was pressed (single line). |
+| `onSubmitEditing` | `{ text }` | The return key was pressed in an input that submits (single line, or `submitBehavior` `"submit"` / `"blurAndSubmit"`). |
 | `onFocus` / `onBlur` | | The input gained / lost focus. |
 | `onSelectionChange` | `{ start, end }` | The caret or selection moved (UTF-16 units). |
 | `onKeyPress` | `{ key }` | Before the text changes: `key` is the typed text, `"Backspace"` or `"Enter"`. |
@@ -115,7 +116,15 @@ On iOS, `ios={{ keyboardAppearance: "dark" }}` (or `"light"`, `"default"`) gives
 
 ## The return key and moving between fields
 
-`returnKeyType` labels the return key: `"default"`, `"done"`, `"go"`, `"next"`, `"search"` or `"send"`. Pressing it fires `onSubmitEditing` on a single-line input, which then loses focus unless `blurOnSubmit={false}`.
+`returnKeyType` labels the return key: `"default"`, `"done"`, `"go"`, `"next"`, `"search"` or `"send"`. `submitBehavior` says what pressing it does:
+
+| `submitBehavior` | Return | Default for |
+|---|---|---|
+| `"blurAndSubmit"` | fires `onSubmitEditing`, then the input loses focus | single-line inputs |
+| `"submit"` | fires `onSubmitEditing`; the input keeps focus | single-line inputs with `blurOnSubmit={false}` |
+| `"newline"` | inserts a line break (multiline inputs only) | multiline inputs |
+
+A multiline input with `"submit"` or `"blurAndSubmit"` sends on return, as chat composers do, and still wraps its lines; on a hardware keyboard (desktops, a Mac, a tablet's keyboard) Shift+Return or Option / Alt+Return inserts a line break. A return that commits an input method's composition (Chinese or Japanese input, say) only commits it and never submits.
 
 To move to the next field, keep refs to the inputs and call `focus()`:
 
@@ -146,9 +155,9 @@ function SignIn() {
 mount(SignIn);
 ```
 
-`blurOnSubmit={false}` on the first field keeps the keyboard up while focus moves, so it does not drop and rise again. A chat input that sends on return and stays focused uses the same prop.
+`blurOnSubmit={false}` on the first field keeps the keyboard up while focus moves, so it does not drop and rise again. A chat input that sends on return and stays focused uses `submitBehavior="submit"` (see the composer [below](#content-outside-scroll-views-keyboardavoidingview)).
 
-Both `maxLength` and `blurOnSubmit` are enforced natively: the platform asks "may this character be added?" and "should return end editing?" as the user types, and nsh answers from the props without waiting for JS.
+Both `maxLength` and `submitBehavior` are enforced natively: the platform asks "may this character be added?" and "should return end editing?" as the user types, and nsh answers from the props without waiting for JS.
 
 ## Focus from code
 
@@ -232,6 +241,10 @@ import { keyboard, KeyboardAvoidingView, useSafeAreaInsets } from "nsh/ui/mobile
 function ChatScreen() {
   const insets = useSafeAreaInsets();
   const draft = signal("");
+  const send = () => {
+    if (draft().trim()) console.log("send", draft());
+    draft.set("");
+  };
   return (
     <KeyboardAvoidingView style={{ flex: 1 }}>
       <Scroll style={{ flex: 1 }} keyboardDismissMode="interactive">
@@ -245,7 +258,16 @@ function ChatScreen() {
           paddingBottom: 8 + (keyboard().height > 0 ? 0 : insets().bottom),
         }}
       >
-        <Input value={draft()} onChangeText={(t) => draft.set(t)} placeholder="Message" style={{ flex: 1 }} />
+        <Input
+          value={draft()}
+          onChangeText={(t) => draft.set(t)}
+          multiline
+          submitBehavior="submit"
+          returnKeyType="send"
+          onSubmitEditing={send}
+          placeholder="Message"
+          style={{ flex: 1, maxHeight: 120 }}
+        />
       </View>
     </KeyboardAvoidingView>
   );

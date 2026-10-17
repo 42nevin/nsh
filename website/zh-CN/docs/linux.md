@@ -100,13 +100,31 @@ fn main() -> gtk::glib::ExitCode {
 运行环境是桌面环境：安全区和键盘高度为 0，`Platform.constants.interfaceIdiom` 为 `"desktop"`，`Platform.Version` 为内核的主、次版本号，
 深色模式实时跟随桌面的设置（通过 XDG 设置门户）。见[设备与环境](./device-and-environment.md)。
 
+### 键盘
+
+| 按键 | 作用 |
+|---|---|
+| Return | 在 `Input` 中按 `submitBehavior` 行事：提交（`onSubmitEditing`）、提交并离开输入框，或换行（多行输入框） |
+| Shift+Return、Alt+Return | 在回车即提交的多行输入框中换行（Ctrl+Return 提交） |
+| Tab、Shift+Tab | 按屏幕顺序移到下一个 / 上一个输入框，只在最上层的模态窗口之内 |
+| Escape | 离开有焦点的输入框；否则清除文本选区，再返回上一页或请求关闭最上层的模态窗口 |
+| Alt+Left、Back 键、鼠标的后退键 | 返回上一页（在输入框中也是） |
+| Ctrl+方向键、Home / End，加 Shift；Ctrl+Backspace / Delete | 在输入框中按词和行移动、选择、删除，与其他 GTK 应用一致 |
+| Ctrl+Z、Ctrl+Shift+Z、Ctrl+X / C / V / A | 撤销、重做、剪切、复制、粘贴、全选（密码输入框拒绝剪切和复制）；Ctrl+A / Ctrl+C 选择并复制 `selectable` 文本 |
+| 方向键；Page Up / Down、Space、Shift+Space；Home / End | 滚动有焦点的视图所在或鼠标下方的滚动视图：一行、一页、到开头 / 结尾（输入框有焦点时不滚动） |
+| Ctrl+W、F11、Ctrl+Q | 关闭窗口、全屏、退出（`nsh package` 和 `nsh run` 的应用） |
+| Ctrl+R | 重新加载最新的构建（`nsh run`） |
+
+快捷键适用于任何键盘布局（在西里尔或希腊字母布局下，Ctrl+C 是美式布局中输入 C 的那个键）。确认输入法组合文字（中文、日文等）的回车
+不会提交。`onKeyPress` 报告的与 React Native 一致：输入的文字、`"Enter"`、`"Backspace"` 和 `"Escape"`；粘贴的文字不报告。
+
 不支持：
 
 - **`WebView`**：它需要 WebKitGTK；Web 视图只显示一个中性的占位视图。
 - **视频的 `rate`**：GTK 只能以正常速度播放。`onEnd` 只对不循环的视频触发。
 - **可缩放的滚动视图**（`zoomTo`、缩放相关属性）。
 - **`mixBlendMode` 和 `backdropFilter`**（背景色仍会绘制）；`borderCurve: "continuous"` 绘制为圆形圆角。
-- **可选择的文本**、**输入辅助视图**和**状态栏**（桌面上没有对应物）。
+- **输入辅助视图**和**状态栏**（桌面上没有对应物）。
 - **无障碍**：`accessible` 分组、自定义 `accessibilityActions`；实时区域改为播报。
 
 ## 另见

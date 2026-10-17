@@ -268,6 +268,9 @@ struct ModalNav {
     reported: Option<(Size, EdgeInsets)>,
     /// Watches it while it is presented: keeps its last image.
     paintable: Option<gtk::WidgetPaintable>,
+    /// What had the keyboard focus when it was presented: it gets it back
+    /// when the modal closes, as a desktop dialog gives it back.
+    restore: Option<glib::WeakRef<gtk::Widget>>,
 }
 
 /// What leaves the screen during a pop.
@@ -1293,6 +1296,7 @@ impl Nav {
             return;
         };
         let Some(view) = m.view.take() else { return };
+        let restore = m.restore.take().and_then(|w| w.upgrade());
         if let Some(b) = m.backdrop.take() {
             view.remove_native(&b);
         }
@@ -1312,6 +1316,15 @@ impl Nav {
         };
         set_shift(&view, (0.0, 0.0));
         set_fade(&view, 1.0);
+        self.scope_focus(surface);
+        if let Some(widget) = restore
+            && let Some(root) = surface.root.root()
+            && root.focus().is_none()
+            && widget.is_ancestor(&surface.root)
+        {
+            // Refused while another modal still covers it.
+            widget.grab_focus();
+        }
         match (motion, image) {
             (Some((duration, fade)), Some(node)) => {
                 let layer = Layer::new();
@@ -1388,6 +1401,27 @@ impl Nav {
             return true;
         }
         false
+    }
+
+    /// Keeps the keyboard focus inside the newest modal: Tab never reaches
+    /// the views under it (`can-focus` off holds for a widget's descendants
+    /// too). Dialogs and toasts are not views, and keep theirs.
+    fn scope_focus(&self, surface: &Surface) {
+        let top = self
+            .order
+            .last()
+            .and_then(|id| self.modals.get(id))
+            .and_then(|m| m.view.clone());
+        let mut child = surface.root.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            if c.is::<NshView>() {
+                c.set_can_focus(
+                    top.as_ref()
+                        .is_none_or(|t| t.upcast_ref::<gtk::Widget>() == &c),
+                );
+            }
+        }
     }
 
     /// Keeps the presented modals (and those leaving) over the app's
@@ -1700,6 +1734,17 @@ pub(crate) fn present(surface: &Rc<Surface>, view: &NshView) {
     if m.view.is_some() {
         return;
     }
+    // The field being typed in under the modal leaves it (until the modal
+    // closes).
+    let window = surface.root.root();
+    let focus = window
+        .as_ref()
+        .and_then(|r| r.focus())
+        .filter(|f| f.is_ancestor(&surface.root));
+    if let (Some(window), Some(_)) = (&window, &focus) {
+        window.set_focus(None::<&gtk::Widget>);
+    }
+    m.restore = focus.map(|f| f.downgrade());
     m.view = Some(view.clone());
     m.paintable = Some(gtk::WidgetPaintable::new(Some(view)));
     m.closed = false;
@@ -1709,6 +1754,7 @@ pub(crate) fn present(surface: &Rc<Surface>, view: &NshView) {
     }
     view.insert_before(&surface.root, None::<&gtk::Widget>);
     nav.order.push(id);
+    nav.scope_focus(surface);
     nav.style_modal(dark(surface), id);
     nav.sheet_scrim(surface, id);
     nav.size_modal(surface, id);

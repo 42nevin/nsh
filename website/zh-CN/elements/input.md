@@ -32,7 +32,7 @@ function NameField() {
 - **受控**：传入 `value`，并在 `onChangeText` 中更新它。JS 可以改写用户的输入（去掉空白、格式化）：输入框会立即显示用户的编辑，新的 `value` 到达后再被修正。每次原生编辑都带有一个计数，只有基于最新一次编辑的 `value` 才会被应用，因此即使某一轮 JS 执行较慢，也不会覆盖用户更新的输入。
 - **非受控**：传入 `defaultValue`（或不传），从 `onChangeText` 或 `onSubmitEditing` 读取文本。
 
-用户输入过程中必须遵守的规则以属性形式给出，由原生侧直接判断而不询问 JS：`maxLength` 限制长度，`blurOnSubmit` 决定回车键的行为。参见[表单与键盘](../docs/forms-and-keyboard.md)。
+用户输入过程中必须遵守的规则以属性形式给出，由原生侧直接判断而不询问 JS：`maxLength` 限制长度，`submitBehavior`（或 `blurOnSubmit`）决定回车键的行为。参见[表单与键盘](../docs/forms-and-keyboard.md)。
 
 ## 属性
 
@@ -46,7 +46,7 @@ function NameField() {
 | `defaultValue` | `string` | | 初始文本。 |
 | `placeholder` | `string` | | 输入框为空时显示的提示。 |
 | `placeholderTextColor` | `ColorValue` | | 提示文字的颜色。 |
-| `multiline` | `boolean` | `false` | 多行；回车插入换行。 |
+| `multiline` | `boolean` | `false` | 多行；回车插入换行（`submitBehavior` 另有设置时除外）。 |
 | `maxLength` | `number` | | 用户最多能输入的字符数。 |
 | `editable` | `boolean` | `true` | 用户可以修改文本。 |
 | `secureTextEntry` | `boolean` | `false` | 隐藏文本（密码）。 |
@@ -62,7 +62,8 @@ function NameField() {
 | `autoCapitalize` | `"none" \| "sentences" \| "words" \| "characters"` | `"sentences"` | 自动大写。 |
 | `autoCorrect` | `boolean` | `true` | 系统自动更正。 |
 | `autoComplete` | `AutoComplete \| TextContentType` | | 输入框内容的类型，用于自动填充：`"username"`、`"current-password"`、`"new-password"`、`"one-time-code"`、`"email"`、`"tel"`、`"postal-code"`、`"cc-number"`、`"off"` 等。 |
-| `blurOnSubmit` | `boolean` | `true` | 回车让单行输入框失去焦点；设为 `false` 时键盘保持弹出（例如连续发送多条消息）。 |
+| `submitBehavior` | `"submit" \| "blurAndSubmit" \| "newline"` | `"blurAndSubmit"`（单行），`"newline"`（多行） | 回车键做什么：`"submit"` 触发 `onSubmitEditing` 并保持焦点，`"blurAndSubmit"` 提交后再失去焦点，`"newline"` 插入换行（仅多行；单行总是提交）。会提交的多行输入框在硬件键盘上仍可用 Shift+Return 或 Option / Alt+Return 换行。优先于 `blurOnSubmit`。 |
+| `blurOnSubmit` | `boolean` | `true` | 回车让单行输入框失去焦点；设为 `false` 时键盘保持弹出（例如连续发送多条消息）。`submitBehavior` 取代了它。 |
 | `autoFocus` | `boolean` | `false` | 出现时自动获得焦点。 |
 
 ### 光标与选区
@@ -90,7 +91,7 @@ function NameField() {
 | 事件 | 载荷 | 触发时机 |
 |---|---|---|
 | `onChangeText` | `(text: string)` | 用户修改了文本。 |
-| `onSubmitEditing` | `{ text }` | 按下了回车键（单行）。 |
+| `onSubmitEditing` | `{ text }` | 在会提交的输入框中按下了回车键（单行，或 `submitBehavior` 为 `"submit"` / `"blurAndSubmit"`）。 |
 | `onFocus` / `onBlur` | 无 | 输入框获得 / 失去焦点。 |
 | `onSelectionChange` | `{ start, end }` | 光标或选区移动（UTF-16 单位）。 |
 | `onKeyPress` | `{ key }` | 文本变化之前：`key` 是输入的文本、`"Backspace"` 或 `"Enter"`。 |

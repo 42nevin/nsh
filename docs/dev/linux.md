@@ -59,9 +59,9 @@ server client, log forwarding, the error overlay: `dev.rs`).
 | Canvas | `canvas.rs` | The recorded drawing replayed with Cairo into a recording surface (`Snapshot::append_cairo`), sharp at any scale; shadows blurred into a mask; conic gradients as mesh patterns |
 | Scroll views | `scroll.rs` | Offsets of their own (`ScrollState`), reported as UIKit's `contentOffset`; wheel / touchpad / drag scrolling with UIKit-like deceleration, snapping, paging, sticky cells, rubber banding for touch drags; the keyboard (arrows by 40 pt, Page Up / Page Down and Space / Shift+Space by a page, Home / End) scrolls the view around the focused widget or under the pointer while no field has focus; a widget that gets the focus (Tab, a click, `focus()`) is scrolled into view, animated |
 | Input | `input.rs` | Its own hit testing over the views (GTK's `pick` ignores `overflow: hidden`, `hidden` and `box-only`; hosted widgets are picked inside with GTK's; outside a view's bounds only in its `Overflow` area); touches for the responder system, with `panActivation` gates (the scroll views around wait for the pan to fail; `TouchEvent::activated`); native presses, long presses, hover and pressed states; pan / pinch / rotate native values (Ctrl + wheel pinches); wheel, touchpad, mouse drag and touch scrolling routed to scroll views: wheels go to views along their axis, and a scroll stays on its view until it ends (touchpad gesture; wheel notches within 200 ms) |
-| Text inputs | `text_input.rs` | `gtk::Text` / `gtk::TextView` in a `gtk::ScrolledWindow`, hosted at the content box; the view draws the decoration, a per-input style provider clears GTK's (an animated `color` goes to a second one-rule provider, so frames do not reload the sheet); edit counts drop stale JS values; offsets converted between UTF-16 and characters |
+| Text inputs | `text_input.rs` | `gtk::Text` / `gtk::TextView` in a `gtk::ScrolledWindow`, hosted at the content box; the view draws the decoration, a per-input style provider clears GTK's (an animated `color` goes to a second one-rule provider, so frames do not reload the sheet); edit counts drop stale JS values; offsets converted between UTF-16 and characters; return does what `submitBehavior` says (see "Keyboard") |
 | Navigation | `navigation.rs` | Screens are child views, only the top one (and the one below during a transition) child-visible; headers are plain GTK widgets, of a fixed height reported to the core (`set_screen_header`); departing screens leave as a `gtk::WidgetPaintable` image; Escape (unless a text field has the focus: Escape leaves the field), Alt+Left, the Back key and the mouse's back button pop natively (a stack inside the newest modal first, else that modal is asked to close) |
-| Modals | `navigation.rs` | Children of the root above the app's views, sliding up or fading in; page and form sheets are centered cards (720 / 540 points wide at most) over a scrim that dims the window, and clicking the scrim asks them to close |
+| Modals | `navigation.rs` | Children of the root above the app's views, sliding up or fading in; page and form sheets are centered cards (720 / 540 points wide at most) over a scrim that dims the window, and clicking the scrim asks them to close; the views under the newest modal cannot take the focus (`can-focus` off), and the widget that had it when a modal opened gets it back when it closes |
 | Dialogs, toasts | `system.rs` | GTK widgets the root hosts over the app's views (not separate windows: they stay with an embedded surface and never block the main loop) |
 | Video | `native.rs` | `gtk::MediaFile` (GStreamer) in a `gtk::Picture`, or `gtk::Video` with `controls` |
 | Native components | `native.rs` | `AppView::register_component(name, factory)`; a `NativeComponent`'s widget fills the node's view; `ComponentContext::emit` / `set_size` from any thread |
@@ -69,7 +69,35 @@ server client, log forwarding, the error overlay: `dev.rs`).
 | Environment | `system.rs` | Color scheme: the app's appearance (`nsh.json` `"appearance"`, `setColorScheme`) when it forces one, else the XDG settings portal's (`org.freedesktop.appearance color-scheme`, live); hosted GTK widgets, dialogs and the root's background follow it, and a packaged app's window opens in it (`nsh/app.json`). The locale (`Intl`) from `LC_ALL` / `LC_TIME` / `LC_NUMERIC` / `LC_MESSAGES` / `LANG`, else GLib's language names. Font scale from `gtk-xft-dpi`, reduce motion from `gtk-enable-animations`, the surface's (fractional) scale, GTK's text direction, AT-SPI's `ScreenReaderEnabled`; `Platform.OS` `"linux"`, idiom `desktop`, OS version the kernel's major.minor; safe area and keyboard height 0 |
 | Clipboard | `system.rs` | The display's `GdkClipboard`; reads are asynchronous (another app's text), `hasString` only looks at the formats on offer |
 | Networking | `net.rs` | ureq (rustls, webpki roots), one thread per request, streaming both ways; only connecting and the response head have deadlines |
-| Dev | `dev.rs` | The dev server client on its own thread; status line and error overlay above the surface |
+| Dev | `dev.rs` | The dev server client on its own thread; status line and error overlay above the surface; Ctrl+R reloads the latest build |
+
+## Keyboard
+
+A key goes through the window's controllers in GTK's order: capture from the window down to the focus widget, then
+bubble back up. What nsh adds:
+
+- **Window shortcuts** (`app.rs`, standalone apps only, not an embedded `AppView`): Ctrl+Q quits, Ctrl+W closes the
+  window (GtkWindow's `window.close`), F11 toggles full screen, as GNOME apps do; the dev host's Ctrl+R (`dev.rs`) is a
+  global-scope `gtk::ShortcutController`. Application accelerators and shortcut triggers also match the key of the
+  layout's Latin group, so they work under Cyrillic or Greek layouts.
+- **In a field** (`text_input.rs`), GTK's own bindings edit: Ctrl+arrows, Ctrl+Backspace / Delete, Home / End and their
+  Shift variants, Ctrl+A / X / C / V, Ctrl+Z / Ctrl+Shift+Z (a secure field refuses cut and copy; `maxLength`
+  clips pasted text in `insert-text`). The editors' capture-phase key controller reports Backspace in an empty input
+  and Escape, and takes return in a multiline input whose `InputConfig::submit()` is not `Newline`: a plain return or
+  Ctrl+Return submits, Shift+Return and Alt+Return reach the text view and insert a line break. That return goes to
+  the input method first (`TextView::im_context_filter_keypress`): one that commits a composition submits nothing. A
+  single line submits from `gtk::Text`'s `activate`, which GTK emits only after the input method passed on the return.
+- **At the window**, keys nothing focused used: going back (`navigation::key_pressed`: Escape, which leaves a focused
+  field instead; Alt+Left and the Back key, also from a field, which does not use them), scrolling (`scroll.rs`, not
+  while a field has the focus) and the mouse's back button. A `selectable` text with a selection takes Ctrl+A / Ctrl+C
+  / Escape (`text.rs`); without one Escape goes on.
+- **Focus**: Tab / Shift+Tab is GTK's, in screen order (GTK sorts a container's children by position); hidden screens
+  are not child visible, and the views under the newest modal cannot take the focus. Dialogs (`system.rs`) move it
+  between their own buttons.
+
+`onKeyPress` reports what UIKit's does: the typed text (`"Enter"` for a line break), `"Backspace"` for a deletion (in
+an empty input too), and `"Escape"`, as on macOS. Pasted and undone text, and the deletion of a selection typed over,
+report nothing: the key being handled is kept until the main loop is idle, and `paste-clipboard` marks the paste.
 
 ## Checking a change: `--script`
 
@@ -93,6 +121,17 @@ lines (`script.rs`), so a change can be checked without touching the screen:
 ```sh
 nsh dev examples/gallery &       # or: nsh build examples/gallery and --bundle <path>/bundle.nshc
 ./target/debug/nsh-linux-host --size 390x844 --script "wait 800; shot a.png; tap 100 200; wait 300; shot b.png; quit"
+```
+
+`key` emits the field's signals rather than a key event (GTK 4 cannot make one). For real key events (modifiers,
+input methods, shortcuts) run the host under Xvfb with the X11 backend and drive it with `xdotool` (a window manager
+such as openbox makes full screen work):
+
+```sh
+Xvfb :77 & export DISPLAY=:77 GDK_BACKEND=x11
+./target/debug/nsh-linux-host --bundle out/bundle.qbc --script "wait 20000; quit" & sleep 2
+W=$(xdotool search --pid $! | tail -1)
+xdotool mousemove --window $W 100 30 click 1; xdotool type --window $W "hi"; xdotool key --window $W shift+Return
 ```
 
 Without `--bundle` the host connects to the dev server on this machine (`--dev-server ws://…/ws` names another);

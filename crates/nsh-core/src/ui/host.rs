@@ -14,7 +14,7 @@ use super::{
 use crate::{
     AutoCapitalize, AutoFill, Color, EventKind, HeaderSlot, JsonValue, KeyboardAppearance,
     KeyboardType, ModalAnimation, ModalPresentation, ModalProp, NativeProp, Prop, ResizeMode,
-    ReturnKeyType, ScreenAnimation, ScreenProp, ScrollProp, Size, Tag, WebSource,
+    ReturnKeyType, ScreenAnimation, ScreenProp, ScrollProp, Size, SubmitBehavior, Tag, WebSource,
     canvas::{
         CanvasFont, CanvasGradient, CanvasImage, CanvasOp, CanvasTextAlign, CanvasTextBaseline,
         Composite, Drawing, FillRule, LineCap, LineJoin, Num, Paint, Path, PathOp,
@@ -352,6 +352,12 @@ impl Input {
     /// The return key unfocuses it (default yes, for one line).
     pub fn blur_on_submit(self, blur: bool) -> Self {
         self.set(Prop::BlurOnSubmit(blur))
+    }
+
+    /// What return does (`submitBehavior`; default: submit and unfocus for
+    /// one line, a line break for several).
+    pub fn submit_behavior(self, behavior: SubmitBehavior) -> Self {
+        self.set(Prop::SubmitBehavior(Some(behavior)))
     }
 
     /// Focused when it appears.

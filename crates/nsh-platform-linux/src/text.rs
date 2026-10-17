@@ -1445,7 +1445,10 @@ impl Selection {
                     let len = view.state().text.as_ref().map_or(0, |t| t.text.len_utf16());
                     select(&view, Some((0, len)));
                 }
-                Key::Escape => select(&view, None),
+                // Without a selection Escape goes on (to going back).
+                Key::Escape if view_selection(&view).is_some_and(|s| s.range.get().is_some()) => {
+                    select(&view, None)
+                }
                 _ => return glib::Propagation::Proceed,
             }
             glib::Propagation::Stop

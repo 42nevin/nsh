@@ -7,7 +7,7 @@ use crate::{
     ops::{
         AutoCapitalize, Command, EventMask, ImageSource, KeyboardAppearance, KeyboardDismissMode,
         KeyboardTaps, KeyboardType, ModalAnimation, ModalPresentation, NodeId, ResizeMode,
-        ReturnKeyType, ScreenAnimation, SnapAlignment, WebSource,
+        ReturnKeyType, ScreenAnimation, SnapAlignment, SubmitBehavior, WebSource,
     },
     props::{EdgeInsets, GestureValues, LayoutAnimation, ViewProps},
     style::{Color, TextAlign, ViewStyle},
@@ -411,8 +411,10 @@ pub struct InputConfig {
     /// The user can edit the text.
     pub editable: bool,
     /// Return unfocuses a single-line input (React Native's
-    /// `blurOnSubmit`).
+    /// `blurOnSubmit`); [`InputConfig::submit`] resolves it.
     pub blur_on_submit: bool,
+    /// `submitBehavior` as set; [`InputConfig::submit`] resolves it.
+    pub submit_behavior: Option<SubmitBehavior>,
     /// Focus once on screen.
     pub auto_focus: bool,
     /// Caret and selection color.
@@ -427,6 +429,23 @@ pub struct InputConfig {
     pub accessory_id: Option<Box<str>>,
     /// The input accessory it names, if one is mounted.
     pub accessory: Option<NodeId>,
+}
+
+impl InputConfig {
+    /// What return does, as `submitBehavior`, `blurOnSubmit` and
+    /// `multiline` say together (React Native's resolution): the set
+    /// behavior (a single line never takes line breaks), else a line break
+    /// in a multiline input, else a submit that unfocuses unless
+    /// `blurOnSubmit` is false.
+    pub fn submit(&self) -> SubmitBehavior {
+        match self.submit_behavior {
+            Some(SubmitBehavior::Newline) if !self.multiline => SubmitBehavior::BlurAndSubmit,
+            Some(behavior) => behavior,
+            None if self.multiline => SubmitBehavior::Newline,
+            None if self.blur_on_submit => SubmitBehavior::BlurAndSubmit,
+            None => SubmitBehavior::Submit,
+        }
+    }
 }
 
 impl Default for InputConfig {
@@ -446,6 +465,7 @@ impl Default for InputConfig {
             max_length: None,
             editable: true,
             blur_on_submit: true,
+            submit_behavior: None,
             auto_focus: false,
             selection_color: None,
             auto_fill: crate::ops::AutoFill::Default,

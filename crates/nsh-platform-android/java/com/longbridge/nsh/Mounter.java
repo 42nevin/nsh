@@ -1676,7 +1676,7 @@ final class Mounter {
         int maxLength = b.getInt();
         boolean editable = b.getInt() != 0, autoFocus = b.getInt() != 0, hasSelection = b.getInt() != 0;
         int selection = b.getInt();
-        boolean blurOnSubmit = b.getInt() != 0;
+        int submit = b.getInt();
         String autofill = optString(b, objects);
         boolean inputRtl = b.getInt() != 0;
         boolean caretHidden = b.getInt() != 0;
@@ -1687,7 +1687,7 @@ final class Mounter {
         String family = familyIndex >= 0 ? (String) objects[familyIndex] : null;
         ((InputBox) v).configure(size, weight, italic, color, family, spacing, align, placeholder,
                 hasPlaceholderColor, placeholderColor, secure, keyboard, returnKey, capitalize, autoCorrect,
-                multiline, maxLength, editable, autoFocus, hasSelection, selection, blurOnSubmit);
+                multiline, maxLength, editable, autoFocus, hasSelection, selection, submit);
     }
 
     private void command(ByteBuffer b, Object[] objects) {

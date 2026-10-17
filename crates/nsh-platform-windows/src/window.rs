@@ -30,7 +30,8 @@ use windows::{
         Graphics::{
             Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmFlush, DwmSetWindowAttribute},
             Gdi::{
-                BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT, ScreenToClient, UpdateWindow,
+                BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST,
+                MONITORINFO, MonitorFromWindow, PAINTSTRUCT, ScreenToClient, UpdateWindow,
             },
         },
         System::LibraryLoader::GetModuleHandleW,
@@ -78,6 +79,12 @@ struct WindowData {
     last_press: Cell<(u32, (i32, i32), u32)>,
     /// A high surrogate waiting for its low half (`WM_CHAR`).
     surrogate: Cell<u16>,
+    /// The Alt key combination just handled: its `WM_SYSCHAR` (Alt+Return
+    /// makes one) must not reach `DefWindowProc`, which beeps for a menu
+    /// mnemonic it cannot find.
+    sys_char: Cell<bool>,
+    /// Where the window was before it went full screen.
+    windowed: Cell<Option<WINDOWPLACEMENT>>,
 }
 
 thread_local! {
@@ -160,6 +167,8 @@ pub(crate) fn create(
         buttons: Cell::new(0),
         last_press: Cell::new((0, (0, 0), 0)),
         surrogate: Cell::new(0),
+        sys_char: Cell::new(false),
+        windowed: Cell::new(None),
     });
     let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
     let (style, ex_style) = match parent {
@@ -211,6 +220,63 @@ pub(crate) fn create(
     }
     sync_size(surface, hwnd);
     Ok(hwnd)
+}
+
+/// Takes a top-level window to full screen on its monitor (no frame, over
+/// the taskbar), or back to where it was.
+pub(crate) fn toggle_full_screen(hwnd: HWND) {
+    let Some(data) = data(hwnd) else { return };
+    if !data.top_level {
+        return;
+    }
+    let frame = WS_OVERLAPPEDWINDOW.0 as isize;
+    // SAFETY: plain calls on a live window with local structures.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        match data.windowed.take() {
+            None => {
+                let mut placement = WINDOWPLACEMENT {
+                    length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                    ..Default::default()
+                };
+                let mut info = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                if GetWindowPlacement(hwnd, &mut placement).is_err()
+                    || !GetMonitorInfoW(monitor, &mut info).as_bool()
+                {
+                    return;
+                }
+                data.windowed.set(Some(placement));
+                SetWindowLongPtrW(hwnd, GWL_STYLE, style & !frame);
+                let r = info.rcMonitor;
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOP),
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                );
+            }
+            Some(placement) => {
+                SetWindowLongPtrW(hwnd, GWL_STYLE, style | frame);
+                let _ = SetWindowPlacement(hwnd, &placement);
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                );
+            }
+        }
+    }
 }
 
 /// Shows a top-level window.
@@ -619,11 +685,16 @@ fn handle(
                 repeat: down && (lparam.0 >> 30) & 1 == 1,
                 modifiers: modifiers(),
             };
-            if crate::input::key(surface, event) {
+            let handled = crate::input::key(surface, event);
+            if msg == WM_SYSKEYDOWN {
+                data.sys_char.set(handled);
+            }
+            if handled {
                 return Some(LRESULT(0));
             }
             // Alt+F4 and the system menu keep working.
         }
+        WM_SYSCHAR if data.sys_char.replace(false) => return Some(LRESULT(0)),
         WM_CHAR => {
             let unit = wparam.0 as u16;
             if (0xD800..0xDC00).contains(&unit) {

@@ -832,7 +832,11 @@ pub(crate) fn key(surface: &Rc<Surface>, event: KeyEvent) -> bool {
         // it saw no other key: swallow the release once Alt + key was ours.
         return event.vk == VK_MENU && input.alt_combo.replace(false);
     }
-    let handled = crate::system::key(surface, &event)
+    // The window's shortcuts (full screen, the dev host's reload) work
+    // wherever the focus is.
+    let shortcut = surface.shortcuts.borrow().iter().any(|f| f(&event));
+    let handled = shortcut
+        || crate::system::key(surface, &event)
         || crate::text_input::key(surface, &event)
         || crate::text::key(surface, &event)
         || crate::navigation::key_pressed(surface, &event)
@@ -848,14 +852,16 @@ pub(crate) fn key(surface: &Rc<Surface>, event: KeyEvent) -> bool {
 }
 
 /// Tab and Shift + Tab move the keyboard focus between the text fields, in
-/// tree order (GTK's focus chain does this on Linux).
+/// tree order (GTK's focus chain does this on Linux), within the newest
+/// modal: the views under it never get the focus. The field reached has
+/// its text selected, as in Windows' dialogs.
 fn tab(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
     let m = event.modifiers;
     if event.vk != VK_TAB || m.ctrl || m.alt || m.meta {
         return false;
     }
     let mut fields = Vec::new();
-    collect_fields(&surface.root, &mut fields);
+    collect_fields(&crate::navigation::focus_scope(surface), &mut fields);
     if fields.is_empty() {
         return false;
     }
@@ -868,7 +874,7 @@ fn tab(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
         (None, false) => 0,
         (None, true) => n - 1,
     };
-    crate::text_input::focus(&fields[next]);
+    crate::text_input::tab_to(&fields[next]);
     true
 }
 

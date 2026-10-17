@@ -36,7 +36,7 @@ function NameField() {
 - **Uncontrolled**: pass `defaultValue` (or nothing) and read the text from `onChangeText` or `onSubmitEditing`.
 
 Rules that must hold while the user types are props, answered natively without asking JS: `maxLength` limits the length
-and `blurOnSubmit` decides what return does. See [forms and the keyboard](../docs/forms-and-keyboard.md).
+and `submitBehavior` (or `blurOnSubmit`) decides what return does. See [forms and the keyboard](../docs/forms-and-keyboard.md).
 
 ## Props
 
@@ -51,7 +51,7 @@ view styles apply):
 | `defaultValue` | `string` | | The initial text. |
 | `placeholder` | `string` | | Shown while the input is empty. |
 | `placeholderTextColor` | `ColorValue` | | The placeholder's color. |
-| `multiline` | `boolean` | `false` | Several lines; return inserts a line break. |
+| `multiline` | `boolean` | `false` | Several lines; return inserts a line break unless `submitBehavior` says otherwise. |
 | `maxLength` | `number` | | The most characters the user can enter. |
 | `editable` | `boolean` | `true` | The user can change the text. |
 | `secureTextEntry` | `boolean` | `false` | The text is hidden (passwords). |
@@ -67,7 +67,8 @@ view styles apply):
 | `autoCapitalize` | `"none" \| "sentences" \| "words" \| "characters"` | `"sentences"` | Automatic capitalization. |
 | `autoCorrect` | `boolean` | `true` | The system's corrections. |
 | `autoComplete` | `AutoComplete \| TextContentType` | | What the input holds, for autofill: `"username"`, `"current-password"`, `"new-password"`, `"one-time-code"`, `"email"`, `"tel"`, `"postal-code"`, `"cc-number"`, `"off"`, … |
-| `blurOnSubmit` | `boolean` | `true` | Return unfocuses a single-line input; `false` keeps the keyboard up (e.g. to send several messages). |
+| `submitBehavior` | `"submit" \| "blurAndSubmit" \| "newline"` | `"blurAndSubmit"` (single line), `"newline"` (multiline) | What return does: `"submit"` reports `onSubmitEditing` and keeps the focus, `"blurAndSubmit"` also unfocuses, `"newline"` inserts a line break (multiline only; a single line submits). A multiline input that submits still takes line breaks from Shift+Return or Option / Alt+Return on hardware keyboards. Wins over `blurOnSubmit`. |
+| `blurOnSubmit` | `boolean` | `true` | Return unfocuses a single-line input; `false` keeps the keyboard up (e.g. to send several messages). `submitBehavior` replaces it. |
 | `autoFocus` | `boolean` | `false` | Focused when it appears. |
 
 ### Caret and selection
@@ -95,7 +96,7 @@ view styles apply):
 | Event | Payload | When |
 |---|---|---|
 | `onChangeText` | `(text: string)` | The user changed the text. |
-| `onSubmitEditing` | `{ text }` | The return key was pressed (single line). |
+| `onSubmitEditing` | `{ text }` | The return key was pressed in an input that submits (single line, or `submitBehavior` `"submit"` / `"blurAndSubmit"`). |
 | `onFocus` / `onBlur` | none | The input gained / lost focus. |
 | `onSelectionChange` | `{ start, end }` | The caret or selection moved (UTF-16 units). |
 | `onKeyPress` | `{ key }` | Before the text changes: `key` is the typed text, `"Backspace"` or `"Enter"`. |

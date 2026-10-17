@@ -1412,13 +1412,9 @@ pub(crate) fn selection_key(
     let command = event
         .modifierFlags()
         .contains(NSEventModifierFlags::Command);
-    let key = event
-        .charactersIgnoringModifiers()
-        .map(|s| s.to_string().to_lowercase())
-        .unwrap_or_default();
-    match key.as_str() {
-        "c" if command => copy(surface),
-        "a" if command => select_all(surface),
+    match crate::input::shortcut_key(event) {
+        Some('c') if command => copy(surface),
+        Some('a') if command => select_all(surface),
         // Escape.
         _ if event.keyCode() == 53 && surface.selection.with_range().is_some() => {
             clear(surface);
