@@ -4,7 +4,7 @@ export const SITE_URL = 'https://native-shell.com';
 export const SITE_TITLE = 'Native Shell';
 
 export const SITE_DESCRIPTION =
-  'Native Shell: AI-generated UI, native in your app. iOS, Android, Linux and macOS apps load signed, sandboxed TSX modules at run time; the Windows Win32 / Direct2D backend is in development.';
+  'Native Shell: AI-generated UI, native in your app. iOS, Android, Linux, macOS and Windows apps load signed, sandboxed TSX modules at run time.';
 
 export const REPO_URL = 'https://github.com/longbridge/native-shell';
 

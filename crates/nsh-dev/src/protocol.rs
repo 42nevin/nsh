@@ -68,6 +68,8 @@ pub enum HostPlatform {
     Linux,
     /// The macOS (AppKit) host.
     MacOs,
+    /// The Windows host.
+    Windows,
     /// A platform this version does not know.
     #[serde(other)]
     Other,

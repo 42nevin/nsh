@@ -1,12 +1,12 @@
 ---
 title: 简介
-description: Native Shell 是什么：让原生 iOS、Android、Linux 和 macOS 应用在发布之后加载 UI 模块的 Shell；Windows Win32 / Direct2D 后端正在开发中。
+description: Native Shell 是什么：让原生 iOS、Android、Linux、macOS 和 Windows 应用在发布之后加载 UI 模块的 Shell。
 order: 1
 ---
 
 # 简介
 
-Native Shell（简称 nsh）是为**由 AI 生成、动态下发的原生界面**而设计的。模型用 TSX 写出一个小模块，原生 iOS、Android、Linux 或 macOS 应用在运行时加载它，用平台自己的视图显示，并运行在应用掌控的沙箱里。同一套机制也让原生应用整体具备扩展能力——插件、功能、整个页面都可以在发布之后下发。手机客户端是首要目标；Linux（GTK 4）和 macOS（AppKit）已支持，Windows（Win32 / Direct2D）后端正在开发中。
+Native Shell（简称 nsh）是为**由 AI 生成、动态下发的原生界面**而设计的。模型用 TSX 写出一个小模块，原生 iOS、Android、Linux、macOS 或 Windows 应用在运行时加载它，用平台自己的视图显示，并运行在应用掌控的沙箱里。同一套机制也让原生应用整体具备扩展能力——插件、功能、整个页面都可以在发布之后下发。手机客户端是首要目标；Linux（GTK 4）、macOS（AppKit）和 Windows（Win32 / Direct2D）均已支持。
 
 > [!IMPORTANT]
 > nsh 不是用 TypeScript 编写整个应用的框架。应用仍然是原生应用，照原来的方式构建和发布；nsh 是嵌在其中的一层，负责那些在发布之后才生成、修改或新增的界面。
@@ -41,9 +41,9 @@ Native Shell（简称 nsh）是为**由 AI 生成、动态下发的原生界面*
 - **系统能力都得重新实现。** 嵌在原生页面里的自绘界面，没有平台的文本选区，也没有选区弹出的菜单（拷贝、分享、翻译、查询、全选），更没有系统输入法、无障碍，以及每一代 iOS 带来的新系统视觉效果。在 GPU 渲染器里复刻这些是一项永远做不完的大工程，而且复刻品总会和真正的系统行为走样。
 - **手机团队得接手一套新的 UI 技术栈。** 要在现有手机客户端里大规模运营一层自绘界面，iOS 和 Android 团队就得接手一个陌生的渲染器，以及它在各种系统版本和设备上的兼容性问题和缺陷。
 
-因此 nsh 使用宿主平台自己的视图来渲染模块：移动端使用 UIKit 和 Android 视图，Linux 使用 GTK 4，macOS 使用 AppKit，Windows 使用 Win32 / Direct2D。Linux 和 macOS 后端已支持，Windows 后端仍在开发中。同一种模块格式和运行时可以运行在这些宿主上。
+因此 nsh 使用宿主平台自己的视图来渲染模块：移动端使用 UIKit 和 Android 视图，Linux 使用 GTK 4，macOS 使用 AppKit，Windows 使用 Win32 / Direct2D。Linux、macOS 和 Windows 后端均已支持。同一种模块格式和运行时可以运行在这些宿主上。
 
-两者的定位不同：GPUI Shell 用于扩展 GPUI 桌面应用；Native Shell 用于扩展原生手机应用和桌面应用，桌面端通过各平台的原生后端实现。Linux 和 macOS 已支持；Win32 / Direct2D Windows 后端正在开发中。
+两者的定位不同：GPUI Shell 用于扩展 GPUI 桌面应用；Native Shell 用于扩展原生手机应用和桌面应用，桌面端通过各平台的原生后端实现：[macOS](./macos.md) 上用 AppKit，[Linux](./linux.md) 上用 GTK 4，[Windows](./windows.md) 上用 Direct2D 绘制的 Win32 窗口。
 
 ## 一个模块
 
@@ -98,7 +98,7 @@ let info = try await app.loadPackage(at: downloadedFile, trust: trust)   // 先�
 
 ## 你能得到什么
 
-- **嵌入。** `NshAppView`（Swift）、`NshView`（Java/Kotlin）和 Linux 的 GTK `AppView` 可以把模块放进原生应用，数量不限（[iOS](./embedding-ios.md)、[Android](./embedding-android.md)、[Linux](./linux.md)）。
+- **嵌入。** `NshAppView`（Swift）、`NshView`（Java/Kotlin）和桌面端的 `AppView`（AppKit、GTK、Win32）可以把模块放进原生应用，数量不限（[iOS](./embedding-ios.md)、[Android](./embedding-android.md)、[macOS](./macos.md#嵌入-mac-应用)、[Linux](./linux.md#嵌入-gtk-应用)、[Windows](./windows.md#嵌入-win32-应用)）。
 - **签名、可吊销的下发。** Ed25519 签名的包，发布密钥由离线根密钥认证，支持吊销列表（[签名包](./signed-packages.md)）。
 - **由宿主配置的沙箱。** 每个视图单独设置虚拟机限制和授予的能力（[沙箱与能力](./sandbox-and-capabilities.md)）。
 - **模块可以使用宿主的视图。** 用 Swift、Java 或 Rust 注册原生组件（[原生组件](./native-components.md)）。
@@ -116,13 +116,13 @@ let info = try await app.loadPackage(at: downloadedFile, trust: trust)   // 先�
 | Android | 已支持（API 28，Android 9+） | `arm64-v8a` 和 `x86_64`；通过 `nsh.aar` 嵌入 |
 | Linux | 已支持 | GTK 4 视图；独立应用或通过 `AppView` 嵌入（[Linux](./linux.md)） |
 | macOS | 已支持（macOS 14+） | 原生 AppKit 后端（[macOS](./macos.md)） |
-| Windows | 开发中 | 原生 Win32 / Direct2D 后端 |
+| Windows | 已支持（Windows 10 1809+） | 原生 Win32 / Direct2D 后端（[Windows](./windows.md)） |
 | Mac Catalyst | 仅用于开发 | `nsh run` 在 Mac 上打开的 iPhone 尺寸窗口 |
 | Web（WebAssembly） | 仅用于演示 | 运行本站的示例，用 DOM 而不是原生视图绘制（[Web](./web.md)）；不是可发布的目标平台 |
 
 <div class="diagram-scroll">
-<img class="diagram diagram-light" src="/diagrams/platforms-light.svg" alt="一个模块，多种宿主：同一个 bundle 和 Rust 运行时，运行在 iOS、Android、Linux 和 macOS AppKit（已支持）、Windows Win32 / Direct2D（开发中）和 Web（WebAssembly 渲染到 DOM，仅用于本站演示）。">
-<img class="diagram diagram-dark" src="/diagrams/platforms-dark.svg" alt="一个模块，多种宿主：同一个 bundle 和 Rust 运行时，运行在 iOS、Android、Linux 和 macOS AppKit（已支持）、Windows Win32 / Direct2D（开发中）和 Web（WebAssembly 渲染到 DOM，仅用于本站演示）。">
+<img class="diagram diagram-light" src="/diagrams/platforms-light.svg" alt="一个模块，多种宿主：同一个 bundle 和 Rust 运行时，运行在 iOS、Android、Linux、macOS AppKit 和 Windows Win32 / Direct2D（已支持）和 Web（WebAssembly 渲染到 DOM，仅用于本站演示）。">
+<img class="diagram diagram-dark" src="/diagrams/platforms-dark.svg" alt="一个模块，多种宿主：同一个 bundle 和 Rust 运行时，运行在 iOS、Android、Linux、macOS AppKit 和 Windows Win32 / Direct2D（已支持）和 Web（WebAssembly 渲染到 DOM，仅用于本站演示）。">
 </div>
 
 ## 与其他方案的比较
