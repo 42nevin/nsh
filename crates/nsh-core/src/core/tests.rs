@@ -4150,6 +4150,104 @@ mod components {
         );
     }
 
+    /// Measures its box when pressed (and a ref no element carries).
+    #[derive(Default)]
+    struct Ruler {
+        target: Option<ElementRef>,
+        unused: Option<ElementRef>,
+        shown: String,
+    }
+
+    impl Component for Ruler {
+        type Props = ();
+        type Event = NoEvent;
+
+        fn setup(&mut self, _: &(), cx: &mut Context<'_, Self>) {
+            self.target = Some(cx.element_ref());
+            self.unused = Some(cx.element_ref());
+        }
+
+        fn render(&self, _: &(), cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            view()
+                .p_4()
+                .child(
+                    view().pl(px(10.0)).child(
+                        view()
+                            .element_ref(self.target.as_ref().unwrap())
+                            .w(px(30.0))
+                            .h(px(20.0)),
+                    ),
+                )
+                .child(text(self.shown.clone()))
+                .child(view().w(px(5.0)).h(px(5.0)).on_press(cx.listener(
+                    |this: &mut Self, _, cx| {
+                        let target = this.target.as_ref().unwrap().measure();
+                        let unused = this.unused.as_ref().unwrap().measure();
+                        cx.spawn(|this, _| async move {
+                            let (m, none) = (target.await, unused.await);
+                            this.update(move |this: &mut Self, cx| {
+                                let m = m.expect("laid out");
+                                this.shown = format!(
+                                    "{},{} {}x{} at {},{} {}",
+                                    m.frame.x,
+                                    m.frame.y,
+                                    m.frame.width,
+                                    m.frame.height,
+                                    m.page_x,
+                                    m.page_y,
+                                    none.is_none()
+                                );
+                                cx.notify();
+                            })
+                            .await;
+                        })
+                        .detach();
+                    },
+                )))
+        }
+    }
+
+    #[test]
+    fn element_refs_measure_with_the_commits_layout() {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Ruler>();
+        c.set_components(registry);
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Component(std::any::type_name::<Ruler>().into()),
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ],
+        );
+        let batch = c.commit().unwrap();
+        let button = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Events { id, events } if events.contains(EventKind::Press) => Some(*id),
+                _ => None,
+            })
+            .expect("the button listens to presses");
+        assert!(c.component_event(button, EventKind::Press, &EventPayload::None));
+        // The frame in its parent (past the parent's padding), the corner
+        // in the surface (past the component's padding too); the ref no
+        // element carries measures nothing.
+        let shown = run_until(&mut c, |s| s.iter().any(|t| t.contains(" at ")));
+        assert_eq!(shown.last().unwrap(), "10,0 30x20 at 26,16 true");
+    }
+
     /// Provides an accent to what is below it, through the app's JSX.
     #[derive(Default)]
     struct Theming {
@@ -4493,6 +4591,268 @@ mod components {
                 .iter()
                 .all(|i| !matches!(i, MountItem::Create { .. }))
         );
+    }
+
+    /// A chat: its own rows in a list that follows its end; a press makes
+    /// the last row taller (a reply streaming in).
+    #[derive(Default)]
+    struct Chat {
+        tall: bool,
+    }
+
+    impl Component for Chat {
+        type Props = ();
+        type Event = NoEvent;
+
+        fn render(&self, _: &(), cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            let tall = self.tall;
+            view()
+                .flex_1()
+                .child(
+                    view()
+                        .h(px(20.0))
+                        .on_press(cx.listener(|this: &mut Self, _, cx| {
+                            this.tall = !this.tall;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    virtual_list(20, move |_, at| {
+                        view().h(px(if tall && at.is_last() { 120.0 } else { 40.0 }))
+                    })
+                    .estimated_item_size(40.0)
+                    .follow_end(10.0)
+                    .flex_1(),
+                )
+        }
+    }
+
+    #[test]
+    fn virtual_lists_follow_their_end() {
+        let mut c = core();
+        c.mount_root(&crate::ui::Root::new::<Chat>(|| ()));
+        let batch = c.commit().unwrap();
+        let created = |kind: ViewKind| {
+            batch.items.iter().find_map(|i| match i {
+                MountItem::Create { id, kind: k } if *k == kind => Some(*id),
+                _ => None,
+            })
+        };
+        let list = created(ViewKind::Scroll).expect("a list");
+        let button = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Events { id, events } if events.contains(EventKind::Press) => Some(*id),
+                _ => None,
+            })
+            .expect("the button");
+        let scrolled = |batch: &MountBatch| -> f32 {
+            batch
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    MountItem::ScrollBy { id, dy, .. } if *id == list => Some(*dy),
+                    _ => None,
+                })
+                .sum()
+        };
+        // At its end (20 rows of 40 in 460 points), the last row grows by
+        // 80: the list scrolls with it.
+        c.set_scroll_offset(list, 0.0, 800.0 - 460.0, 0);
+        assert!(c.commit().is_none(), "every row is bound already");
+        assert!(c.component_event(button, EventKind::Press, &EventPayload::None));
+        assert_eq!(scrolled(&c.commit().unwrap()), 80.0);
+        // Scrolled up, what is visible stays as the last row shrinks and
+        // grows again.
+        c.set_scroll_offset(list, 0.0, 100.0, 1);
+        assert!(c.component_event(button, EventKind::Press, &EventPayload::None));
+        assert_eq!(scrolled(&c.commit().unwrap()), 0.0);
+        assert!(c.component_event(button, EventKind::Press, &EventPayload::None));
+        assert_eq!(scrolled(&c.commit().unwrap()), 0.0);
+    }
+
+    thread_local! {
+        /// How many times `Opened` was set up on this thread.
+        static SETUPS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// A drawer whose content (lazy children) shows while it is open.
+    #[derive(Default)]
+    struct Drawer;
+
+    #[derive(Clone, PartialEq, Props)]
+    struct DrawerProps {
+        #[prop(default)]
+        open: bool,
+        #[prop(lazy)]
+        children: Children,
+    }
+
+    impl Component for Drawer {
+        type Props = DrawerProps;
+        type Event = NoEvent;
+
+        fn render(&self, props: &DrawerProps, _: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            view().children(props.open.then(|| view().p_2().child(props.children)))
+        }
+    }
+
+    /// Content with state of its own: the how-manieth it was set up.
+    #[derive(Default)]
+    struct Opened(u32);
+
+    impl Component for Opened {
+        type Props = ();
+        type Event = NoEvent;
+
+        fn setup(&mut self, _: &(), _: &mut Context<'_, Self>) {
+            self.0 = SETUPS.with(|s| {
+                s.set(s.get() + 1);
+                s.get()
+            });
+        }
+
+        fn render(&self, _: &(), _: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            view().child(text(format!("opened {}", self.0)))
+        }
+    }
+
+    /// Renders a drawer with content, opened and closed by a press.
+    #[derive(Default)]
+    struct Shelf {
+        open: bool,
+    }
+
+    impl Component for Shelf {
+        type Props = ();
+        type Event = NoEvent;
+
+        fn render(&self, _: &(), cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            view()
+                .child(
+                    view()
+                        .h(px(10.0))
+                        .on_press(cx.listener(|this: &mut Self, _, cx| {
+                            this.open = !this.open;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Drawer::element(DrawerProps {
+                        open: self.open,
+                        children: Children::default(),
+                    })
+                    .child(Opened::element(())),
+                )
+        }
+    }
+
+    #[test]
+    fn lazy_children_a_component_passes_are_made_while_placed() {
+        let mut c = core();
+        c.mount_root(&crate::ui::Root::new::<Shelf>(|| ()));
+        let batch = c.commit().unwrap();
+        let button = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Events { id, events } if events.contains(EventKind::Press) => Some(*id),
+                _ => None,
+            })
+            .expect("the button");
+        let instances = c.components.instances.len();
+        assert_eq!(SETUPS.with(Cell::get), 0, "closed: not made");
+        let mut events = Vec::new();
+        c.take_events(&mut events);
+        assert!(events.is_empty(), "nothing for JS: {events:?}");
+
+        // Opened: made, and placed in the same commit.
+        assert!(c.component_event(button, EventKind::Press, &EventPayload::None));
+        assert_eq!(texts(&c.commit().unwrap()), ["opened 1"]);
+        assert_eq!(c.components.instances.len(), instances + 1);
+        // Closed: released.
+        assert!(c.component_event(button, EventKind::Press, &EventPayload::None));
+        c.commit();
+        assert_eq!(c.components.instances.len(), instances);
+        // Opened again: made afresh.
+        assert!(c.component_event(button, EventKind::Press, &EventPayload::None));
+        assert_eq!(texts(&c.commit().unwrap()), ["opened 2"]);
+        c.take_events(&mut events);
+        assert!(events.is_empty(), "nothing for JS: {events:?}");
+    }
+
+    /// Pastes the clipboard's text when pressed, if it holds some.
+    #[derive(Default)]
+    struct Paster {
+        pasted: String,
+    }
+
+    impl Component for Paster {
+        type Props = ();
+        type Event = NoEvent;
+
+        fn render(&self, _: &(), cx: &mut RenderCx<'_, Self>) -> impl IntoElement {
+            view().child(text(format!("pasted {}", self.pasted))).child(
+                view()
+                    .h(px(10.0))
+                    .on_press(cx.listener(|_: &mut Self, _, cx| {
+                        let (has, text) = (cx.clipboard_has_string(), cx.clipboard_string());
+                        cx.spawn(|this, _| async move {
+                            let pasted = if has.await { text.await } else { "-".into() };
+                            this.update(move |this: &mut Self, cx| {
+                                this.pasted = pasted;
+                                cx.notify();
+                            })
+                            .await;
+                        })
+                        .detach();
+                    })),
+            )
+        }
+    }
+
+    #[test]
+    fn components_read_the_clipboard() {
+        let mut c = core();
+        c.mount_root(&crate::ui::Root::new::<Paster>(|| ()));
+        let batch = c.commit().unwrap();
+        let button = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Events { id, events } if events.contains(EventKind::Press) => Some(*id),
+                _ => None,
+            })
+            .expect("the button");
+        assert!(c.component_event(button, EventKind::Press, &EventPayload::None));
+        let reads: Vec<_> = c
+            .commit()
+            .unwrap()
+            .items
+            .into_iter()
+            .filter_map(|i| match i {
+                MountItem::Command {
+                    id: ROOT_ID,
+                    command: Command::ReadClipboard { id, has_only },
+                } => Some((id, has_only)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reads, [(1, true), (2, false)]);
+        // The platform answers both on the root.
+        for (id, has_only) in reads {
+            let mut payload = vec![
+                ("id", crate::PayloadValue::Number(f64::from(id))),
+                ("has", crate::PayloadValue::Bool(true)),
+            ];
+            if !has_only {
+                payload.push(("text", crate::PayloadValue::Str("hello".into())));
+            }
+            assert!(c.component_event(ROOT_ID, EventKind::Clipboard, &EventPayload::Map(payload)));
+        }
+        let shown = run_until(&mut c, |s| s.iter().any(|t| t.starts_with("pasted h")));
+        assert_eq!(shown.last().unwrap(), "pasted hello");
     }
 
     /// Shows a fallback while a component below it failed; a press tries
@@ -5081,6 +5441,38 @@ mod painter {
         canvas::{CanvasGradient, CanvasOp, FillRule, GradientShape, Num, Paint, svg_path},
         ui::prelude::*,
     };
+
+    #[test]
+    fn painters_hit_test_what_they_drew() {
+        // A slice drawn moved by 10, a line along the top, a rectangle as
+        // the current path.
+        let slice = svg_path("M0 0 L40 0 L0 40 Z");
+        let p = Painter::new()
+            .save()
+            .translate(10.0, 10.0)
+            .fill_path(&slice, FillRule::NonZero)
+            .restore()
+            .line_width(4.0)
+            .stroke_svg("M0 2 L100 2")
+            .begin_path()
+            .rect(60.0, 60.0, 20.0, 20.0);
+        // Paths given are tested with the transform at the end: drawn
+        // translated, the slice is hit where it shows only with the same
+        // transform recorded.
+        assert!(p.path_contains(&slice, 5.0, 5.0, FillRule::NonZero));
+        assert!(!p.path_contains(&slice, 45.0, 45.0, FillRule::NonZero));
+        let moved = Painter::new().translate(10.0, 10.0);
+        assert!(moved.path_contains(&slice, 15.0, 15.0, FillRule::NonZero));
+        assert!(!moved.path_contains(&slice, 5.0, 5.0, FillRule::NonZero));
+        // The current path, and strokes with the line width.
+        assert!(p.is_point_in_path(70.0, 70.0, FillRule::EvenOdd));
+        assert!(!p.is_point_in_path(50.0, 70.0, FillRule::NonZero));
+        assert!(p.is_point_in_stroke(60.0, 70.0));
+        assert!(!p.is_point_in_stroke(70.0, 70.0));
+        let top = svg_path("M0 2 L100 2");
+        assert!(p.stroke_contains(&top, 50.0, 3.5));
+        assert!(!p.stroke_contains(&top, 50.0, 5.0));
+    }
 
     /// A label placed by its measured width, gradients, a stroked SVG path
     /// and an operation built by hand reading a native value.

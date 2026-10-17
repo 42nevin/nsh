@@ -226,6 +226,14 @@ impl Expanded {
     }
 }
 
+/// What a component's task waits for from the animation graph.
+enum Awaited {
+    /// An animation's end: whether it finished.
+    End(AnswerSlot<bool>),
+    /// A value read ([`crate::ui::NativeValue::value`]).
+    Value(AnswerSlot<f32>),
+}
+
 /// The core's component state.
 pub(super) struct Components {
     registry: Registry,
@@ -262,8 +270,12 @@ pub(super) struct Components {
     /// id: their answers.
     clipboard_reads: FxHashMap<u32, ClipboardRead>,
     next_clipboard_read: u32,
-    /// The ends of the animations components started, by id.
-    animations: FxHashMap<nsh_animation::AnimationId, AnswerSlot<bool>>,
+    /// The ends of the animations components started and the values they
+    /// read, by id.
+    animations: FxHashMap<nsh_animation::AnimationId, Awaited>,
+    /// Elements to measure once this commit is laid out
+    /// ([`crate::ui::ElementRef::measure`]).
+    pub(super) measures: Vec<(NodeId, AnswerSlot<Option<crate::Measurement>>)>,
     /// The components' own lists, by node.
     virtual_lists: FxHashMap<NodeId, VirtualListState>,
     /// The insets screens and modals reported (`onInsets`).
@@ -303,6 +315,7 @@ impl Default for Components {
             clipboard_reads: FxHashMap::default(),
             next_clipboard_read: 1,
             animations: FxHashMap::default(),
+            measures: Vec::new(),
             virtual_lists: FxHashMap::default(),
             insets: FxHashMap::default(),
             js_back: false,
@@ -1274,20 +1287,34 @@ impl<M: TextEngine> Core<M> {
                 self.detach_id(child);
             }
         }
-        // Lazy children are made while the render places them.
+        // Lazy children are made while the render places them: by JS, or
+        // by the component that renders this one (it renders again to pass
+        // them, or to drop them).
         let wanted = inst.children_at != Placement::None;
         if inst.children_wanted != wanted && inst.spec.as_ref().is_some_and(|s| s.lazy_children) {
             inst.children_wanted = wanted;
-            self.events.push((
-                host,
-                EventKind::NativeEvent,
-                EventPayload::Native {
-                    name: "$children".into(),
-                    data: JsonValue::Bool(wanted),
-                },
-            ));
+            match self.components.owners.get(&host).copied() {
+                Some(owner) => self.components.mark(owner),
+                None => self.events.push((
+                    host,
+                    EventKind::NativeEvent,
+                    EventPayload::Native {
+                        name: "$children".into(),
+                        data: JsonValue::Bool(wanted),
+                    },
+                )),
+            }
         }
         failure
+    }
+
+    /// Whether the component hosted by `nested` takes its children now:
+    /// unless they are lazy and its render does not place them.
+    fn wants_children(&self, nested: NodeId) -> bool {
+        self.components
+            .instances
+            .get(&nested)
+            .is_none_or(|i| i.children_wanted || !i.spec.as_ref().is_some_and(|s| s.lazy_children))
     }
 
     fn detach_id(&mut self, id: NodeId) {
@@ -1817,7 +1844,17 @@ impl<M: TextEngine> Core<M> {
             // The content this render passes it (`.child`, `.fill`): nodes of
             // this render, inserted into its host as JS inserts its children,
             // so the nested component places them where its render says.
-            let content = std::mem::take(&mut el.children);
+            // Lazy children are passed only while it places them, as JS
+            // makes the app's (`$children`); slots and rows always are.
+            let mut content = std::mem::take(&mut el.children);
+            if !self.wants_children(id) {
+                content.retain(|c| {
+                    c.attrs
+                        .props
+                        .iter()
+                        .any(|p| matches!(p, Prop::ComponentSlot(_)))
+                });
+            }
             let children = self.reconcile_children(id, old_children, content, host, inst);
             return Expanded {
                 id,
@@ -2447,13 +2484,26 @@ impl<M: TextEngine> Core<M> {
                 let _ = self.apply_op(Op::Animation(op));
             }
             Action::Animate { op, animation, end } => {
-                self.components.animations.insert(animation, end);
+                self.components
+                    .animations
+                    .insert(animation, Awaited::End(end));
                 let _ = self.apply_op(Op::Animation(op));
+            }
+            Action::ReadValue { node, value } => {
+                let request = self.components.executor.next_animation_id();
+                self.components
+                    .animations
+                    .insert(request, Awaited::Value(value));
+                let _ = self.apply_op(Op::Animation(nsh_animation::AnimationOp::Read {
+                    node,
+                    request,
+                }));
             }
             Action::ReportViewable(list) => self.report_viewable(list),
             Action::Frame(answer) => self.wait_frame(answer),
             Action::Direction(change) => self.change_direction(change),
             Action::Appearance(appearance) => self.set_appearance(appearance),
+            Action::Measure(id, answer) => self.components.measures.push((id, answer)),
             Action::ImageInfo(uri, answer) => {
                 let id = self.components.next_image_info;
                 self.components.next_image_info += 1;
@@ -2480,8 +2530,12 @@ impl<M: TextEngine> Core<M> {
     /// [`crate::ui::AnimationEnd`]s; JS's stay in `finished`.
     pub fn animations_finished(&mut self, finished: &mut Vec<nsh_animation::Finished>) {
         finished.retain(|f| match self.components.animations.remove(&f.animation) {
-            Some(end) => {
+            Some(Awaited::End(end)) => {
                 end.borrow_mut().deliver(f.finished);
+                false
+            }
+            Some(Awaited::Value(value)) => {
+                value.borrow_mut().deliver(f.value.unwrap_or_default());
                 false
             }
             // JS's are even.

@@ -110,8 +110,10 @@ impl Component for Button {                // JS export: `Button`, the type's na
   belong to whoever renders the stack (state they depend on goes in a global or a context; `examples/gallery-rs`). Canvases draw a `Drawing`, recorded with `Painter` (the Canvas 2D
   operations: `.fill_style(..)` / `.stroke_style(..)` take colors, `CanvasGradient::linear` / `radial` / `conic`
   and native values; `.stroke_path(&canvas::svg_path(d))`; `cx.measure_text(font, text)` in the render is
-  `measureText`; operations built by hand take `painter.num(&v)` / `.paint(..)` and go in with `.op(..)`); a new
-  drawing replaces the old one. Props that take a plain color (an input's placeholder color)
+  `measureText`; operations built by hand take `painter.num(&v)` / `.paint(..)` and go in with `.op(..)`;
+  `isPointInPath` / `isPointInStroke` are `painter.is_point_in_path(x, y, rule)` / `.is_point_in_stroke(x, y)` and,
+  with a `Path2D`, `.path_contains(&path, x, y, rule)` / `.stroke_contains(&path, x, y)`, on the render's
+  painter: made by a method the render and the press handler both call, to find the shape under a tap); a new drawing replaces the old one. Props that take a plain color (an input's placeholder color)
   take `cx.color(theme.muted_foreground)`: the theme color for the appearance now.
 - **State** is `Self`, written like a TSX component where Rust allows:
 
@@ -125,25 +127,28 @@ impl Component for Button {                // JS export: `Button`, the type's na
   | `cleanup` | `fn cleanup(&mut self, props, cx)` (with a `Context`: it can still use the platform's services), and `Drop` |
   | `windowSize()`, `safeArea()`, `keyboard()`, `colorScheme()`, ... | `cx.window()`, `cx.safe_area()`, `cx.keyboard_height()`, `cx.dark()`, ... in the render: reading subscribes |
   | `PixelRatio.get()`, `roundToNearestPixel`, `Platform.OS` / `Version` / `isPad` | `cx.pixel_ratio()`, `cx.round_to_nearest_pixel(v)`, `cx.os()`, `cx.os_version()`, `cx.idiom()` in the render |
+  | `Intl.NumberFormat()`, `toLocaleString()` (the user's locale) | `cx.locale()` in the render (a `Locale`: `de-DE`; reading subscribes), formatted with a Rust crate: `Intl` and the locale-aware `toLocale*String`s are JS globals of TS apps, like `fetch` |
   | `requestAnimationFrame(cb)`, `cancelAnimationFrame` | `cx.request_animation_frame(\|this, at, cx\| ..)` returns a `Task` (dropping it cancels); in a task `cx.next_frame().await` (an `Instant`), once per frame in a loop |
   | `I18nManager.forceRTL` / `allowRTL` | `cx.force_rtl(bool)` / `cx.allow_rtl(bool)`: the root's direction at once, `cx.rtl()` readers render again |
   | `import logo from "./logo@2x.png"`, `import font from "./a.ttf"` | `const LOGO: ImageAsset = asset!("logo@2x.png");` (`image(LOGO)` lays out at its natural size), `const A: FontAsset = asset!("a.ttf");` (`.font_family(A.family)`), with `registry.assets(assets!())` (below) |
   | `Image.getSize(uri)`, `Image.prefetch(uri)` | `cx.image_size(uri)` / `cx.prefetch_image(uri)`: answers to await in a task |
+  | `Clipboard.setString(text)`, `await Clipboard.getString()` / `hasString()` (`nsh/clipboard`) | `cx.set_clipboard(text)`, `cx.clipboard_string()` / `cx.clipboard_has_string()`: answers to await in a task (the app's `capabilities.clipboard` applies as for JS) |
   | `AccessibilityInfo.announceForAccessibility`, `setAccessibilityFocus(ref)` | `cx.announce_for_accessibility(msg)`, `self.note.set_accessibility_focus()` (an `ElementRef`) |
   | `Toast.show(msg, "long")` (`nsh/android`) | `cx.toast(msg, ToastDuration::Long)` (nothing happens off Android) |
   | an effect on the environment | `fn environment_changed(&mut self, props, old, new, cx)` |
   | `useSafeAreaInsets()` | `cx.insets()` in the render: the insets where the component renders (the nearest screen's or modal's, else the surface's safe area) |
   | a signal or store at module level | `cx.global::<G>()` in the render (subscribes); `cx.update_global::<G, _>(..)` in listeners, tasks' updates and modules renders the readers again |
   | `context(default)` / `<Ctx.Provider value>` / `Ctx()` | `cx.provide(value)` in the render; `cx.context::<T>()` below it (the nearest provider up the node tree, through the app's elements too; subscribes) |
-  | `createNativeValue`, `Animated.spring`, `interpolate` | `cx.native_value(0.0)` (in `setup`, kept in a field); `.bind_translate_y(&v)` / `.bind_opacity(..)` / `.bind_background(..)` / `.bind_scale(..)` / `.bind_rotate(..)`, `.pan_values(..)` (drags move it natively), `.pinch_value(&scale)` / `.rotation_value(&angle)` (TS `pinch={{ scale }}`, `rotation={{ angle }}`), `scroll().scroll_value(&v)`, canvas arguments (`Painter::new().fill_rect(0.0, 0.0, &v, 4.0)`); `v.spring(to, Spring::default())` / `.timing(to, ms, easing)` / `.timing_with(to, Timing { delay_ms, .. })` / `.decay(..)` return an `AnimationEnd` to await; `v.interpolate(..)`, `.interpolate_with(.., Interpolation { extrapolate_left, extrapolate_right, easing })`, `.add(..)`, `.diff_clamp(..)` derive nodes |
+  | `createNativeValue`, `Animated.spring`, `interpolate` | `cx.native_value(0.0)` (in `setup`, kept in a field); `.bind_translate_y(&v)` / `.bind_opacity(..)` / `.bind_background(..)` / `.bind_border_color(..)` / `.bind_color(..)` / `.bind_shadow_color(..)` / `.bind_shadow_opacity(..)` / `.bind_shadow_radius(..)` / `.bind_scale(..)` / `.bind_rotate(..)`, `.pan_values(..)` (drags move it natively), `.pinch_value(&scale)` / `.rotation_value(&angle)` (TS `pinch={{ scale }}`, `rotation={{ angle }}`), `scroll().scroll_value(&v)`, canvas arguments (`Painter::new().fill_rect(0.0, 0.0, &v, 4.0)`); `v.spring(to, Spring::default())` / `.timing(to, ms, easing)` / `.timing_with(to, Timing { delay_ms, .. })` / `.decay(..)` / `.decay_within(.., (min, max), bounce)` return an `AnimationEnd` to await; `v.value()` (`getValue()`; after `v.stop()`, `stop()`'s promise) an `Answer<f32>`; `v.set_offset(..)` / `.flatten_offset()` / `.extract_offset()`; `ui::sample_easing` / `sample_spring` / `sample_decay` (`Easing.sample`, `Animated.sampleSpring` / `sampleDecay`) the curves, to draw them; `v.interpolate(..)`, `.interpolate_with(.., Interpolation { extrapolate_left, extrapolate_right, easing })`, `.add(..)`, `.diff_clamp(..)` derive nodes |
   | `Animated.sequence / parallel / stagger / delay / loop`, `.start(cb)` / `.stop()` / `.reset()` | `Animation::sequence([Animation::timing(&v, to, Timing::new(ms, easing)), Animation::delay(ms), Animation::spring(..)])`, `::parallel(..)` (`.stop_together(false)`), `::stagger(ms, ..)`, `.looped(iterations)` (`.reset_before_iteration(false)`), built in `setup` and kept in a field; `a.start()` returns an `AnimationEnd`, `a.stop()`, `a.reset()` |
   | `BackHandler.addEventListener("hardwareBackPress", f)`, `.remove()` | `cx.on_back_press(|this, cx| -> bool)` (in `setup`, kept in a field) returns a `BackSubscription`; dropping it removes the listener. After modals and stacks, the components' listeners run newest first, then JS's; when none returns true the app exits (`ui/back.rs`) |
   | an error boundary (TS has none) | `fn catch_error(&mut self, error, cx) -> bool`: the nearest component above one whose code panicked (render, listener, method, task) handles it, typically keeping `error`, rendering a fallback and clearing it to try again; the failed one renders nothing until it renders again; unhandled errors are logged (`js` target) |
   | a portal | none (TS has none either); overlays are `modal().transparent(true)` |
-  | `ref={el}`, `el.focus()` | `cx.element_ref()` (in `setup`, kept in a field), `.element_ref(&self.field)` on the element each render, `self.field.focus()` / `.scroll_to(..)` / `.seek(..)` / `.command(..)` from listeners and tasks |
+  | `ref={el}`, `el.focus()`, `await el.measure()` | `cx.element_ref()` (in `setup`, kept in a field), `.element_ref(&self.field)` on the element each render, `self.field.focus()` / `.scroll_to(..)` / `.seek(..)` / `.command(..)` from listeners and tasks; `self.field.measure()` is an `Answer<Option<Measurement>>` (frame, `page_x` / `page_y`) to await in a task |
   | `onStartShouldSetResponder`, `onMoveShouldSetResponder(Capture)`, `PanResponder.create` | `.claim_touches(TouchClaim::on_start())` (`::on_move()`, `.capture()`, `.ask(cx.listener(\|this, request: &ClaimRequest, cx\| request.claim()))` to decide with state and the gesture, `.block_native(false)`; `TouchClaim::on_pan(PanActivation::horizontal(10.0, 10.0))` (`panActivation`) claims when the platform activates a pan, deciding on the main thread, `elements.md`), `.keep_touches(true)` (`onResponderTerminationRequest` → false); `.on_responder_grant` / `_move` / `_release` / `_terminate` / `_start` / `_end` / `_reject` get a `ResponderEvent` (the finger's `location_x`, `page_x`, ... and `gesture: PanGesture`: `dx`, `dy`, `vx`, `vy`, the centroid; `PanGesture::begin` / `update` follow one from `on_touch`) |
   | a ref to a component, `await stepper.value()`, `stepper.setValue(5)` | `cx.component_ref::<Stepper>()` (in `setup`, kept in a field), `Stepper::element(..).component_ref(&self.field)`, `self.field.update(\|s, cx\| s.set_value(5.0, cx))`: its `#[methods]` called directly, right after the listener; await the `Updated` for the result |
   | `<List ListHeaderComponent ListFooterComponent ListEmptyComponent ItemSeparatorComponent stickyHeaderIndices viewabilityConfig onViewableItemsChanged onEndReachedThreshold initialScrollIndex>` | `virtual_list(n, row).header(..).footer(..).empty(..).separator(\|\| ..).sticky_header_indices(..).viewability(..).minimum_view_time(..).on_viewable_items_changed(..).end_reached_threshold(..).initial_scroll_index(..)`: the header, footer and empty view are part of the render (the component's state and handlers), never recycled |
+  | `<List maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 40 }}>` | `.follow_end(40.0)` (`ListLayout`: on `virtual_list(..)` and on a placed `ListElement`) |
   | `<ListView each={rows} keyExtractor ListHeaderComponent={Header}>{row}</ListView>` | `ListView::element(props).items(virtual_list(n, row).keys(ids).header(..))` |
   | `<Text>a <Text style={link} onPress={f}>b</Text> <View/></Text>` | `text("a ").child(link("b").on_press(..)).child(" ").child(view())`: one paragraph, links and inline views |
   | `class="group"`, `group-active:`, `dark:`, `disabled:` | `.group()`, `.group_active(\|s\| ..)`, `.dark(\|s\| ..)`, `.disabled_style(\|s\| ..)` (native, no render) |
@@ -154,7 +159,8 @@ impl Component for Button {                // JS export: `Button`, the type's na
   `cx.dialog(Dialog)` shows an alert or action sheet and returns a future of the index chosen (-1: dismissed; the
   answer is the root's `Dialog` event, which the core resolves; JS never sees it);
   `dismiss_keyboard()`, `animate_layout(..)`, `announce_for_accessibility(..)`, `toast(..)`, `force_rtl` /
-  `allow_rtl`, the image information (`image_size`, `prefetch_image`: on `Context` and `AsyncCx`), display frames
+  `allow_rtl`, the clipboard (`set_clipboard`; reads `clipboard_string` / `clipboard_has_string` on `Context` and
+  `AsyncCx`), the image information (`image_size`, `prefetch_image`: on `Context` and `AsyncCx`), display frames
   (`Context::request_animation_frame`, `AsyncCx::next_frame`: the core keeps the waiting tasks' answers, the engine
   asks the platform for a frame while one waits, `MountSink::request_frame`, and delivers it at
   `EngineControl::frame`), and the status bar (below); they are actions the core applies in order with the
@@ -170,7 +176,9 @@ impl Component for Button {                // JS export: `Button`, the type's na
   even) is what `reset()` restores by, and dropping the last handle releases it (a run going on goes on).
 - **Element refs** (`ui/element_ref.rs`) hold the node of the element that carries them, set when the render is
   applied and cleared when the element goes; their commands go out through the executor, and an event's handling
-  applies them right after its own changes, so they keep their order.
+  applies them right after its own changes, so they keep their order. A measurement (`measure()`) waits in the core
+  for the layout of the commit it goes out with, as JS's `Command::Measure` does, and is answered there
+  (`Core::measure`); none goes to the platform.
 - **Element attributes for system UI**: `.inset_padding(insets)` / `.inset_margin(insets)` add to the padding /
   margin the styles resolve to (what `SafeAreaView` and `KeyboardAvoidingView` use, so the app's own padding stays),
   `.inline_style(&style)` applies a `ui::Style` prop (`KeyboardAvoidingView`'s `contentContainerStyle`).
@@ -230,7 +238,7 @@ component cancels all of its own.
 ## Environment
 
 The engine hands the core what components may read (`ui::Environment`: window, safe area, keyboard height, appearance,
-font scale, reduced motion, screen reader, direction, pixel ratio, OS, its version, idiom). A render records what it
+font scale, reduced motion, screen reader, direction, pixel ratio, OS, its version, idiom, locale). A render records what it
 read (`RenderCx::window()` and the like); when the environment changes, only the components that read a changed part
 render again. The direction components read is the surface's: its root's (`Prop::LayoutDirection`, which JS's
 `I18nManager` sets), else the platform's; once a component sets a policy (`force_rtl` / `allow_rtl`), and from the
@@ -347,7 +355,10 @@ never sees the expanded nodes; their events are the component's (below).
   render places them, under a `cond` on a signal; the core tells it with a `$children` event (`true` / `false`) on
   the host when the render starts or stops placing them (`ComponentSpec::lazy_children`), so they are made again on
   each opening and released after. Until they are made, `Children::is_empty()` is true: a render that places them
-  only when they are present never asks for them.
+  only when they are present never asks for them. The content a Rust render passes such a component
+  (`Sheet::element(..).child(..)`) is lazy the same way: the core leaves it out (slots and rows stay) while the
+  nested component does not place its children, and renders the passing component again when that changes, instead
+  of telling JS.
 - Named slots: the JS face creates one holder view per slot **the app passes** (`componentSlot`), filled with that prop's
   JSX. The render's `Slot` element *is* that holder: its styles and handlers apply to it, the core places it but never
   releases it (it is JS's). Filling or emptying a holder renders the component again.

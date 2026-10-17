@@ -46,7 +46,9 @@ mod theme;
 mod value;
 pub(crate) mod virtual_list;
 
-pub use nsh_animation::{Curve, EaseMode, Easing, Extrapolate, Output as AnimationOutput};
+pub use nsh_animation::{
+    Curve, EaseMode, Easing, Extrapolate, Output as AnimationOutput, sample_easing,
+};
 pub use nsh_macros::{
     Event, JsObject, PropEnum, Props, asset, assets, methods, module, native_module,
 };
@@ -54,7 +56,7 @@ pub use nsh_macros::{
 pub use self::{
     animated::{
         Animated, Animation, AnimationEnd, AnimationOperand, Interpolation, NativeNode,
-        NativeValue, Spring, Timing,
+        NativeValue, Spring, Timing, sample_decay, sample_decay_within, sample_spring,
     },
     asset::{AssetFile, AssetKind, FileAsset, FontAsset, ImageAsset, ImageSrc},
     back::BackSubscription,
@@ -105,10 +107,11 @@ pub use crate::{
     AccessibilityRole, AccessibilityState, AutoCapitalize, AutoFill, BlendMode, BoxShadow, Dialog,
     DialogButton, DialogButtonStyle, EdgeInsets, EllipsizeMode, EventKind, EventPayload,
     KeyboardAppearance, KeyboardDismissMode, KeyboardTaps, KeyboardType, LayoutAnimation,
-    LayoutCurve, LayoutProperty, LayoutTransition, ModalAnimation, ModalPresentation,
-    PointerEvents, ResizeMode, ReturnKeyType, ScreenAnimation, SnapAlignment, StatusBarConfig,
-    StatusBarSetting, StatusBarStyle, TouchEvent, TransformKind, TransformOrigin, Viewability,
-    platform::{Idiom, Os},
+    LayoutCurve, LayoutProperty, LayoutTransition, Measurement, ModalAnimation, ModalPresentation,
+    PanActivation, PointerEvents, ResizeMode, ReturnKeyType, ScreenAnimation, SnapAlignment,
+    StatusBarConfig, StatusBarSetting, StatusBarStyle, TouchEvent, TransformKind, TransformOrigin,
+    Viewability,
+    platform::{Appearance, Idiom, Locale, Os},
     style::{Color, OriginLen},
 };
 
@@ -123,6 +126,7 @@ pub mod prelude {
         Animation,
         AnimationOutput,
         AnyElement,
+        Appearance,
         AsyncCx,
         // Host elements and their settings.
         AutoCapitalize,
@@ -175,6 +179,7 @@ pub mod prelude {
         Length,
         ListLayout,
         Listener,
+        Measurement,
         Method,
         Modal,
         ModalAnimation,
@@ -187,6 +192,7 @@ pub mod prelude {
         NoEvent,
         Orientation,
         Painter,
+        PanActivation,
         PanEvent,
         PanGesture,
         ParentElement,

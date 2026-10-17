@@ -89,6 +89,11 @@ pub(crate) enum Action {
         animation: nsh_animation::AnimationId,
         end: AnswerSlot<bool>,
     },
+    /// Reads a node's value where it moves; the value resolves the slot.
+    ReadValue {
+        node: nsh_animation::NodeId,
+        value: AnswerSlot<f32>,
+    },
     /// A component's own list reports the rows viewable now (they stayed
     /// so for its minimum view time).
     ReportViewable(NodeId),
@@ -98,6 +103,9 @@ pub(crate) enum Action {
     Direction(super::services::Direction),
     /// Sets the app's appearance.
     Appearance(crate::platform::Appearance),
+    /// Measures the node with the layout of the commit the action goes out
+    /// with; the measurement resolves the slot.
+    Measure(NodeId, AnswerSlot<Option<crate::Measurement>>),
 }
 
 /// A clipboard read waiting for the platform's answer.
@@ -499,16 +507,16 @@ impl AsyncCx {
     /// `Clipboard.getString`). On iOS, reading it may show the system's
     /// paste notice.
     pub fn clipboard_string(&self) -> Answer<String> {
-        let (answer, slot) = Answer::new();
-        self.act(Action::ReadClipboard(ClipboardRead::Text(slot)));
+        let (answer, action) = services::clipboard_string();
+        self.act(action);
         answer
     }
 
     /// Whether the system clipboard holds text, without reading it (TS:
     /// `Clipboard.hasString`).
     pub fn clipboard_has_string(&self) -> Answer<bool> {
-        let (answer, slot) = Answer::new();
-        self.act(Action::ReadClipboard(ClipboardRead::Has(slot)));
+        let (answer, action) = services::clipboard_has_string();
+        self.act(action);
         answer
     }
 

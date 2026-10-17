@@ -319,6 +319,12 @@ impl<'a, C: Component> RenderCx<'a, C> {
         (points * ratio).round() / ratio
     }
 
+    /// The user's locale (TS: what `Intl` and `toLocaleString` format
+    /// for by default): format numbers and dates for it with a Rust crate.
+    pub fn locale(&self) -> crate::platform::Locale {
+        self.read(env::LOCALE).locale
+    }
+
     /// The operating system (TS: `Platform.OS`).
     pub fn os(&self) -> crate::platform::Os {
         self.scope.environment.os
@@ -461,6 +467,23 @@ impl<'a, C: Component> Context<'a, C> {
         self.inner
             .actions
             .push(super::services::set_clipboard(text.into()));
+    }
+
+    /// The text on the system clipboard, `""` when it holds none (TS:
+    /// `Clipboard.getString`), to await in a task. On iOS, reading it may
+    /// show the system's paste notice.
+    pub fn clipboard_string(&mut self) -> task::Answer<String> {
+        let (answer, action) = super::services::clipboard_string();
+        self.inner.actions.push(action);
+        answer
+    }
+
+    /// Whether the system clipboard holds text, without reading it (TS:
+    /// `Clipboard.hasString`), to await in a task.
+    pub fn clipboard_has_string(&mut self) -> task::Answer<bool> {
+        let (answer, action) = super::services::clipboard_has_string();
+        self.inner.actions.push(action);
+        answer
     }
 
     /// Shows `message` at the bottom of the screen (Android's toasts, TS:
@@ -799,6 +822,7 @@ pub struct ListConfig {
     pub(crate) inverted: Option<bool>,
     pub(crate) shows_indicator: Option<bool>,
     pub(crate) content: Option<ListContentStyle>,
+    pub(crate) follow_end: Option<f32>,
 }
 
 impl ListConfig {
@@ -821,6 +845,9 @@ impl ListConfig {
         }
         if self.content != old.content {
             out.push(Prop::ListContent(self.content.unwrap_or_default()));
+        }
+        if self.follow_end != old.follow_end {
+            out.push(Prop::FollowEnd(self.follow_end));
         }
     }
 }
@@ -989,6 +1016,21 @@ pub trait Element: IntoElement + Sized {
     /// Binds a text's color (the whole text) to a node of colors.
     fn bind_color(self, value: &impl super::Animated) -> Self {
         self.bind(nsh_animation::AnimationProp::Color, value)
+    }
+
+    /// Binds the shadow's color to a node of colors (TS: `shadowColor`).
+    fn bind_shadow_color(self, value: &impl super::Animated) -> Self {
+        self.bind(nsh_animation::AnimationProp::ShadowColor, value)
+    }
+
+    /// Binds the shadow's opacity, 0..1 (TS: `shadowOpacity`).
+    fn bind_shadow_opacity(self, value: &impl super::Animated) -> Self {
+        self.bind(nsh_animation::AnimationProp::ShadowOpacity, value)
+    }
+
+    /// Binds the shadow's blur radius, in points (TS: `shadowRadius`).
+    fn bind_shadow_radius(self, value: &impl super::Animated) -> Self {
+        self.bind(nsh_animation::AnimationProp::ShadowRadius, value)
     }
 
     /// Binds `prop` (anything but a transform step or a canvas argument)
