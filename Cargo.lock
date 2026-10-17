@@ -2086,6 +2086,7 @@ dependencies = [
  "rolldown_error",
  "rolldown_sourcemap",
  "serde_json",
+ "string_wizard",
  "tokio",
  "ttf-parser",
 ]
@@ -2366,7 +2367,9 @@ dependencies = [
  "nsh-bundler",
  "nsh-core",
  "nsh-engine",
+ "nsh-js",
  "nsh-ui-mobile",
+ "rquickjs",
  "rustc-hash",
  "serde_json",
  "ttf-parser",

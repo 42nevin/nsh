@@ -34,6 +34,7 @@ mod rust_platform;
 mod rust_styles;
 mod rust_touch;
 mod shutdown;
+mod split;
 mod theme;
 
 /// Hands the engine's batches to the test.

@@ -2,8 +2,9 @@
 //! app bundle and its assets. Needs no Rust; iOS packaging uses Xcode's
 //! command line tools (`codesign`, and `actool` for icons), macOS packaging
 //! `codesign` and `sips`, Linux packaging `tar`; Windows packaging needs
-//! nothing (`windows.rs`). GPUI packages are made as the native backend's
-//! of the machine they are made on, with the GPUI release runner.
+//! nothing (`windows.rs`), nor does the web's (`web.rs`). GPUI packages are
+//! made as the native backend's of the machine they are made on, with the
+//! GPUI release runner.
 
 use std::{
     fs,
@@ -36,6 +37,9 @@ pub(crate) enum PackageTarget {
     /// Windows: a directory with the runner as `<name>.exe` (the app's
     /// icon embedded) and the bundle, and the same as a `.zip`.
     Windows,
+    /// The web: a static site (`index.html` and files named by their
+    /// content) for any web server or CDN.
+    Web,
     /// GPUI, for this machine's OS: packaged as `linux`, `macos` or
     /// `windows` are, with the GPUI release runner.
     Gpui,
@@ -102,7 +106,8 @@ pub(crate) struct PackageOptions<'a> {
     /// Android release keystore, key alias and password.
     pub(crate) keystore: Option<(&'a Path, &'a str, &'a str)>,
     /// Install and launch in the simulator or on the device afterwards
-    /// (Linux, macOS, Windows: launch it).
+    /// (Linux, macOS, Windows: launch it; the web: serve it and open it in
+    /// the browser).
     pub(crate) run: bool,
 }
 
@@ -151,7 +156,13 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
         executable
     };
 
-    let built = crate::build::compile(&entry, true).map_err(|e| e.into_error(&entry))?;
+    // Web apps load what `import()` brings in when it is used; native
+    // packages are one bundle.
+    let compile = match options.target {
+        PackageTarget::Web => crate::build::compile_split,
+        _ => crate::build::compile,
+    };
+    let built = compile(&entry, true).map_err(|e| e.into_error(&entry))?;
     ui::done(format!("built {} {}", ui::path(&entry), built.summary("")));
     // GPUI apps are packaged as this OS's native ones, with another runner.
     let (target, runner) = match options.target {
@@ -192,6 +203,9 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
         PackageTarget::Windows => {
             return crate::windows::package(&options, config, &name, &id, runner, &built);
         }
+        PackageTarget::Web => {
+            return crate::web::package(&options, config, &name, &id, &built);
+        }
         PackageTarget::Gpui => unreachable!("packaged as this OS's apps are"),
     };
     let runner = runtime::file(platform, true)?;
@@ -224,6 +238,7 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
         | PackageTarget::Linux
         | PackageTarget::Macos
         | PackageTarget::Windows
+        | PackageTarget::Web
         | PackageTarget::Gpui => "iphonesimulator",
     };
     let mut info = info_plist(&name, &id, &executable, config, sdk);
@@ -251,6 +266,7 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
         | PackageTarget::Linux
         | PackageTarget::Macos
         | PackageTarget::Windows
+        | PackageTarget::Web
         | PackageTarget::Gpui => {
             unreachable!("packaged above")
         }

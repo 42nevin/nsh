@@ -843,9 +843,10 @@ pub enum ModalProp {
     /// `animationType`: how the modal appears.
     #[prop(js = "animationType", on = MODAL)]
     Animation(ModalAnimation),
-    /// `presentationStyle` (iOS, desktop): `"pageSheet"` / `"formSheet"` keep what is
-    /// behind visible (on a desktop: a card centered in the window).
-    #[prop(ios = "presentationStyle", desktop = "presentationStyle", on = MODAL)]
+    /// `presentationStyle` (iOS, desktop, web): `"pageSheet"` / `"formSheet"` keep what
+    /// is behind visible (on a desktop: a card centered in the window; in a phone
+    /// browser: a card from just below the top, as on iPhones).
+    #[prop(ios = "presentationStyle", desktop = "presentationStyle", web = "presentationStyle", on = MODAL)]
     Presentation(ModalPresentation),
     /// `transparent`: the background shows what is behind.
     #[prop(js = "transparent", on = MODAL)]
@@ -1032,7 +1033,7 @@ pub struct StatusBarConfig {
     pub hidden: bool,
     /// Animate the change.
     pub animated: bool,
-    /// Background (Android before edge-to-edge only).
+    /// Background (Android before edge-to-edge; the web's theme color).
     pub background: Option<Color>,
 }
 
@@ -1046,7 +1047,7 @@ pub struct StatusBarSetting {
     pub hidden: Option<bool>,
     /// Animate the change.
     pub animated: Option<bool>,
-    /// Background (Android before edge-to-edge only).
+    /// Background (Android before edge-to-edge; the web's theme color).
     pub background: Option<Color>,
 }
 
@@ -1126,7 +1127,8 @@ pub enum Prop {
     /// Scrolling behavior of a scroll view or list.
     #[prop(nested)]
     Scroll(ScrollProp),
-    /// `showsIndicator`: the scroll indicator shows (default true).
+    /// `showsIndicator`: the scroll indicator shows (default true). On the
+    /// desktop a horizontal view keeps it: it is the mouse's scroll bar.
     #[prop(js = "showsIndicator", default = true, on = SCROLL | LIST)]
     ShowsIndicator(bool),
     /// `refreshing`: the pull-to-refresh spinner shows.
@@ -1366,9 +1368,11 @@ pub enum Prop {
     /// `maxFontSizeMultiplier`: the upper bound of the system scale (0 is none).
     #[prop(js = "maxFontSizeMultiplier", min = 0, on = TEXT | INPUT)]
     MaxFontSizeMultiplier(f32),
-    /// `selectable`: a long press offers to copy the text.
+    /// `selectable`: a long press offers to copy the text; `false` also
+    /// keeps it from being selected where text is by default (desktop
+    /// browsers), unset leaves it to the platform.
     #[prop(js = "selectable", on = TEXT)]
-    Selectable(bool),
+    Selectable(Option<bool>),
     /// `adjustsFontSizeToFit`: shrink the font until the text fits its lines
     /// (`numberOfLines`) and box.
     #[prop(js = "adjustsFontSizeToFit", on = TEXT)]

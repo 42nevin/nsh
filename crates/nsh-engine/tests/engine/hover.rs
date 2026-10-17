@@ -39,6 +39,7 @@ fn start() -> (Engine, Receiver<MountBatch>) {
         entry: dir.join("App.tsx"),
         minify: false,
         ui_sets: vec![nsh_ui_mobile::registry()],
+        split: false,
     })
     .unwrap();
     let bytecode = nsh_js::compile_bytecode(&bundle.code, false).unwrap();

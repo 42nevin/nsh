@@ -1,18 +1,23 @@
 //! Mount batches as the JSON the DOM mounter (`web/nsh.js`, `apply`)
 //! reads: one array per batch, one array per item, `[op, id, ...]`. Visual
-//! styles are turned into CSS here, so JS only assigns them.
+//! styles are turned into CSS here, so JS only assigns them: each distinct
+//! CSS text is a class, `nsh-` and 8 hex digits of its hash
+//! ([`class_key`]), defined once per page (`["css", name, text]`, before
+//! the first item that uses it), so the browser parses it once, elements
+//! carry no inline style but their geometry, and batches carry names.
 //!
 //! Native animation items stay in Rust ([`crate::animation::UiAnimation`]); the DOM
 //! gets their results each frame.
 
-use std::fmt::Write as _;
+use std::{cell::RefCell, fmt::Write as _};
 
 use nsh_core::{
     BorderStyle, Color, Command, EventKind, Filter, Gradient, GradientKind, GradientSize,
     ImageSource, InputConfig, Keyframes, LayoutCurve, LayoutTransition, MountItem, NativeProps,
-    OriginLen, ResizeMode, ScrollBehavior, Transform, TransformKind, TransitionProps, ViewKind,
-    ViewProps, ViewStyle, WebSource, ui::JsValue,
+    OriginLen, ResizeMode, ScreenAnimation, ScrollBehavior, Transform, TransformKind,
+    TransitionProps, ViewKind, ViewProps, ViewStyle, WebSource, ui::JsValue,
 };
+use rustc_hash::FxHashMap;
 
 use crate::text::{WebLayout, css_font};
 
@@ -95,6 +100,136 @@ impl Out {
     pub(crate) fn animation(&mut self, id: u32, prop: &str, value: &str) {
         self.item("a").num(id).str(prop).str(value).end();
     }
+}
+
+/// New classes a view may define before its styles get rules of their own,
+/// which are replaced as they change: a style animated from JS (a new CSS
+/// text every frame) must not grow the stylesheet by a rule a frame.
+const OWN_RULES_AFTER: u8 = 16;
+
+/// The style classes defined in the page.
+#[derive(Default)]
+struct Classes {
+    /// Class key -> a second hash of its text, which tells a collision.
+    defined: FxHashMap<u32, u64>,
+    /// How many classes each view defined (by node id).
+    count: Vec<u8>,
+}
+
+thread_local! {
+    static CLASSES: RefCell<Classes> = RefCell::new(Classes::default());
+}
+
+/// The key of the class of CSS text `css`: its 32-bit FNV-1a hash (as
+/// `nsh.js` computes the names of the classes it makes itself).
+fn class_key(css: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in css.bytes() {
+        h ^= u32::from(b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+/// The 64-bit FNV-1a hash of `css`, which two texts with the same
+/// [`class_key`] hardly share.
+fn text_hash(css: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in css.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+/// The class of a style.
+#[derive(Clone, Copy)]
+enum Class {
+    /// No CSS.
+    None,
+    /// By content: `nsh-<8 hex digits of the key>`.
+    Shared(u32),
+    /// A view's own rule (`nsh.js` puts its player's prefix in front).
+    Own(u32, Part),
+}
+
+/// Which of a view's styles.
+#[derive(Clone, Copy)]
+enum Part {
+    View,
+    Border,
+    Text(usize),
+    Selection,
+    Field,
+}
+
+impl Out {
+    /// The class of `css`, style `part` of view `id`, defining it first
+    /// when the page does not have it.
+    fn class(&mut self, id: u32, part: Part, css: &str) -> Class {
+        if css.is_empty() {
+            return Class::None;
+        }
+        let key = class_key(css);
+        let hash = text_hash(css);
+        // `Some(new)`: shared; `None`: the view's own rule.
+        let shared = CLASSES.with(|c| {
+            let mut c = c.borrow_mut();
+            match c.defined.get(&key) {
+                Some(&h) if h == hash => return Some(false),
+                // Another text has this name.
+                Some(_) => return None,
+                None => {}
+            }
+            let i = id as usize;
+            if c.count.len() <= i {
+                c.count.resize(i + 1, 0);
+            }
+            if c.count[i] >= OWN_RULES_AFTER {
+                return None;
+            }
+            c.count[i] += 1;
+            c.defined.insert(key, hash);
+            Some(true)
+        });
+        let class = match shared {
+            Some(_) => Class::Shared(key),
+            None => Class::Own(id, part),
+        };
+        if shared != Some(false) {
+            self.item("css");
+            self.class_arg(class).str(css).end();
+        }
+        class
+    }
+
+    fn push_class(&mut self, class: Class) {
+        let _ = match class {
+            Class::None => write!(self.s, "null"),
+            Class::Shared(key) => write!(self.s, "\"nsh-{key:08x}\""),
+            Class::Own(id, Part::View) => write!(self.s, "\"i{id}\""),
+            Class::Own(id, Part::Border) => write!(self.s, "\"i{id}b\""),
+            Class::Own(id, Part::Text(i)) => write!(self.s, "\"i{id}t{i}\""),
+            Class::Own(id, Part::Selection) => write!(self.s, "\"i{id}s\""),
+            Class::Own(id, Part::Field) => write!(self.s, "\"i{id}f\""),
+        };
+    }
+
+    /// Appends a class (after [`Out::class`]).
+    fn class_arg(&mut self, class: Class) -> &mut Self {
+        self.s.push(',');
+        self.push_class(class);
+        self
+    }
+}
+
+/// A view was deleted: its id's next view starts afresh.
+fn forget_view(id: u32) {
+    CLASSES.with(|c| {
+        if let Some(n) = c.borrow_mut().count.get_mut(id as usize) {
+            *n = 0;
+        }
+    });
 }
 
 fn push_str(out: &mut String, v: &str) {
@@ -281,11 +416,17 @@ pub(crate) fn view_css(s: &ViewStyle) -> (String, Option<String>) {
         String::new()
     };
     css.push_str(&radius);
-    if s.opacity < 1.0 {
+    if s.animation.is_some() {
+        // Keyframes multiply the view's opacity (`--nsh-ko`, `nsh.js`).
+        let _ = write!(css, "opacity:calc({}*var(--nsh-ko));", s.opacity);
+    } else if s.opacity < 1.0 {
         let _ = write!(css, "opacity:{};", s.opacity);
     }
+    // `clip`, not `hidden`: a hidden box is still a scroll container, which
+    // the browser scrolls to bring a focused field into view, moving
+    // content away from where the core laid it out.
     if s.overflow_hidden {
-        css.push_str("overflow:hidden;");
+        css.push_str("overflow:clip;");
     }
     let mut shadows = Vec::new();
     if s.shadow.opacity > 0.0 && !s.shadow.color.is_transparent() {
@@ -359,11 +500,12 @@ pub(crate) fn view_css(s: &ViewStyle) -> (String, Option<String>) {
     if cursor != "auto" {
         let _ = write!(css, "cursor:{cursor};");
     }
+    let mut border_transition = String::new();
     if let Some(t) = &s.transition {
         let mut props = Vec::new();
         let p = t.properties;
         if p.has(TransitionProps::COLORS) {
-            props.extend(["background-color", "border-color", "color"]);
+            props.extend(["background-color", "outline-color"]);
         }
         if p.has(TransitionProps::OPACITY) {
             props.push("opacity");
@@ -375,16 +517,26 @@ pub(crate) fn view_css(s: &ViewStyle) -> (String, Option<String>) {
             props.push("box-shadow");
         }
         if p.has(TransitionProps::SHAPE) {
-            props.push("border-radius");
+            props.extend(["border-radius", "outline-width"]);
         }
-        let _ = write!(
-            css,
-            "transition-property:{};transition-duration:{}ms;transition-delay:{}ms;transition-timing-function:{};",
-            props.join(","),
+        let timing = format!(
+            "transition-duration:{}ms;transition-delay:{}ms;transition-timing-function:{};",
             t.duration,
             t.delay,
             bezier(t.easing)
         );
+        let _ = write!(css, "transition-property:{};{timing}", props.join(","));
+        // The overlay draws the border.
+        let mut border = Vec::new();
+        if p.has(TransitionProps::COLORS) {
+            border.push("border-color");
+        }
+        if p.has(TransitionProps::SHAPE) {
+            border.extend(["border-width", "border-radius"]);
+        }
+        if !border.is_empty() {
+            border_transition = format!("transition-property:{};{timing}", border.join(","));
+        }
     }
     if let Some(a) = &s.animation {
         let name = match a.keyframes {
@@ -396,9 +548,11 @@ pub(crate) fn view_css(s: &ViewStyle) -> (String, Option<String>) {
         let iterations = a
             .iterations
             .map_or("infinite".to_owned(), |n| n.to_string());
+        // Added to the view's own transform, as the native backends
+        // apply keyframes after the style's transform.
         let _ = write!(
             css,
-            "animation:{name} {}ms {} {}ms {iterations};",
+            "animation:{name} {}ms {} {}ms {iterations};animation-composition:add;",
             a.duration,
             bezier(a.easing),
             a.delay
@@ -417,6 +571,7 @@ pub(crate) fn view_css(s: &ViewStyle) -> (String, Option<String>) {
             );
         }
         out.push_str(&radius);
+        out.push_str(&border_transition);
         Some(out)
     } else {
         None
@@ -460,7 +615,8 @@ fn resize_mode(m: ResizeMode) -> &'static str {
         ResizeMode::Cover => "cover",
         ResizeMode::Contain => "contain",
         ResizeMode::Stretch => "fill",
-        ResizeMode::Center => "none",
+        // Centered, scaled down to fit when larger.
+        ResizeMode::Center => "scale-down",
     }
 }
 
@@ -574,6 +730,33 @@ fn props_json(p: &ViewProps) -> String {
     if a.state.selected {
         s.push_str(",\"selected\":true");
     }
+    if let Some(c) = a.state.checked {
+        let _ = write!(s, ",\"checked\":{}", json_str(&kebab(&format!("{c:?}"))));
+    }
+    if a.state.busy {
+        s.push_str(",\"busy\":true");
+    }
+    if let Some(e) = a.state.expanded {
+        let _ = write!(s, ",\"expanded\":{e}");
+    }
+    if let Some(v) = &a.value {
+        let n = |v: Option<f32>| v.map_or("null".to_owned(), |v| v.to_string());
+        let _ = write!(
+            s,
+            ",\"value\":[{},{},{},{}]",
+            n(v.min),
+            n(v.max),
+            n(v.now),
+            v.text.as_deref().map_or("null".to_owned(), json_str)
+        );
+    }
+    if a.live_region != nsh_core::LiveRegion::None {
+        let _ = write!(
+            s,
+            ",\"live\":{}",
+            json_str(&kebab(&format!("{:?}", a.live_region)))
+        );
+    }
     if a.hidden {
         s.push_str(",\"hidden\":true");
     }
@@ -588,8 +771,7 @@ fn input_json(c: &InputConfig) -> String {
     let mut s = String::from("{");
     let _ = write!(
         s,
-        "\"css\":{},\"placeholder\":{},\"secure\":{},\"keyboard\":{},\"returnKey\":{},\"multiline\":{},\"editable\":{},\"submit\":{},\"autoFocus\":{},\"autoCapitalize\":{},\"autoCorrect\":{}",
-        json_str(&text_css(&c.style, None)),
+        "\"placeholder\":{},\"secure\":{},\"keyboard\":{},\"returnKey\":{},\"multiline\":{},\"editable\":{},\"submit\":{},\"autoFocus\":{},\"autoCapitalize\":{},\"autoCorrect\":{},\"placeholderColor\":{}",
         json_str(&c.placeholder),
         c.secure,
         json_str(&enum_name(&c.keyboard)),
@@ -600,31 +782,40 @@ fn input_json(c: &InputConfig) -> String {
         c.auto_focus,
         json_str(&enum_name(&c.auto_capitalize)),
         c.auto_correct,
+        c.placeholder_color.is_some(),
     );
-    let align = match c.align {
-        nsh_core::TextAlign::Center => "center",
-        nsh_core::TextAlign::Right => "right",
-        _ => "left",
-    };
-    let _ = write!(s, ",\"align\":\"{align}\"");
-    if let Some(c) = c.placeholder_color {
-        let _ = write!(s, ",\"placeholderColor\":{}", json_str(&css_color(c)));
-    }
-    if let Some(c) = c.selection_color {
-        let _ = write!(s, ",\"selectionColor\":{}", json_str(&css_color(c)));
-    }
     if let Some(m) = c.max_length {
         let _ = write!(s, ",\"maxLength\":{m}");
     }
-    let _ = write!(s, ",\"lineHeight\":{}", c.style.line_height);
     s.push('}');
     s
+}
+
+/// The CSS of a field's text: its style, alignment, line height, the
+/// placeholder's color (`--ph`) and the caret's.
+fn field_css(c: &InputConfig) -> String {
+    let mut css = text_css(&c.style, None);
+    match c.align {
+        nsh_core::TextAlign::Center => css.push_str("text-align:center;"),
+        nsh_core::TextAlign::Right => css.push_str("text-align:right;"),
+        _ => css.push_str("text-align:left;"),
+    }
+    if c.style.line_height > 0.0 {
+        let _ = write!(css, "line-height:{}px;", c.style.line_height);
+    }
+    if let Some(c) = c.placeholder_color {
+        let _ = write!(css, "--ph:{};", css_color(c));
+    }
+    if let Some(c) = c.selection_color {
+        let _ = write!(css, "caret-color:{};", css_color(c));
+    }
+    css
 }
 
 fn behavior_json(b: &ScrollBehavior) -> String {
     let offsets: Vec<String> = b.snap_offsets.iter().map(|o| o.to_string()).collect();
     format!(
-        "{{\"paging\":{},\"snapInterval\":{},\"snapOffsets\":[{}],\"snapAlignment\":{},\"enabled\":{},\"bounces\":{},\"inset\":[{},{},{},{}],\"minZoom\":{},\"maxZoom\":{}}}",
+        "{{\"paging\":{},\"snapInterval\":{},\"snapOffsets\":[{}],\"snapAlignment\":{},\"enabled\":{},\"bounces\":{},\"inset\":[{},{},{},{}],\"minZoom\":{},\"maxZoom\":{},\"bouncesZoom\":{},\"pinch\":{},\"centerContent\":{}}}",
         b.paging,
         b.snap_interval,
         offsets.join(","),
@@ -636,7 +827,10 @@ fn behavior_json(b: &ScrollBehavior) -> String {
         b.content_inset.bottom,
         b.content_inset.left,
         b.min_zoom,
-        b.max_zoom
+        b.max_zoom,
+        b.bounces_zoom,
+        b.pinch,
+        b.center_content
     )
 }
 
@@ -644,16 +838,13 @@ fn transition_json(t: &Option<LayoutTransition>) -> String {
     match t {
         None => "null".to_owned(),
         Some(t) => {
+            // UIKit's curves, which CSS's keywords are.
             let easing = match t.curve {
                 LayoutCurve::Linear => "linear".to_owned(),
                 LayoutCurve::EaseIn => "ease-in".to_owned(),
                 LayoutCurve::EaseOut => "ease-out".to_owned(),
                 LayoutCurve::EaseInEaseOut => "ease-in-out".to_owned(),
-                // An overshooting curve stands in for a spring.
-                LayoutCurve::Spring { damping } => {
-                    let over = (1.0 - damping.clamp(0.0, 1.0)) * 0.8 + 1.0;
-                    format!("cubic-bezier(0.34,{over},0.64,1)")
-                }
+                LayoutCurve::Spring { damping } => spring_easing(damping),
             };
             format!(
                 "{{\"duration\":{},\"delay\":{},\"easing\":{},\"property\":{}}}",
@@ -664,6 +855,44 @@ fn transition_json(t: &Option<LayoutTransition>) -> String {
             )
         }
     }
+}
+
+/// A damped spring from 0 to 1 at `x` (the fraction of the duration), its
+/// stiffness chosen so that it settles by the end, as UIKit's
+/// `usingSpringWithDamping` fits a spring into the given duration (the
+/// Linux backend's curve).
+fn spring(damping: f32, x: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    // The envelope falls to 1/1000 by the end.
+    const SETTLE: f32 = 6.907_755; // ln(1000)
+    let zeta = damping.clamp(0.05, 1.0);
+    if zeta > 0.999 {
+        // Critically damped: (1 + w x) e^(-w x) reaches 1/1000 at w = 9.23.
+        let w = 9.233;
+        return 1.0 - (1.0 + w * x) * (-w * x).exp();
+    }
+    let w = SETTLE / zeta;
+    let wd = w * (1.0 - zeta * zeta).sqrt();
+    let envelope = (-zeta * w * x).exp();
+    1.0 - envelope * ((wd * x).cos() + zeta * w / wd * (wd * x).sin())
+}
+
+/// Samples of the spring as a CSS `linear()` easing (piecewise linear,
+/// enough points that the overshoot keeps its shape).
+fn spring_easing(damping: f32) -> String {
+    const SAMPLES: usize = 48;
+    let mut out = String::from("linear(0");
+    for i in 1..=SAMPLES {
+        let v = spring(damping, i as f32 / SAMPLES as f32);
+        let _ = write!(out, ",{}", (v * 1000.0).round() / 1000.0);
+    }
+    out.push(')');
+    out
 }
 
 /// Appends `item` (all but the animation items, which the caller keeps).
@@ -688,7 +917,10 @@ pub(crate) fn encode(out: &mut Out, item: &MountItem) {
             out.end();
         }
         MountItem::Remove { id } => out.item("r").num(*id).end(),
-        MountItem::Delete { id } => out.item("d").num(*id).end(),
+        MountItem::Delete { id } => {
+            forget_view(*id);
+            out.item("d").num(*id).end();
+        }
         MountItem::Frame { id, frame } => {
             out.item("f")
                 .num(*id)
@@ -700,7 +932,12 @@ pub(crate) fn encode(out: &mut Out, item: &MountItem) {
         }
         MountItem::ViewStyle { id, style } => {
             let (css, border) = view_css(style);
-            out.item("s").num(*id).str(&css).opt_str(border.as_deref());
+            let class = out.class(*id, Part::View, &css);
+            let border = match &border {
+                Some(border) => out.class(*id, Part::Border, border),
+                None => Class::None,
+            };
+            out.item("s").num(*id).class_arg(class).class_arg(border);
             match style.tint_color {
                 Some(c) => out.str(&css_color(c)),
                 None => out.raw("null"),
@@ -713,13 +950,40 @@ pub(crate) fn encode(out: &mut Out, item: &MountItem) {
             layout,
             content,
         } => {
+            let layout = layout.downcast::<WebLayout>();
+            // Defined before the item that uses them. A line box as tall
+            // as the font: the baseline sits at the run's top plus its
+            // ascent, where layout put it.
+            let classes: Vec<Class> = layout.map_or_else(Vec::new, |layout| {
+                layout
+                    .styles
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let css = format!(
+                            "{}line-height:{}px;",
+                            text_css(&s.style, text.shadow.as_ref()),
+                            s.ascent + s.descent
+                        );
+                        out.class(*id, Part::Text(i), &css)
+                    })
+                    .collect()
+            });
+            let selection = match text.selection_color {
+                Some(c) => out.class(
+                    *id,
+                    Part::Selection,
+                    &format!("--nsh-selection:{};", css_color(c)),
+                ),
+                None => Class::None,
+            };
             out.item("t")
                 .num(*id)
                 .num(content.x)
                 .num(content.y)
                 .num(content.width)
                 .num(content.height);
-            let Some(layout) = layout.downcast::<WebLayout>() else {
+            let Some(layout) = layout else {
                 out.raw("[]").raw("[]").end();
                 return;
             };
@@ -730,26 +994,26 @@ pub(crate) fn encode(out: &mut Out, item: &MountItem) {
                 }
                 let _ = write!(out.s, "[{},{},", run.x, run.y);
                 push_str(&mut out.s, &run.text);
-                let _ = write!(out.s, ",{}]", run.style);
+                let _ = write!(out.s, ",{}", run.style);
+                if !run.after.is_empty() {
+                    out.s.push(',');
+                    push_str(&mut out.s, &run.after);
+                }
+                out.s.push(']');
             }
             out.s.push_str("],[");
-            for (i, s) in layout.styles.iter().enumerate() {
+            for (i, class) in classes.into_iter().enumerate() {
                 if i > 0 {
                     out.s.push(',');
                 }
-                // A line box as tall as the font: the baseline sits at the
-                // run's top plus its ascent, where layout put it.
-                let css = format!(
-                    "{}line-height:{}px;",
-                    text_css(&s.style, text.shadow.as_ref()),
-                    s.ascent + s.descent
-                );
-                push_str(&mut out.s, &css);
+                out.push_class(class);
             }
             out.s.push(']');
-            out.bool(text.selectable)
-                .opt_str(text.selection_color.map(css_color).as_deref())
-                .end();
+            match text.selectable {
+                Some(on) => out.bool(on),
+                None => out.raw("null"),
+            };
+            out.class_arg(selection).end();
         }
         MountItem::Events { id, events } => {
             out.item("e").num(*id);
@@ -855,7 +1119,12 @@ pub(crate) fn encode(out: &mut Out, item: &MountItem) {
                 .end();
         }
         MountItem::Input { id, config } => {
-            out.item("in").num(*id).raw(&input_json(config)).end();
+            let class = out.class(*id, Part::Field, &field_css(config));
+            out.item("in")
+                .num(*id)
+                .raw(&input_json(config))
+                .class_arg(class)
+                .end();
         }
         MountItem::InputValue { id, text, count } => {
             out.item("iv").num(*id).str(text).num(*count).end();
@@ -886,7 +1155,12 @@ pub(crate) fn encode(out: &mut Out, item: &MountItem) {
                     None => out.raw("null"),
                 };
             }
-            out.end();
+            out.str(match config.animation {
+                ScreenAnimation::Default => "default",
+                ScreenAnimation::Fade => "fade",
+                ScreenAnimation::None => "none",
+            })
+            .end();
         }
         MountItem::ModalConfig { id, config } => {
             out.item("mc")
@@ -894,16 +1168,28 @@ pub(crate) fn encode(out: &mut Out, item: &MountItem) {
                 .str(&enum_name(&config.animation))
                 .bool(config.transparent)
                 .bool(config.dismissible)
+                .str(&enum_name(&config.presentation))
                 .end();
         }
         MountItem::NativeProps { id, props } => match props {
             NativeProps::WebView(w) => {
-                let (url, html) = match &w.source {
-                    WebSource::Uri(u) => (Some(&**u), None),
-                    WebSource::Html { html, .. } => (None, Some(&**html)),
-                    _ => (None, None),
+                let (url, html, base) = match &w.source {
+                    WebSource::Uri(u) => (Some(&**u), None, None),
+                    WebSource::Html { html, base_url } => {
+                        (None, Some(&**html), base_url.as_deref())
+                    }
+                    _ => (None, None, None),
                 };
-                out.item("web").num(*id).opt_str(url).opt_str(html).end();
+                out.item("web")
+                    .num(*id)
+                    .opt_str(url)
+                    .opt_str(html)
+                    .opt_str(base)
+                    .opt_str(w.injected_js_before.as_deref())
+                    .opt_str(w.injected_js.as_deref())
+                    .bool(w.scroll_enabled)
+                    .bool(w.javascript_enabled)
+                    .end();
             }
             NativeProps::Video(v) => {
                 out.item("video")
@@ -916,12 +1202,14 @@ pub(crate) fn encode(out: &mut Out, item: &MountItem) {
                     .bool(v.repeat)
                     .str(resize_mode(v.resize_mode))
                     .bool(v.controls)
+                    .num(v.progress_interval_ms)
                     .end();
             }
         },
         MountItem::Command { id, command } => encode_command(out, *id, command),
         MountItem::Component { id, name } => out.item("comp").num(*id).str(name).end(),
-        // Browsers hit-test what overflows a box themselves.
+        // Browsers hit-test what overflows a box themselves; the keymap
+        // stays in Rust (`nsh_key`).
         MountItem::ComponentProps { .. }
         | MountItem::Keymap(_)
         | MountItem::Overflow { .. }
@@ -969,8 +1257,15 @@ fn encode_command(out: &mut Out, id: u32, command: &Command) {
                 }
                 push_str(&mut out.s, &b.text);
             }
+            out.s.push_str("],[");
+            for (i, b) in d.buttons.iter().enumerate() {
+                if i > 0 {
+                    out.s.push(',');
+                }
+                push_str(&mut out.s, &kebab(&format!("{:?}", b.style)));
+            }
             out.s.push(']');
-            out.end();
+            out.bool(d.cancelable).bool(d.sheet).end();
         }
         Command::SetJsResponder { block } => {
             out.item("cmd")
@@ -987,7 +1282,30 @@ fn encode_command(out: &mut Out, id: u32, command: &Command) {
         Command::InjectJavaScript(s) => {
             out.item("cmd").num(id).str("injectJavaScript").str(s).end();
         }
+        Command::Back => out.item("cmd").num(id).str("back").end(),
+        Command::Announce(text) => out.item("cmd").num(id).str("announce").str(text).end(),
+        Command::AccessibilityFocus => out.item("cmd").num(id).str("a11yFocus").end(),
         Command::Seek(t) => out.item("cmd").num(id).str("seek").num(*t).end(),
+        Command::ZoomTo {
+            scale,
+            center,
+            animated,
+        } => {
+            out.item("cmd").num(id).str("zoomTo").num(*scale);
+            match center {
+                Some((x, y)) => out.num(*x).num(*y),
+                None => out.raw("null").raw("null"),
+            };
+            out.bool(*animated).end();
+        }
+        Command::Toast { text, long } => {
+            out.item("cmd")
+                .num(id)
+                .str("toast")
+                .str(text)
+                .bool(*long)
+                .end();
+        }
         Command::SetClipboard(text) => out.item("cmd").num(id).str("setClipboard").str(text).end(),
         Command::ReadClipboard {
             id: request,
@@ -999,6 +1317,20 @@ fn encode_command(out: &mut Out, id: u32, command: &Command) {
                 .num(*request)
                 .bool(*has_only)
                 .end();
+        }
+        Command::ImageInfo { id: request, uri } => {
+            out.item("cmd")
+                .num(id)
+                .str("imageInfo")
+                .num(*request)
+                .str(uri)
+                .end();
+        }
+        // The bar's color is the page's theme color; the browser keeps
+        // its bars' content and visibility.
+        Command::StatusBar(c) => {
+            let color = c.background.map(css_color).unwrap_or_default();
+            out.item("cmd").num(id).str("statusBar").str(&color).end();
         }
         other => log::debug!("web: command {other:?} is not supported"),
     }

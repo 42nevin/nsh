@@ -18,6 +18,7 @@ mod rust_app;
 mod sign;
 mod trace;
 mod ui;
+mod web;
 mod windows;
 
 use std::{path::PathBuf, process::ExitCode, sync::OnceLock};
@@ -76,6 +77,10 @@ enum Command {
         /// Minify and strip debug info.
         #[arg(long)]
         release: bool,
+        /// Split what `import()` loads into chunk files next to the bundle
+        /// (`Screen.js`, ...), loaded on demand: how web apps are published.
+        #[arg(long)]
+        split: bool,
     },
     /// Run an app headless and print the mount instructions and timings.
     Trace {
@@ -155,8 +160,8 @@ enum Command {
     /// Like `dev`, and also run the app in a development host: the Mac
     /// Catalyst app (default on macOS), the macOS (AppKit) app, the Linux
     /// app (default on Linux), the Windows app (default on Windows), the
-    /// GPUI app (on any of the three), an iOS simulator, or an Android
-    /// device or emulator.
+    /// GPUI app (on any of the three), an iOS simulator, an Android device
+    /// or emulator, or a browser.
     Run {
         /// The entry module, or the app's directory (default: the current one),
         /// whose `App.tsx` is the entry.
@@ -316,7 +321,8 @@ struct PackageArgs {
     #[arg(long, env = "NSH_KEYSTORE_PASSWORD", hide_env_values = true)]
     keystore_password: Option<String>,
     /// Install and launch the app in the simulator or on the Android device
-    /// afterwards (Linux, macOS, Windows: launch it).
+    /// afterwards (Linux, macOS, Windows: launch it; web: serve it on this
+    /// machine and open it in the browser).
     #[arg(long)]
     run: bool,
 }
@@ -392,7 +398,8 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             entry,
             out,
             release,
-        } => build::build(&entry, &out, release),
+            split,
+        } => build::build(&entry, &out, release, split),
         Command::Trace {
             entry,
             taps,

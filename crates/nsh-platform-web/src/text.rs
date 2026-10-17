@@ -49,6 +49,13 @@ pub(crate) struct WebTextEngine {
 }
 
 impl WebTextEngine {
+    /// Forgets the measurements: a font finished loading, so what was
+    /// measured with a fallback font is stale.
+    pub(crate) fn clear_caches(&self) {
+        self.widths.borrow_mut().clear();
+        self.metrics.borrow_mut().clear();
+    }
+
     fn width(&self, font: &Arc<str>, text: &str) -> f32 {
         if text.is_empty() {
             return 0.0;
@@ -150,6 +157,9 @@ pub(crate) struct Run {
     pub(crate) y: f32,
     pub(crate) text: String,
     pub(crate) style: u16,
+    /// What follows the run when the text is copied: the line's break (a
+    /// newline, or the spaces a wrap dropped) after its last run.
+    pub(crate) after: String,
 }
 
 /// A final layout.
@@ -331,7 +341,9 @@ impl TextEngine for WebTextEngine {
                     AtomKind::Text | AtomKind::Space => {
                         self.width(&font, &text) + spacing * text.chars().count() as f32
                     }
-                    _ => 0.0,
+                    // Its placeholder's room on the line.
+                    AtomKind::Attachment(w, _) => w,
+                    AtomKind::Newline => 0.0,
                 };
                 atoms.push(Atom {
                     text,
@@ -536,10 +548,20 @@ impl TextEngine for WebTextEngine {
                         y: baseline - s.ascent,
                         text,
                         style,
+                        after: String::new(),
                     }),
                 }
                 merge = true;
                 x += w;
+            }
+            if !last && let Some(run) = runs.last_mut() {
+                // An empty line adds its newline to the one before.
+                match atoms.get(line.end) {
+                    Some(a) if a.kind == AtomKind::Newline => run.after.push('\n'),
+                    _ => atoms[end..line.end]
+                        .iter()
+                        .for_each(|a| run.after.push_str(&a.text)),
+                }
             }
             let first = &styles[atoms.get(line.start).map_or(0, |a| a.style) as usize];
             text_lines.push(TextLine {
@@ -589,9 +611,9 @@ impl TextEngine for WebTextEngine {
             .or_else(|| name(ttf_parser::name_id::FAMILY))
             .ok_or("the font has no family name")?;
         ffi::register_font(&family, data, face.weight().to_number(), face.is_italic());
-        // Widths measured with a fallback font are stale now.
-        self.widths.borrow_mut().clear();
-        self.metrics.borrow_mut().clear();
+        // Widths measured with a fallback font are stale now (and again
+        // when the face finishes loading: `nsh_fonts_loaded`).
+        self.clear_caches();
         Ok(())
     }
 }

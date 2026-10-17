@@ -24,15 +24,17 @@
 //! Presses, pans and scroll drags never start on hosted items and text
 //! fields (they handle their own clicks, focus and selection drags), as
 //! native widgets keep theirs on Linux; mouse drags over selectable text
-//! select it rather than scroll.
+//! select it rather than pan.
 //!
 //! Presses follow React Native and the other backends: the innermost view
 //! listening to press events gets them (or the pressable text span under
 //! the pointer); `activeOpacity` fades the view natively; inside scroll
 //! views a touch reports `onPressIn` only after ~130 ms, as it may start a
 //! scroll. A move beyond 6 pt starts the innermost pan or scroll view that
-//! takes that direction (mouse drags scroll too, as in Mac Catalyst: apps
-//! are written for fingers); beyond 10 pt the press is over.
+//! takes that direction (only touches and pens drag scroll views: the
+//! mouse scrolls with the wheel, the touchpad, the keyboard and the
+//! indicator, and its drags go to pans, responders and text selection);
+//! beyond 10 pt the press is over.
 //!
 //! A view with a `panActivation` around the first pointer gates it
 //! ([`PanActivation::decide`] on every move): the scroll views around the
@@ -1351,7 +1353,7 @@ fn down(
             Some(Item::Input(hit.view.clone()))
         } else if !touch && crate::text::selectable(&hit.view.state()) {
             // Mouse drags over selectable text select it rather than
-            // scroll or pan.
+            // pan.
             Some(Item::Text(hit.view.clone()))
         } else {
             None
@@ -1400,9 +1402,9 @@ fn down(
         }
         if let Some(scroll) = &s.scroll {
             in_scroll = true;
-            // Mouse drags scroll too, as in Mac Catalyst (the other
-            // desktop host): apps are written for fingers.
-            if !native && !selects {
+            // Dragging the content is a touchscreen's way to scroll; on the
+            // desktop the mouse's drags are the app's.
+            if touch && !native && !selects {
                 candidates.push((
                     v.clone(),
                     Candidate::Scroll {
@@ -2171,6 +2173,12 @@ fn hover(surface: &Rc<Surface>, x: f32, y: f32, modifiers: Modifiers) {
     let tracking = !input.hover_tracked.borrow().is_empty() || !input.hovered.borrow().is_empty();
     let pressed = input.pointers.borrow().iter().any(|p| p.key == Key::Mouse);
     let hit = pick(&surface.root, x, y, true);
+    // The scroll views under the mouse show their indicators.
+    if let Some(hit) = &hit {
+        for v in chain(&hit.view).iter().filter(|v| v.kind() == ViewKind::Scroll) {
+            crate::scroll::hovered(surface, v);
+        }
+    }
     if tracking {
         let views = match &hit {
             Some(hit) => chain(&hit.view).into_iter().filter(hoverable).collect(),

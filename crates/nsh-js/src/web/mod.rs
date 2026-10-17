@@ -142,6 +142,17 @@ impl ClassTs {
         head: "",
         members: "",
     };
+
+    /// This declaration, or [`ClassTs::NONE`] in builds without
+    /// declarations (`nsh_core::ui::DECLARATIONS`): the text is then not in
+    /// the binary.
+    pub(crate) const fn declared(self) -> ClassTs {
+        if nsh_core::ui::DECLARATIONS {
+            self
+        } else {
+            ClassTs::NONE
+        }
+    }
 }
 
 fn specs() -> impl Iterator<Item = &'static Spec> {
@@ -215,6 +226,9 @@ pub(crate) struct Web {
     /// The requests in flight.
     pub(crate) fetches: rustc_hash::FxHashMap<crate::net::RequestId, fetch::Inflight>,
     pub(crate) next_fetch: crate::net::RequestId,
+    /// What relative request URLs resolve against ([`crate::HostOptions`]
+    /// `base_url`).
+    pub(crate) base_url: Option<::url::Url>,
 }
 
 impl Web {

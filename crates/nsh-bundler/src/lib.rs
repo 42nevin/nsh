@@ -14,12 +14,18 @@ mod compile;
 mod hot;
 mod jsx;
 #[cfg(feature = "bundle")]
+mod minify;
+#[cfg(feature = "bundle")]
 mod plugin;
+#[cfg(feature = "bundle")]
+mod split;
 #[cfg(feature = "bundle")]
 mod types;
 
 #[cfg(feature = "bundle")]
 pub use bundle::*;
+#[cfg(feature = "bundle")]
+pub use minify::minify_module;
 #[cfg(feature = "bundle")]
 pub use types::{TSCONFIG, type_definitions};
 

@@ -350,7 +350,7 @@ pub(crate) fn title_bar(ctx: *mut JsContext) -> JsValue {
     accessor(ctx, Part::TitleBar)
 }
 
-fn current(ctx: *mut JsContext) -> Environment {
+pub(crate) fn current(ctx: *mut JsContext) -> Environment {
     (*env(ctx).current.borrow()).unwrap_or_default()
 }
 
@@ -384,7 +384,7 @@ pub(crate) const REEXPORTS: &[Item] = &[
     (
         "safeArea",
         Export::Value(|ctx| accessor(ctx, Part::SafeArea)),
-        Ts::Const(
+        Ts::value(
             "Insets of the surface not covered by system UI (notch, home indicator,\ntitle bar), in points (reactive).",
             "Accessor<Insets>",
         ),
@@ -392,7 +392,7 @@ pub(crate) const REEXPORTS: &[Item] = &[
     (
         "keyboard",
         Export::Value(|ctx| accessor(ctx, Part::Keyboard)),
-        Ts::Const(
+        Ts::value(
             "Height of the software keyboard over the surface (0 when hidden) and the\nduration of its animation in seconds (reactive).",
             "Accessor<{ height: number; duration: number }>",
         ),
@@ -400,7 +400,7 @@ pub(crate) const REEXPORTS: &[Item] = &[
     (
         "useSafeAreaInsets",
         Export::Function(use_safe_area_insets, 0),
-        Ts::Function(
+        Ts::function(
             "Insets not covered by system UI or headers where this component renders:\nthe surface's safe area, a modal's, or a screen's (below its header).",
             &["(): Accessor<Insets>"],
         ),
@@ -452,10 +452,6 @@ fn idiom(env: &Environment) -> &'static str {
     }
 }
 
-fn is_desktop(os: Os) -> bool {
-    matches!(os, Os::MacOs | Os::Windows | Os::Linux)
-}
-
 /// `Platform`: the OS and form factor, constant while the app runs.
 fn platform(ctx: *mut JsContext) -> JsValue {
     let e = current(ctx);
@@ -471,7 +467,7 @@ fn platform(ctx: *mut JsContext) -> JsValue {
         ctx,
         &[
             (c"OS", string(ctx, e.os.name())),
-            (c"isDesktop", boolean(is_desktop(e.os))),
+            (c"isDesktop", boolean(e.desktop())),
             (c"Version", os_version(ctx, &e)),
             (c"isPad", boolean(e.idiom == Idiom::Pad)),
             (c"isTV", boolean(e.idiom == Idiom::Tv)),
@@ -483,7 +479,7 @@ fn platform(ctx: *mut JsContext) -> JsValue {
 }
 
 /// `Platform.select(spec)`: this OS's value, else `mobile` / `desktop`,
-/// else `native`, else `default`.
+/// else `native` (not on the web, as in React Native), else `default`.
 unsafe extern "C" fn platform_select(
     ctx: *mut JsContext,
     _this: JsValue,
@@ -495,9 +491,13 @@ unsafe extern "C" fn platform_select(
     if !unsafe { qjs::JS_IsObject(spec) } {
         return UNDEFINED;
     }
-    let os = current(ctx).os;
-    let kind = if is_desktop(os) { "desktop" } else { "mobile" };
-    for key in [os.name(), kind, "native", "default"] {
+    let env = current(ctx);
+    let kind = if env.desktop() { "desktop" } else { "mobile" };
+    let keys = [env.os.name(), kind, "native", "default"];
+    for key in keys
+        .into_iter()
+        .filter(|k| *k != "native" || env.os != Os::Web)
+    {
         let key = std::ffi::CString::new(key).unwrap_or_default();
         let v = unsafe { qjs::JS_GetPropertyStr(ctx, spec, key.as_ptr()) };
         if !unsafe { qjs::JS_IsUndefined(v) } {
@@ -672,7 +672,7 @@ pub(crate) const DEVICE_EXPORTS: &[Item] = &[
     (
         "windowSize",
         Export::Value(|ctx| accessor(ctx, Part::Window)),
-        Ts::Const(
+        Ts::value(
             "Size of the surface in points (reactive).",
             "Accessor<{ width: number; height: number }>",
         ),
@@ -680,7 +680,7 @@ pub(crate) const DEVICE_EXPORTS: &[Item] = &[
     (
         "colorScheme",
         Export::Value(|ctx| accessor(ctx, Part::ColorScheme)),
-        Ts::Const(
+        Ts::value(
             "The appearance shown (reactive): the system's, unless the app set its\nown (`nsh.json` `\"appearance\"`, `setColorScheme`).",
             "Accessor<\"light\" | \"dark\">",
         ),
@@ -688,7 +688,7 @@ pub(crate) const DEVICE_EXPORTS: &[Item] = &[
     (
         "setColorScheme",
         Export::Function(set_color_scheme, 1),
-        Ts::Function(
+        Ts::function(
             "Shows the app in `scheme` whatever the system's appearance, at once:\n`colorScheme()`, `dark:` classes, the components' theme and the\nplatform's controls (alerts, the status bar's default style) follow it;\n`\"system\"` follows the system again. `nsh.json` `\"appearance\"` sets it\nfrom the start.",
             &["(scheme: \"light\" | \"dark\" | \"system\"): void"],
         ),
@@ -696,7 +696,7 @@ pub(crate) const DEVICE_EXPORTS: &[Item] = &[
     (
         "fontScale",
         Export::Value(|ctx| accessor(ctx, Part::FontScale)),
-        Ts::Const(
+        Ts::value(
             "The user's preferred text size relative to the default (reactive).",
             "Accessor<number>",
         ),
@@ -704,7 +704,7 @@ pub(crate) const DEVICE_EXPORTS: &[Item] = &[
     (
         "Platform",
         Export::Value(platform),
-        Ts::Const(
+        Ts::value(
             "The platform the app runs on (React Native's `Platform`).",
             "PlatformStatic",
         ),
@@ -712,7 +712,7 @@ pub(crate) const DEVICE_EXPORTS: &[Item] = &[
     (
         "PixelRatio",
         Export::Value(pixel_ratio),
-        Ts::Const(
+        Ts::value(
             "Device pixels per point (React Native's `PixelRatio`). Not reactive:\nread in components that also read `windowSize()` to follow a window\nmoving to another screen.",
             "PixelRatioStatic",
         ),
@@ -720,7 +720,7 @@ pub(crate) const DEVICE_EXPORTS: &[Item] = &[
     (
         "I18nManager",
         Export::Value(i18n_manager),
-        Ts::Const(
+        Ts::value(
             "Right-to-left layout (React Native's `I18nManager`). Right to left,\nrows run from the right and `left` / `right` style properties mean start\nand end. Changes apply at once (no restart).",
             "I18nManagerStatic",
         ),
@@ -734,20 +734,23 @@ pub(crate) const DEVICE_TYPES: &str = r#"export interface PlatformSelectSpec<T> 
   macos?: T;
   windows?: T;
   linux?: T;
-  /** iOS and Android. */
+  web?: T;
+  /** iOS, Android, and phone and tablet browsers. */
   mobile?: T;
-  /** macOS, Windows and Linux. */
+  /** macOS, Windows, Linux, and desktop browsers. */
   desktop?: T;
-  /** Every platform (nsh only runs natively). */
+  /** Every platform but the web. */
   native?: T;
   default?: T;
 }
 
 export interface PlatformStatic {
   readonly OS: OS;
-  /** A desktop OS (macOS, Windows, Linux). */
+  /** Desktop behavior applies: macOS, Windows, Linux, and browsers with a
+   * mouse and a wide viewport (`interfaceIdiom` `"desktop"`). */
   readonly isDesktop: boolean;
-  /** iOS and desktops: the version string (`"17.5"`); Android: the API level. */
+  /** iOS and desktops: the version string (`"17.5"`); Android: the API
+   * level; the web: `"0.0"`. */
   readonly Version: string | number;
   readonly isPad: boolean;
   readonly isTV: boolean;
@@ -757,8 +760,9 @@ export interface PlatformStatic {
     readonly osVersion: string | number;
     readonly interfaceIdiom: "phone" | "pad" | "mac" | "tv" | "desktop";
   };
-  /** The value for this platform: its OS (`ios`, `macos`, ...), else
-   * `mobile` / `desktop`, else `native`, else `default`. */
+  /** The value for this platform: its OS (`ios`, `macos`, `web`, ...),
+   * else `mobile` / `desktop`, else `native` (not on the web), else
+   * `default`. */
   select<T>(spec: PlatformSelectSpec<T>): T | undefined;
 }
 
@@ -907,7 +911,7 @@ pub(crate) const ACCESSIBILITY_EXPORTS: &[Item] = &[
     (
         "reduceMotion",
         Export::Value(|ctx| accessor(ctx, Part::ReduceMotion)),
-        Ts::Const(
+        Ts::value(
             "Whether the user asked for less motion (reactive; also `motion-reduce:`).",
             "Accessor<boolean>",
         ),
@@ -915,7 +919,7 @@ pub(crate) const ACCESSIBILITY_EXPORTS: &[Item] = &[
     (
         "screenReaderEnabled",
         Export::Value(|ctx| accessor(ctx, Part::ScreenReader)),
-        Ts::Const(
+        Ts::value(
             "Whether a screen reader (VoiceOver, TalkBack) runs (reactive).",
             "Accessor<boolean>",
         ),
@@ -923,7 +927,7 @@ pub(crate) const ACCESSIBILITY_EXPORTS: &[Item] = &[
     (
         "AccessibilityInfo",
         Export::Value(accessibility_info),
-        Ts::Const(
+        Ts::value(
             "Screen reader and motion settings. `screenReaderEnabled()` and\n`reduceMotion()` are the reactive forms.",
             "AccessibilityInfoModule & AccessibilitySettings",
         ),

@@ -46,11 +46,13 @@ globals.
 | `nsh/desktop` | `isAvailable`, `titleBar()` (the environment's `title_bar`), `Menu.setApplicationMenu` / `Menu.popup` (decoded natively into `nsh_core::desktop::MenuItem`s, the items' functions kept by id, called on the root's `onMenu`), `Window` (Rust: `setTitle`, `setTitleBar`, `minimize`, `toggleMaximize`, `toggleFullScreen`, `close`); all of it is `Command::Desktop` on the root, which mobile platforms ignore | `desktop.rs` + its registry |
 | `nsh/ui/mobile` | `Stack`, `Screen`, `createNavigator`, `Modal`; the Rust components and modules of `nsh-ui-mobile`: `SafeAreaView`, `KeyboardAvoidingView`, `StatusBar` (and `StatusBar.setBarStyle` / `setHidden`), `Alert.alert` and `ActionSheet.show` (promises of the index chosen; a list dialog on Android), `Keyboard.dismiss`, `Button`, `Card`, `Group`, `ListView`, `Stepper`, `TextField`, `Sheet`, `SelectList`; re-exported from the runtime: `safeArea()`, `keyboard()`, `useSafeAreaInsets()` | `navigation.rs`; the registry (`components.rs`), `env.rs` |
 
-`nsh:hot` (hot module replacement, `hot.rs`) is only imported by development bundles.
+`nsh:hot` (hot module replacement, `hot.rs`) is only imported by development bundles. The same loader also compiles
+the chunks of a split bundle (`Screen.js`: a name that is no native module, with code the host gave; `chunks.rs`,
+`native-pipeline.md`), which `import()` loads through the global `__nsh_import`.
 
 - **Platform modules** are importable on both platforms (one bundle runs on both); on the other one their calls do
   nothing and their components render nothing. `isAvailable` tells which.
-- **Platform-only props** are grouped: `ios={{…}}` / `android={{…}}` / `desktop={{…}}` (macOS, Windows, Linux) on
+- **Platform-only props** are grouped: `ios={{…}}` / `android={{…}}` / `web={{…}}` / `desktop={{…}}` (macOS, Windows, Linux, and browsers in the desktop idiom) on
   elements and components (`IOSProps` / `AndroidProps` / `DesktopProps` in `types.d.ts`, extended per element; the host
   props in them are the generated `IOS…HostProps` / `Android…HostProps`). The renderer
   (`platform_props` in `dom.rs`) sends only the current platform's object, each key as a prop of its own (keys removed
@@ -60,7 +62,7 @@ globals.
   input `inputAccessoryViewID` / `textContentType` / `keyboardAppearance`, Screen `headerLargeTitle` / `headerBackTitle`, Modal
   `presentationStyle` / `supportedOrientations`, WebView `allowsBackForwardNavigationGestures`. Desktop: Screen
   `headerLargeTitle` / `headerBackTitle`, Modal `presentationStyle`, WebView `allowsBackForwardNavigationGestures`
-  (macOS' trackpad swipes, Windows' touchscreen swipes) (a prop of several platforms names each:
+  (macOS' trackpad swipes, Windows' touchscreen swipes). Web: Modal `presentationStyle` (a prop of several platforms names each:
   `#[prop(ios = "x", desktop = "x")]`).
 - A module's exports are made when a bundle first imports it; what must always happen (the root's direction, the
   themes) is the renderer's (`dom.rs`, `setup`), not a module's.

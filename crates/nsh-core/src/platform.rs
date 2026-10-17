@@ -62,6 +62,9 @@ pub enum Os {
     Windows,
     /// Linux.
     Linux,
+    /// A web browser (the WebAssembly runtime): phone, tablet or desktop
+    /// by [`Idiom`].
+    Web,
 }
 
 impl Os {
@@ -73,10 +76,14 @@ impl Os {
             Os::MacOs => "macos",
             Os::Windows => "windows",
             Os::Linux => "linux",
+            Os::Web => "web",
         }
     }
 
-    /// A desktop OS (`desktop={{…}}` props, `Platform.select({ desktop })`).
+    /// The OS of a desktop backend (macOS, Windows, Linux): it has windows
+    /// and menus (`nsh/desktop`). Desktop behavior (`desktop={{…}}` props,
+    /// `Platform.select({ desktop })`) also covers desktop-class browsers:
+    /// [`Environment::desktop`].
     pub fn is_desktop(self) -> bool {
         matches!(self, Os::MacOs | Os::Windows | Os::Linux)
     }
@@ -106,7 +113,8 @@ pub enum Idiom {
     Mac,
     /// A TV.
     Tv,
-    /// A desktop computer (a desktop backend; Mac Catalyst is [`Idiom::Mac`]).
+    /// A desktop computer (a desktop backend, or a browser with a mouse and
+    /// a wide viewport; Mac Catalyst is [`Idiom::Mac`]).
     Desktop,
 }
 
@@ -147,8 +155,22 @@ pub struct Environment {
     pub os_version: (u16, u16),
     /// The kind of device.
     pub idiom: Idiom,
+    /// A browser on an Apple platform (macOS, iOS): its keyboard shortcuts
+    /// follow Apple's conventions ([`crate::keymap::apple_keys`]: `mod` is
+    /// Command, labels use ⌘). Only read for [`Os::Web`]; the other OSes
+    /// imply theirs.
+    pub apple_keyboard: bool,
     /// The user's locale (number and date formats: `Intl`'s default).
     pub locale: Locale,
+}
+
+impl Environment {
+    /// Desktop behavior applies: a desktop OS, or a browser in the desktop
+    /// idiom (`desktop={{…}}` props, `Platform.select({ desktop })`,
+    /// `Platform.isDesktop`).
+    pub fn desktop(&self) -> bool {
+        self.os.is_desktop() || (self.os == Os::Web && self.idiom == Idiom::Desktop)
+    }
 }
 
 impl Default for Environment {
@@ -168,6 +190,7 @@ impl Default for Environment {
             os: Os::default(),
             os_version: (0, 0),
             idiom: Idiom::Phone,
+            apple_keyboard: false,
             locale: Locale::EN_US,
         }
     }

@@ -28,7 +28,7 @@ use std::{
     rc::Rc,
 };
 
-use nsh_core::{EventKind, NodeId, Op, Tag, platform::Os};
+use nsh_core::{EventKind, NodeId, Op, Tag, decl, platform::Os};
 use rquickjs::{Ctx, Value, qjs};
 use rustc_hash::FxHashMap;
 
@@ -60,9 +60,11 @@ pub(crate) struct Dom {
     nodes: RefCell<Vec<*mut NodeData>>,
     /// The root view's object (owned).
     root: Cell<JsValue>,
-    /// The platform: `ios={{…}}` / `android={{…}}` / `desktop={{…}}` props
+    /// The platform: `ios={{…}}` / `android={{…}}` / `web={{…}}` props
     /// apply on it only.
     os: Cell<Os>,
+    /// Desktop behavior applies (`desktop={{…}}`; `Environment::desktop`).
+    desktop: Cell<bool>,
     /// The layout direction sent to the root (`None`: nothing mounted yet).
     rtl: Cell<Option<bool>>,
     /// The `onDismiss` handlers of modals the app removed, kept until the
@@ -231,6 +233,7 @@ impl Dom {
             nodes: RefCell::new(Vec::new()),
             root: Cell::new(UNDEFINED),
             os: Cell::new(Os::Ios),
+            desktop: Cell::new(false),
             rtl: Cell::new(None),
             env_rtl: Cell::new(false),
             dismissed: RefCell::new(Vec::new()),
@@ -247,9 +250,11 @@ impl Dom {
         }
     }
 
-    /// The platform `ios={{…}}` / `android={{…}}` props are for.
-    pub(crate) fn set_os(&self, os: Os) {
+    /// The platform `ios={{…}}` / `android={{…}}` / `web={{…}}` props are
+    /// for, and whether `desktop={{…}}` props apply.
+    pub(crate) fn set_platform(&self, os: Os, desktop: bool) {
         self.os.set(os);
+        self.desktop.set(desktop);
     }
 
     /// The platform the app runs on.
@@ -316,89 +321,116 @@ pub(crate) const NODE_METHODS: &[(&str, c_int, &str, &str)] = &[
     (
         "focus",
         0,
-        "(): void",
-        "Focuses an `<Input>` (shows the keyboard).",
+        decl!("(): void"),
+        decl!("Focuses an `<Input>` (shows the keyboard)."),
     ),
-    ("blur", 0, "(): void", "Unfocuses an `<Input>`."),
+    (
+        "blur",
+        0,
+        decl!("(): void"),
+        decl!("Unfocuses an `<Input>`."),
+    ),
     (
         "setSelection",
         2,
-        "(start: number, end?: number): void",
-        "Inputs: selects `start..end` (UTF-16 units; a caret without `end`).",
+        decl!("(start: number, end?: number): void"),
+        decl!("Inputs: selects `start..end` (UTF-16 units; a caret without `end`)."),
     ),
     (
         "command",
         2,
-        "(name: string, args?: unknown): void",
-        "Calls command `name` of a registered native component (`nsh/native`) with `args` (any JSON value).",
+        decl!("(name: string, args?: unknown): void"),
+        decl!(
+            "Calls command `name` of a registered native component (`nsh/native`) with `args` (any JSON value)."
+        ),
     ),
     (
         "scrollTo",
         1,
-        "(options: { x?: number; y?: number; animated?: boolean }): void",
-        "Scrolls a `<Scroll>` or `List` to an offset.",
+        decl!("(options: { x?: number; y?: number; animated?: boolean }): void"),
+        decl!("Scrolls a `<Scroll>` or `List` to an offset."),
     ),
     (
         "zoomTo",
         1,
-        "(options: { scale: number; x?: number; y?: number; animated?: boolean }): void",
-        "A zoomable `<Scroll>` (`maximumZoomScale` above `minimumZoomScale`): zooms to `scale` (clamped to the limits), with the content point (`x`, `y`) (unzoomed points) in the middle of the viewport, or around the middle. E.g. double tap to zoom in on the tapped point.",
+        decl!("(options: { scale: number; x?: number; y?: number; animated?: boolean }): void"),
+        decl!(
+            "A zoomable `<Scroll>` (`maximumZoomScale` above `minimumZoomScale`): zooms to `scale` (clamped to the limits), with the content point (`x`, `y`) (unzoomed points) in the middle of the viewport, or around the middle. E.g. double tap to zoom in on the tapped point."
+        ),
     ),
     (
         "scrollToOffset",
         1,
-        "(options: { offset: number; animated?: boolean }): void",
-        "`List`: scrolls to a content offset along the list's axis.",
+        decl!("(options: { offset: number; animated?: boolean }): void"),
+        decl!("`List`: scrolls to a content offset along the list's axis."),
     ),
     (
         "scrollToIndex",
         1,
-        "(options: { index: number; animated?: boolean; viewPosition?: number; viewOffset?: number }): void",
-        "`List`: scrolls item `index` into view. `viewPosition` places it: 0 at the start of the viewport (default), 0.5 in the middle, 1 at the end; `viewOffset` shifts it further. Resolved natively with the current (measured or estimated) item sizes.",
+        decl!(
+            "(options: { index: number; animated?: boolean; viewPosition?: number; viewOffset?: number }): void"
+        ),
+        decl!(
+            "`List`: scrolls item `index` into view. `viewPosition` places it: 0 at the start of the viewport (default), 0.5 in the middle, 1 at the end; `viewOffset` shifts it further. Resolved natively with the current (measured or estimated) item sizes."
+        ),
     ),
     (
         "scrollToEnd",
         1,
-        "(options?: { animated?: boolean }): void",
-        "`List`: scrolls to the end of the content (the start of an inverted list).",
+        decl!("(options?: { animated?: boolean }): void"),
+        decl!("`List`: scrolls to the end of the content (the start of an inverted list)."),
     ),
     (
         "measure",
         0,
-        "(): Promise<{ x: number; y: number; width: number; height: number; pageX: number; pageY: number } | null>",
-        "Where the view is once this turn's changes are laid out: `x` / `y` / `width` / `height` its frame in its parent (as `onLayout`), `pageX` / `pageY` its top left corner in the root view it is in (the surface, or its modal), the coordinates of touches' `pageX` / `pageY`: `event.pageX - m.pageX` is a touch's position in the view. Scroll offsets and zoom scales of the scroll views and lists around it are applied, transforms (animations included) are not. `null` when the view is not in the tree.",
+        decl!(
+            "(): Promise<{ x: number; y: number; width: number; height: number; pageX: number; pageY: number } | null>"
+        ),
+        decl!(
+            "Where the view is once this turn's changes are laid out: `x` / `y` / `width` / `height` its frame in its parent (as `onLayout`), `pageX` / `pageY` its top left corner in the root view it is in (the surface, or its modal), the coordinates of touches' `pageX` / `pageY`: `event.pageX - m.pageX` is a touch's position in the view. Scroll offsets and zoom scales of the scroll views and lists around it are applied, transforms (animations included) are not. `null` when the view is not in the tree."
+        ),
     ),
-    ("reload", 0, "(): void", "`WebView`: reloads the page."),
+    (
+        "reload",
+        0,
+        decl!("(): void"),
+        decl!("`WebView`: reloads the page."),
+    ),
     (
         "goBack",
         0,
-        "(): void",
-        "`WebView`: goes back in its history.",
+        decl!("(): void"),
+        decl!("`WebView`: goes back in its history."),
     ),
     (
         "goForward",
         0,
-        "(): void",
-        "`WebView`: goes forward in its history.",
+        decl!("(): void"),
+        decl!("`WebView`: goes forward in its history."),
     ),
-    ("stopLoading", 0, "(): void", "`WebView`: stops loading."),
+    (
+        "stopLoading",
+        0,
+        decl!("(): void"),
+        decl!("`WebView`: stops loading."),
+    ),
     (
         "injectJavaScript",
         1,
-        "(script: string): void",
-        "`WebView`: runs JavaScript in the page.",
+        decl!("(script: string): void"),
+        decl!("`WebView`: runs JavaScript in the page."),
     ),
     (
         "postMessage",
         1,
-        "(data: string): void",
-        "`WebView`: sends `data` to the page (a `message` event on `window`).",
+        decl!("(data: string): void"),
+        decl!("`WebView`: sends `data` to the page (a `message` event on `window`)."),
     ),
     (
         "seek",
         1,
-        "(seconds: number): void",
-        "`Video`: jumps to `seconds`.",
+        decl!("(seconds: number): void"),
+        decl!("`Video`: jumps to `seconds`."),
     ),
 ];
 
@@ -1099,7 +1131,9 @@ fn set_prop(
             }
             return Ok(());
         }
-        "ios" | "android" | "desktop" => return platform_props(ctx, node, name, value, prev),
+        "ios" | "android" | "desktop" | "web" => {
+            return platform_props(ctx, node, name, value, prev);
+        }
         "contentContainerStyle" | "contentContainerClass"
             if unsafe { (*p).tag } == Some(Tag::Scroll) =>
         {
@@ -1270,8 +1304,9 @@ pub(crate) fn is_ancestor_of(ctx: *mut JsContext, node: NodeId, of: NodeId) -> b
     is_ancestor(ctx, node, of)
 }
 
-/// `ios={{…}}` / `android={{…}}` / `desktop={{…}}`: the props of this
-/// platform only, each set (or cleared) on its own.
+/// `ios={{…}}` / `android={{…}}` / `web={{…}}` / `desktop={{…}}`: the
+/// props of this platform only, each set (or cleared) on its own. Desktop
+/// props apply on the desktop OSes and in desktop-class browsers.
 fn platform_props(
     ctx: *mut JsContext,
     node: JsValue,
@@ -1279,11 +1314,10 @@ fn platform_props(
     value: JsValue,
     prev: JsValue,
 ) -> Result<(), JsValue> {
-    let os = dom(ctx).os.get();
-    let desktop = matches!(os, Os::MacOs | Os::Windows | Os::Linux);
+    let dom = dom(ctx);
     let applies = match name {
-        "desktop" => desktop,
-        other => other == os.name(),
+        "desktop" => dom.desktop.get(),
+        other => other == dom.os.get().name(),
     };
     if !applies {
         return Ok(());

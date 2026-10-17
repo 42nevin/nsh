@@ -65,14 +65,14 @@ nsh init [DIR] [--name <NAME>]
 ## nsh run
 
 ```sh
-nsh run [ENTRY] [--target catalyst|ios|android|macos|linux|windows|gpui] [--device <DEVICE>] [--port <PORT>] [--release] [--trace] [--fps]
+nsh run [ENTRY] [--target catalyst|ios|android|macos|linux|windows|gpui|web] [--device <DEVICE>] [--port <PORT>] [--release] [--trace] [--fps]
 ```
 
 启动开发服务器（同 `nsh dev`），启动一个从它加载应用的开发宿主，并在每次保存时重新构建。热模块替换会就地修补正在运行的应用；应用的日志和错误会打印在终端里。用 Ctrl-C 停止（或关闭 Catalyst、macOS、Linux、Windows 或 GPUI 窗口）。
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--target <TARGET>` | macOS 上为 `catalyst`，Linux 上为 `linux`，Windows 上为 `windows` | `catalyst`：Mac Catalyst 宿主，一个 iPhone 大小的窗口（390×844）。`ios`：iOS 模拟器中的宿主。`android`：Android 设备或模拟器上的宿主。`macos`：AppKit 宿主，一个 1200×800 的窗口（[macOS](./macos.md)）。`linux`：GTK 宿主，一个 390×844 的窗口（[Linux](./linux.md)）。`windows`：Win32 宿主，一个 1200×800 的窗口（[Windows](./windows.md)）。`gpui`：GPUI 宿主，一个 1200×800 的窗口，可在 macOS、Windows 或 Linux 上运行（[GPUI](./gpui.md)）。 |
+| `--target <TARGET>` | macOS 上为 `catalyst`，Linux 上为 `linux`，Windows 上为 `windows` | `catalyst`：Mac Catalyst 宿主，一个 iPhone 大小的窗口（390×844）。`ios`：iOS 模拟器中的宿主。`android`：Android 设备或模拟器上的宿主。`macos`：AppKit 宿主，一个 1200×800 的窗口（[macOS](./macos.md)）。`linux`：GTK 宿主，一个 390×844 的窗口（[Linux](./linux.md)）。`windows`：Win32 宿主，一个 1200×800 的窗口（[Windows](./windows.md)）。`gpui`：GPUI 宿主，一个 1200×800 的窗口，可在 macOS、Windows 或 Linux 上运行（[GPUI](./gpui.md)）。`web`：开发服务器的页面，在浏览器中打开（[Web](./web.md#在浏览器里开发)）。 |
 | `--device <DEVICE>` | | 要使用的 iOS 模拟器，按名称（`"iPhone 16 Pro"`）或 UDID 指定。默认：已启动的模拟器，否则启动最新的 iPhone。 |
 | `--port <PORT>` | `8790` | 开发服务器端口。被占用时使用下一个空闲端口。 |
 | `--release` | | 压缩代码并去掉调试信息。release 包没有热模块替换：每次保存都会重新加载应用。 |
@@ -87,12 +87,14 @@ nsh run [ENTRY] [--target catalyst|ios|android|macos|linux|windows|gpui] [--devi
 nsh dev [ENTRY] [--port <PORT>] [--release]
 ```
 
-只运行开发服务器：构建应用、监视入口所在目录，并把每次重新构建推送给连接到它的宿主。它会打印本机宿主使用的 URL，以及每个局域网地址对应的设备 URL：
+只运行开发服务器：构建应用、监视入口所在目录，并把每次重新构建推送给连接到它的宿主。它会打印本机宿主使用的 URL、每个局域网地址对应的设备 URL，以及在 Web 运行时存在时，浏览器运行应用要打开的页面（[Web](./web.md#在浏览器里开发)）：
 
 ```text
 ✓ built App.tsx (3.2 KB js, 9.8 KB bytecode, 21ms)
 → dev server ws://127.0.0.1:8790/ws
+  browsers: http://127.0.0.1:8790/
   devices on this network: ws://192.168.1.20:8790/ws
+  browsers on this network: http://192.168.1.20:8790/
 ```
 
 适合配合你自己启动的宿主使用，例如嵌入了开发版 SDK（`NativeShellDev.xcframework`、`nsh-dev.aar`）的应用。参数与 `nsh run` 相同。
@@ -128,7 +130,7 @@ perf commit: 56 ops, 412µs (list js 6µs), 49 mount items, 21 nodes
 ## nsh build
 
 ```sh
-nsh build [ENTRY] [-o <OUT>] [--release]
+nsh build [ENTRY] [-o <OUT>] [--release] [--split]
 ```
 
 打包应用并编译为 QuickJS 字节码，供嵌入 NSH、自行分发 bundle 的应用使用。
@@ -137,6 +139,7 @@ nsh build [ENTRY] [-o <OUT>] [--release]
 |---|---|---|
 | `-o, --out <OUT>` | `out` | 输出目录。 |
 | `--release` | | 压缩代码并去掉调试信息。 |
+| `--split` | | 把 `import()` 加载的代码放进独立的 chunk 文件，第一次导入时才下载（Web 应用，见[拆分 bundle](./web.md#拆分-bundle)）。不加时，bundle 包含整个应用。 |
 
 输出内容：
 
@@ -145,20 +148,21 @@ nsh build [ENTRY] [-o <OUT>] [--release]
 | `bundle.js` | JavaScript 形式的 bundle |
 | `bundle.js.map` | 它的 source map（堆栈会映射回你的源码） |
 | `bundle.nshc` | 编译后的字节码 bundle：应用实际加载的就是它 |
+| `<Chunk>.js`、`<Chunk>.js.map`、`<Chunk>.nshc` | 使用 `--split` 时：每个 chunk、它的 source map 和字节码（`import("./Screen")` 对应 `Screen.js`） |
 | `capabilities.json` | `nsh.json` 中声明的 `capabilities`（未声明时删除） |
 | `assets/` | 所有被导入的图片和字体，保持相对于应用根目录的路径 |
 
 ## nsh package
 
 ```sh
-nsh package [ENTRY] --target ios|ios-simulator|android|macos|linux|windows|gpui [-o <OUT>] [flags]
+nsh package [ENTRY] --target ios|ios-simulator|android|macos|linux|windows|gpui|web [-o <OUT>] [flags]
 ```
 
-用预构建的运行时以 release 模式构建可安装的应用。整个过程不涉及 Rust，也不需要 Xcode 工程或 Gradle 构建：NSH 自己组装应用包，并使用 Xcode 的 `actool` 和 `codesign`（iOS）或 SDK 中的 `aapt2`、`zipalign` 和 `apksigner`（Android）；macOS 则用 `codesign` 组装一个 ad hoc 签名的 `.app`（图标用 `sips` 转换）；Linux 则复制运行器并用 `tar` 生成 `.tar.gz`；Windows 则复制运行器、嵌入图标并生成 `.zip`，不需要任何工具；GPUI 则按本机操作系统的方式打包，只是换成 GPUI 运行器。元数据来自 `nsh.json`，可被参数覆盖。
+用预构建的运行时以 release 模式构建可安装的应用。整个过程不涉及 Rust，也不需要 Xcode 工程或 Gradle 构建：NSH 自己组装应用包，并使用 Xcode 的 `actool` 和 `codesign`（iOS）或 SDK 中的 `aapt2`、`zipalign` 和 `apksigner`（Android）；macOS 则用 `codesign` 组装一个 ad hoc 签名的 `.app`（图标用 `sips` 转换）；Linux 则复制运行器并用 `tar` 生成 `.tar.gz`；Windows 则复制运行器、嵌入图标并生成 `.zip`，不需要任何工具；GPUI 则按本机操作系统的方式打包，只是换成 GPUI 运行器；Web 则写出一个静态站点，同样不需要任何工具。元数据来自 `nsh.json`，可被参数覆盖。
 
 | 参数 | 说明 |
 |---|---|
-| `--target <TARGET>` | 必填。`ios`：iOS 设备，签名的 `.ipa`（不带 `--sign` 时为未签名的 `.app`）。`ios-simulator`：ad hoc 签名的 `.app`。`android`：签名的 `.apk`。`macos`：ad hoc 签名的 `.app`（[macOS](./macos.md#打包)）。`linux`：一个目录 `<Name>/`（可执行文件、`nsh/`、`.desktop` 文件）和 `<Name>.tar.gz`（[Linux](./linux.md#打包)）。`windows`：一个目录 `<Name>\`（`<Name>.exe`、`nsh\`）和 `<Name>.zip`（[Windows](./windows.md#打包)）。`gpui`：本机上 `macos`、`windows` 或 `linux` 生成的产物，但使用 GPUI 运行器（[GPUI](./gpui.md#打包)）。 |
+| `--target <TARGET>` | 必填。`ios`：iOS 设备，签名的 `.ipa`（不带 `--sign` 时为未签名的 `.app`）。`ios-simulator`：ad hoc 签名的 `.app`。`android`：签名的 `.apk`。`macos`：ad hoc 签名的 `.app`（[macOS](./macos.md#打包)）。`linux`：一个目录 `<Name>/`（可执行文件、`nsh/`、`.desktop` 文件）和 `<Name>.tar.gz`（[Linux](./linux.md#打包)）。`windows`：一个目录 `<Name>\`（`<Name>.exe`、`nsh\`）和 `<Name>.zip`（[Windows](./windows.md#打包)）。`gpui`：本机上 `macos`、`windows` 或 `linux` 生成的产物，但使用 GPUI 运行器（[GPUI](./gpui.md#打包)）。`web`：一个目录 `<Name>/`，即静态站点（`index.html` 和以内容命名的文件）（[Web](./web.md#发布应用)）。 |
 | `-o, --out <OUT>` | 输出目录（默认 `out`）。 |
 | `--name <NAME>` | 显示名称。 |
 | `--id <ID>` | Bundle identifier，例如 `com.example.app`。 |
@@ -170,7 +174,7 @@ nsh package [ENTRY] --target ios|ios-simulator|android|macos|linux|windows|gpui 
 | `--keystore <FILE>` | Android：release keystore。默认使用 `~/.android/debug.keystore` 中的调试密钥（不存在时创建）。 |
 | `--key-alias <ALIAS>` | Android：keystore 中的密钥别名。 |
 | `--keystore-password <PASSWORD>` | Android：keystore 密码，也可从 `NSH_KEYSTORE_PASSWORD` 读取。 |
-| `--run` | 打包完成后安装并启动应用：在模拟器中（`ios-simulator`）或在已连接的 Android 设备上；`macos`、`linux`、`windows` 和 `gpui` 则直接启动它。 |
+| `--run` | 打包完成后安装并启动应用：在模拟器中（`ios-simulator`）或在已连接的 Android 设备上；`macos`、`linux`、`windows` 和 `gpui` 则直接启动它；`web` 在本机提供站点服务并在浏览器中打开。 |
 
 ```sh
 nsh package App.tsx --target ios-simulator --run
@@ -180,6 +184,7 @@ nsh package App.tsx --target macos
 nsh package App.tsx --target linux
 nsh package App.tsx --target windows
 nsh package App.tsx --target gpui
+nsh package App.tsx --target web
 ```
 
 参见[打包](./packaging.md)。

@@ -10,6 +10,7 @@
 //! dist/nsh/runtime/windows/{nsh-windows-host,nsh-windows-app}.exe  development host, packaged app runner
 //! dist/nsh/runtime/gpui/{nsh-gpui-host,nsh-gpui-app}[.exe]     development host, packaged app runner (GPUI)
 //! dist/nsh/runtime/android/{release,dev}/                      classes.dex, lib/<abi>/libnsh.so
+//! dist/nsh/runtime/web/{nsh.wasm,nsh-dev.wasm,nsh.js}          the web runtimes (published apps', the dev host's)
 //! dist/nsh/embed/ios/{NativeShell,NativeShellDev}.xcframework  embedding in iOS apps
 //! dist/nsh/embed/android/{nsh,nsh-dev}.aar                     embedding in Android apps
 //! ```
@@ -21,7 +22,9 @@
 //! without WebKitGTK's development files it is built with placeholders for
 //! web views and needs only GTK); the Windows runtime likewise, on
 //! Windows only (where the CLI is `bin/nsh.exe`). The GPUI runtime is
-//! built for this machine on each of the three.
+//! built for this machine on each of the three. The web runtime is built
+//! everywhere: it needs a clang that targets wasm32 and `llvm-ar`
+//! (`docs/dev/web.md`).
 
 use std::{env, fs, path::Path, process::Command};
 
@@ -130,6 +133,32 @@ pub(crate) fn dist() -> anyhow::Result<()> {
             )?;
         }
     }
+
+    // The web runtimes: the same files on every machine. Published apps'
+    // (no QuickJS parser: bytecode only) and the development host's (JS
+    // source and hot updates). Both build to the same file, copied in turn.
+    for (features, file) in [
+        (&["--features", "bytecode-only"][..], "nsh.wasm"),
+        (&[][..], "nsh-dev.wasm"),
+    ] {
+        let mut web = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+        web.current_dir(&root)
+            .args(["build", "--profile", "web", "-p", "nsh-platform-web"])
+            .args(features)
+            .args(["--target", "wasm32-unknown-unknown"]);
+        if env::var_os("AR_wasm32_unknown_unknown").is_none() && env::var_os("AR").is_none() {
+            web.env("AR_wasm32_unknown_unknown", "llvm-ar");
+        }
+        term::cargo(&mut web, "the web runtime")?;
+        copy(
+            &release.join("wasm32-unknown-unknown/web/nsh_platform_web.wasm"),
+            &out.join("runtime/web").join(file),
+        )?;
+    }
+    copy(
+        &root.join("crates/nsh-platform-web/web/nsh.js"),
+        &out.join("runtime/web/nsh.js"),
+    )?;
 
     // Android runtimes. Windows machines often have no Android SDK: the
     // distribution is then made without them.

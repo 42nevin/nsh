@@ -23,6 +23,11 @@
     `INTERNAL_EVENTS`);
   - a web class: its spec's `ClassTs` (members as in a class body; the constants come from the spec's table), the
     types its file declares in `TYPES`, a global function's `web::Function`, the other globals `host::GLOBALS`.
+- The text of declarations (documentation, TypeScript) is only in builds that can write them: the WebAssembly runtime
+  (`nsh_core::ui::DECLARATIONS` is false there) leaves it out, as pages download it. The tables keep their shape and
+  wrap the text: `Ts::function` / `value` / `class`, `ClassTs { … }.declared()`, `decl!("…")` (a constant's text is
+  then not in the binary at all), and generated code calls `ts_of::<T>()` instead of `T::ts_type`. New tables do
+  the same; nothing the runtime needs (names, lengths, whether a method returns) goes through them.
 - The tests keep them true: every module is loaded and its exports compared with its declarations
   (`declarations_match_the_modules`), every web class's members with its spec (`web_classes_declare_their_members`),
   the globals with a host's (`globals_match_the_host`: what is declared exists, and every global the host adds to
@@ -86,7 +91,11 @@ before every `cargo run`): `✓` lines for its builds, cargo's and the tools' ou
 - The CLI watches sources with notify and pushes every rebuild over WebSocket (`/ws`, default port 8790, the next free port if taken) to all
   connected hosts; new clients subscribe before receiving the current state, so no event is missed. Protocol: `crates/nsh-dev/src/protocol.rs`
   (JSON text frames + binary frames).
-- Bytecode version negotiation: the client reports `BYTECODE_VERSION` in its handshake; on a mismatch the server sends JS source instead.
+- Bytecode version negotiation: the client reports `BYTECODE_VERSION` in its handshake; on a mismatch the server sends JS source instead
+  (an empty version, the web host's, asks for source without a warning).
+- The web host is a page the dev server serves itself (`DevServer::serve_web`, the fallback route: `/`, `/nsh.js`,
+  `/nsh.wasm`) when a web runtime exists; browsers connect to `/ws` on the same port. `nsh run --target web` builds the
+  runtime in a checkout and opens the page (`docs/dev/web.md`, "The CLI's web target").
 - Watching ignores `Access` events: inotify (Linux) reports reads, FSEvents does not, so the build's own reads of the
   sources would start the next build, forever.
 - `nsh run` defaults to the host that runs on this machine: `--target catalyst` on macOS, `--target linux` (the GTK
@@ -160,6 +169,12 @@ before every `cargo run`): `✓` lines for its builds, cargo's and the tools' ou
 - Stacks are symbolicated with source maps: bundling produces a hidden source map (the TSX→JSX→JS maps are composed with
   `rolldown_sourcemap::collapse_sourcemaps`), sent along with the bundle; the engine rewrites `bundle.js:L:C` to `App.tsx:L:C` before reporting.
 
+## `nsh build --split`
+
+Writes a split bundle (`native-pipeline.md`, "Split bundles"): `bundle.js` / `.map` / `.nshc` and, per chunk,
+`<id>`, `<id>.map` and `<stem>.nshc` (`build::compile_split`, `Built::chunks`). Without `--split` (and for `nsh
+package`, `publish`, the dev server) the bundle holds the whole app.
+
 ## `nsh trace`
 
 `crates/nsh-cli/src/trace.rs` runs the app in the CLI's process (`ApproxTextEngine`, a channel as the mount sink, 60 Hz
@@ -231,7 +246,9 @@ The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distributi
 `target/<triple>/<profile>` (Linux's, macOS's, Windows' and GPUI's, built for this machine, in `target/<profile>`,
 Windows' `nsh-windows-host.exe` / `nsh-windows-app.exe`; the distribution has GPUI's in `runtime/gpui/` on each OS) and `target/android/<profile>[-dev]` with the CLI's own profile (`NSH_RUNTIME` overrides). In a checkout (`<root>/target/<profile>/nsh` next to
 `crates/nsh-ios-host`), the CLI builds what it needs with cargo first (`cargo build -p nsh-ios-host --target ...`,
-`cargo xtask android --dev`), so `nsh run` never uses a missing or stale host.
+`cargo xtask android --dev`), so `nsh run` never uses a missing or stale host. The web runtimes (`runtime/web/nsh.wasm`
+for published apps, `nsh-dev.wasm` for the development host, and `nsh.js`: `docs/dev/web.md`) are always built with
+the `web` profile, into `target/wasm32-unknown-unknown/web/`.
 
 ## Releases
 

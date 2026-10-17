@@ -1,4 +1,4 @@
-//! Scroll views: offsets, wheel / touchpad / drag / keyboard scrolling with
+//! Scroll views: offsets, wheel / touchpad / touch / keyboard scrolling with
 //! momentum, snapping, sticky cells, the core's scroll requests, scroll
 //! events.
 //!
@@ -745,7 +745,10 @@ pub(crate) fn config(
             return;
         };
         s.horizontal = horizontal;
-        s.indicator = indicator;
+        // A horizontal view keeps its indicator: it is the mouse's scroll
+        // bar, and a mouse without a horizontal wheel has no other way
+        // to move it (mouse drags do not scroll).
+        s.indicator = indicator || horizontal;
         if !indicator {
             s.live.alpha = 0.0;
         }
@@ -934,7 +937,7 @@ pub(crate) fn command(surface: &Rc<Surface>, view: &NshView, command: &Command) 
 
 // Input.
 
-/// A pointer drag on `view` began (touch-style scrolling).
+/// A touchscreen drag on `view` began (the mouse never drags content).
 pub(crate) fn drag_begin(surface: &Rc<Surface>, view: &NshView) {
     if !enabled(view) {
         return;
@@ -1050,6 +1053,32 @@ pub(crate) fn grabs_thumb(view: &NshView, x: f32, y: f32) -> bool {
     };
     (edge - THUMB_GRAB..=edge).contains(&across)
         && (start - THUMB_SLOP..=start + len + THUMB_SLOP).contains(&along)
+}
+
+/// The mouse moved over `view`: its indicator shows (and fades again
+/// once the mouse rests), as GTK's overlay scroll bars do, so that a
+/// mouse user sees it can scroll and where its scroll bar is.
+pub(crate) fn hovered(surface: &Rc<Surface>, view: &NshView) {
+    {
+        let mut state = view.state_mut();
+        if thumb(&state).is_none() {
+            return;
+        }
+        let Some(s) = state.scroll.as_mut() else {
+            return;
+        };
+        if !s.indicator || !s.behavior.enabled {
+            return;
+        }
+        s.live.shown = now();
+        if s.live.alpha == 1.0 {
+            return;
+        }
+        s.live.alpha = 1.0;
+        s.live.dark = surface.environment.get().color_scheme == nsh_engine::ColorScheme::Dark;
+    }
+    view.queue_draw();
+    ensure_ticking(surface, view);
 }
 
 /// The mouse grabbed `view`'s indicator ([`grabs_thumb`]).

@@ -12,6 +12,7 @@
 mod animated;
 mod bytecode;
 mod canvas;
+mod chunks;
 mod components;
 mod console;
 mod declarations;
@@ -41,9 +42,13 @@ pub use nsh_core::{
 };
 
 pub use crate::{
-    bytecode::{BUNDLE_NAME, BYTECODE_VERSION, compile_bytecode, compile_bytecode_with},
+    bytecode::{
+        BUNDLE_NAME, BYTECODE_VERSION, compile_bytecode, compile_bytecode_with,
+        compile_chunk_bytecode,
+    },
     declarations::type_definitions,
     error::JsError,
     host::{ErrorHandler, Host, HostOptions, TextMeasurer},
     net::{FetchEvent, FetchOp, HttpBody, HttpHead, HttpRequest, NetworkQueue, RequestId},
+    sandbox::compile_harden,
 };

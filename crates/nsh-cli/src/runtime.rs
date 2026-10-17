@@ -18,18 +18,24 @@
 //! runtime/gpui/nsh-gpui-app[.exe]            release runner (GPUI, this OS)
 //! runtime/android/release/             classes.dex + lib/<abi>/libnsh.so
 //! runtime/android/dev/                 the same with development support
+//! runtime/web/nsh.wasm                 the web runtime (`nsh-platform-web`)
+//! runtime/web/nsh.js                   the DOM runtime that loads it
 //! ```
 //!
 //! In a cargo checkout, the same files come from `target/<triple>/<profile>`
 //! (with the profile of this CLI; Linux's, macOS's, Windows' and GPUI's
 //! from `target/<profile>`, as they are built for this machine), and are
 //! built with cargo first, so a run never uses a missing or stale host.
+//! The web runtime is always built with the `web` profile (a debug build is
+//! several times larger and slower), into
+//! `target/wasm32-unknown-unknown/web/`, its `nsh.js` read from the crate.
 //! `NSH_RUNTIME` overrides the root. An app with a Rust crate of its own
 //! gets hosts built for it instead (`rust_app.rs`).
 
 use std::{
     env,
     ffi::OsString,
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -204,6 +210,111 @@ fn android_existing(dir: PathBuf, dev: bool) -> anyhow::Result<PathBuf> {
         dir.display(),
         if dev { " --dev" } else { "" }
     )
+}
+
+/// The web runtime: the engine (`nsh.wasm`) and the DOM runtime that
+/// loads it (`nsh.js`), which only work together.
+pub(crate) struct WebRuntime {
+    pub(crate) wasm: PathBuf,
+    pub(crate) js: PathBuf,
+}
+
+/// Which web runtime: the two differ in QuickJS only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebKind {
+    /// Published apps' (`nsh package --target web`): without QuickJS'
+    /// parser (feature `bytecode-only`), it runs the bytecode the CLI
+    /// compiled. `nsh.wasm`.
+    Release,
+    /// The development host's (`nsh dev`, `nsh run --target web`): it runs
+    /// JS source and hot updates. `nsh-dev.wasm`.
+    Dev,
+}
+
+impl WebKind {
+    /// Its file in the distribution (`runtime/web/`) and, in a checkout,
+    /// next to the build's output.
+    fn file(self) -> &'static str {
+        match self {
+            WebKind::Release => "nsh.wasm",
+            WebKind::Dev => "nsh-dev.wasm",
+        }
+    }
+}
+
+/// The web runtime ([`WebRuntime`]) of `kind`. In a checkout it is built
+/// first when `build` is set; without it, the build that is there, if any
+/// (`None`).
+pub(crate) fn web(kind: WebKind, build: bool) -> anyhow::Result<Option<WebRuntime>> {
+    const WASM: &str = "wasm32-unknown-unknown";
+    let found = |dir: PathBuf| {
+        let runtime = WebRuntime {
+            wasm: dir.join(kind.file()),
+            js: dir.join("nsh.js"),
+        };
+        (runtime.wasm.exists() && runtime.js.exists()).then_some(runtime)
+    };
+    if let Some(root) = env::var_os("NSH_RUNTIME") {
+        let dir = PathBuf::from(root).join("web");
+        return match found(dir.clone()) {
+            Some(runtime) => Ok(Some(runtime)),
+            None if build => bail!("the web runtime is not in {}", dir.display()),
+            None => Ok(None),
+        };
+    }
+    let exe = cli_exe()?;
+    let bin = exe.parent().context("cli has no parent directory")?;
+    if let Some(runtime) = found(bin.join("../runtime/web")) {
+        return Ok(Some(runtime));
+    }
+    let Some(root) = checkout(bin) else {
+        if build {
+            bail!(
+                "the web runtime is not at {}",
+                bin.join("../runtime/web").display()
+            );
+        }
+        return Ok(None);
+    };
+    let out = bin
+        .parent()
+        .context("cli is not in a target directory")?
+        .join(WASM)
+        .join("web");
+    let features: &[&str] = match kind {
+        WebKind::Release => &["--features", "bytecode-only"],
+        WebKind::Dev => &[],
+    };
+    if build {
+        let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+        let mut command = Command::new(&cargo);
+        command
+            .args(["build", "--profile", "web", "-p", "nsh-platform-web"])
+            .args(features)
+            .args(["--target", WASM])
+            .current_dir(&root);
+        // QuickJS' archive needs an `ar` that knows WebAssembly objects.
+        let ar = format!("AR_{}", WASM.replace('-', "_"));
+        if env::var_os(&ar).is_none() && env::var_os("AR").is_none() {
+            command.env(&ar, "llvm-ar");
+        }
+        crate::ui::cargo(&mut command, "the web runtime")?;
+        // Both kinds build to the same file: each keeps a copy of its own.
+        let built = out.join("nsh_platform_web.wasm");
+        fs::copy(&built, out.join(kind.file()))
+            .with_context(|| format!("copy {}", built.display()))?;
+    }
+    let runtime = WebRuntime {
+        wasm: out.join(kind.file()),
+        js: root.join("crates/nsh-platform-web/web/nsh.js"),
+    };
+    if runtime.wasm.exists() {
+        return Ok(Some(runtime));
+    }
+    if build {
+        bail!("the web runtime is not at {}", runtime.wasm.display());
+    }
+    Ok(None)
 }
 
 /// Path of the development host (`runner` false) or release runner for

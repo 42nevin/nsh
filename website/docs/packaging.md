@@ -1,6 +1,6 @@
 ---
 title: Packaging
-description: Build installable apps with nsh package for iOS devices, the iOS simulator, Android, macOS, Windows and Linux, with app metadata, icons and signing.
+description: Build installable apps with nsh package for iOS devices, the iOS simulator, Android, macOS, Windows, Linux and the web, with app metadata, icons and signing.
 order: 19
 group: platforms
 ---
@@ -8,7 +8,7 @@ group: platforms
 # Packaging
 
 `nsh package` turns an app into something you can install: a `.app` for the iOS simulator, a signed `.ipa` for iOS
-devices, a signed `.apk` for Android, an ad hoc signed `.app` for macOS, a directory and `.tar.gz` for Linux, or a directory and `.zip` for Windows; `--target gpui` makes this machine's desktop package with the GPUI runner. It combines a release build of your app with the **prebuilt runtime** that
+devices, a signed `.apk` for Android, an ad hoc signed `.app` for macOS, a directory and `.tar.gz` for Linux, a directory and `.zip` for Windows, or a static site for the web; `--target gpui` makes this machine's desktop package with the GPUI runner. It combines a release build of your app with the **prebuilt runtime** that
 ships with NSH, so it needs no Rust toolchain, no Xcode project and no Gradle.
 
 ```sh
@@ -17,6 +17,7 @@ nsh package App.tsx --target android --run           # build, install and launch
 nsh package App.tsx --target macos --run             # build and launch on this Mac
 nsh package App.tsx --target linux --run             # build and launch on this machine
 nsh package App.tsx --target windows --run           # build and launch on this machine
+nsh package App.tsx --target web --run               # build, serve on this machine and open in the browser
 nsh package App.tsx --target ios --sign "Apple Development: Jane Doe (ABCDE12345)" --profile Dev.mobileprovision
 ```
 
@@ -62,7 +63,7 @@ nsh package App.tsx --target android --app-version 1.4.0 --build 42
 
 | Flag | Description |
 |---|---|
-| `--target <ios \| ios-simulator \| android \| macos \| linux \| windows \| gpui>` | What to build for (required). |
+| `--target <ios \| ios-simulator \| android \| macos \| linux \| windows \| gpui \| web>` | What to build for (required). |
 | `-o, --out <dir>` | Output directory. Default `out`. |
 | `--name <name>` | Display name. |
 | `--id <id>` | Bundle identifier, such as `com.example.app`. |
@@ -74,7 +75,7 @@ nsh package App.tsx --target android --app-version 1.4.0 --build 42
 | `--keystore <file>` | Android: a release keystore (default: the debug key). |
 | `--key-alias <alias>` | Android: the key alias in the keystore. |
 | `--keystore-password <password>` | Android: the keystore password; also read from `NSH_KEYSTORE_PASSWORD`. |
-| `--run` | Install and launch afterwards: in the iOS simulator, or on the Android device or emulator `adb` sees; macOS, Linux, Windows and GPUI apps are launched on this machine. Not for `--target ios`. |
+| `--run` | Install and launch afterwards: in the iOS simulator, or on the Android device or emulator `adb` sees; macOS, Linux, Windows and GPUI apps are launched on this machine; a web site is served on this machine and opened in the browser. Not for `--target ios`. |
 
 ## iOS simulator
 
@@ -187,6 +188,17 @@ runner is built for the machine it is built on. See [GPUI](./gpui.md#packaging).
 
 A Linux GPUI package links WebKitGTK 4.1 (web views) and GStreamer (videos) dynamically, so the machines it runs on need them installed, with GTK 3 and GStreamer's base and good plug-ins (Debian / Ubuntu: `libwebkit2gtk-4.1-0`, `libgstreamer1.0-0`, `libgstreamer-plugins-base1.0-0`, `gstreamer1.0-plugins-good`), besides a Vulkan driver and `libxkbcommon`.
 
+## Web
+
+```sh
+nsh package App.tsx --target web --run
+```
+
+Writes `out/<Name>/`, a static site: `index.html`, `manifest.webmanifest`, and the runtime (`nsh.<digest>.js`,
+`nsh.<digest>.wasm`), the app (`app.<digest>.js`, its JS source), its assets and icons, each named after its content
+so hosts can cache them for good. Deploy the directory to any web server or CDN; `--run` serves it on
+`http://127.0.0.1:4173/` and opens the browser. Cache headers and embedding: [Web](./web.md#publish-an-app).
+
 ## Icons
 
 Give one square PNG, ideally 1024×1024, in `nsh.json` (`"icon": "icon.png"`) or with `--icon`:
@@ -198,6 +210,7 @@ Give one square PNG, ideally 1024×1024, in `nsh.json` (`"icon": "icon.png"`) or
 - **Linux:** copied as `<id>.png`, which the `.desktop` file names as its `Icon`.
 - **Windows:** resized to 16 to 64 pixels and 256 pixels and embedded in the executable as its icon, which the window,
   Explorer and the taskbar show.
+- **Web:** resized to 32 pixels (the favicon), 180 (`apple-touch-icon`), 192 and 512 (the web app manifest).
 
 Without an icon, the system shows its default.
 
@@ -214,6 +227,7 @@ imports, next to the prebuilt runtime:
 | Linux | the `nsh-linux-app` executable, renamed `<Name>` | `<Name>/nsh/bundle.nshc`, `nsh/assets/…` |
 | Windows | the `nsh-windows-app.exe` executable, renamed `<Name>.exe` | `<Name>\nsh\bundle.nshc`, `nsh\assets\…` |
 | GPUI | the `nsh-gpui-app` executable, renamed as on this machine's OS | as on this machine's OS |
+| Web | `nsh.<digest>.wasm`, `nsh.<digest>.js` | `<Name>/app.<digest>.js` (JS source), `assets/…`, `index.html` |
 
 A packaged app registers no [native components](./native-components.md); for those, embed NSH in your own app.
 
@@ -223,9 +237,9 @@ A packaged app registers no [native components](./native-components.md); for tho
 NSH it uses `target/<triple>/<profile>` and `target/android/<profile>`, with the CLI's own profile (a debug CLI uses
 debug runtimes): build them with `cargo build -p nsh-ios-app --target aarch64-apple-ios-sim` (or `aarch64-apple-ios`
 for devices) and `cargo xtask android` (add `--release` for a release CLI); `nsh-macos-app` (on macOS), `nsh-linux-app` (on Linux), `nsh-windows-app` (on Windows) and `nsh-gpui-app` (on any of them) are built for this
-machine in `target/<profile>` (`cargo build -p nsh-macos-app`, `cargo build -p nsh-linux-app`, `cargo build -p nsh-windows-app`, `cargo build --manifest-path crates/gpui/Cargo.toml --target-dir target -p nsh-gpui-app`). The environment variable `NSH_RUNTIME`
+machine in `target/<profile>` (`cargo build -p nsh-macos-app`, `cargo build -p nsh-linux-app`, `cargo build -p nsh-windows-app`, `cargo build --manifest-path crates/gpui/Cargo.toml --target-dir target -p nsh-gpui-app`); the web runtime is built with the `web` profile whatever the CLI's, into `target/wasm32-unknown-unknown/web/`. The environment variable `NSH_RUNTIME`
 points the CLI at another directory laid out like the distribution's `runtime/` (`ios/iphoneos`,
-`ios/iphonesimulator`, `android/release`, `macos`, `linux`, `windows`, `gpui`, ...).
+`ios/iphonesimulator`, `android/release`, `macos`, `linux`, `windows`, `gpui`, `web`, ...).
 
 ## See also
 

@@ -82,6 +82,38 @@ pub struct Host {
     budget: Budget,
 }
 
+/// A context with `JS_NewContext`'s intrinsics. With feature
+/// `bytecode-only` without the one that compiles source (`eval`, the
+/// function constructors, `Module::declare`): nothing then reaches QuickJS'
+/// parser and compiler, which the linker leaves out, and the VM runs
+/// bytecode only (the web runtime of published apps).
+fn new_context(rt: &Runtime) -> rquickjs::Result<Context> {
+    #[cfg(not(feature = "bytecode-only"))]
+    {
+        Context::full(rt)
+    }
+    #[cfg(feature = "bytecode-only")]
+    {
+        use rquickjs::context::intrinsic::{
+            Date, Json, MapSet, Performance, Promise, Proxy, RegExp, TypedArrays, WeakRef,
+        };
+        let ctx = Context::custom::<(
+            Date,
+            RegExp,
+            Json,
+            Proxy,
+            MapSet,
+            TypedArrays,
+            Promise,
+            WeakRef,
+            Performance,
+        )>(rt)?;
+        // SAFETY: a new, live context; rquickjs has no intrinsic for it.
+        ctx.with(|ctx| unsafe { rquickjs::qjs::JS_AddIntrinsicAToB(ctx.as_raw().as_ptr()) });
+        Ok(ctx)
+    }
+}
+
 /// How a VM is set up.
 #[derive(Debug, Clone, Default)]
 pub struct HostOptions {
@@ -90,9 +122,18 @@ pub struct HostOptions {
     /// Removes `eval` and the function constructors and freezes the shared
     /// prototypes (see `sandbox`). Off for development bundles.
     pub harden: bool,
+    /// The hardening as bytecode ([`crate::compile_harden`]), run instead
+    /// of compiling it: a runtime without QuickJS' parser
+    /// (`bytecode-only`) needs it to harden. Trusted input, like a bundle's
+    /// bytecode: only from the CLI that compiled the app.
+    pub harden_bytecode: Option<std::sync::Arc<Vec<u8>>>,
     /// The UI sets apps import as native modules
     /// (`nsh_ui_mobile::registry()`, served as `nsh/ui/mobile`).
     pub ui_sets: Vec<nsh_core::ui::Registry>,
+    /// The URL relative request URLs (`fetch("/api")`, `new Request("x")`)
+    /// resolve against: the page's on the web. `None` (native hosts):
+    /// they are invalid, as there is no document they belong to.
+    pub base_url: Option<String>,
 }
 
 impl Host {
@@ -114,16 +155,24 @@ impl Host {
         rt.set_max_stack_size(limits.stack_bytes);
         let budget = Budget::new(limits);
         rt.set_interrupt_handler(Some(budget.interrupt_handler(None)));
-        let ctx = Context::full(&rt)?;
+        let ctx = new_context(&rt)?;
         let shared = Rc::new(Shared {
             limits,
             ..Shared::default()
         });
         ctx.with(|ctx| {
             crate::state::install(&ctx, shared.clone(), &options.ui_sets);
+            web::web(ctx.as_raw().as_ptr()).base_url = options
+                .base_url
+                .as_deref()
+                .and_then(|u| url::Url::parse(u).ok());
             install(&ctx, &shared)?;
             if options.harden {
-                sandbox::harden(&ctx)?;
+                match &options.harden_bytecode {
+                    // SAFETY: trusted, per the option's contract.
+                    Some(bytecode) => unsafe { sandbox::harden_from(&ctx, bytecode)? },
+                    None => sandbox::harden(&ctx)?,
+                }
             }
             Ok(())
         })
@@ -273,6 +322,53 @@ impl Host {
             Ok(())
         })
         .unwrap_or_else(|| Err(self.stopped()))
+    }
+
+    /// Gives the VM chunk `id` of a split bundle (an ES module as
+    /// `nsh-bundler` makes it), before the bundle is evaluated or when it
+    /// was asked for ([`Host::take_chunk_requests`]); the imports waiting
+    /// for it continue.
+    pub fn add_chunk_source(&self, id: &str, source: String) {
+        self.add_chunk(id, crate::modules::ChunkCode::Source(source));
+    }
+
+    /// [`Host::add_chunk_source`] for a chunk compiled with
+    /// [`crate::compile_chunk_bytecode`].
+    ///
+    /// # Safety
+    ///
+    /// As [`Host::eval_bytecode`]: bytecode from this QuickJS build, from a
+    /// trusted source (QuickJS does not validate it).
+    pub unsafe fn add_chunk_bytecode(&self, id: &str, bytecode: Vec<u8>) {
+        self.add_chunk(id, crate::modules::ChunkCode::Bytecode(bytecode));
+    }
+
+    fn add_chunk(&self, id: &str, code: crate::modules::ChunkCode) {
+        self.guarded(Phase::Call, || {
+            self.ctx
+                .with(|ctx| crate::chunks::add(ctx.as_raw().as_ptr(), id, code));
+            self.run_jobs();
+        });
+    }
+
+    /// Chunk `id` could not be loaded: the imports waiting for it reject
+    /// with `message`. A later import asks for it again.
+    pub fn chunk_failed(&self, id: &str, message: &str) {
+        self.guarded(Phase::Call, || {
+            self.ctx
+                .with(|ctx| crate::chunks::failed(ctx.as_raw().as_ptr(), id, message));
+            self.run_jobs();
+        });
+    }
+
+    /// Moves the ids of the chunks the app imports and the VM does not have
+    /// (since the last call) into `out`: the host loads each and hands it
+    /// over with [`Host::add_chunk_source`] or [`Host::chunk_failed`].
+    pub fn take_chunk_requests(&self, out: &mut Vec<String>) {
+        self.ctx.with(|ctx| {
+            // SAFETY: the context's state, for this call.
+            unsafe { &(*crate::state::state(ctx.as_raw().as_ptr())).chunks }.take_requests(out)
+        });
     }
 
     /// Delivers a native event (and its data) to the node's JS handler.
@@ -427,7 +523,7 @@ impl Host {
                 let result = (|| {
                     let raw = ctx.as_raw().as_ptr();
                     // SAFETY: the state of this host's context.
-                    unsafe { &(*crate::state::state(raw)).dom }.set_os(env.os);
+                    unsafe { &(*crate::state::state(raw)).dom }.set_platform(env.os, env.desktop());
                     if crate::env::set_environment(raw, env).is_err() {
                         return Err(rquickjs::Error::Exception);
                     }
@@ -745,6 +841,7 @@ fn install(ctx: &Ctx<'_>, shared: &Rc<Shared>) -> rquickjs::Result<()> {
     let globals = ctx.globals();
     console::install(ctx)?;
     web::install(ctx.as_raw().as_ptr())?;
+    crate::chunks::install(ctx.as_raw().as_ptr()).map_err(|_| rquickjs::Error::Exception)?;
     crate::dom::install_globals(ctx.as_raw().as_ptr());
 
     for (name, repeat) in [("setTimeout", false), ("setInterval", true)] {
@@ -1118,7 +1215,20 @@ const report = (v) => text(String(v));
 
     #[test]
     fn hardened_vms_run_no_code_from_strings() {
-        let host = sandboxed(Limits::default());
+        // Hardened from source, and from the bytecode the CLI ships to
+        // runtimes without a parser.
+        let from_bytecode = Host::with_options(HostOptions {
+            harden: true,
+            harden_bytecode: Some(crate::compile_harden().unwrap().into()),
+            ..HostOptions::default()
+        })
+        .unwrap();
+        for host in [sandboxed(Limits::default()), from_bytecode] {
+            hardened_vm_runs_no_code_from_strings(&host);
+        }
+    }
+
+    fn hardened_vm_runs_no_code_from_strings(host: &Host) {
         host.eval_source(&(REPORT.to_owned()
             + r#"
             const results = [];
@@ -1153,7 +1263,7 @@ const report = (v) => text(String(v));
             "#))
         .unwrap();
         assert_eq!(
-            reported(&host),
+            reported(host),
             [
                 "ReferenceError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,ran,ran,ran,TypeError"
             ]

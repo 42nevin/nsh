@@ -80,6 +80,60 @@ pub struct Bundle {
     pub source_map: Option<Arc<str>>,
     /// What the code may do.
     pub policy: Policy,
+    /// What relative request URLs resolve against (the page's URL on the
+    /// web); `None`: they are invalid.
+    pub base_url: Option<Arc<str>>,
+    /// The chunks of a split bundle that come with it (`import()` loads
+    /// them without asking the platform); those missing are asked of
+    /// [`MountSink::load_chunk`]. Shared by the bundle's clones.
+    pub chunks: Arc<Vec<Chunk>>,
+    /// The sandbox's hardening as bytecode (`nsh_js::compile_harden`),
+    /// for a runtime without QuickJS' parser (the web runtime of published
+    /// apps); `None`: compiled when the policy hardens. Set it with
+    /// [`Bundle::with_harden_bytecode`].
+    pub harden_bytecode: Option<Arc<Vec<u8>>>,
+}
+
+/// A chunk of a split bundle (`nsh_bundler::Chunk`): app code that
+/// `import()` loads on demand.
+#[derive(Debug, Clone)]
+pub struct Chunk {
+    /// Its id (`Screen.js`), as the bundle imports it.
+    pub id: String,
+    /// The code.
+    pub code: BundleCode,
+    /// Source map (JSON), for stack traces.
+    pub source_map: Option<Arc<str>>,
+}
+
+impl Chunk {
+    /// A chunk as JS source.
+    pub fn source(id: impl Into<String>, code: String) -> Self {
+        Self {
+            id: id.into(),
+            code: BundleCode::Source(code),
+            source_map: None,
+        }
+    }
+
+    /// A chunk as bytecode (`nsh_js::compile_chunk_bytecode`).
+    ///
+    /// # Safety
+    ///
+    /// As [`Bundle::bytecode`].
+    pub unsafe fn bytecode(id: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self {
+            id: id.into(),
+            code: BundleCode::Bytecode(bytes),
+            source_map: None,
+        }
+    }
+
+    /// Attaches a source map.
+    pub fn with_source_map(mut self, map: impl Into<Arc<str>>) -> Self {
+        self.source_map = Some(map.into());
+        self
+    }
 }
 
 /// What a bundle's code may do.
@@ -151,6 +205,9 @@ impl Bundle {
             code: BundleCode::Bytecode(bytes),
             source_map: None,
             policy: Policy::default(),
+            base_url: None,
+            chunks: Arc::default(),
+            harden_bytecode: None,
         }
     }
 
@@ -160,6 +217,9 @@ impl Bundle {
             code: BundleCode::Source(code),
             source_map: None,
             policy: Policy::default(),
+            base_url: None,
+            chunks: Arc::default(),
+            harden_bytecode: None,
         }
     }
 
@@ -169,9 +229,32 @@ impl Bundle {
         self
     }
 
+    /// Sets the URL relative request URLs resolve against.
+    pub fn with_base_url(mut self, url: impl Into<Arc<str>>) -> Self {
+        self.base_url = Some(url.into());
+        self
+    }
+
+    /// Hardens with `bytes` ([`Bundle::harden_bytecode`]).
+    ///
+    /// # Safety
+    ///
+    /// As [`Bundle::bytecode`]: `bytes` comes from `nsh_js::compile_harden`
+    /// of this runtime's `BYTECODE_VERSION`, from a trusted source.
+    pub unsafe fn with_harden_bytecode(mut self, bytes: Vec<u8>) -> Self {
+        self.harden_bytecode = Some(Arc::new(bytes));
+        self
+    }
+
     /// Replaces the policy.
     pub fn with_policy(mut self, policy: Policy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Adds chunks of a split bundle (see [`Bundle::chunks`]).
+    pub fn with_chunks(mut self, chunks: impl IntoIterator<Item = Chunk>) -> Self {
+        Arc::make_mut(&mut self.chunks).extend(chunks);
         self
     }
 
@@ -331,6 +414,15 @@ pub trait MountSink: Send + 'static {
     /// latest size. A platform that waits for the layout at a new size, to
     /// show it in the frame the window takes the size, stops waiting here.
     fn resized(&self, _size: Size) {}
+
+    /// The app imports chunk `id` of a split bundle (`import()`), which its
+    /// [`Bundle`] does not hold: load it and hand it over with
+    /// [`EngineControl::chunk_loaded`] (or [`EngineControl::chunk_failed`]),
+    /// from any thread, and return true. False (the default): this host
+    /// has no chunks to load, and the import fails.
+    fn load_chunk(&self, _id: &str) -> bool {
+        false
+    }
 }
 
 /// Receives what happens to a request started by [`Network::fetch`], in
@@ -445,10 +537,14 @@ enum Message {
     ScreenHeader(NodeId, Option<f32>),
     Frame,
     States(NodeId, u8),
+    FontsChanged,
     /// An event of a request (by the hop it is for: events of a hop the
     /// engine left are dropped).
     Fetch(RequestId, u64, FetchEvent),
     Hot(HotUpdate),
+    /// A chunk [`MountSink::load_chunk`] was asked for, or why it could
+    /// not be loaded (its id and the message).
+    Chunk(Result<Chunk, (String, String)>),
     Perf(Option<Arc<perf::PerfMonitor>>),
     /// The embedding app's theme.
     Theme(Option<Box<Theme>>),
@@ -542,6 +638,18 @@ impl EngineControl {
         let _ = self.tx.send(Message::Hot(update));
     }
 
+    /// Hands over the chunk [`MountSink::load_chunk`] asked for: the
+    /// dynamic imports waiting for it continue.
+    pub fn chunk_loaded(&self, chunk: Chunk) {
+        let _ = self.tx.send(Message::Chunk(Ok(chunk)));
+    }
+
+    /// Chunk `id` could not be loaded: the dynamic imports waiting for it
+    /// fail with `message` (a later import asks for it again).
+    pub fn chunk_failed(&self, id: String, message: String) {
+        let _ = self.tx.send(Message::Chunk(Err((id, message))));
+    }
+
     /// A display frame began, after [`MountSink::request_frame`]: runs the
     /// `requestAnimationFrame` callbacks and the tasks waiting for it.
     pub fn frame(&self) {
@@ -554,6 +662,13 @@ impl EngineControl {
     /// (`active:`, `hover:`, `focus:`) update without JS.
     pub fn set_states(&self, id: NodeId, states: u8) {
         let _ = self.tx.send(Message::States(id, states));
+    }
+
+    /// Fonts the platform loads asynchronously became usable (on the web,
+    /// a `FontFace` finished loading): text measured with a fallback font
+    /// is measured again.
+    pub fn fonts_changed(&self) {
+        let _ = self.tx.send(Message::FontsChanged);
     }
 
     /// Records the engine's commits into `monitor` from now on (`None`:
@@ -910,6 +1025,7 @@ impl<M: TextEngine + 'static> Driver<M> {
             sink.submit(batch);
         }
         state.net.pump(script);
+        state.load_chunks(script, &**sink);
         state.request_frame(script, &**sink);
         driver.check_stopped();
         Some(driver)
@@ -984,6 +1100,7 @@ impl<M: TextEngine + 'static> Driver<M> {
             sink.resized(size);
         }
         state.net.pump(script);
+        state.load_chunks(script, &**sink);
         state.request_frame(script, &**sink);
         self.check_stopped();
     }
@@ -1257,6 +1374,19 @@ impl<M: TextEngine> State<M> {
         }
     }
 
+    /// Asks the platform for the chunks JS imports and does not have.
+    fn load_chunks(&mut self, script: Option<&Script>, sink: &dyn MountSink) {
+        let Some(script) = script else { return };
+        let mut ids = Vec::new();
+        script.take_chunk_requests(&mut ids);
+        for id in ids {
+            if !sink.load_chunk(&id) {
+                let message = "this host does not load chunks (the app was built split)".to_owned();
+                let _ = self.net.tx.send(Message::Chunk(Err((id, message))));
+            }
+        }
+    }
+
     /// Asks the platform for a frame when JS or a component's task waits
     /// for one.
     fn request_frame(&mut self, script: Option<&Script>, sink: &dyn MountSink) {
@@ -1411,7 +1541,9 @@ fn ui_environment(env: &Environment, window: Size) -> nsh_core::ui::Environment 
 fn class_environment(env: &Environment) -> nsh_core::tailwind::ClassEnvironment {
     nsh_core::tailwind::ClassEnvironment {
         dark: env.color_scheme == ColorScheme::Dark,
-        platform: if cfg!(target_os = "android") {
+        platform: if env.os == Os::Web {
+            nsh_core::tailwind::Platform::Web
+        } else if cfg!(target_os = "android") {
             nsh_core::tailwind::Platform::Android
         } else {
             nsh_core::tailwind::Platform::Ios
@@ -1513,6 +1645,7 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
             }
         }
         Message::States(id, states) => state.core.set_states(id, states),
+        Message::FontsChanged => state.core.fonts_changed(),
         Message::Fetch(id, hop, event) => {
             if let Some(event) = state.net.event(id, hop, event)
                 && let Some(script) = script
@@ -1521,6 +1654,11 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
             }
         }
         Message::Hot(update) => state.hot.push(update),
+        Message::Chunk(chunk) => {
+            if let Some(script) = script {
+                script.chunk(chunk);
+            }
+        }
         Message::Perf(monitor) => {
             state.perf = monitor;
             state.perf_commit = perf::CommitTiming::default();
