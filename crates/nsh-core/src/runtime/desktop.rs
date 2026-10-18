@@ -4,7 +4,7 @@
 
 use crate::{
     Command, ROOT_ID,
-    desktop::{DesktopCommand, TitleBarStyle},
+    desktop::{DesktopCommand, TitleBarStyle, WindowFrame, WindowLevel},
     ui::{ModuleCx, module, task::Action},
 };
 
@@ -54,6 +54,33 @@ impl Window {
     /// Enters or leaves full screen.
     pub(crate) fn toggle_full_screen(cx: &mut ModuleCx) {
         desktop(cx, DesktopCommand::ToggleFullScreen);
+    }
+
+    /// Moves and sizes the window in points; omitted fields keep their values.
+    /// macOS and Windows use the outer frame, including window decorations;
+    /// Linux uses GTK's default window size. `x` and `y` are the bottom left
+    /// corner in macOS screen coordinates and the top left on Windows.
+    /// `animated` enables macOS's resize animation (false by default).
+    /// Sizing is supported on macOS, Windows and Linux; positioning and levels
+    /// on macOS and Windows. GPUI's host chooses its bounds and level.
+    pub(crate) fn set_frame(frame: WindowFrame, cx: &mut ModuleCx) {
+        let frame = WindowFrame {
+            x: frame.x.filter(|v| v.is_finite()),
+            y: frame.y.filter(|v| v.is_finite()),
+            width: frame.width.filter(|v| v.is_finite() && *v > 0.0),
+            height: frame.height.filter(|v| v.is_finite() && *v > 0.0),
+            animated: frame.animated,
+        };
+        desktop(cx, DesktopCommand::SetFrame(frame));
+    }
+
+    /// Sets the window's level on macOS and Windows: `"normal"` restores the
+    /// normal level; `"floating"` stays above normal windows. `"desktopIcon"`
+    /// selects macOS's desktop icon level or moves a Windows window to the
+    /// bottom of the current z-order, where later activation can raise it.
+    /// GTK and GPUI leave the level to the host and window manager.
+    pub(crate) fn set_level(level: WindowLevel, cx: &mut ModuleCx) {
+        desktop(cx, DesktopCommand::SetLevel(level));
     }
 
     /// Closes the window; the app ends with it.

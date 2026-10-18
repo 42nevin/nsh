@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::ui::PropEnum;
+use crate::ui::{JsObject, PropEnum};
 
 /// How the window's title bar looks (`Window.setTitleBar`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
@@ -20,6 +20,37 @@ pub enum TitleBarStyle {
     /// lights, Windows' caption buttons, GTK's window buttons) in the area
     /// the environment's `title_bar` reports.
     Hidden,
+}
+
+/// A window's frame (`Window.setFrame`): the part of it to move, in
+/// points, in screen coordinates; a field left out keeps its value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, JsObject)]
+pub struct WindowFrame {
+    /// Its left edge (macOS's screen coordinates go up: `x` and `y` are the
+    /// window's bottom left corner there).
+    pub x: Option<f32>,
+    /// Its bottom edge on macOS, its top edge elsewhere.
+    pub y: Option<f32>,
+    /// Its outer width on macOS / Windows, GTK default width on Linux.
+    pub width: Option<f32>,
+    /// Its outer height on macOS / Windows, GTK default height on Linux.
+    pub height: Option<f32>,
+    /// Animates the change on macOS (false by default).
+    pub animated: Option<bool>,
+}
+
+/// How high a window floats (`Window.setLevel`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
+pub enum WindowLevel {
+    /// The normal level.
+    #[default]
+    Normal,
+    /// Above normal windows: a floating palette or a widget.
+    Floating,
+    /// macOS's desktop icon level; on Windows, moves to the bottom of
+    /// the current z-order (later activation can raise the window).
+    #[prop(rename = "desktopIcon")]
+    DesktopIcon,
 }
 
 /// A key of a [`Shortcut`].
@@ -565,6 +596,11 @@ pub enum DesktopCommand {
     ToggleMaximize,
     /// Enters or leaves full screen.
     ToggleFullScreen,
+    /// Moves and sizes the window (screen coordinates, points; a field
+    /// left out keeps its value).
+    SetFrame(WindowFrame),
+    /// The window's level (a floating window stays above normal ones).
+    SetLevel(WindowLevel),
     /// Closes the window (the app ends with its last window).
     Close,
     /// The application menu (macOS's menu bar, the window's menu bar on

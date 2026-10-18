@@ -166,6 +166,21 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
         }
         DesktopCommand::ToggleMaximize => toggle_maximize(surface),
         DesktopCommand::ToggleFullScreen => toggle_fullscreen(surface),
+        DesktopCommand::SetFrame(frame) => {
+            // Merge with the requested size: GTK applies it asynchronously,
+            // so the allocation may still reflect an earlier frame.
+            if (frame.width.is_some() || frame.height.is_some())
+                && let Some(window) = window(surface)
+            {
+                let (width, height) = window.default_size();
+                window.set_default_size(
+                    frame.width.map_or(width, |v| v.round() as i32),
+                    frame.height.map_or(height, |v| v.round() as i32),
+                );
+            }
+        }
+        // GTK 4 has no window levels.
+        DesktopCommand::SetLevel(_) => {}
         DesktopCommand::Close => close(surface),
     }
 }

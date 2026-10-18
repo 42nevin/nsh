@@ -29,6 +29,14 @@ const Window: {
   minimize(): void;
   toggleMaximize(): void;
   toggleFullScreen(): void;
+  setFrame(frame: {
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+    animated?: boolean;
+  }): void;
+  setLevel(level: "normal" | "floating" | "desktopIcon"): void;
   close(): void;
 };
 ```
@@ -40,7 +48,13 @@ const Window: {
 | `minimize()` | Minimizes the window. |
 | `toggleMaximize()` | Maximizes the window, or restores it when it is maximized. |
 | `toggleFullScreen()` | Enters or leaves full screen. |
+| `setFrame(frame)` | Moves and sizes the window in points; omitted fields keep their values. On macOS and Windows, `width` and `height` include window decorations; on Linux they set GTK's default window size. `x` and `y` are the bottom left corner in macOS screen coordinates and the top left on Windows. `animated: true` enables macOS's resize animation (default: false). |
+| `setLevel(level)` | On macOS and Windows, `"floating"` keeps the window above normal windows and `"normal"` restores the normal level. `"desktopIcon"` selects macOS's desktop icon level; on Windows it moves the window to the bottom of the current z-order, where later activation can raise it. |
 | `close()` | Closes the window; the app ends with it. |
+
+Window sizing is supported on macOS, Windows and Linux; positioning and levels on macOS and Windows. Linux's window manager controls placement and stacking. GPUI's host configures window bounds and level when opening the window.
+
+When sizing a window from content measured with `onLayout`, allow room for window decorations on macOS and Windows. `width` and `height` accept positive finite numbers; `x` and `y` accept finite numbers. Invalid fields keep their previous values.
 
 ## A title bar of your own
 
