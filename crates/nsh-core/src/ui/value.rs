@@ -1,9 +1,10 @@
-//! Values crossing between JS and components: shared strings, and the
-//! conversion of prop and event values from and to JSON with their
-//! TypeScript types.
+//! Values crossing between JS and Rust: shared strings, and the direct
+//! conversion of props, event data, arguments and results from and to JS
+//! values ([`JsValue`]) with their TypeScript types.
 
 use std::{borrow::Borrow, fmt, ops::Deref, sync::Arc};
 
+use super::js::{JsHost, JsIn, JsKind, JsOwned};
 use crate::{JsonValue, style::Color};
 
 /// A cheaply cloned string: a static string or a shared one.
@@ -154,7 +155,9 @@ impl std::error::Error for PropError {}
 /// The named TypeScript types the declarations use (`AlertButton`,
 /// `BarStyle`), declared once each.
 #[derive(Debug, Clone, Default)]
-pub struct TsTypes(std::collections::BTreeMap<&'static str, String>);
+pub struct TsTypes {
+    types: std::collections::BTreeMap<&'static str, String>,
+}
 
 impl TsTypes {
     /// Type `name`, declared by `declaration` (`interface ... {}` or
@@ -164,24 +167,31 @@ impl TsTypes {
         name: &'static str,
         declaration: impl FnOnce(&mut TsTypes) -> String,
     ) -> String {
-        if !self.0.contains_key(name) {
+        if !self.types.contains_key(name) {
             // Present while it is built: a type naming itself stops here.
-            self.0.insert(name, String::new());
+            self.types.insert(name, String::new());
             let text = declaration(self);
-            self.0.insert(name, text);
+            self.types.insert(name, text);
         }
         name.to_owned()
     }
 
+    /// Class `def`'s type: its name (the class is declared with the set's
+    /// classes, which include every class a registered signature names:
+    /// [`super::Registry::class`]).
+    pub fn class(&mut self, def: &'static super::ClassDef) -> String {
+        def.name.to_owned()
+    }
+
     /// Adds `other`'s types.
     pub(crate) fn merge(&mut self, other: &TsTypes) {
-        for (name, text) in &other.0 {
-            self.0.entry(name).or_insert_with(|| text.clone());
+        for (name, text) in &other.types {
+            self.types.entry(name).or_insert_with(|| text.clone());
         }
     }
 
     pub(crate) fn declarations(&self) -> impl Iterator<Item = &str> {
-        self.0.values().map(String::as_str)
+        self.types.values().map(String::as_str)
     }
 }
 
@@ -200,19 +210,28 @@ pub const fn ts_of<T: JsValue>() -> TsType {
     }
 }
 
-/// A type props and event data can have: how it converts from and to JSON,
-/// and its TypeScript type. `#[derive(PropEnum)]` implements it for enums
-/// of unit variants, `#[derive(JsObject)]` for structs.
+/// An enum of unit variants that is a string union in JS
+/// (`#[derive(PropEnum)]` implements it).
+pub trait PropEnum: JsValue {
+    /// The variant's JS name (`SemiBold` is `"semiBold"`).
+    fn js_name(&self) -> &'static str;
+}
+
+/// A type props, event data, and the arguments and results of classes and
+/// functions can have: how it converts from and to JS values (directly,
+/// in the JS call or when JS receives it) and its TypeScript type.
+/// `#[derive(PropEnum)]` implements it for enums of unit variants,
+/// `#[derive(JsObject)]` for structs.
 pub trait JsValue: Sized {
     /// Its TypeScript type (`string`, `AlertButton`), declaring the named
     /// types it uses in `types`.
     fn ts_type(types: &mut TsTypes) -> String;
 
-    /// The value JS sent.
-    fn from_json(value: JsonValue) -> Result<Self, PropError>;
+    /// The value of JS value `value`.
+    fn from_js(value: JsIn<'_>) -> Result<Self, PropError>;
 
-    /// The value for JS.
-    fn to_json(&self) -> JsonValue;
+    /// The value as a JS value of `host`.
+    fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError>;
 }
 
 impl JsValue for bool {
@@ -220,69 +239,77 @@ impl JsValue for bool {
         "boolean".into()
     }
 
-    fn from_json(value: JsonValue) -> Result<Self, PropError> {
-        value
-            .as_bool()
-            .ok_or_else(|| PropError::expected("a boolean", &value))
+    fn from_js(value: JsIn<'_>) -> Result<Self, PropError> {
+        value.as_bool().ok_or_else(|| value.expected("a boolean"))
     }
 
-    fn to_json(&self) -> JsonValue {
-        JsonValue::Bool(*self)
+    fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+        Ok(JsOwned::new(host, host.new_bool(*self)))
     }
 }
 
+/// Whether `n` is a whole number in the range of a `bits`-bit integer: what
+/// an integer parameter, prop or field takes (a fraction, `NaN`,
+/// `Infinity` or a value out of range is a mistake, not something to round
+/// or clamp).
+pub(crate) fn fits(n: f64, signed: bool, bits: u32) -> bool {
+    if !n.is_finite() || n.fract() != 0.0 {
+        return false;
+    }
+    let (lo, hi) = if signed {
+        let half = 2f64.powi(bits as i32 - 1);
+        (-half, half)
+    } else {
+        (0.0, 2f64.powi(bits as i32))
+    };
+    n >= lo && n < hi
+}
+
 macro_rules! number {
-    ($to_json:ident: $($ty:ty),*) => {$(
+    ($check:ident: $($ty:ty),*) => {$(
         impl JsValue for $ty {
             fn ts_type(_types: &mut TsTypes) -> String {
                 "number".into()
             }
 
-            fn from_json(value: JsonValue) -> Result<Self, PropError> {
-                value
-                    .as_f64()
-                    .map(|n| n as $ty)
-                    .ok_or_else(|| PropError::expected("a number", &value))
+            fn from_js(value: JsIn<'_>) -> Result<Self, PropError> {
+                let n = value.as_number().ok_or_else(|| value.expected("a number"))?;
+                number!(@$check $ty, n, value);
+                Ok(n as $ty)
             }
 
-            fn to_json(&self) -> JsonValue {
-                $to_json(*self)
+            /// Above 2^53 an integer is the nearest number JS has.
+            fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+                Ok(JsOwned::new(host, host.new_number(*self as f64)))
             }
         }
     )*};
+    // A float takes any number.
+    (@any $ty:ty, $n:ident, $value:ident) => {};
+    (@whole $ty:ty, $n:ident, $value:ident) => {
+        if !fits($n, <$ty>::MIN != 0, <$ty>::BITS) {
+            return Err($value.expected(concat!("an integer that fits ", stringify!($ty))));
+        }
+    };
 }
 
-fn float(n: impl Into<f64>) -> JsonValue {
-    serde_json::Number::from_f64(n.into()).map_or(JsonValue::Null, JsonValue::Number)
-}
-
-fn int(n: impl Into<i64>) -> JsonValue {
-    JsonValue::Number(n.into().into())
-}
-
-fn uint(n: impl TryInto<u64>) -> JsonValue {
-    n.try_into()
-        .map_or(JsonValue::Null, |n: u64| JsonValue::Number(n.into()))
-}
-
-number!(float: f32, f64);
-number!(int: i32, i64);
-number!(uint: u32, u64, usize);
+number!(any: f32, f64);
+number!(whole: i32, i64, u32, u64, usize);
 
 impl JsValue for SharedString {
     fn ts_type(_types: &mut TsTypes) -> String {
         "string".into()
     }
 
-    fn from_json(value: JsonValue) -> Result<Self, PropError> {
-        match value {
-            JsonValue::String(s) => Ok(s.into()),
-            v => Err(PropError::expected("a string", &v)),
-        }
+    fn from_js(value: JsIn<'_>) -> Result<Self, PropError> {
+        value
+            .as_string()
+            .map(Into::into)
+            .ok_or_else(|| value.expected("a string"))
     }
 
-    fn to_json(&self) -> JsonValue {
-        JsonValue::String(self.as_str().to_owned())
+    fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+        Ok(JsOwned::new(host, host.new_string(self.as_str())?))
     }
 }
 
@@ -291,15 +318,12 @@ impl JsValue for String {
         "string".into()
     }
 
-    fn from_json(value: JsonValue) -> Result<Self, PropError> {
-        match value {
-            JsonValue::String(s) => Ok(s),
-            v => Err(PropError::expected("a string", &v)),
-        }
+    fn from_js(value: JsIn<'_>) -> Result<Self, PropError> {
+        value.as_string().ok_or_else(|| value.expected("a string"))
     }
 
-    fn to_json(&self) -> JsonValue {
-        JsonValue::String(self.clone())
+    fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+        Ok(JsOwned::new(host, host.new_string(self)?))
     }
 }
 
@@ -309,20 +333,23 @@ impl JsValue for Color {
         "string".into()
     }
 
-    fn from_json(value: JsonValue) -> Result<Self, PropError> {
+    fn from_js(value: JsIn<'_>) -> Result<Self, PropError> {
         value
-            .as_str()
+            .as_string()
+            .as_deref()
             .and_then(Color::parse)
-            .ok_or_else(|| PropError::expected("a color", &value))
+            .ok_or_else(|| value.expected("a color"))
     }
 
-    fn to_json(&self) -> JsonValue {
-        JsonValue::String(format!("#{:08x}", self.0))
+    fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+        Ok(JsOwned::new(
+            host,
+            host.new_string(&format!("#{:08x}", self.0))?,
+        ))
     }
 }
 
-/// A node JS passes (a `YNode`, a `ref`): the glue sends its id as
-/// `{ "$node": id }`.
+/// A node JS passes (a `YNode`, a `ref`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeRef(pub crate::NodeId);
 
@@ -331,49 +358,58 @@ impl JsValue for NodeRef {
         "YNode".into()
     }
 
-    fn from_json(value: JsonValue) -> Result<Self, PropError> {
+    fn from_js(value: JsIn<'_>) -> Result<Self, PropError> {
         value
-            .get("$node")
-            .and_then(JsonValue::as_u64)
-            .and_then(|id| crate::NodeId::try_from(id).ok())
+            .host()
+            .node(value.raw())
             .map(NodeRef)
-            .ok_or_else(|| PropError::expected("a node", &value))
+            .ok_or_else(|| value.expected("a node"))
     }
 
-    fn to_json(&self) -> JsonValue {
-        serde_json::json!({ "$node": self.0 })
+    /// The node's JS object (`null` once JS let it go).
+    fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+        Ok(JsOwned::new(host, host.node_value(self.0)))
     }
 }
 
+/// Any value, as JSON (a real JSON API's data: `JSON.stringify`'s view of
+/// the value).
 impl JsValue for JsonValue {
     fn ts_type(_types: &mut TsTypes) -> String {
         "unknown".into()
     }
 
-    fn from_json(value: JsonValue) -> Result<Self, PropError> {
-        Ok(value)
+    fn from_js(value: JsIn<'_>) -> Result<Self, PropError> {
+        match value.kind() {
+            JsKind::Undefined => Ok(JsonValue::Null),
+            _ => value.to_json(),
+        }
     }
 
-    fn to_json(&self) -> JsonValue {
-        self.clone()
+    fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+        Ok(JsOwned::new(host, host.json(self)?))
     }
 }
 
-/// `null` is `None`.
+/// `null` (and `undefined`) is `None`.
 impl<T: JsValue> JsValue for Option<T> {
     fn ts_type(types: &mut TsTypes) -> String {
         format!("{} | null", T::ts_type(types))
     }
 
-    fn from_json(value: JsonValue) -> Result<Self, PropError> {
-        match value {
-            JsonValue::Null => Ok(None),
-            v => T::from_json(v).map(Some),
+    fn from_js(value: JsIn<'_>) -> Result<Self, PropError> {
+        if value.is_nullish() {
+            Ok(None)
+        } else {
+            T::from_js(value).map(Some)
         }
     }
 
-    fn to_json(&self) -> JsonValue {
-        self.as_ref().map_or(JsonValue::Null, T::to_json)
+    fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+        match self {
+            Some(v) => v.to_js(host),
+            None => Ok(JsOwned::new(host, host.null())),
+        }
     }
 }
 
@@ -382,14 +418,28 @@ impl<T: JsValue> JsValue for Vec<T> {
         format!("({})[]", T::ts_type(types))
     }
 
-    fn from_json(value: JsonValue) -> Result<Self, PropError> {
-        match value {
-            JsonValue::Array(items) => items.into_iter().map(T::from_json).collect(),
-            v => Err(PropError::expected("an array", &v)),
+    fn from_js(value: JsIn<'_>) -> Result<Self, PropError> {
+        let len = value
+            .array_len()?
+            .ok_or_else(|| value.expected("an array"))?;
+        // The length is JS's (the host limits what it reads): reserve a
+        // bounded amount up front.
+        let mut out = Vec::with_capacity(len.min(1024));
+        for i in 0..len {
+            let item = value.index(i)?;
+            out.push(T::from_js(item.get()).map_err(|e| PropError(format!("[{i}]: {e}")))?);
         }
+        Ok(out)
     }
 
-    fn to_json(&self) -> JsonValue {
-        JsonValue::Array(self.iter().map(T::to_json).collect())
+    fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+        // Owned until the array takes them: an item failing frees the
+        // ones made before.
+        let mut items = Vec::with_capacity(self.len());
+        for item in self {
+            items.push(item.to_js(host)?);
+        }
+        let raws = items.into_iter().map(JsOwned::into_raw).collect();
+        Ok(JsOwned::new(host, host.new_array(raws)?))
     }
 }

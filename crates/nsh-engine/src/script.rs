@@ -39,10 +39,16 @@ mod imp {
     impl Script {
         /// Starts a VM for `bundle` and evaluates it (errors go to `sink`);
         /// also the time evaluation took. `None`: the VM did not start.
+        /// The JS calls Rust posts queue in `posts` (the core's too).
+        #[allow(
+            clippy::too_many_arguments,
+            reason = "the VM's setup, from the engine's"
+        )]
         pub(crate) fn start<M: TextEngine + 'static>(
             bundle: &Bundle,
             limits: Limits,
             ui_sets: &[nsh_core::ui::Registry],
+            posts: nsh_core::ui::Posts,
             environment: &Environment,
             text_engine: Rc<M>,
             stop: Arc<AtomicBool>,
@@ -53,6 +59,7 @@ mod imp {
                 harden: bundle.policy.harden,
                 harden_bytecode: bundle.harden_bytecode.clone(),
                 ui_sets: ui_sets.to_vec(),
+                posts,
                 base_url: bundle.base_url.as_deref().map(str::to_owned),
             };
             let mut host = match Host::with_options(options) {
@@ -154,6 +161,10 @@ mod imp {
             self.host.dispatch_event(id, event, payload);
         }
 
+        pub(crate) fn deliver(&self, event: nsh_core::ui::JsEvent) {
+            self.host.deliver(event);
+        }
+
         pub(crate) fn bind_list(&self, list: NodeId, binds: &[(u32, u32)]) {
             self.host.bind_list(list, binds);
         }
@@ -164,6 +175,14 @@ mod imp {
 
         pub(crate) fn take_ops(&self, out: &mut Vec<Op>) {
             self.host.take_ops(out);
+        }
+
+        pub(crate) fn run_posted(&self) {
+            self.host.run_posted();
+        }
+
+        pub(crate) fn has_posted(&self) -> bool {
+            self.host.has_posted()
         }
 
         pub(crate) fn next_timer(&self) -> Option<Instant> {
@@ -233,10 +252,12 @@ mod stub {
     }
 
     impl Script {
+        #[allow(clippy::too_many_arguments, reason = "as the real one's")]
         pub(crate) fn start<M: TextEngine + 'static>(
             _: &Bundle,
             _: Limits,
             _: &[nsh_core::ui::Registry],
+            _: nsh_core::ui::Posts,
             _: &Environment,
             _: Rc<M>,
             _: Arc<AtomicBool>,
@@ -268,6 +289,10 @@ mod stub {
             match *self {}
         }
 
+        pub(crate) fn deliver(&self, _: nsh_core::ui::JsEvent) {
+            match *self {}
+        }
+
         pub(crate) fn bind_list(&self, _: NodeId, _: &[(u32, u32)]) {
             match *self {}
         }
@@ -277,6 +302,14 @@ mod stub {
         }
 
         pub(crate) fn take_ops(&self, _: &mut Vec<Op>) {
+            match *self {}
+        }
+
+        pub(crate) fn run_posted(&self) {
+            match *self {}
+        }
+
+        pub(crate) fn has_posted(&self) -> bool {
             match *self {}
         }
 

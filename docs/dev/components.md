@@ -7,11 +7,11 @@ back. One implementation draws the same on iOS and Android, is laid out in the s
 
 | Where | What |
 |---|---|
-| `crates/nsh-core/src/ui/` | The API (`nsh_core::ui`, `prelude`): `Component`, `Module`, elements, `Styled`, `Theme`, `Registry`, the status bar's layers (`status_bar.rs`), the declarations generator `typescript` |
-| `crates/nsh-macros` | `#[component]`, `#[derive(Props)]`, `#[derive(PropEnum)]`, `#[derive(Event)]`, `#[derive(JsObject)]`; `#[methods]`, `#[module]`; `#[native_module("…")]` (an app crate's set: `docs/dev/tooling.md`); `style_helpers!` (the spacing methods of `Styled`) |
+| `crates/nsh-core/src/ui/` | The API (`nsh_core::ui`, `prelude`): `Component`, `Module`, `Class` (`class.rs`, `callback.rs`; direct JS values: `js.rs`), elements, `Styled`, `Theme`, `Registry`, the status bar's layers (`status_bar.rs`), the declarations generator `typescript` |
+| `crates/nsh-macros` | `#[component]`, `#[derive(Props)]`, `#[derive(PropEnum)]`, `#[derive(Event)]`, `#[derive(JsObject)]`; `#[methods]`, `#[module]`, `#[class]`; `#[native_module("…")]` (an app crate's set: `docs/dev/tooling.md`); `style_helpers!` (the spacing methods of `Styled`) |
 | `crates/nsh-core/src/core/components.rs` | The core side: instances, children and slots, events; `core/views.rs`: views, their bindings' patches and regions |
 | `crates/nsh-ui-mobile` | The mobile set's components, one file each (`README.md`: how to write one) |
-| `crates/nsh-js/src/components.rs` | The JS face of components and modules, made from their specs when a bundle imports the set |
+| `crates/nsh-js/src/components.rs` | The JS face of components and modules, made from their specs when a bundle imports the set; `classes.rs`: classes' (on the web classes' machinery), synchronous functions', callbacks |
 | `crates/nsh-js/src/declarations.rs` | `nsh/ui/mobile.d.ts`: the declarations generated from `nsh_ui_mobile::registry()` (`nsh_core::ui::declarations`) with the re-exports and the navigation |
 | `nsh_engine::EngineConfig::ui_sets` | The registries a surface serves (the platforms' `set_ui_sets`, by default `nsh_ui_mobile::registry()`; an app's own set: `docs/dev/tooling.md`) |
 
@@ -68,13 +68,20 @@ child components go with it. The design and its reasons: `reactive-components.md
   host serves, also for modules of the same name); components of different sets may share an export. A test
   pins `nsh/ui/mobile`'s exports (`nsh-ui-mobile` `the_exports_are_pinned`). A module's JS name is its type's
   too (`#[module] impl Alert`: `Alert`).
-- **Props** are a struct, **events** an enum; the derives produce the decoding of `$name` values from JS, defaults,
-  and the TypeScript types (doc comments included). Field and variant names become camel case in JS. Value types
+- **Props** are a struct, **events** an enum; the derives produce a decoder per prop (`PropSpec::decode`: the JS
+  value into the field's Rust type, when JS sets it), the conversion of an event's data to JS (`Event::data_js`),
+  defaults, and the TypeScript types (doc comments included). Field and variant names become camel case in JS. Value types
   implement `JsValue` (numbers, `bool`, strings, `Color`, `Option`, `Vec`, `JsonValue`, `ui::Style` (an inline
-  `StyleProp<ViewStyle>`), `PropEnum`s, `JsObject` structs). A field that can change is a `Prop<T>` (`Copy`): in the
+  `StyleProp<ViewStyle>`, decoded as a host element's `style` is: transforms, shadow offsets and native animated
+  values included; Rust builds one with `Style::from_decls` / `with`), `PropEnum`s, `JsObject` structs). A field that can change is a `Prop<T>` (`Copy`): in the
   instance each is a memo of its own, so a new value from JS or from a parent reaches only what read it
-  (`props.title.get()` in a binding, `get_untracked()` in a listener). A plain field is read once. A prop JS sends with
-  the wrong type is refused with a warning; clearing a prop restores its default. A Rust parent passes a value
+  (`props.title.get()` in a binding, `get_untracked()` in a listener). A plain field is read once. The JS face
+  decodes a prop when JS sets it and sends the typed value (`Prop::RustProp`, an `AnyValue`); one of the wrong type
+  is a warning, as a host element's bad value is (``Gauge.level: expected an integer that fits u32, got 1.5``,
+  through the VM's warnings and the dev overlay), and the prop keeps its value (its default in the first render)
+  while every other prop is set (one effect reads them all, so each stays tracked); clearing a prop (`undefined`)
+  restores its default. Only a decoder's panic or a getter's exception throws, as a render effect's error: by the
+  assignment that ran it, or by `mount` in the first render. A Rust parent passes a value
   (`3.into()`), a signal (`n.into()`) or a closure (`Prop::bind(move || ..)`). Platform-only props are an `android` /
   `ios` prop of a `JsObject` struct (`StatusBar`'s `android={{ backgroundColor }}`), as for host elements.
 - **`Scope<E>`** (`Copy`) is what the component has of its own: `cx.emit(event)` (to the app's `on<Event>`, or to the
@@ -162,6 +169,9 @@ child components go with it. The design and its reasons: `reactive-components.md
   | `keymap.bind("mod+k", f, { when, repeat })`, `keymap.label("mod+k")` (`nsh/keymap`) | `on_key("mod+k", \|keystroke\| ..)` / `on_key_with(k, KeyOptions { when, repeat }, f)`, bound while the current owner lives; `key_label("mod+k")` (`⌘K`, `Ctrl+K`). The core joins the views' bindings to JS's in the root's one table (a view's after JS's: it wins on the same keystroke) and runs a view's handler itself when the root's `KeyCommand` reports it; their ids start at 2^31, above JS's (`ui/keys.rs`) |
   | `BackHandler.addEventListener("hardwareBackPress", f)`, `.remove()` | `on_back_press(\|\| -> bool)`: registered while the current owner lives (only while a signal holds: inside an `effect`). After modals and before stacks, the views' listeners run newest first, then JS's; when none returns true the core sends `Command::Back`: the top stack pops, else the app exits (`ui/back.rs`) |
   | `<ErrorBoundary fallback>` | `catch_error(\|\| view, \|error, reset\| fallback)` |
+  | a class TS uses (`new Tally(3)`, `tally.add(2)`, `tally.count`, `await tally.save(p)`) | `#[class]` on the struct and its `impl`, `registry.class::<Tally>()`: synchronous members run in the call, `async fn`s return promises |
+  | a function returning its value (`checksum(bytes)`) | a `#[module]` function without `cx` (not `async`): it runs in the call |
+  | a callback TS passes (`items.sort((a, b) => ..)`, a listener) | a `Callback<A, R>` parameter: `call(args)` inside a synchronous call, `post(args)` / `call_async(args).await` from tasks; kept in a class's field, it is collected with a cycle through the object |
   | a portal | none (TS has none either); overlays are `modal().transparent(true)` |
   | `ref={el}`, `el.focus()`, `await el.measure()` | `element_ref()`, `.element_ref(&r)` on the element, `r.focus()` / `.scroll_to(..)` / `.seek(..)` / `.command(..)` from listeners and tasks; `r.measure()` is an `Answer<Option<Measurement>>` (frame, `page_x` / `page_y`) to await in a task |
   | `onStartShouldSetResponder`, `onMoveShouldSetResponder(Capture)`, `PanResponder.create` | `.claim_touches(TouchClaim::on_start())` (`::on_move()`, `.capture()`, `.ask(\|request: &ClaimRequest\| request.claim())` to decide with state and the gesture, `.block_native(false)`; `TouchClaim::on_pan(PanActivation::horizontal(10.0, 10.0))` (`panActivation`) claims when the platform activates a pan, deciding on the main thread, `elements.md`), `.keep_touches(true)` (`onResponderTerminationRequest` → false); `.on_responder_grant` / `_move` / `_release` / `_terminate` / `_start` / `_end` / `_reject` get a `ResponderEvent` (the finger's `location_x`, `page_x`, ... and `gesture: PanGesture`: `dx`, `dy`, `vx`, `vy`, the centroid; `PanGesture::begin` / `update` follow one from `on_touch`) |
@@ -212,32 +222,90 @@ write: `#[methods] impl StepperApi { pub fn set_value(&self, v: f64) {..} pub fn
 implements `Api`, the view registers it with `cx.methods(StepperApi { .. })` for as long as it lives, and
 `#[component(methods = StepperApi)]` (`Component::METHODS = Methods::of::<StepperApi>()`) names it in the spec, so the
 JS face builds the ref (`StepperRef`: `node` and the methods, typed from the Rust signatures and docs) with no TS
-written. A call is a `Command::Native { name, args: { c, a } }` op, so it runs in order with the props JS set before
-it. A method returning nothing is called and forgotten (`c` 0); one returning a `JsValue` gives JS a `Promise`,
-answered by a `$return` event (`{ c, v }` or `{ c, e }` for a refused argument) in the same frame's commit rounds. Rust
-calls them directly: `ComponentRef::api::<StepperApi>()`.
+written. A call converts its arguments in the JS call (a wrong one throws, or rejects the promise of a method that
+returns a value) into a closure an op carries (`RustCall::Method`), so it runs in order with the props JS set
+before it, with the API the view registered. A method returning nothing is called and forgotten; one returning a
+value gives JS a `Promise`, settled from the core's events (`JsEvent::Reply`, the boxed value converted then) in
+the same frame's commit rounds. Rust calls them directly: `ComponentRef::api::<StepperApi>()`.
 
 ## Modules
 
 Functions a UI set exports without a component (`Alert.alert`, `Keyboard.dismiss`, `StatusBar.setHidden`) are a
 `#[module]` `impl` block of a unit struct: `pub fn`s are the functions, typed from their signatures (`Option`
-parameters at the end may be left out); a sync one may take a last `cx: &mut ModuleCx` (the platform's services,
-applied in order right after the call). One returning a `JsValue` returns a `Promise` in JS; an `async fn` takes no
-context and runs as a root task, reaching the platform with the same free functions views use (`Alert.alert` awaits
-`dialog(..)`). `Registry::module::<M>()` registers it. A call is a root `Command::Native { name: "Alert.alert", args:
-{ c, a } }` op (in order with the ops before it), answered like methods by a root `$return` event; `components.rs`
-builds the object. A module with a component's name is merged into it (`StatusBar` is a component with static
+parameters at the end may be left out). The signature decides how a call runs (`FunctionCall`):
+
+- **No context, not `async`** (`Sync`): it runs inside the JS call, as a class's method does (below), converting
+  the arguments and the result directly; TS gets the value, an `Err` throws. It computes; the UI's free functions
+  (signals, `dialog`, `theme()`) are not there (the reactive graph is not entered).
+- **A last `cx: &mut ModuleCx`** (`Op`): the platform's services, applied in order right after the call (a dialog,
+  the status bar, focus). Its arguments are converted in the JS call into a closure an op carries
+  (`RustCall::Op`, in order with the ops before it); one returning a value gives JS a `Promise`, settled like a
+  method's, and a conversion error rejects it.
+- **`async fn`** (`Async`): no context; it runs as a root task, reaching the platform with the same free functions
+  views use (`Alert.alert` awaits `dialog(..)`), sent as the op above; a `Promise` of its value, rejected with an
+  `Err`'s message or a panic's.
+
+Parameters are `Arg`s: the `JsValue` types, instances (`Instance<T>`) and `Callback`s; results are `Ret`s. In an op
+or a task, instances and functions ride in its closure as they are (`docs/dev/rust-classes.md`, "How calls
+cross"). A panic in an op rejects it (its actions dropped). `Registry::module::<M>()` registers it; `components.rs` builds
+the object. A module with a component's name is merged into it (`StatusBar` is a component with static
 functions). `Registry::reexport` re-exports runtime values (`safeArea`, `keyboard`, `useSafeAreaInsets`: `nsh-js`
 `env.rs`) under the set's module, and `Registry::native_values` names the values `nsh-js` makes for the set (the
 mobile UI's navigation: `navigation.rs`).
 
 The runtime has modules of its own the same way (`crates/nsh-core/src/runtime/`, `runtime::registries()`): one
-`Registry` per JS module (`Registry::runtime("nsh/android")`), whose functions JS calls as `nsh/android:Toast.show` so
-they never clash with a UI set's; the core looks a call up in the set's registry, then the runtime's. Runtime modules
+`Registry` per JS module (`Registry::runtime("nsh/android")`); a call carries what it runs, so a runtime module's
+functions never clash with a UI set's of the same name. Runtime modules
 use the same services as components (`cx.toast`, `cx.announce_for_accessibility`, `image_size`), and the core's
 internal actions for the rest (exiting the app, a ref's accessibility focus).
 `#[module(flat)]` exports functions one by one (`setStatusBarBackgroundColor`); a function returning `Result` rejects
-the promise with the error; a `NodeRef` parameter is a `YNode` in TS (sent as `{ $node: id }`).
+the promise with the error (throws, when it runs in the call); a `NodeRef` parameter is a `YNode` in TS (the node's
+id, and its object again as a result).
+
+## Classes
+
+A Rust type TS uses with `new` (`docs/dev/rust-classes.md`): `#[class]` on the struct and on its `impl` block
+implements `Class` (its `ClassDef`: name, doc, members) and `Registry::class::<C>()` exports it. In the block, `new`
+is the constructor (without one TS cannot make it: `private constructor()`), `&self` / `&mut self` functions are
+methods, `#[getter]` / `#[setter]` (`count`, `set_count`) the property `count`, functions without a receiver
+statics, and `async fn`s (`this: Instance<Self>` first, for a method) members returning promises.
+
+- **Instances live in Rust**, in an `Rc<RefCell<Option<C>>>` (`Instance<C>`), owned by their JS object: an object of
+  the web classes' QuickJS class (`nsh-js` `web/mod.rs`) whose slot holds the `Rc` (`classes.rs`), so collection,
+  `instanceof`, `new.target` (TS subclasses) and re-entrancy behave as for `URL`. The object being collected drops
+  its handle; `dispose()` and `[Symbol.dispose]` drop the value at once, and any use after throws a `TypeError`. An
+  instance has one object while both live (`classes.rs` remembers it by the `Rc`'s address): a member returning an
+  instance Rust keeps gives the object it has.
+- **Members that are not `async` run in the JS call** (`MemberCall::Sync`), outside the core: `nsh-js`'s `CallHost`
+  implements `JsHost`, and the generated code converts the arguments and the result directly
+  (`JsValue::from_js` / `to_js`, no JSON: the derives implement them too), borrows its instance for the call (a
+  re-entrant use throws "used re-entrantly") and catches a panic as an `Error` (where Rust unwinds: the web runtime
+  aborts on a panic). A wrong argument is a `TypeError`
+  naming the member and the parameter (``Tally.add: `by`: expected a number, got "x"``). `&Other` / `&mut Other`
+  parameters borrow another instance for the call, `Instance<Other>` keeps one; results `Self`, `Other` and
+  `Instance<Other>` are objects. Another class's object is refused.
+- **`async` members are ops** (`MemberCall::Async`): `this` and the arguments are converted in the JS call into
+  the start of a task an op carries (`RustCall::Task`), which the core runs as a root task like an async
+  function's; the instances ride in it, so a task keeps its instance after the object goes, and the instance it
+  resolves with is converted to its object when the promise settles. Ops the engine drops (the VM stopped) reject
+  their promises (`Core::discard_ops`).
+- **Callbacks** (`callback.rs`): a `Callback<A, R>` parameter is a JS function (`A` one value, `()` or a tuple;
+  `(a: string, b: number) => boolean`). `call` runs it on the spot, only inside a synchronous call from JS (it
+  panics in a task, and rethrows an uncatchable interrupt when the call returns, and fails inside a collection);
+  `post` and `call_async` queue a `JsCall` in `Posts`, one ordered queue the engine makes and hands to the script
+  and the core (`HostOptions::posts`, `Core::set_posts`), which the engine runs (`Host::run_posted`) at each
+  commit round before the core's events, so a task's posts reach JS before its result. A post made inside a
+  synchronous call from JS is parked in its place until an op after the ops JS sent before it is applied
+  (`RustCall::Post`: the op's place releases it whichever way the op goes), and what those ops post goes before it,
+  so posts run in program order. `call_async` settles a
+  promise the function returns; once the VM stops, queued and later calls are dropped and their replies say so.
+  `nsh-js` keeps the functions in a table of the context (freed with it, so callbacks Rust keeps longer do
+  nothing). `#[class]` on the struct implements the `unsafe trait Trace` from every field whose type implements it
+  (chosen by type, so aliases count); the object's mark hook reports them when it is the instance's only owner, so
+  a listener that captures its own object is collected; callbacks held elsewhere are roots. Before a collected
+  object's value drops, its callbacks are released: its `Drop` calling one finds it gone.
+- **A class a signature names is registered with it** (`Registry::module`, `class`, `register` follow the
+  members' `ClassRefs`), so its objects have a class, an export and a declaration.
 
 ## The status bar
 
@@ -417,8 +485,8 @@ what changed.
   so the list's own are left out). Each cell is then the placing component's row wrapper (`Inner::Row`) around a
   node showing the row (`Inner::VirtualRow`), so each part's handlers run with its own component.
 - Lazy children (`#[prop(lazy)] children: Children`, `Sheet`'s): the JS face makes the app's children only while the
-  view places them, under a `cond` on a signal; the core tells it with a `$children` event (`true` / `false`) on the
-  host when the view starts or stops placing them (`ComponentSpec::lazy_children`), so they are made again on each
+  view places them, under a `cond` on a signal; the core tells it in its events (`JsEvent::Children`, `true` /
+  `false`) when the view starts or stops placing them (`ComponentSpec::lazy_children`), so they are made again on each
   opening and released after. Until they are made, `Children::is_empty()` is true. The content a Rust view passes
   such a component (`Sheet::element(..).child(..)`) is lazy the same way: the core keeps it in a region of a signal it
   sets when the nested component starts or stops placing its children (slots and rows stay), instead of telling JS.
@@ -433,8 +501,9 @@ what changed.
   or the view's that passed it.
 - A component's own list reports its viewable rows to it in the core, waiting for `minimum_view_time` when set
   (a task of the list's owner).
-- `cx.emit(event)` is routed after the code that emitted it: to JS as a `NativeEvent` on the host (`{ name, data }`,
-  from the `Event` derive; the JS face calls the app's `on<Name>(data)`), or, for a nested component, to the
+- `cx.emit(event)` is routed after the code that emitted it: to JS as the event itself (`JsEvent::Component`, its
+  data converted by the `Event` derive's `data_js` when JS hears it; the JS face calls the app's
+  `on<Name>(data)`), or, for a nested component, to the
   `on_event` listener of the view that made it, typed, whose own emits are routed in turn until none are left.
 - The back button: `on_back_press` listeners of views run newest first, after modals' and before stacks', then JS's
   (`ui/back.rs`).
@@ -442,12 +511,13 @@ what changed.
 ## The JS face and the declarations
 
 `nsh-js` `components.rs` makes each component's and module's JS from its spec (`ComponentSpec`, `ModuleSpec`) when a
-bundle first imports the set. `nsh_core::ui::declarations(registry, omit)` writes their declarations (into the set's
-module file, `nsh/ui/mobile.d.ts`; `nsh-js` `declarations.rs` adds the re-exports and native values it makes): the
-named types the props, events, methods and functions use (`export type
-BarStyle = ...` for a `PropEnum`, `export interface AlertButton` for a `JsObject`, each once, with its doc comment;
-`JsValue::ts_type(&mut TsTypes)` declares them), the props interfaces, the components and the module objects (each
-of type `<Name>Module`). The JS face runs for every instance, so it is kept minimal: **one render effect reading every prop
+bundle first imports the set, and `classes.rs` each class's from its `ClassDef`. `nsh_core::ui::declarations(registry,
+omit)` writes their declarations (into the set's module file, `nsh/ui/mobile.d.ts`; `nsh-js` `declarations.rs` adds
+the re-exports and native values it makes): the named types the props, events, methods and functions use (`export
+type BarStyle = ...` for a `PropEnum`, `export interface AlertButton` for a `JsObject`, each once, with its doc
+comment; `JsValue::ts_type(&mut TsTypes)` declares them), the props interfaces, the components, the module objects
+(each of type `<Name>Module`; a synchronous function returns its type, an op's or task's a `Promise`) and the
+classes (`export declare class`). The JS face runs for every instance, so it is kept minimal: **one render effect reading every prop
 directly** and sending the ones that changed, no `split` / `merge` / `spread` (their proxies made the first version, in
 the former JS runtime, cost more JS than the TSX component it replaced), no node for an absent slot, no event listener
 when no handler is passed. Benchmarks against the same Button in TSX: `docs/dev/performance.md` (`examples/bench`,

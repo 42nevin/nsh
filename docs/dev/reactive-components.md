@@ -181,7 +181,7 @@ impl Component for Counter {
 - Listeners are plain closures (`move |e| ..`) that capture signals. They no longer receive `&mut Self` and props, so
   `cx.listener(..)` and `Listener::map` go.
 
-**Props** are reactive. `#[derive(Props)]` keeps its attributes (`default`, `rename`, `lazy`) and its JSON decoding, and
+**Props** are reactive. `#[derive(Props)]` keeps its attributes (`default`, `rename`, `lazy`) and its decoding (now typed, below), and
 each field becomes readable in a binding:
 
 ```rust
@@ -195,8 +195,9 @@ pub struct StepperProps {
 // In render, `props.max` is a `Prop<f64>`: `props.max.get()` tracks it.
 ```
 
-- From JS, a changed prop writes that prop's signal (the core decodes `Op::SetProp { ComponentProp }` into it, as it
-  decodes into the props struct today). Only the bindings that read it run.
+- From JS, a changed prop writes that prop's signal: the JS face decodes it into the field's type when JS sets it
+  (`PropSpec::decode`; a wrong type is a warning, as a host prop's, and the prop keeps its value) and sends the value (`Op::SetProp { RustProp }`, an `AnyValue`),
+  which the core moves into the signal. Only the bindings that read it run.
 - From Rust, a parent passes each prop as a value, a signal or a closure: `ButtonProps { title: "Save".into(),
   disabled: busy.into(), .. }`. The field type is `Prop<T>`, built from any `Into<Reactive<T>>`.
 - `Props: Clone + PartialEq` and the parent-side equality skip go: there is nothing to skip.
@@ -207,7 +208,8 @@ pub struct StepperProps {
   as today.
 - Methods JS calls on a ref: `#[methods]` moves from the component to a handle the body makes. It holds the signals the
   methods read and write: `cx.methods(StepperApi { value })` with `#[methods] impl StepperApi { fn set_value(&self, v:
-  f64) {..} fn value(&self) -> f64 {..} }`. The JS side (`Command::Native`, `$return`) is unchanged.
+  f64) {..} fn value(&self) -> f64 {..} }`. (JS's calls now cross typed: `docs/dev/rust-classes.md`, "How calls
+  cross".)
 - `element_ref()` and `component_ref()` become free functions returning `Copy` handles owned by the current owner;
   `.element_ref(r)` on an element attaches it once.
 
@@ -264,7 +266,7 @@ dynamic(move || if wide.get() { two_columns() } else { one_column() })
 
 - `props.children` and `props.header` (a `Slot`) are placed once where the body puts them. Lazy children (`#[prop(lazy)]`)
   are made while the place that holds them is mounted: `If::new(open, move || props.children)` makes them only while
-  open, as `Sheet` needs. The `$children` event that tells JS stays.
+  open, as `Sheet` needs. The event that tells JS stays (`JsEvent::Children`).
 - `children_each(children, |child, at| ..)` and `list(items, ..)` become `Each`-like: one wrapper per JS child, made
   once, with `at` as a signal.
 

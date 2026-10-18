@@ -19,7 +19,7 @@ use std::{io, rc::Rc, sync::Arc, time::Duration};
 use crossbeam_channel::{Receiver, Sender};
 use nsh_core::{
     ApplyError, Core, EdgeInsets, EventKind, EventPayload, ListBind, MountBatch, NodeId, Op,
-    PayloadValue, Size, TextEngine, time::Instant,
+    PayloadValue, Size, TextEngine, time::Instant, ui::JsEvent,
 };
 pub use nsh_core::{
     access::{Access, Capabilities},
@@ -895,6 +895,11 @@ impl<M: TextEngine + 'static> Driver<M> {
         });
         let mut core = Core::new(text_engine.clone(), config.viewport);
         core.set_components(nsh_core::ui::Registry::merged(&config.ui_sets));
+        // The JS calls Rust posts queue in one place, which the core
+        // releases in order with the ops (a post during a synchronous call)
+        // and the script runs.
+        let posts = nsh_core::ui::Posts::new();
+        core.set_posts(posts.clone());
         if let App::Js(_) = &config.app {
             // Only JS is limited (Rust code is as trusted as the platform).
             core.set_max_nodes(config.limits.max_nodes);
@@ -942,9 +947,14 @@ impl<M: TextEngine + 'static> Driver<M> {
                 sink.report_error(&format!("font failed: {}: {err}", font.uri));
             }
         }
-        // A task woken on any thread wakes the loop.
+        // A task woken on any thread wakes the loop, and so does a JS call
+        // Rust queues.
         let wake = tx.clone();
         core.set_task_notify(Arc::new(move || {
+            let _ = wake.send(Message::Wake);
+        }));
+        let wake = tx.clone();
+        posts.set_notify(Arc::new(move || {
             let _ = wake.send(Message::Wake);
         }));
         let state = State {
@@ -990,6 +1000,7 @@ impl<M: TextEngine + 'static> Driver<M> {
                     bundle,
                     config.limits,
                     &config.ui_sets,
+                    posts,
                     &environment,
                     text_engine,
                     stop,
@@ -1153,7 +1164,7 @@ struct State<M: TextEngine> {
     /// List render requests not yet sent to JS.
     binds: Vec<ListBind>,
     /// Events raised by the core (e.g. `onEndReached`, `onLayout`).
-    events: Vec<(NodeId, EventKind, EventPayload)>,
+    events: Vec<JsEvent>,
     trace: bool,
     /// Where commit timings go ([`EngineControl::set_perf_monitor`]).
     perf: Option<Arc<perf::PerfMonitor>>,
@@ -1476,13 +1487,29 @@ impl<M: TextEngine> State<M> {
             } else {
                 drop(binds);
             }
+            // The JS calls Rust queued (callbacks' posts), in order, before
+            // the events: a task's posts come before its result.
+            if let Some(script) = script {
+                script.run_posted();
+            }
             // The core's events (layouts, ends reached, ...) on a Rust
-            // component's nodes are the component's; the rest are JS's.
-            for (id, event, payload) in self.events.drain(..) {
-                if !self.core.component_event(id, event, &payload)
-                    && let Some(script) = script
-                {
-                    script.dispatch_event(id, event, &payload);
+            // component's nodes are the component's; the rest are JS's, in
+            // order with Rust components' events and calls' results.
+            for event in self.events.drain(..) {
+                match event {
+                    JsEvent::Event(id, event, payload) => {
+                        if !self.core.component_event(id, event, &payload)
+                            && let Some(script) = script
+                        {
+                            script.dispatch_event(id, event, &payload);
+                        }
+                    }
+                    // Without JS nothing waits for them.
+                    other => {
+                        if let Some(script) = script {
+                            script.deliver(other);
+                        }
+                    }
                 }
             }
             if let Some(script) = script {
@@ -1490,11 +1517,14 @@ impl<M: TextEngine> State<M> {
             }
             js += js_start.elapsed();
             op_count += self.ops.len();
-            // A stop drops the rest of the ops (`drain` clears them).
-            for op in self.ops.drain(..) {
+            // A stop drops the rest of the ops, releasing what they hold
+            // for Rust classes.
+            let mut ops = self.ops.drain(..);
+            while let Some(op) = ops.next() {
                 match self.core.apply(op) {
                     Ok(()) => {}
                     Err(err) if err.is_fatal() => {
+                        self.core.discard_ops(ops.by_ref());
                         let Some(script) = script else { break };
                         script.stop(match err {
                             ApplyError::TooManyNodes(max) => {
@@ -1517,7 +1547,9 @@ impl<M: TextEngine> State<M> {
             }
             self.core.take_list_binds(&mut self.binds);
             self.core.take_events(&mut self.events);
-            if self.binds.is_empty() && self.events.is_empty() {
+            // Posts the ops queued (in program order) run in another round.
+            let posted = script.is_some_and(Script::has_posted);
+            if self.binds.is_empty() && self.events.is_empty() && !posted {
                 break;
             }
         }

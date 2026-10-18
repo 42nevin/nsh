@@ -17,14 +17,15 @@ use rustc_hash::FxHashMap;
 
 use super::{Core, Kind, NO_KEY};
 use crate::{
-    ApplyError, Command, EdgeInsets, EventKind, EventMask, EventPayload, JsonValue, NodeId, Op,
-    Prop, ROOT_ID, Tag, TextEngine,
+    ApplyError, Command, EdgeInsets, EventKind, EventMask, EventPayload, NodeId, Op, Prop, ROOT_ID,
+    Tag, TextEngine,
     tailwind::ClassList,
     ui::{
-        Action, AnswerSlot, AnyInstance, Attrs, Child, ClipboardRead, ComponentError,
-        ComponentSpec, ElKind, ElNode, Environment, Executor, Function, FunctionCall, ImageSize,
-        IntoElement, ListConfig, Listener, ModuleCx, ParentElement, PlaceFn, Position, PropError,
-        Reactive, Registry, Root, SharedString, StyleRefinement, Task, Theme, caught,
+        Action, AnswerSlot, AnyInstance, AnyValue, Attrs, Child, ClipboardRead, ComponentError,
+        ComponentSpec, ElKind, ElNode, Environment, Executor, ImageSize, IntoElement, JsEvent,
+        JsResult, ListConfig, Listener, ModuleCx, ParentElement, PlaceFn, Position, Posts,
+        Reactive, Registry, Root, RustCall, RustOp, SharedString, StyleRefinement, Task, Theme,
+        caught,
         responder::ResponderEl,
         view,
         virtual_list::{self, RowFn, SeparatorFn, VirtualListEl},
@@ -350,6 +351,10 @@ pub(super) struct Components {
     /// Their views' regions, by id.
     pub(super) regions: FxHashMap<u32, super::views::RegionState>,
     pub(super) next_region: u32,
+    /// The JS calls Rust posts (the engine's queue, shared with the
+    /// script): a call posted during a synchronous call from JS waits for
+    /// its op ([`RustCall::Post`]).
+    posts: Posts,
 }
 
 impl Default for Components {
@@ -398,6 +403,7 @@ impl Default for Components {
             patches: super::views::Patches::default(),
             regions: FxHashMap::default(),
             next_region: 1,
+            posts: Posts::default(),
         }
     }
 }
@@ -448,47 +454,23 @@ impl Components {
     }
 }
 
-/// The inline style of `id` from a JS style (an object or an array of
-/// them; keys and values as in React Native). Values that are objects or
-/// arrays (transforms, offsets) are not taken.
+/// The inline style of `id`: the declarations of its `Style` prop, then
+/// the native values bound to it, then (on a host) the app's style.
 fn inline_style(
     id: NodeId,
-    value: Option<&JsonValue>,
+    inline: Option<&crate::StylePatch>,
     animated: &[(crate::StyleDecl, crate::ui::NativeNode)],
     app: Option<&crate::StylePatch>,
 ) -> Op {
-    fn walk(value: &JsonValue, style: &mut crate::Style, patch: &mut crate::StylePatch) {
-        use crate::StyleValue as V;
-        match value {
-            JsonValue::Object(entries) => {
-                for (key, value) in entries {
-                    let v = match value {
-                        JsonValue::Number(n) => V::Number(n.as_f64().unwrap_or(0.0) as f32),
-                        JsonValue::String(s) => V::Str(s),
-                        JsonValue::Null => V::Null,
-                        _ => continue,
-                    };
-                    if patch.set(style, key, v).is_err() {
-                        log::warn!(target: "js", "style `{key}`: not taken");
-                    }
-                }
-            }
-            JsonValue::Array(items) => {
-                for item in items {
-                    walk(item, style, patch);
-                }
-            }
-            _ => {}
-        }
-    }
     let mut style = Box::<crate::Style>::default();
     let mut patch = crate::StylePatch::default();
-    if let Some(value) = value {
-        walk(value, &mut style, &mut patch);
-    }
-    // Native values over the rest, then (on a host) the app's style.
+    let inline = inline.map(|p| p.decls()).unwrap_or_default();
     let app = app.map(|p| p.decls()).unwrap_or_default();
-    for decl in animated.iter().map(|(d, _)| d).chain(app) {
+    for decl in inline
+        .iter()
+        .chain(animated.iter().map(|(d, _)| d))
+        .chain(app)
+    {
         let _ = patch.push(&mut style, decl.clone());
     }
     Op::SetStyle { id, style, patch }
@@ -608,6 +590,27 @@ impl<M: TextEngine> Core<M> {
         self.apply_environment(environment);
     }
 
+    /// Drops `ops` without applying them (the script was stopped): the
+    /// calls into Rust among them are not made, and the promises waiting
+    /// for them reject (their replies are in the next events); a JS call
+    /// parked behind one is dropped.
+    pub fn discard_ops(&mut self, ops: impl IntoIterator<Item = Op>) {
+        for op in ops {
+            if let Op::Rust(RustOp { call, run }) = op {
+                // What the call holds (a post's place: released) (its arguments: instances, callbacks)
+                // goes now.
+                drop_caught(run);
+                self.settle(call, Err("the script stopped before the call ran".into()));
+            }
+        }
+    }
+
+    /// The queue of the JS calls Rust posts: the one the engine hands the
+    /// script too.
+    pub fn set_posts(&mut self, posts: Posts) {
+        self.components.posts = posts;
+    }
+
     /// Wakes the engine when a component's task is woken (from any
     /// thread): it then calls [`Self::run_component_tasks`].
     pub fn set_task_notify(&mut self, notify: Arc<dyn Fn() + Send + Sync>) {
@@ -668,7 +671,7 @@ impl<M: TextEngine> Core<M> {
                 let app = inst.app_style.clone();
                 Ok(Some(inline_style(
                     id,
-                    inline.as_ref(),
+                    inline.as_deref(),
                     &animated,
                     app.as_ref(),
                 )))
@@ -910,21 +913,8 @@ impl<M: TextEngine> Core<M> {
                     enabled: enabled || own,
                 }))
             }
-            // A function of a module, on the root.
-            Op::Command {
-                id: crate::ROOT_ID,
-                command: Command::Native { name, args },
-            } if self.function(&name).is_some() => {
-                self.call_function(&name, args);
-                Ok(None)
-            }
-            // A method of the component's ref: `{ c, a }`, the call (0: no
-            // reply) and the arguments.
-            Op::Command {
-                id,
-                command: Command::Native { name, args },
-            } if self.is_host(id) => {
-                self.call_method(id, &name, args);
+            Op::Rust(op) => {
+                self.run_rust(op);
                 Ok(None)
             }
             Op::Release { id } if self.is_host(id) => {
@@ -985,109 +975,101 @@ impl<M: TextEngine> Core<M> {
         self.components.mark(cell);
     }
 
-    /// Function `name` of a module: the UI set's (`Alert.alert`), else the
-    /// runtime's (`nsh/android:Toast.show`).
-    fn function(&self, name: &str) -> Option<&'static Function> {
-        self.components
-            .registry
-            .function(name)
-            .or_else(|| crate::runtime::function(name))
+    /// Runs a call JS made into Rust, in order with the ops before it: its
+    /// result settles promise `call` (in the events, in order with them).
+    pub(super) fn run_rust(&mut self, op: RustOp) {
+        let posts = self.components.posts.clone();
+        posts.in_op(|| self.run_rust_op(op));
     }
 
-    /// Calls module function `name` (`Alert.alert`); a call JS waits for
-    /// gets its result as a `$return` event on the root.
-    fn call_function(&mut self, name: &str, args: JsonValue) {
-        let Some(function) = self.function(name) else {
-            return;
-        };
-        let call = args.get("c").and_then(JsonValue::as_u64).unwrap_or(0);
-        let args = match args.get("a") {
-            Some(JsonValue::Array(a)) => a.clone(),
-            _ => Vec::new(),
-        };
-        let root = crate::ROOT_ID;
-        match &function.call {
-            FunctionCall::Sync(run) => {
+    fn run_rust_op(&mut self, op: RustOp) {
+        let RustOp { call, run } = op;
+        match run {
+            RustCall::Op(run) => {
                 let mut cx = ModuleCx::default();
-                let result = run(args, &mut cx);
-                for action in cx.actions {
-                    self.apply_action(action);
-                }
+                // The app's code: a panic rejects the call (its actions are
+                // dropped) instead of unwinding through the engine.
+                let result = match caught(|| run(&mut cx)) {
+                    Ok(result) => {
+                        for action in std::mem::take(&mut cx.actions) {
+                            self.apply_action(action);
+                        }
+                        result
+                    }
+                    Err(message) => Err(message),
+                };
                 self.apply_actions();
-                if let Err(e) = &result {
-                    log::warn!(target: "js", "{name}(): {e}");
-                }
-                if call != 0 {
-                    self.reply(root, call, result.map_err(|e| e.0));
-                }
+                self.settle(call, result);
             }
-            FunctionCall::Async(start) => {
-                let executor = Rc::downgrade(&self.components.executor);
-                match start(args) {
-                    Ok(future) => {
-                        // A task of the root: it never goes away.
-                        crate::ui::task::spawn_raw(
-                            &self.components.executor,
-                            root,
-                            Box::pin(async move {
-                                let result = future.await;
-                                if call == 0 {
-                                    if let Err(e) = &result {
-                                        log::warn!(target: "js", "{}(): {e}", function.name);
-                                    }
-                                } else if let Some(executor) = executor.upgrade() {
+            RustCall::Task(start) => match caught(start) {
+                Ok(future) => {
+                    let executor = Rc::downgrade(&self.components.executor);
+                    // A task of the root: it never goes away.
+                    crate::ui::task::spawn_raw(
+                        &self.components.executor,
+                        ROOT_ID,
+                        Box::pin(async move {
+                            let result = crate::ui::module::catching(future).await;
+                            match executor.upgrade() {
+                                Some(executor) if call != 0 => {
                                     executor.act(Action::Return(call, result));
                                 }
-                            }),
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!(target: "js", "{name}(): {e}");
-                        if call != 0 {
-                            self.reply(root, call, Err(e.0));
-                        }
-                    }
+                                _ => {
+                                    if let Err(e) = &result {
+                                        log::warn!(target: "js", "an async call into Rust failed: {e}");
+                                    }
+                                }
+                            }
+                        }),
+                    );
                 }
+                Err(message) => self.settle(call, Err(message)),
+            },
+            RustCall::Method(host, method) => {
+                let mut failed = None;
+                let result = match self
+                    .components
+                    .instances
+                    .get_mut(&host)
+                    .map(|i| &mut i.inner)
+                {
+                    Some(Inner::Component(inner)) => match caught(|| inner.call(method)) {
+                        Ok(Some(result)) => result,
+                        Ok(None) => {
+                            Err(format!("{} has no ref of this method's type", inner.name()))
+                        }
+                        Err(message) => {
+                            failed = Some(message.clone());
+                            Err(message)
+                        }
+                    },
+                    _ => {
+                        drop_caught(method);
+                        Err(format!("node {host} hosts no Rust component"))
+                    }
+                };
+                self.apply_actions();
+                if let Some(message) = failed {
+                    self.component_failed(host, message);
+                }
+                self.settle(call, result);
             }
+            // Its place, released: the call runs there.
+            RustCall::Post(place) => drop(place),
         }
     }
 
-    /// Calls method `name` of `host`'s component; a call JS waits for gets
-    /// its result (or error) as a `$return` event.
-    fn call_method(&mut self, host: NodeId, name: &str, args: JsonValue) {
-        let call = args.get("c").and_then(JsonValue::as_u64).unwrap_or(0);
-        let args = match args.get("a") {
-            Some(JsonValue::Array(a)) => a.clone(),
-            _ => Vec::new(),
-        };
-        let mut failed = None;
-        let result = match self
-            .components
-            .instances
-            .get_mut(&host)
-            .map(|i| &mut i.inner)
-        {
-            Some(Inner::Component(inner)) => match caught(|| inner.call(name, args)) {
-                Ok(result) => {
-                    result.unwrap_or_else(|| Err(PropError(format!("no method `{name}`"))))
-                }
-                Err(message) => {
-                    failed = Some(message.clone());
-                    Err(PropError(message))
-                }
-            },
-            _ => Err(PropError(format!("no method `{name}`"))),
-        };
-        self.apply_actions();
-        if let Some(message) = failed {
-            self.component_failed(host, message);
+    /// Settles promise `call` with `result` (in the events, in order with
+    /// them); 0: JS does not wait, an error is logged.
+    pub(super) fn settle(&mut self, call: u32, result: JsResult) {
+        if call == 0 {
+            if let Err(e) = &result {
+                log::warn!(target: "js", "a call into Rust failed: {e}");
+            }
+            drop_caught(result);
+            return;
         }
-        if let Err(e) = &result {
-            log::warn!(target: "js", "{name}(): {e}");
-        }
-        if call != 0 {
-            self.reply(host, call, result.map_err(|e| e.0));
-        }
+        self.events.push(JsEvent::Reply { call, result });
     }
 
     /// The app's classes on `host` changed.
@@ -1190,8 +1172,8 @@ impl<M: TextEngine> Core<M> {
     pub(super) fn set_component_prop(
         &mut self,
         host: NodeId,
-        name: Arc<str>,
-        value: Option<JsonValue>,
+        name: &str,
+        value: Option<AnyValue>,
     ) -> bool {
         let Some(inst) = self.components.instances.get_mut(&host) else {
             return false;
@@ -1199,7 +1181,7 @@ impl<M: TextEngine> Core<M> {
         let Inner::Component(inner) = &mut inst.inner else {
             return true;
         };
-        match inner.set_prop(&name, value) {
+        match inner.set_prop(name, value) {
             Ok(true) => self.components.mark(host),
             Ok(false) => {}
             Err(e) => {
@@ -1736,14 +1718,7 @@ impl<M: TextEngine> Core<M> {
                         signal.set(wanted);
                     }
                 }
-                None => self.events.push((
-                    host,
-                    EventKind::NativeEvent,
-                    EventPayload::Native {
-                        name: "$children".into(),
-                        data: JsonValue::Bool(wanted),
-                    },
-                )),
+                None => self.events.push(JsEvent::Children { host, wanted }),
             }
         }
     }
@@ -1796,7 +1771,7 @@ impl<M: TextEngine> Core<M> {
         }
         self.components.props = props;
         if new.inline != old.inline || new.animated != old.animated {
-            let _ = self.apply_op(inline_style(id, new.inline.as_ref(), &new.animated, app));
+            let _ = self.apply_op(inline_style(id, new.inline.as_deref(), &new.animated, app));
         }
         if new.drawing != old.drawing
             && let Some(drawing) = &new.drawing
@@ -3237,7 +3212,7 @@ impl<M: TextEngine> Core<M> {
                     command: Command::Dialog(Box::new(dialog)),
                 });
             }
-            Action::Return(call, result) => self.reply(crate::ROOT_ID, call, result),
+            Action::Return(call, result) => self.settle(call, result),
             Action::Animation(op) => {
                 let _ = self.apply_op(Op::Animation(op));
             }
@@ -3388,24 +3363,6 @@ impl<M: TextEngine> Core<M> {
             Some(ClipboardRead::Has(answer)) => answer.borrow_mut().deliver(has),
             None => {}
         }
-    }
-
-    /// The answer to a call JS waits for, as a `$return` event on `host`.
-    pub(super) fn reply(&mut self, host: NodeId, call: u64, result: Result<JsonValue, String>) {
-        let mut reply = serde_json::Map::new();
-        reply.insert("c".into(), call.into());
-        match result {
-            Ok(value) => reply.insert("v".into(), value),
-            Err(e) => reply.insert("e".into(), JsonValue::String(e)),
-        };
-        self.events.push((
-            host,
-            EventKind::NativeEvent,
-            EventPayload::Native {
-                name: "$return".into(),
-                data: JsonValue::Object(reply),
-            },
-        ));
     }
 
     /// Events the components handle before anything else: dialog answers
@@ -3643,15 +3600,17 @@ impl<M: TextEngine> Core<M> {
                 }
                 self.apply_actions();
             }
-            None => self.events.push((
-                host,
-                EventKind::NativeEvent,
-                EventPayload::Native {
-                    name: event.name().into(),
-                    data: event.data(),
-                },
-            )),
+            None => self.events.push(JsEvent::Component { host, event }),
         }
+    }
+}
+
+/// Drops `value`, which holds the app's values (a call's arguments or
+/// result): a panic in their `Drop` is logged instead of unwinding
+/// through the core.
+fn drop_caught<T>(value: T) {
+    if let Err(message) = caught(move || drop(value)) {
+        log::error!(target: "js", "a value of a call into Rust panicked as it dropped: {message}");
     }
 }
 

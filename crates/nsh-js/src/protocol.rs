@@ -44,6 +44,12 @@ impl Warnings {
         }
     }
 
+    /// Whether `message` was reported (tests).
+    #[cfg(test)]
+    pub(crate) fn reported(&self, message: &str) -> bool {
+        self.seen.contains(message)
+    }
+
     /// Logs what `other` collected and was not reported yet.
     pub(crate) fn merge(&mut self, other: Warnings) {
         for message in other.deferred.unwrap_or_default() {
@@ -378,6 +384,17 @@ pub(crate) fn decode_prop<'js>(
             Ok(None)
         }
     }
+}
+
+/// Style `value` (an object or an array of them) as a host element's
+/// `style` decodes it: its declarations.
+pub(crate) fn style_patch<'js>(
+    value: &Value<'js>,
+    warnings: &mut Warnings,
+) -> rquickjs::Result<StylePatch> {
+    let mut entries = Vec::new();
+    style_entries(value, &mut entries)?;
+    Ok(decode_style(entries, warnings)?.1)
 }
 
 /// The properties of a style: an object, or (React Native style) an array
@@ -827,7 +844,7 @@ fn decode_composite(
 /// Deepest nesting of a value sent to a native component.
 const JSON_DEPTH: usize = 64;
 /// Most entries (array items, object fields) in such a value.
-const JSON_ENTRIES: usize = 1 << 20;
+pub(crate) const JSON_ENTRIES: usize = 1 << 20;
 
 /// A JS value as JSON for a native component (like `JSON.stringify`:
 /// functions and symbols become `null`, non-finite numbers too). Values

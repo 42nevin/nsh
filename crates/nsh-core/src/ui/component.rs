@@ -12,10 +12,12 @@ use rustc_hash::FxHashMap;
 
 use super::{
     Children, IntoElement, PropError, Slot, TsType, TsTypes,
+    call::{AnyValue, JsResult, MethodCall},
+    class::{Class, ClassDef, ClassSpec, MemberKind, Thrown},
     element::{ComponentElement, ElNode},
-    module::{Function, FunctionSpec, Module, ModuleSpec},
+    js::{JsHost, JsIn, JsOwned},
+    module::{FunctionSpec, Module, ModuleSpec},
 };
-use crate::JsonValue;
 
 /// A component written in Rust: a function that runs once ([`Self::view`])
 /// and makes its view, binding what changes to signals. Its props come from
@@ -97,7 +99,7 @@ pub(crate) fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 
 /// A method JS calls on a component's ref: one of its API's
 /// ([`Api`]; `#[methods]` makes them).
-pub struct Method<A: 'static> {
+pub struct Method {
     /// Its JS name (`setValue`).
     pub name: &'static str,
     /// Documentation.
@@ -107,8 +109,13 @@ pub struct Method<A: 'static> {
     /// The TypeScript type of its result (`None`: it returns nothing, and
     /// JS does not wait for it).
     pub returns: Option<TsType>,
-    /// Calls it with JS's arguments.
-    pub call: fn(&A, Vec<JsonValue>) -> Result<JsonValue, PropError>,
+    /// The classes its parameters and result name.
+    pub refs: super::ClassRefs,
+    /// Its call, the arguments converted in the JS call: what the core
+    /// runs with the API, in order with the props set before it. A wrong
+    /// argument's error starts with the method's name; the host puts its
+    /// component's before it (`Stepper.setValue: ...`).
+    pub call: fn(&dyn JsHost) -> Result<MethodCall, Thrown>,
 }
 
 /// What a component's ref does in JS: a handle its view makes, holding the
@@ -117,7 +124,7 @@ pub struct Method<A: 'static> {
 /// it.
 pub trait Api: Sized + 'static {
     /// Its methods.
-    const METHODS: &'static [Method<Self>];
+    const METHODS: &'static [Method];
 }
 
 /// The methods a component's ref has, for its spec and declarations:
@@ -125,18 +132,25 @@ pub trait Api: Sized + 'static {
 #[derive(Clone, Copy)]
 pub struct Methods {
     specs: fn(&mut TsTypes) -> Vec<MethodSpec>,
+    refs: super::ClassRefs,
 }
 
 impl Methods {
     /// None.
     pub const NONE: Self = Self {
         specs: |_| Vec::new(),
+        refs: |_| {},
     };
 
     /// Those of `A`.
     pub const fn of<A: Api>() -> Self {
         Self {
             specs: specs_of::<A>,
+            refs: |out| {
+                for m in A::METHODS {
+                    (m.refs)(out);
+                }
+            },
         }
     }
 }
@@ -149,6 +163,7 @@ fn specs_of<A: Api>(types: &mut TsTypes) -> Vec<MethodSpec> {
             doc: m.doc,
             params: m.params.iter().map(|(n, ts)| (*n, ts(types))).collect(),
             returns: m.returns.map(|ts| ts(types)),
+            call: m.call,
         })
         .collect()
 }
@@ -167,12 +182,15 @@ pub struct MethodSpec {
     pub params: Vec<(&'static str, String)>,
     /// The TypeScript type of its result; `None`: nothing to wait for.
     pub returns: Option<String>,
+    /// Its call (the arguments converted in the JS call).
+    pub call: fn(&dyn JsHost) -> Result<MethodCall, Thrown>,
 }
 
 /// What a prop is to the glue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropKind {
-    /// A value, sent as `$name`.
+    /// A value: decoded in the JS call ([`PropSpec::decode`]), set by the
+    /// core.
     Value,
     /// A named slot: JSX in a holder node.
     Slot,
@@ -182,6 +200,11 @@ pub enum PropKind {
     /// `List` (the glue makes the list, the component places it).
     Items,
 }
+
+/// What converts a JS value into a prop's Rust type (the prop's
+/// [`super::JsValue::from_js`], type-erased): `nsh-js` calls it when JS
+/// sets the prop.
+pub type PropDecode = fn(JsIn<'_>) -> Result<AnyValue, PropError>;
 
 /// One prop, for the glue and its declarations.
 #[derive(Debug, Clone)]
@@ -196,6 +219,8 @@ pub struct PropSpec {
     pub doc: &'static str,
     /// What it is.
     pub kind: PropKind,
+    /// A value prop's value from JS (`None` for slots, children and rows).
+    pub decode: Option<PropDecode>,
 }
 
 /// One event, for the glue and its declarations.
@@ -229,9 +254,9 @@ pub trait Props: Clone + PartialEq + 'static {
     /// Every prop at its default.
     fn initial() -> Self;
 
-    /// Prop `name` (its JS name) from JS; `None` restores its default.
-    /// Returns whether it changed.
-    fn set(&mut self, name: &str, value: Option<JsonValue>) -> Result<bool, PropError>;
+    /// Prop `name` (its JS name) from JS, as [`PropSpec::decode`] made it;
+    /// `None` restores its default. Returns whether it changed.
+    fn set(&mut self, name: &str, value: Option<AnyValue>) -> Result<bool, PropError>;
 
     /// Slot `name` filled (`Some`) or not; returns whether it changed.
     fn set_slot(&mut self, name: &str, slot: Option<Slot>) -> bool;
@@ -271,7 +296,7 @@ impl Props for () {
 
     fn initial() -> Self {}
 
-    fn set(&mut self, name: &str, _: Option<JsonValue>) -> Result<bool, PropError> {
+    fn set(&mut self, name: &str, _: Option<AnyValue>) -> Result<bool, PropError> {
         Err(PropError(format!("unknown prop `{name}`")))
     }
 
@@ -292,8 +317,8 @@ pub trait Event: 'static {
     /// This event's name.
     fn name(&self) -> &'static str;
 
-    /// Its data for JS.
-    fn data(&self) -> JsonValue;
+    /// Its data as a JS value of `host` (converted when JS hears it).
+    fn data_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError>;
 }
 
 /// The events of a component that has none.
@@ -309,7 +334,7 @@ impl Event for NoEvent {
         match *self {}
     }
 
-    fn data(&self) -> JsonValue {
+    fn data_js<'a>(&self, _host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
         match *self {}
     }
 }
@@ -405,7 +430,7 @@ fn export_name(type_name: &str) -> &str {
 
 /// An instance: a component's props and view, their types erased.
 pub(crate) trait AnyInstance {
-    fn set_prop(&mut self, name: &str, value: Option<JsonValue>) -> Result<bool, PropError>;
+    fn set_prop(&mut self, name: &str, value: Option<AnyValue>) -> Result<bool, PropError>;
     /// Props from the component whose view has this one.
     fn set_props(&mut self, props: &dyn Any);
     fn set_slot(&mut self, name: &'static str, filled: bool);
@@ -416,8 +441,9 @@ pub(crate) trait AnyInstance {
     fn view(&mut self) -> ElNode;
     /// Its registered name.
     fn name(&self) -> &'static str;
-    /// Method `name` of its ref; `None` when it has none of that name.
-    fn call(&mut self, name: &str, args: Vec<JsonValue>) -> Option<Result<JsonValue, PropError>>;
+    /// A method of its ref (its arguments decoded); `None` when it has no
+    /// ref of the method's type.
+    fn call(&mut self, call: MethodCall) -> Option<JsResult>;
     /// Its view's owner, once its view is made.
     fn owner(&self) -> Option<super::Owner>;
     /// Where a failure of its code goes first: its owner, or where it is
@@ -526,7 +552,13 @@ struct ComponentType {
 #[derive(Clone)]
 struct ModuleType {
     spec: Arc<ModuleSpec>,
-    functions: &'static [Function],
+    /// The type that implements it.
+    type_name: &'static str,
+}
+
+#[derive(Clone)]
+struct ClassType {
+    spec: Arc<ClassSpec>,
     /// The type that implements it.
     type_name: &'static str,
 }
@@ -537,6 +569,9 @@ struct ModuleType {
 pub struct Registry {
     types: Arc<FxHashMap<&'static str, ComponentType>>,
     modules: Arc<FxHashMap<&'static str, ModuleType>>,
+    /// By the specifier of their set and their name: the sets merged for
+    /// the core may have classes of the same name.
+    classes: Arc<FxHashMap<(Option<&'static str>, &'static str), ClassType>>,
     /// Values and types of `nsh/_core` exported as they are.
     reexports: Arc<(Vec<&'static str>, Vec<&'static str>)>,
     /// Values `nsh-js` makes for the set (declared by hand, not generated
@@ -579,6 +614,14 @@ impl Registry {
             let set = self.ui_set.or(self.namespace);
             panic!("{}", same_name(spec.name, old.id, TypeId::of::<C>(), set));
         }
+        if self.classes.keys().any(|(_, name)| *name == spec.export) {
+            panic!(
+                "component `{}` is exported as `{}` like a class{}: rename one",
+                spec.name,
+                spec.export,
+                of_set(self.ui_set.or(self.namespace)),
+            );
+        }
         if let Some(other) = types.values().find(|t| t.spec.export == spec.export) {
             panic!(
                 "components `{}` and `{}` are both exported as `{}`{}: rename one",
@@ -596,7 +639,9 @@ impl Registry {
                 id: TypeId::of::<C>(),
             },
         );
-        self
+        let mut refs = Vec::new();
+        (C::METHODS.refs)(&mut refs);
+        self.classes_named(refs)
     }
 
     /// Registers module `M`: its functions on a JS object named
@@ -609,6 +654,13 @@ impl Registry {
     #[track_caller]
     pub fn module<M: Module>(&mut self) -> &mut Self {
         let type_name = std::any::type_name::<M>();
+        if self.classes.keys().any(|(_, name)| *name == M::NAME) {
+            panic!(
+                "module `{type_name}` is named `{}` like a class{}: rename one",
+                M::NAME,
+                of_set(self.ui_set.or(self.namespace))
+            );
+        }
         let modules = Arc::make_mut(&mut self.modules);
         if let Some(old) = modules.get(M::NAME) {
             panic!(
@@ -625,11 +677,75 @@ impl Registry {
             M::NAME,
             ModuleType {
                 spec: Arc::new(ModuleSpec::of::<M>()),
-                functions: M::FUNCTIONS,
                 type_name,
             },
         );
+        let mut refs = Vec::new();
+        for f in M::FUNCTIONS {
+            (f.refs)(&mut refs);
+        }
+        self.classes_named(refs)
+    }
+
+    /// Registers class `C` (`#[class]`): a JS class named [`Class::DEF`]'s
+    /// name, which JS makes with `new` (when it has a constructor) and gets
+    /// from the members that return one. The classes its members'
+    /// signatures name are registered with it, as are those a module's
+    /// functions or a component's methods name ([`Registry::module`],
+    /// [`Registry::register`]): their objects reach JS, so they are
+    /// exported and declared. Registering a class again does nothing.
+    ///
+    /// # Panics
+    ///
+    /// When the set has another class, a module or a component of that
+    /// name already.
+    #[track_caller]
+    pub fn class<C: Class>(&mut self) -> &mut Self {
+        self.class_def(C::DEF)
+    }
+
+    /// Registers the classes in `refs` (a signature names them), unless
+    /// the set has them.
+    #[track_caller]
+    fn classes_named(&mut self, refs: Vec<&'static ClassDef>) -> &mut Self {
+        for def in refs {
+            self.class_def(def);
+        }
         self
+    }
+
+    #[track_caller]
+    fn class_def(&mut self, def: &'static ClassDef) -> &mut Self {
+        let type_name = (def.type_name)();
+        let set = self.ui_set.or(self.namespace);
+        if let Some(old) = self.classes.get(&(set, def.name)) {
+            if (old.spec.def.type_id)() == (def.type_id)() {
+                return self;
+            }
+            panic!("{}", same_class(def.name, old.type_name, type_name, set));
+        }
+        if self.modules.contains_key(def.name)
+            || self.types.values().any(|t| t.spec.export == def.name)
+        {
+            panic!(
+                "class `{type_name}` is named `{}` like a module or a component{}: rename one",
+                def.name,
+                of_set(set)
+            );
+        }
+        Arc::make_mut(&mut self.classes).insert(
+            (set, def.name),
+            ClassType {
+                spec: Arc::new(ClassSpec::of(def)),
+                type_name,
+            },
+        );
+        // What its members name, in turn (it is registered: a cycle ends).
+        let mut refs = Vec::new();
+        for m in def.members {
+            (m.refs)(&mut refs);
+        }
+        self.classes_named(refs)
     }
 
     /// Exports `values` and `types` of the runtime as they are (accessors
@@ -641,15 +757,16 @@ impl Registry {
         self
     }
 
-    /// The components and modules of all of `sets`, for finding them by
-    /// name (the core's view of the sets a host serves). Not a module of its
-    /// own. Components of different sets may share an export (JS imports
-    /// them from different modules), not a name.
+    /// The components of all of `sets`, for making them by name (the
+    /// core's view of the sets a host serves). Not a module of its own.
+    /// Components of different sets may share an export (JS imports them
+    /// from different modules), not a name. Modules and classes are not
+    /// in it: their calls carry what they run.
     ///
     /// # Panics
     ///
-    /// When two sets register the same component, two types of the same
-    /// name, or modules of the same name (JS calls their functions by it).
+    /// When two sets register the same component or two types of the same
+    /// name.
     #[track_caller]
     pub fn merged(sets: &[Registry]) -> Self {
         let mut out = Self::default();
@@ -658,15 +775,6 @@ impl Registry {
             for (name, ty) in set.types.iter() {
                 if let Some(old) = types.insert(name, ty.clone()) {
                     panic!("{}, by two UI sets", same_name(name, old.id, ty.id, None));
-                }
-            }
-            let modules = Arc::make_mut(&mut out.modules);
-            for (name, m) in set.modules.iter() {
-                if let Some(old) = modules.insert(name, m.clone()) {
-                    panic!(
-                        "{}, by two UI sets",
-                        same_module(name, old.type_name, m.type_name, None)
-                    );
                 }
             }
         }
@@ -735,19 +843,11 @@ impl Registry {
         self.namespace
     }
 
-    /// Function `name` of a module (`Alert.alert`; with a namespace,
-    /// `nsh/android:Toast.show`).
-    pub(crate) fn function(&self, name: &str) -> Option<&'static Function> {
-        let name = match self.namespace {
-            Some(namespace) => name.strip_prefix(namespace)?.strip_prefix(':')?,
-            None => name,
-        };
-        let (module, function) = name.split_once('.')?;
-        self.modules
-            .get(module)?
-            .functions
-            .iter()
-            .find(|f| f.name == function)
+    /// The registered classes, by name.
+    pub fn class_specs(&self) -> Vec<Arc<ClassSpec>> {
+        let mut specs: Vec<_> = self.classes.values().map(|c| c.spec.clone()).collect();
+        specs.sort_by_key(|s| s.name);
+        specs
     }
 
     /// The registered modules, by name.
@@ -794,6 +894,18 @@ fn same_module(name: &str, old: &str, new: &str, set: Option<&str>) -> String {
     }
 }
 
+/// The message of two classes named `name`.
+fn same_class(name: &str, old: &str, new: &str, set: Option<&str>) -> String {
+    if old == new {
+        format!("class `{old}` is registered twice{}", of_set(set))
+    } else {
+        format!(
+            "classes `{old}` and `{new}` are both named `{name}`{}: rename one",
+            of_set(set)
+        )
+    }
+}
+
 /// ` in `nsh/ui/mobile`` for a registry with a specifier.
 fn of_set(set: Option<&str>) -> String {
     set.map(|s| format!(" in `{s}`")).unwrap_or_default()
@@ -802,13 +914,15 @@ fn of_set(set: Option<&str>) -> String {
 /// The declarations of what `registry`'s specs export: one component per
 /// spec (by its [`ComponentSpec::export`] name), one object per module
 /// (its type `<Name>Module`; merged into a component of the same name; a
-/// flat module's functions one by one), and the named types they use.
+/// flat module's functions one by one), one class per class, and the
+/// named types they use.
 /// Exports named in `omit` are left out (their types stay): `nsh-js`
 /// declares them, building on the module (`BackHandlerModule & ...`), as
 /// it declares the re-exports and native values it makes.
 pub fn declarations(registry: &Registry, omit: &[&str]) -> String {
     let specs = registry.specs();
     let modules = registry.module_specs();
+    let classes = registry.class_specs();
     use std::fmt::Write as _;
     let mut out = String::new();
     let doc = |out: &mut String, indent: &str, doc: &str| {
@@ -824,6 +938,9 @@ pub fn declarations(registry: &Registry, omit: &[&str]) -> String {
     for m in &modules {
         types.merge(&m.types);
     }
+    for c in &classes {
+        types.merge(&c.types);
+    }
     for declaration in types.declarations() {
         let _ = write!(out, "{declaration}\n\n");
     }
@@ -835,9 +952,10 @@ pub fn declarations(registry: &Registry, omit: &[&str]) -> String {
             .map(|(n, ts, optional)| format!("{n}{}: {ts}", if *optional { "?" } else { "" }))
             .collect::<Vec<_>>()
             .join(", ");
-        let returns = match &f.returns {
-            Some(ts) => format!("Promise<{ts}>"),
-            None => "void".to_owned(),
+        let returns = match (&f.returns, f.kind) {
+            (Some(ts), super::module::FunctionKind::Sync) => ts.clone(),
+            (Some(ts), _) => format!("Promise<{ts}>"),
+            (None, _) => "void".to_owned(),
         };
         (params, returns)
     };
@@ -952,7 +1070,50 @@ pub fn declarations(registry: &Registry, omit: &[&str]) -> String {
             let _ = write!(out, "export declare const {0}: {0}Module;\n\n", m.name);
         }
     }
+    for c in classes.iter().filter(|c| !omit.contains(&c.name)) {
+        class_declaration(&mut out, c);
+    }
     out
+}
+
+/// `export declare class Name { ... }`.
+fn class_declaration(out: &mut String, c: &ClassSpec) {
+    use std::fmt::Write as _;
+    let doc = |out: &mut String, indent: &str, doc: &str| {
+        if !doc.is_empty() {
+            let _ = writeln!(out, "{indent}/** {doc} */");
+        }
+    };
+    doc(out, "", c.doc);
+    let _ = writeln!(out, "export declare class {} {{", c.name);
+    if !c.members.iter().any(|m| m.kind == MemberKind::Constructor) {
+        out.push_str("  /** Made by the class's members only. */\n  private constructor();\n");
+    }
+    for m in &c.members {
+        doc(out, "  ", m.doc);
+        let params = m
+            .params
+            .iter()
+            .map(|(n, ts, optional)| format!("{n}{}: {ts}", if *optional { "?" } else { "" }))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let value = m.returns.clone().unwrap_or_else(|| "void".to_owned());
+        let returns = if m.is_async {
+            format!("Promise<{value}>")
+        } else {
+            value
+        };
+        let _ = match m.kind {
+            MemberKind::Constructor => writeln!(out, "  constructor({params});"),
+            MemberKind::Method => writeln!(out, "  {}({params}): {returns};", m.name),
+            MemberKind::Getter => writeln!(out, "  get {}(): {returns};", m.name),
+            MemberKind::Setter => writeln!(out, "  set {}({params});", m.name),
+            MemberKind::Static => writeln!(out, "  static {}({params}): {returns};", m.name),
+        };
+    }
+    out.push_str(
+        "  /** Frees the Rust value now (else when the object is collected); the object throws after. */\n  dispose(): void;\n  [Symbol.dispose](): void;\n}\n\n",
+    );
 }
 
 /// `press` -> `onPress`.
@@ -1051,21 +1212,105 @@ mod tests {
             assert!(ts.contains(line), "missing {line:?} in\n{ts}");
         }
         let mut props = StepperProps::initial();
+        let size = |json| {
+            let specs = StepperProps::spec(&mut TsTypes::default());
+            let decode = specs
+                .iter()
+                .find(|p| p.name == "size")
+                .unwrap()
+                .decode
+                .unwrap();
+            super::super::json_host::decode(decode, json)
+        };
         assert!(
             props
-                .set("size", Some(serde_json::json!("extraLarge")))
+                .set("size", Some(size(serde_json::json!("extraLarge")).unwrap()))
                 .unwrap()
         );
         assert!(props.size == StepperSize::ExtraLarge);
-        assert!(props.set("size", Some(serde_json::json!("huge"))).is_err());
+        // A value of another type: the conversion fails (JS warns, the prop
+        // keeps its value), and so does a decoded value of another prop's
+        // type.
+        assert!(size(serde_json::json!("huge")).is_err());
+        assert!(props.set("size", Some(AnyValue::new(1.0f64))).is_err());
         assert!(props.set("size", None).unwrap());
         assert!(props.size == StepperSize::Regular);
+        let data = |e: &StepperEvent| super::super::json_host::event_data(e);
         assert_eq!(
-            StepperEvent::Change { new_value: 2.5 }.data(),
-            serde_json::json!({ "newValue": 2.5 })
+            data(&StepperEvent::Change { new_value: 2.5 }),
+            Some(serde_json::json!({ "newValue": 2.5 }))
         );
-        assert_eq!(StepperEvent::Limit(3).data(), serde_json::json!(3));
+        assert_eq!(data(&StepperEvent::Limit(3)), Some(serde_json::json!(3)));
+        assert_eq!(data(&StepperEvent::Reset), None);
         assert_eq!(StepperEvent::Reset.name(), "reset");
+    }
+
+    /// A class no set registers.
+    #[crate::ui::class]
+    struct Lonely;
+
+    #[crate::ui::class]
+    impl Lonely {
+        fn new() -> Self {
+            Lonely
+        }
+    }
+
+    /// Makes a `Lonely`.
+    struct Maker;
+
+    #[crate::ui::module]
+    impl Maker {
+        fn make() -> Instance<Lonely> {
+            Instance::new(Lonely)
+        }
+    }
+
+    #[test]
+    fn the_classes_a_signature_names_are_registered_with_it() {
+        let mut r = Registry::ui_set("test/maker");
+        r.module::<Maker>();
+        // The module's result names `Lonely`: it is the set's, declared and
+        // exported.
+        let names: Vec<_> = r.class_specs().iter().map(|c| c.name).collect();
+        assert_eq!(names, ["Lonely"]);
+        let ts = declarations(&r, &[]);
+        assert!(ts.contains("export declare class Lonely"), "{ts}");
+        assert!(ts.contains("make(): Lonely;"), "{ts}");
+        // Registering it again does nothing.
+        r.class::<Lonely>();
+        assert_eq!(r.class_specs().len(), 1);
+        let _ = Registry::merged(&[r]);
+    }
+
+    mod clash {
+        /// Another class named `Lonely`.
+        #[crate::ui::class]
+        pub(super) struct Lonely;
+
+        #[crate::ui::class]
+        impl Lonely {
+            pub(super) fn new() -> Self {
+                Lonely
+            }
+        }
+    }
+
+    #[test]
+    fn a_clash_through_a_signature_names_both_types() {
+        let mut r = Registry::ui_set("test/maker");
+        r.class::<clash::Lonely>();
+        // `Maker.make` names the other `Lonely`.
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            r.module::<Maker>();
+        }))
+        .unwrap_err();
+        let message = failed.downcast_ref::<String>().unwrap();
+        assert!(
+            message.contains("`nsh_core::ui::component::tests::clash::Lonely`")
+                && message.contains("`nsh_core::ui::component::tests::Lonely`"),
+            "{message}"
+        );
     }
 
     #[test]

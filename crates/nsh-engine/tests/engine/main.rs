@@ -12,6 +12,7 @@ use nsh_core::MountBatch;
 use nsh_engine::MountSink;
 
 mod canvas;
+mod class_bench;
 mod compiled;
 mod component_bench;
 mod components;
@@ -29,6 +30,7 @@ mod package;
 mod platform;
 mod rust_animation;
 mod rust_app;
+mod rust_classes;
 mod rust_lists;
 mod rust_platform;
 mod rust_styles;

@@ -130,6 +130,11 @@ pub struct HostOptions {
     /// The UI sets apps import as native modules
     /// (`nsh_ui_mobile::registry()`, served as `nsh/ui/mobile`).
     pub ui_sets: Vec<nsh_core::ui::Registry>,
+    /// The queue of the JS calls Rust posts (`Callback::post`,
+    /// `call_async`): the engine hands the core the same one
+    /// ([`nsh_core::Core::set_posts`]), which releases the calls posted
+    /// during a synchronous call in order with the ops.
+    pub posts: nsh_core::ui::Posts,
     /// The URL relative request URLs (`fetch("/api")`, `new Request("x")`)
     /// resolve against: the page's on the web. `None` (native hosts):
     /// they are invalid, as there is no document they belong to.
@@ -161,7 +166,12 @@ impl Host {
             ..Shared::default()
         });
         ctx.with(|ctx| {
-            crate::state::install(&ctx, shared.clone(), &options.ui_sets);
+            crate::state::install(
+                &ctx,
+                shared.clone(),
+                &options.ui_sets,
+                options.posts.clone(),
+            );
             web::web(ctx.as_raw().as_ptr()).base_url = options
                 .base_url
                 .as_deref()
@@ -216,9 +226,9 @@ impl Host {
         if self.shared.fatal.borrow().is_some() {
             return None;
         }
-        let started = self.budget.begin(phase);
+        let running = self.budget.run(phase);
         let result = f();
-        self.budget.end(started);
+        drop(running);
         // The app may have caught running out (it is an `InternalError`):
         // the VM stops all the same.
         if self.exhausted.load(Ordering::Relaxed) && self.shared.fatal.borrow().is_none() {
@@ -371,6 +381,33 @@ impl Host {
         });
     }
 
+    /// Delivers what the core hands JS after a commit
+    /// ([`nsh_core::Core::take_events`]): a node's event to its handler, a
+    /// Rust component's event to its `on<Event>` prop, a call's result to
+    /// its promise (converted now).
+    pub fn deliver(&self, event: nsh_core::ui::JsEvent) {
+        if let nsh_core::ui::JsEvent::Event(id, kind, payload) = &event {
+            self.dispatch_event(*id, *kind, payload);
+            return;
+        }
+        // What it carries is the app's (a result, an event): dropped
+        // unused (JS stopped), its `Drop` must not unwind into the engine.
+        let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.guarded(Phase::Call, || {
+                self.ctx.with(|ctx| {
+                    let raw = ctx.as_raw().as_ptr();
+                    if crate::components::deliver(raw, event).is_err() {
+                        self.report::<()>(&ctx, Err(rquickjs::Error::Exception));
+                    }
+                });
+                self.run_jobs();
+            })
+        }));
+        if delivered.is_err() {
+            log::error!(target: "js", "a value for JS panicked as it dropped");
+        }
+    }
+
     /// Delivers a native event (and its data) to the node's JS handler.
     pub fn dispatch_event(&self, id: NodeId, event: EventKind, payload: &EventPayload) {
         self.guarded(Phase::Call, || {
@@ -502,6 +539,76 @@ impl Host {
                 }
             }
         });
+    }
+
+    /// Whether warning `message` was logged (tests).
+    #[cfg(test)]
+    pub(crate) fn warned(&self, message: &str) -> bool {
+        self.shared.warnings.borrow().reported(message)
+    }
+
+    /// Runs `f` with the raw context (tests).
+    #[cfg(test)]
+    pub(crate) fn with_raw<R>(&self, f: impl FnOnce(*mut qjs::JSContext) -> R) -> R {
+        self.ctx.with(|ctx| f(ctx.as_raw().as_ptr()))
+    }
+
+    /// Whether an exception is pending outside any call (none should be).
+    #[cfg(test)]
+    pub(crate) fn has_exception(&self) -> bool {
+        // SAFETY: a check on the live context.
+        self.ctx
+            .with(|ctx| unsafe { qjs::JS_HasException(ctx.as_raw().as_ptr()) })
+    }
+
+    /// Runs the calls of JS functions Rust queued (`Callback::post`,
+    /// `Callback::call_async`), in order; those queued meanwhile wait for
+    /// the next call. The engine calls it each turn, after the core's work.
+    pub fn run_posted(&self) {
+        if self.fatal().is_some() {
+            // Stopped for good: what waits for these calls is told so.
+            self.ctx
+                .with(|ctx| crate::classes::close(ctx.as_raw().as_ptr()));
+            return;
+        }
+        self.guarded(Phase::Call, || {
+            self.ctx.with(|ctx| {
+                let ran = crate::classes::run_posted(ctx.as_raw().as_ptr());
+                self.report(&ctx, ran.map_err(|_| rquickjs::Error::Exception));
+            });
+            self.run_jobs();
+        });
+    }
+
+    /// Releases the posts JS's ops park (as the core does) and runs the
+    /// posted calls: for tests without a core.
+    #[cfg(test)]
+    pub(crate) fn run_posted_without_core(&self) {
+        let mut ops = Vec::new();
+        self.take_ops(&mut ops);
+        self.apply_posts(&mut ops);
+        self.run_posted();
+    }
+
+    /// Applies the posts' ops among `ops` (as the core does: dropped, they
+    /// release their places): for tests without a core.
+    #[cfg(test)]
+    pub(crate) fn apply_posts(&self, ops: &mut Vec<Op>) {
+        ops.retain(|op| {
+            !matches!(
+                op,
+                Op::Rust(nsh_core::ui::RustOp {
+                    run: nsh_core::ui::RustCall::Post(_),
+                    ..
+                })
+            )
+        });
+    }
+
+    /// Whether calls Rust queued wait for [`Host::run_posted`].
+    pub fn has_posted(&self) -> bool {
+        self.ctx
+            .with(|ctx| crate::classes::has_posted(ctx.as_raw().as_ptr()))
     }
 
     /// Moves the network requests and cancellations made since the last

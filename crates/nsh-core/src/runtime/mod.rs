@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use crate::ui::{Function, Registry};
+use crate::ui::Registry;
 
 mod accessibility;
 mod android;
@@ -35,13 +35,4 @@ pub fn registries() -> &'static [Registry] {
         desktop.module::<desktop::Window>();
         vec![android, accessibility, image, clipboard, desktop]
     })
-}
-
-/// Function `name` of a runtime module (`nsh/android:Toast.show`).
-pub(crate) fn function(name: &str) -> Option<&'static Function> {
-    let (namespace, _) = name.split_once(':')?;
-    registries()
-        .iter()
-        .find(|r| r.namespace() == Some(namespace))?
-        .function(name)
 }

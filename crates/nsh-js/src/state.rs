@@ -30,6 +30,7 @@ pub(crate) struct State {
     pub(crate) animations: crate::animated::Animations,
     pub(crate) canvases: crate::canvas::Canvases,
     pub(crate) web: crate::web::Web,
+    pub(crate) classes: crate::classes::Classes,
     pub(crate) hot: crate::hot::Hot,
     pub(crate) keymap: crate::keymap::Keymap,
     pub(crate) chunks: crate::chunks::Chunks,
@@ -58,8 +59,13 @@ pub(crate) fn of_runtime(rt: *mut qjs::JSRuntime) -> Option<*mut State> {
 
 /// Makes the state of `ctx`: the graph, the renderer and their classes,
 /// the environment, and the module loader of the native modules (with the
-/// UI sets `ui_sets`).
-pub(crate) fn install(ctx: &Ctx<'_>, shared: Rc<Shared>, ui_sets: &[Registry]) {
+/// UI sets `ui_sets`); the JS calls Rust posts queue in `posts`.
+pub(crate) fn install(
+    ctx: &Ctx<'_>,
+    shared: Rc<Shared>,
+    ui_sets: &[Registry],
+    posts: nsh_core::ui::Posts,
+) {
     let raw = ctx.as_raw().as_ptr();
     // SAFETY: registering classes on the context's runtime; the state is
     // freed by `uninstall`.
@@ -79,6 +85,7 @@ pub(crate) fn install(ctx: &Ctx<'_>, shared: Rc<Shared>, ui_sets: &[Registry]) {
             animations: Default::default(),
             canvases: Default::default(),
             web: Default::default(),
+            classes: crate::classes::Classes::new(posts),
             hot: Default::default(),
             keymap: Default::default(),
             chunks: Default::default(),
@@ -108,6 +115,9 @@ pub(crate) fn uninstall(ctx: &Ctx<'_>) {
         STATES.with(|m| m.borrow_mut().remove(&(rt as usize)));
         qjs::JS_SetContextOpaque(raw, ptr::null_mut());
         let mut state = Box::from_raw(p);
+        // First: what the frees below finalize finds Rust's callbacks
+        // released and their calls refused.
+        state.classes.free_all();
         state.hot.free_all();
         state.chunks.free_all();
         state.keymap.free_all();

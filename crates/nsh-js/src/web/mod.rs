@@ -10,7 +10,8 @@
 //! briefly and never across a call into JS, so a re-entrant call throws
 //! instead of aliasing. Constructors honor `new.target`, so the classes can
 //! be subclassed (`class Channel extends EventTarget`). The classes are
-//! made when an app first reads one of the globals.
+//! made when an app first reads one of the globals. The objects of Rust's
+//! `#[class]` classes (`classes.rs`) are of the same QuickJS class.
 
 pub(crate) mod js;
 
@@ -252,14 +253,52 @@ pub(crate) fn web<'a>(ctx: Ctx) -> &'a mut Web {
 /// What an object's opaque points to.
 struct Slot(RefCell<Box<dyn Object>>);
 
+thread_local! {
+    /// The finalizers running on this thread: in a collection, or freeing
+    /// an object whose last reference went (any release of a JS value may
+    /// run one). No JS may run and no op be made until they return.
+    static FINALIZING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Raised while a finalizer of this thread drops Rust values (a Rust
+/// class's value, a closure's captures): their drops are the app's code,
+/// and what they do with JS waits ([`finalizing`]).
+pub(crate) struct Finalizing(());
+
+impl Finalizing {
+    pub(crate) fn enter() -> Self {
+        FINALIZING.with(|f| f.set(f.get() + 1));
+        Finalizing(())
+    }
+}
+
+impl Drop for Finalizing {
+    fn drop(&mut self) {
+        FINALIZING.with(|f| f.set(f.get() - 1));
+    }
+}
+
+/// Whether a finalizer of this thread is dropping Rust values: a callback
+/// must not run JS now (QuickJS is collecting garbage), and a post must
+/// not make an op.
+pub(crate) fn finalizing() -> bool {
+    FINALIZING.with(|f| f.get() > 0)
+}
+
 unsafe extern "C" fn finalize(_rt: *mut qjs::JSRuntime, obj: Raw) {
+    let _finalizing = Finalizing::enter();
     // SAFETY: the opaque of these classes is a boxed slot; its values free
     // themselves through the runtime.
-    unsafe {
+    let slot = unsafe {
         let p = qjs::JS_GetAnyOpaque(obj, &mut 0);
-        if !p.is_null() {
-            drop(Box::from_raw(p as *mut Slot));
-        }
+        (!p.is_null()).then(|| Box::from_raw(p as *mut Slot))
+    };
+    // A Rust class's value drops here: a panic in the app's drop must not
+    // unwind into the collector.
+    if let Some(slot) = slot
+        && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(slot))).is_err()
+    {
+        log::error!(target: "js", "a value of a Rust class panicked while it was dropped");
     }
 }
 
@@ -272,18 +311,31 @@ unsafe extern "C" fn mark(rt: *mut qjs::JSRuntime, obj: Raw, mark: qjs::JS_MarkF
         if let Some(slot) = p.as_ref()
             && let Ok(data) = slot.0.try_borrow()
         {
-            data.trace(&mut |v| qjs::JS_MarkValue(rt, v, mark));
+            // A Rust class's tracing is the app's code: a panic must not
+            // unwind into the collector (what it did not mark stays alive).
+            let traced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                data.trace(&mut |v| qjs::JS_MarkValue(rt, v, mark));
+            }));
+            if traced.is_err() {
+                log::error!(target: "js", "a value of a Rust class panicked while it was traced");
+            }
         }
     }
 }
 
 unsafe extern "C" fn finalize_closure(_rt: *mut qjs::JSRuntime, obj: Raw) {
+    let _finalizing = Finalizing::enter();
     // SAFETY: the opaque of closures is a boxed closure.
-    unsafe {
+    let closure = unsafe {
         let p = qjs::JS_GetAnyOpaque(obj, &mut 0);
-        if !p.is_null() {
-            drop(Box::from_raw(p as *mut Closure));
-        }
+        (!p.is_null()).then(|| Box::from_raw(p as *mut Closure))
+    };
+    // Its captures may hold the app's values (a call's reply): a panic in
+    // their drop must not unwind into the collector.
+    if let Some(closure) = closure
+        && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(closure))).is_err()
+    {
+        log::error!(target: "js", "a Rust value a JS function held panicked while it was dropped");
     }
 }
 
@@ -312,9 +364,21 @@ unsafe extern "C" fn call_closure(
         let Some(c) = p.as_ref() else {
             return qjs::JS_UNDEFINED;
         };
-        match (c.f)(ctx, &c.captures, Args::new(argc, argv)) {
-            Ok(v) => v.take(),
-            Err(Throw) => qjs::JS_EXCEPTION,
+        // Rust code (a callback's reply converts the app's values): a panic
+        // throws instead of unwinding into QuickJS.
+        let args = Args::new(argc, argv);
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (c.f)(ctx, &c.captures, args)
+        })) {
+            Ok(Ok(v)) => v.take(),
+            Ok(Err(Throw)) => qjs::JS_EXCEPTION,
+            Err(_) => {
+                let e = qjs::JS_NewError(ctx);
+                if let Ok(m) = js::string(ctx, "a Rust function panicked") {
+                    qjs::JS_SetPropertyStr(ctx, e, c"message".as_ptr(), m.take());
+                }
+                qjs::JS_Throw(ctx, e)
+            }
         }
     }
 }
@@ -411,10 +475,17 @@ pub(crate) fn instance(ctx: Ctx, new_target: Raw, class: Class, data: impl Objec
     } else {
         proto(ctx, class)?
     };
+    instance_of_proto(ctx, proto.raw(), data)
+}
+
+/// A new object holding `data` with prototype `proto` (the classes of
+/// Rust's `#[class]`, `classes.rs`, whose prototypes are made at run time).
+pub(crate) fn instance_of_proto(ctx: Ctx, proto: Raw, data: impl Object) -> R<V> {
+    register(ctx);
     let id = web(ctx).object_class;
     // SAFETY: an object of the web class owning its slot.
     unsafe {
-        let obj = V::checked(ctx, qjs::JS_NewObjectProtoClass(ctx, proto.raw(), id))?;
+        let obj = V::checked(ctx, qjs::JS_NewObjectProtoClass(ctx, proto, id))?;
         let slot: Box<Slot> = Box::new(Slot(RefCell::new(Box::new(data))));
         qjs::JS_SetOpaque(obj.raw(), Box::into_raw(slot) as *mut c_void);
         Ok(obj)
@@ -442,6 +513,14 @@ pub(crate) fn data<'a, T: Object>(ctx: Ctx, v: Raw, what: &str) -> R<RefMut<'a, 
         .map_err(|_| js::type_error(ctx, &format!("{what} used re-entrantly")))?;
     RefMut::filter_map(b, |d| (d.as_mut() as &mut dyn Any).downcast_mut::<T>())
         .map_err(|_| illegal(ctx))
+}
+
+/// `f` of the data of `v` as a `T`, without throwing (`None`: another
+/// value, or one in use).
+pub(crate) fn peek<T: Object, R>(ctx: Ctx, v: Raw, f: impl FnOnce(&T) -> R) -> Option<R> {
+    let slot = slot(ctx, v)?;
+    let data = slot.0.try_borrow().ok()?;
+    (data.as_ref() as &dyn Any).downcast_ref::<T>().map(f)
 }
 
 /// Whether `v` holds a `T`.

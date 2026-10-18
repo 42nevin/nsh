@@ -33,6 +33,9 @@ pub mod ambient;
 pub(crate) mod animated;
 mod asset;
 mod back;
+pub(crate) mod call;
+mod callback;
+pub(crate) mod class;
 mod component;
 pub(crate) mod element;
 mod element_ref;
@@ -40,8 +43,11 @@ pub(crate) mod env;
 mod events;
 pub(crate) mod flow;
 pub(crate) mod host;
+mod js;
+#[cfg(test)]
+pub(crate) mod json_host;
 pub(crate) mod keys;
-mod module;
+pub(crate) mod module;
 mod once;
 pub mod palette;
 mod prop;
@@ -80,7 +86,8 @@ pub use nsh_animation::{
     Curve, EaseMode, Easing, Extrapolate, Output as AnimationOutput, sample_easing,
 };
 pub use nsh_macros::{
-    Event, JsObject, PropEnum, Props, asset, assets, component, methods, module, native_module,
+    Event, JsObject, PropEnum, Props, asset, assets, class, component, methods, module,
+    native_module,
 };
 
 pub use self::{
@@ -89,9 +96,19 @@ pub use self::{
         NativeValue, Spring, Timing, sample_decay, sample_decay_within, sample_spring,
     },
     asset::{AssetFile, AssetKind, FileAsset, FontAsset, ImageAsset, ImageSrc},
+    call::{
+        AnyValue, EventToJs, JsEvent, JsResult, MethodCall, OpCall, ParkedPost, Posts, RustCall,
+        RustOp, TaskStart, ToJs,
+    },
+    callback::{Callback, CallbackArgs, CallbackHandle, CallbackRet, JsCall, Trace, Tracer},
+    class::{
+        Arg, AsyncCall, Class, ClassDef, ClassInstance, ClassRefs, ClassSpec, Instance, Member,
+        MemberCall, MemberKind, MemberSpec, Ret, Thrown,
+    },
     component::{
         Api, Component, ComponentError, ComponentSpec, Event, EventSpec, Method, MethodSpec,
-        Methods, NoEvent, Param, PropKind, PropSpec, Props, Registry, Root, declarations,
+        Methods, NoEvent, Param, PropDecode, PropKind, PropSpec, Props, Registry, Root,
+        declarations,
     },
     element::{
         Accessible, AnyElement, Attrs, BoundListConfig, Child, Children, ComponentElement, ElNode,
@@ -110,9 +127,10 @@ pub use self::{
         Orientation, Painter, Screen, Scroll, Stack, Video, WebView, canvas, input,
         input_accessory_view, modal, native, screen, scroll, stack, video, web_view, web_view_html,
     },
+    js::{JsHost, JsIn, JsKind, JsOwned, JsRaw},
     module::{
-        Function, FunctionCall, FunctionSpec, Module, ModuleCx, ModuleFuture, ModuleParam,
-        ModuleSpec,
+        Function, FunctionCall, FunctionKind, FunctionSpec, Module, ModuleCx, ModuleFuture,
+        ModuleParam, ModuleSpec, SyncCall,
     },
     once::Scope,
     prop::Prop,
@@ -131,7 +149,7 @@ pub use self::{
     },
     task::{Answer, DialogAnswer, ImageSize, Task},
     theme::{Theme, ThemeColors, ThemeError},
-    value::{JsValue, NodeRef, PropError, SharedString, TsType, TsTypes, ts_of},
+    value::{JsValue, NodeRef, PropEnum, PropError, SharedString, TsType, TsTypes, ts_of},
     virtual_list::{ListLayout, ViewableItems, VirtualList, virtual_list},
 };
 pub(crate) use self::{
@@ -173,6 +191,7 @@ pub mod prelude {
         BlendMode,
         BorderCurve,
         BoxShadow,
+        Callback,
         CanvasView,
         Child,
         Children,
@@ -207,6 +226,7 @@ pub mod prelude {
         ImageAsset,
         Input,
         InputAccessoryView,
+        Instance,
         Interactive,
         Interpolation,
         IntoElement,
@@ -282,6 +302,7 @@ pub mod prelude {
         asset,
         assets,
         canvas,
+        class,
         image,
         input,
         input_accessory_view,
@@ -327,6 +348,8 @@ pub mod prelude {
 #[doc(hidden)]
 pub mod __private {
     pub use serde_json::Map as JsonMap;
+
+    pub use super::class::__private::*;
 
     /// Implemented by nothing: what the generated workspace of an app
     /// calls when a crate of the app has no `#[native_module]`
