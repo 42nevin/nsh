@@ -108,9 +108,9 @@ server client, log forwarding, the error overlay: `dev.rs`). The runtime needs m
 - **Embedding**: `AppView` (`app.rs`) is one surface as a view; `run_app` opens one in a window with a standard menu
   (About, Hide, Quit; Edit's undo / redo / cut / copy / paste / select all, which fields answer; Minimize, Zoom, Enter
   Full Screen, Close), titled with `AppOptions::title`: `name_app` sets the main bundle's `CFBundleName` to it, as the
-  menu bar shows that (the development host has no bundle; `nsh run` passes it the app's name with `--name`). The app
-  ends when its window closes, a minimized one too (AppKit's `applicationShouldTerminateAfterLastWindowClosed:` skips
-  windows that are not on screen, so `windowWillClose:` terminates). `set_ui_sets`
+  menu bar shows that (the development host has no bundle; `nsh run` passes it the app's name with `--name`). The standalone event loop
+  ends when its window closes, a minimized one too; `windowWillClose:` schedules
+  its stop after the close callback. `set_ui_sets`
   replaces the default `nsh/ui/mobile` set for apps with Rust components of their own.
 
 ## How each area maps to AppKit
@@ -244,3 +244,37 @@ so are outer box shadows under an opaque background (unmasked `shadowPath` caste
 - **Accessibility**: `accessibilityActions`.
 - **No desktop equivalent**: the status bar, haptics; the safe area and keyboard height are 0.
 - **Packaged apps** are signed ad hoc; to distribute one, sign it with a Developer ID and notarize it.
+
+## Standalone shutdown
+
+`run_app` owns the standalone window and engine, while its caller owns process
+termination. Closing the window (including a minimized window) stops the engine
+and stops the AppKit event loop. Quit follows the same path through
+`applicationShouldTerminate:`: the delegate cancels AppKit's process exit and
+returns control through `run_app` instead. The helper posts an application-defined
+event after `stop:` so a dispatch-driven close wakes the event loop.
+
+This lets a Rust host perform final cleanup or execute an installed update after
+`run_app` returns. Embedded `AppView` instances continue to use their host's
+delegate and event loop. This change still needs native close, minimized-close,
+Command-Q, script quit, process-exit status and relaunch validation. No tests
+were run for this change at the user's request.
+
+### Retained standalone session design
+
+A standalone host chooses its close policy through
+`AppOptions::keep_alive_on_close` (default false). With retention enabled, the
+close delegate orders out the existing window and declines its destruction.
+`RUNNING` continues owning the same window, AppView and engine. Dock reopen
+orders that window front; it creates neither another engine nor another session.
+
+Explicit application Quit and `quit_app()` always take the stop-and-return
+path, including while the window is hidden. `quit_app()` dispatches to the main
+thread and only affects the standalone runner; an embedded host retains its own
+application lifecycle. The Rust core's `close_window()` remains a window-close
+request, so hosts using retention must use `quit_app()` for Exit/relaunch.
+
+Acceptance requires visible/hidden/minimized close, Dock reopen preserving
+state and transfers, repeated reopen without duplicate windows, Quit while
+hidden, scripted quit, and cleanup after run_app returns. Source implementation
+and CI compilation alone do not prove those runtime behaviors.
