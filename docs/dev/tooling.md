@@ -95,7 +95,7 @@ before every `cargo run`): `✓` lines for its builds, cargo's and the tools' ou
   (an empty version, the web host's, asks for source without a warning).
 - The web host is a page the dev server serves itself (`DevServer::serve_web`, the fallback route: `/`, `/nsh.js`,
   `/nsh.wasm`) when a web runtime exists; browsers connect to `/ws` on the same port. `nsh run --target web` builds the
-  runtime in a checkout and opens the page (`docs/dev/web.md`, "The CLI's web target").
+  runtime in a checkout and prints the page's address (`docs/dev/web.md`, "The CLI's web target").
 - Watching ignores `Access` events: inotify (Linux) reports reads, FSEvents does not, so the build's own reads of the
   sources would start the next build, forever.
 - `nsh run` defaults to the host that runs on this machine: `--target catalyst` on macOS, `--target linux` (the GTK
@@ -237,8 +237,10 @@ toolchain cannot know the set, so `nsh` builds the app its own (`crates/nsh-cli/
   host and the release runner: `nsh_platform_ios::set_ui_sets`, then `nsh_ios_host::main` / `nsh_ios_app::main`),
   `linux-host` / `linux-app`, `macos-host` / `macos-app` and `windows-host` / `windows-app` (the same on Linux, macOS
   and Windows, `nsh_platform_linux` / `nsh_platform_macos` / `nsh_platform_windows::set_ui_sets`; `windows-app` is a
-  windowed program, with no console) and `android` (the app's `libnsh.so`: `nsh::ui_sets!`, which the Android
-  runtime looks up when an engine starts). `gpui-host` / `gpui-app` (`nsh_platform_gpui::set_ui_sets`, under
+  windowed program, with no console), `android` (the app's `libnsh.so`: `nsh::ui_sets!`, which the Android
+  runtime looks up when an engine starts) and `web` (the app's web runtime, a `cdylib` for `wasm32-unknown-unknown`
+  built with the `web` profile: `nsh_platform_web::ui_sets!`, whose `nsh_app_init` export `nsh.js` calls;
+  `docs/dev/web.md`, "Apps with Rust components"). `gpui-host` / `gpui-app` (`nsh_platform_gpui::set_ui_sets`, under
   `cfg(any(target_os = "linux", target_os = "macos", windows))`; `gpui-app` is a windowed program on Windows too) are
   a workspace of their own in `.nsh/rust/gpui` (excluded from the main one), written only when a GPUI host or runner is
   built (`RustApp::gpui_workspace`), so builds for the other targets never resolve GPUI's crates. They
@@ -251,10 +253,23 @@ toolchain cannot know the set, so `nsh` builds the app its own (`crates/nsh-cli/
   path, which falls back to `node_modules`), `nsh trace` renders it. The hosts `run` and `package` need are built
   for the app instead of taken from the runtime (iOS `--target` triples; Linux's, macOS's, Windows' and GPUI's
   `*-host` / `*-app` for this machine; Android: the prebuilt `classes.dex` with
-  the app's `libnsh.so` for each ABI of the prebuilt runtime, cross-compiled with the NDK).
+  the app's `libnsh.so` for each ABI of the prebuilt runtime, cross-compiled with the NDK; the web: the app's
+  `nsh.wasm` / `nsh-dev.wasm`, with nsh's `nsh.js`).
 - `nsh dev` / `nsh run` watch the crate too: a change to its `.rs` files, `Cargo.toml` or `assets/` ends the app's
   command line with exit code 75, and `nsh` builds it and runs the command again (the app restarts; JS and TSX edits
   stay hot).
+- **Rust apps.** With `"root": "<path in the crate>"` in `nsh.json`, the app's directory resolves to its `nsh.json`
+  (`entry::resolve`; a named `App.tsx` stays the TSX entry), and the app runs with no JS: `rust_app::RootConfig`
+  (with `"theme"` and `"appearance"`, also kept in `.nsh/rust/app.json` for the app's command line) adds the members
+  `rust-linux`, `rust-macos`, `rust-windows`, `rust-ios` (each the platform's release runner library without its
+  feature `js`, whose `run_rust` mounts the generated `app_root()`), `rust-android` (`nsh::ui_sets!` and `nsh::main!`,
+  `nsh-platform-android` without `js`; the APK's manifest gets the `com.longbridge.nsh.RUST` meta-data `AppActivity`
+  reads) and `rust-web` (`docs/dev/web.md`), and `gpui/rust-gpui`. `RustApp::runtime`, `android` and `web` build
+  those instead; `nsh package` ships no bundle (`build::rust_root`: the crates' assets only); `nsh run` runs the
+  desktops' runner in debug in place (`NSH_APP_DIR`: its `nsh` directory, and the app's logs on stderr), Catalyst's in
+  an app bundle (`NSH_DEVELOPMENT`), and installs a package on the simulator and Android; on the web a dev session
+  without builds serves the page. A crate change ends the command with `Restart` (`RustApp::watch`). The other
+  commands refuse a Rust app's entry. `examples/gallery-rs` is one (`"root": "Gallery"`).
 - The files the sets' crates ship (`Registry::assets(assets!())`: a crate's `assets/` directory, published as
   `asset:/@<package>/<path>`) go with the app's imported assets: the dev server serves them
   (`DevServer::serve_files`), `nsh build` / `package` / `publish` copy them (`build::Built::assets`: each file's path

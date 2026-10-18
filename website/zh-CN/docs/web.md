@@ -1,16 +1,20 @@
 ---
-title: Web（WebAssembly）
-description: 用 WebAssembly 版运行时在浏览器里运行 NSH 应用，渲染到 DOM；用 NSH package --target web 发布为静态站点，用 NSH run --target web 开发。
+title: Web
+description: 用 Native Shell 组件构建 HTML 和 CSS 界面，在浏览器里开发 Web 应用，并发布到任意静态托管服务或 CDN。
 order: 16
 group: platforms
 demo: counter
 ---
 
-# Web（WebAssembly）
+# Web
 
-NSH 运行时也能编译成 WebAssembly。同一个引擎跑在浏览器页面里，只是渲染目标从 UIKit 或 Android 视图换成了 DOM：核心、响应式图、渲染器、Taffy 布局、`nsh/ui/mobile` 组件，以及 QuickJS 本身，全都一样。`nsh package --target web` 把应用发布成可放在任何 Web 服务器或 CDN 上的静态站点（[发布应用](#发布应用)），`nsh run --target web` 在你编辑时把它运行在浏览器里（[在浏览器里开发](#在浏览器里开发)），本站每一个实时演示，都是 `nsh build` 打出的应用包运行在这个运行时上。
+用 Native Shell 构建 Web 应用，沿用原生平台上的组件、样式和业务逻辑。NSH 将界面渲染为 HTML 元素和 CSS：文字、图片、输入框、滚动、视觉样式和交互都使用浏览器的 DOM 和 Web API。
+
+`nsh package --target web` 把应用发布成可放在任何 Web 服务器或 CDN 上的静态站点（[发布应用](#发布应用)），`nsh run --target web` 在你编辑时把它运行在浏览器里（[在浏览器里开发](#在浏览器里开发)）。本站每一个实时演示都使用这个 Web 后端。
 
 ## 各部分在哪里运行
+
+页面由 HTML 元素和 CSS 样式构成。NSH 将组件更新转换为批量 DOM 操作，浏览器负责界面显示、滚动、文字选择和输入。WebAssembly 承载共享的 Rust 引擎，负责组件状态、布局计算和更新。
 
 在每个原生平台上，引擎都有自己的线程，每次提交把一个 `MountBatch` 交给主线程。浏览器页面只有一个线程，所以 Web 版由页面的事件循环一步步驱动同一个引擎（`nsh_engine::LocalEngine`）：
 
@@ -45,7 +49,7 @@ requestAnimationFrame ───────────┘                      
 
 ```sh
 nsh package App.tsx --target web           # out/<Name>/：一个静态站点
-nsh package App.tsx --target web --run     # 并在本机提供服务，在浏览器中打开
+nsh package App.tsx --target web --run     # 并在本机提供服务（打开它打印的地址）
 ```
 
 `nsh package --target web` 写出 `out/<Name>/`（用 `--out` 指定其他目录），结构与前端构建产物相同：一个页面，其余文件都以内容命名。
@@ -92,7 +96,32 @@ Web 上没有嵌入 API：用 `<iframe>` 嵌入已发布的应用，它的尺寸
 nsh run App.tsx --target web
 ```
 
-会启动开发服务器，并在浏览器中打开它的页面 `http://127.0.0.1:8790/`。这个页面和其他开发宿主一样：运行应用的每次构建，就地应用修改（热更新），在应用上方显示构建错误和运行时错误，并把应用的 `console` 输出发送到终端。同一网络中的手机打开 `nsh run` 打印的地址（`browsers on this network: http://192.168.…:8790/`）即可。只要 Web 运行时存在（发行包中总是存在），`nsh dev` 也会提供同一个页面。
+会启动开发服务器，并打印它的页面地址 `http://127.0.0.1:8790/`，在任意浏览器中打开即可。这个页面和其他开发宿主一样：运行应用的每次构建，就地应用修改（热更新），在应用上方显示构建错误和运行时错误，并把应用的 `console` 输出发送到终端。同一网络中的手机打开 `nsh run` 在其下方打印的地址（`on this network: http://192.168.…:8790/`）即可。只要 Web 运行时存在（发行包中总是存在），`nsh dev` 也会提供同一个页面。
+
+## 带 Rust 组件的应用
+
+用 Rust 编写的应用（[用 Rust 开发](./rust.md)）用同样的命令发布和在浏览器中运行：
+
+```sh
+nsh package --target web           # out/<Name>/：应用自己的 nsh.wasm，包含它的 crate
+nsh run --target web               # 开发服务器的页面；修改 Rust 代码会重新构建
+```
+
+当 `nsh.json` 指定了应用的根组件（`"root"`）时，页面只包含应用的 Rust 代码和 NSH 的页面脚本：`nsh.wasm` 包含引擎、组件和应用的
+crate，不含 QuickJS；站点里没有 `app.nshc` 和 `harden.nshc`；运行时和字体加载完后，页面直接挂载根组件。整个 Rust gallery 为
+3.3 MB（gzip 后 1.06 MB，brotli 后 0.75 MB），比 TSX 应用的运行时还小。通过 TSX 入口（`nsh package App.tsx --target web`）时，
+同一个应用像 TSX 应用一样运行在 QuickJS 上，并导入 crate 的组件和模块。
+
+两种方式下，crate 的资源（`assets!()`）都会随应用的资源一起发布，其中的字体在第一帧之前加载。`nsh run --target web`
+期间，修改 crate 的 Rust 代码会重新构建运行时，已打开的页面会自动加载新的运行时；TSX 的修改仍然是热更新。
+
+要在包括 Web 在内的所有平台上运行的 Rust 代码，使用引擎提供的服务：`fetch(url).await` 通过与 JS `fetch` 相同的网络栈发出 HTTP
+请求（这里是浏览器的网络栈，遵循它的 CORS 规则）；`timer`、`set_timeout` 和 `set_interval` 用于等待；`nsh_core::time::Instant`
+和 `nsh_core::time::unix_ms()` 读取时钟。`background` 和 `blocking` 在原生目标的线程上运行任务。
+
+构建需要 Rust 的目标和能编译到 WebAssembly 的 clang，与运行时本身的构建相同：`rustup target add wasm32-unknown-unknown`，
+以及 `clang` 和 `llvm-ar`（macOS 上使用 LLVM 工具链，例如 Homebrew 的 `llvm`，通过 `CC_wasm32_unknown_unknown` 和
+`AR_wasm32_unknown_unknown` 指定）。
 
 ## 构建本站的播放器
 

@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "examples/gallery-rs/**"
+      - "crates/nsh-cli/**"
       - "crates/nsh-core/**"
       - "crates/nsh-engine/**"
       - "crates/nsh-macros/**"
@@ -12,6 +13,7 @@ on:
       - "crates/nsh-platform-linux/**"
       - "crates/nsh-platform-macos/**"
       - "crates/nsh-platform-windows/**"
+      - "crates/nsh-platform-web/**"
       - "Cargo.toml"
       - ".github/workflows/rust-app.yml"
   pull_request:
@@ -25,6 +27,7 @@ on:
       - "crates/nsh-platform-linux/**"
       - "crates/nsh-platform-macos/**"
       - "crates/nsh-platform-windows/**"
+      - "crates/nsh-platform-web/**"
       - "Cargo.toml"
       - ".github/workflows/rust-app.yml"
   workflow_dispatch:
@@ -81,3 +84,52 @@ jobs:
             echo "The Rust executable unexpectedly links a JS runtime"
             exit 1
           fi
+
+  # The same crate compiled into the app's own web runtime: `nsh package
+  # --target web` builds it for wasm32 and publishes the site.
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up temporary files
+        run: |
+          mkdir -p "$RUNNER_TEMP/nsh-test-tmp"
+          echo "TMPDIR=$RUNNER_TEMP/nsh-test-tmp" >> "$GITHUB_ENV"
+      # QuickJS is C: bindgen needs libclang, its WebAssembly build clang
+      # and llvm-ar. The app's command line links the gallery's crate,
+      # whose native entry (`cargo run`) uses GTK 4 on Linux.
+      - name: Install clang, LLVM and GTK 4
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libclang-dev libgtk-4-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rust-app-web-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-app-web-
+      - name: Build the command line
+        run: cargo build -p nsh-cli --locked
+      - name: Publish the Rust gallery for the web
+        run: |
+          # nsh.json "root": a Rust app, mounted with no QuickJS.
+          ./target/debug/nsh package examples/gallery-rs --target web -o target/rust-app-web
+          site="target/rust-app-web/Rust Gallery"
+          test -f "$site/index.html"
+          # The app's runtime registers the crate's UI set and root.
+          grep -q nsh_app_init "$site"/nsh.*.wasm
+          grep -q nsh_start_rust "$site"/nsh.*.wasm
+          if ls "$site"/app.*.nshc > /dev/null 2>&1 || grep -aq InternalError "$site"/nsh.*.wasm; then
+            echo "The Rust app's web runtime unexpectedly carries JS"
+            exit 1
+          fi
+      - name: Publish its TSX entry for the web
+        run: |
+          # The same crate under its TSX entry: QuickJS runs App.tsx.
+          ./target/debug/nsh package examples/gallery-rs/App.tsx --target web -o target/rust-app-web-tsx
+          site="target/rust-app-web-tsx/Rust Gallery"
+          ls "$site"/app.*.nshc
