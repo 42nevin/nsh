@@ -12,7 +12,7 @@ use nsh_ui_mobile::{KeyboardAvoidingView, KeyboardAvoidingViewProps};
 use crate::ui::{
     Appear, AppearProps, Badge, Button, ButtonVariant, Finish, Finished, IconName, IconTile, MONO,
     Meter, PressProps, PressRole, RoundButton, Section, Segment, SegmentedEvent, Tone, colors,
-    icon, press_with, radius, segmented,
+    hint, icon, press_with, radius, segmented,
 };
 
 /// The tones rows cycle through (the last, neutral, only in the grid).
@@ -642,9 +642,15 @@ struct Item {
     tone: Tone,
 }
 
-/// The pull to refresh section: the spinner's state and the refreshes.
-fn refresh_section(refreshing: Signal<bool>, refreshed: Signal<u32>) -> Section {
-    Section::new("Pull to refresh").child(
+/// The pull to refresh section: the spinner's state and the refreshes,
+/// and on desktops, whose mouse does not pull scroll views down, a button
+/// calling `refresh`.
+fn refresh_section(
+    refreshing: Signal<bool>,
+    refreshed: Signal<u32>,
+    refresh: impl Into<Listener<()>>,
+) -> Section {
+    let section = Section::new("Pull to refresh").child(
         view()
             .flex_row()
             .items_center()
@@ -665,7 +671,7 @@ fn refresh_section(refreshing: Signal<bool>, refreshed: Signal<u32>) -> Section 
                             if refreshing.get() {
                                 "Refreshing…"
                             } else {
-                                "Pull the page down"
+                                hint("Pull the page down", "Refresh below")
                             }
                         })
                         .text_size(px(15.0))
@@ -693,6 +699,14 @@ fn refresh_section(refreshing: Signal<bool>, refreshed: Signal<u32>) -> Section 
                             .text_color(colors::FAINT),
                     ),
             ),
+    );
+    if !is_desktop() {
+        return section;
+    }
+    section.child(
+        Button::new("Refresh", refresh)
+            .variant(ButtonVariant::Secondary)
+            .disabled(Prop::bind(move || refreshing.get())),
     )
 }
 
@@ -861,9 +875,12 @@ fn empty_list() -> Section {
             .h(px(194.0))
             .child(IconTile::new(IconName::Lists).tint(colors::FAINT))
             .child(
-                text("Nothing here yet: tap Add")
-                    .text_size(px(13.0))
-                    .text_color(colors::MUTED),
+                text(hint(
+                    "Nothing here yet: tap Add",
+                    "Nothing here yet: click Add",
+                ))
+                .text_size(px(13.0))
+                .text_color(colors::MUTED),
             ),
     )
     .separator(|| view().h(px(1.0)).ml(px(14.0)).bg(colors::LINE))
@@ -933,7 +950,7 @@ fn More() -> impl IntoElement {
                 view()
                     .p_4()
                     .gap_4()
-                    .child(refresh_section(refreshing, refreshed))
+                    .child(refresh_section(refreshing, refreshed, on_refresh))
                     .child(ranges(range))
                     .child(cards())
                     .child(empty_list()),
