@@ -21,7 +21,7 @@ nsh run App.tsx
 
 This starts the TSX entry instead, which imports the same Rust component from `app/native`: write screens in TSX on top of the Rust components and modules, with hot reloading (TSX runs on QuickJS, in the browser too).
 
-The `nsh` commands use an NSH source checkout to build the app's runners: either run the CLI built in that checkout or set `NSH_SOURCE` to a compatible checkout. The first TSX build generates the `app/native` TypeScript declarations.
+The `nsh` commands build the app's runners from the NSH crates `Cargo.toml` depends on: crates.io's at the version of the `nsh` you run (keep the `nsh-*` dependencies at that version when you upgrade `nsh`), or an NSH checkout's by path. The first TSX build generates the `app/native` TypeScript declarations.
 
 `cargo run` uses published NSH crates. UI state and event handlers execute directly in Rust. The native entry accepts scripted window checks through `NSH_SCRIPT`, for example:
 
