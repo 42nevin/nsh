@@ -11,7 +11,8 @@
 //! Lifetimes: a signal lives as long as its JS object (the object's GC mark
 //! reports the value, so cycles through it are collected); memos and
 //! effects belong to the owner they were made under and are disposed with
-//! it; a memo's object keeps reading its last value after that. Nothing
+//! it; only after disposal does a memo's object own and mark its last value.
+//! The object keeps reading that value until it too is collected. Nothing
 //! here holds a Rust reference across a call into JS (which may re-enter)
 //! or across freeing a JS value (which may finalize a signal or memo object,
 //! whose finalizer updates the graph): the graph is reached through the
@@ -398,7 +399,10 @@ unsafe extern "C" fn gc_mark(rt: *mut qjs::JSRuntime, obj: JsValue, mark: qjs::J
         return;
     }
     let (id, generation) = unpack(p);
-    if g.live(id, generation, GENERATION_MASK) {
+    // Trace only references that this object's finalizer releases. A live
+    // memo's owner still roots its value and equality function: reporting them
+    // as accessor edges lets cycle collection free values the graph retains.
+    if g.live(id, generation, GENERATION_MASK) && (g.kind(id) == Kind::Signal || g.disposed(id)) {
         unsafe { qjs::JS_MarkValue(rt, *g.value(id), mark) };
         if let Some(f) = g.custom_equals(id) {
             unsafe { qjs::JS_MarkValue(rt, *f, mark) };
@@ -1259,6 +1263,127 @@ mod tests {
         });
         assert!(slots < 5000, "{slots} nodes for 5000 signals");
         assert_eq!(after, before, "every signal collected");
+    }
+
+    /// Keeps the graph installed across explicit collections and tears it down
+    /// before assertions, so a failed expectation does not leak the host state.
+    fn with_gc_graph<T>(test: impl FnOnce(&Runtime, &Context) -> T) -> T {
+        let rt = Runtime::new().unwrap();
+        let ctx = Context::full(&rt).unwrap();
+        ctx.with(|ctx| {
+            crate::state::install(&ctx, std::rc::Rc::default(), &[], Default::default());
+            super::install_globals(&ctx);
+        });
+        let out = test(&rt, &ctx);
+        ctx.with(|ctx| crate::state::uninstall(&ctx));
+        out
+    }
+
+    #[test]
+    fn memo_cycles_follow_owner_then_accessor_lifetimes() {
+        // Both the cached value and custom equality function belong to the
+        // live owner, even when their only JS reference back is to the accessor.
+        let (owned, collected) = with_gc_graph(|rt, ctx| {
+            ctx.with(|ctx| {
+                ctx.eval::<(), _>(
+                    r#"
+                    const R = globalThis.__nsh_reactive;
+                    globalThis.release = R.createRoot(dispose => {
+                        let memo = R.createMemo(() => ({}));
+                        memo().self = memo;
+                        let equals = (a, b) => a === b;
+                        let compared = R.createMemo(() => ({}), undefined, { equals });
+                        equals.self = compared;
+                        globalThis.refs = [memo, memo(), compared, equals].map(x => new WeakRef(x));
+                        memo = compared = equals = null;
+                        return dispose;
+                    });
+                "#,
+                )
+                .unwrap();
+            });
+            rt.run_gc();
+            let owned = ctx.with(|ctx| {
+                ctx.eval::<bool, _>("refs.every(ref => ref.deref() !== undefined)")
+                    .unwrap()
+            });
+            ctx.with(|ctx| ctx.eval::<(), _>("release(); release = null;").unwrap());
+            rt.run_gc();
+            let collected = ctx.with(|ctx| {
+                ctx.eval::<bool, _>("refs.every(ref => ref.deref() === undefined)")
+                    .unwrap()
+            });
+            (owned, collected)
+        });
+        assert!(
+            owned,
+            "a live owner retains memo values and equality functions"
+        );
+        assert!(
+            collected,
+            "disposing the owner makes the accessor cycles collectible"
+        );
+    }
+
+    #[test]
+    fn disposed_memo_keeps_its_last_value_until_the_accessor_is_released() {
+        let (last_value, collected) = with_gc_graph(|rt, ctx| {
+            ctx.with(|ctx| {
+                ctx.eval::<(), _>(
+                    r#"
+                    const R = globalThis.__nsh_reactive;
+                    const [read, write] = R.createSignal(1);
+                    const dispose = R.createRoot(dispose => {
+                        globalThis.saved = R.createMemo(() => ({ value: read() }));
+                        saved().self = saved;
+                        globalThis.refs = [saved, saved()].map(x => new WeakRef(x));
+                        return dispose;
+                    });
+                    dispose();
+                    write(2);
+                "#,
+                )
+                .unwrap();
+            });
+            rt.run_gc();
+            let last_value = ctx.with(|ctx| {
+                ctx.eval::<bool, _>("saved().value === 1 && saved().self === saved")
+                    .unwrap()
+            });
+            ctx.with(|ctx| ctx.eval::<(), _>("saved = null;").unwrap());
+            rt.run_gc();
+            let collected = ctx.with(|ctx| {
+                ctx.eval::<bool, _>("refs.every(ref => ref.deref() === undefined)")
+                    .unwrap()
+            });
+            (last_value, collected)
+        });
+        assert!(
+            last_value,
+            "a retained disposed memo remains readable without recomputing"
+        );
+        assert!(
+            collected,
+            "the last accessor owns the disposed memo's cached value"
+        );
+    }
+
+    #[test]
+    fn unowned_memo_cycles_survive_collection_and_host_shutdown() {
+        let host = crate::Host::new().unwrap();
+        host.eval_source(
+            r#"
+            import { computed } from "nsh";
+            {
+                let memo = computed(() => ({}));
+                memo().self = memo;
+                memo = null;
+            }
+        "#,
+        )
+        .unwrap();
+        host.collect_garbage();
+        drop(host);
     }
 
     #[test]
