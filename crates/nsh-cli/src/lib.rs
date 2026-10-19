@@ -195,6 +195,20 @@ enum Command {
         /// the newest iPhone.
         #[arg(long)]
         device: Option<String>,
+        /// The app's name in the host (the menu bar, the window title;
+        /// `nsh.json`'s name by default; `--target macos` only).
+        #[arg(long)]
+        name: Option<String>,
+        /// The window's initial size, `WxH` in points (the host's default
+        /// by default; `--target macos` only).
+        #[arg(long = "window-size", value_name = "WIDTHxHEIGHT")]
+        size: Option<String>,
+        /// Script steps to run once the window shows (`wait`, `shot`,
+        /// `tap`, `quit`, ...; `--target macos` only). With `quit` the
+        /// command exits when the script does — snapshots without a
+        /// window staying open.
+        #[arg(long)]
+        script: Option<String>,
     },
     /// Create a signing key: `<name>.secret` (keep it offline for a root)
     /// and `<name>.pub` (what apps trust, for a root).
@@ -540,6 +554,9 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             fps,
             target,
             device,
+            name,
+            size,
+            script,
         } => run::run(
             &entry,
             port,
@@ -547,6 +564,11 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             run::HostFlags { trace, fps },
             target,
             device.as_deref(),
+            run::HostWindow {
+                name: name.as_deref(),
+                size: size.as_deref(),
+                script: script.as_deref(),
+            },
         ),
         Command::Keygen { name } => sign::keygen(&name),
         Command::Certify {
