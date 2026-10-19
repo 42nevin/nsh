@@ -12,8 +12,14 @@
   component it names and generic ones are inferred: `native-pipeline.md`), `nsh/globals.d.ts` (console, timers,
   frames, the web APIs and the control flow components `If` / `Each`), and from the bundler `nsh/assets.d.ts` (what
   image and font imports give). Each file declares its own names; the `import type` lines between them are worked out
-  from the names each uses. `nsh init` writes a `tsconfig.json` mapping `nsh` and `nsh/*` there (`jsxImportSource:
-  "nsh"`, no DOM library), so editors type-check apps without `node_modules`.
+  from the names each uses. Next to them nsh writes `.nsh/tsconfig.json` (`nsh_bundler::TSCONFIG_BASE`): the
+  compiler options mapping `nsh` and `nsh/*` there (`jsxImportSource: "nsh"`, no DOM library, `ESNext.Disposable`)
+  and the globals and assets files; the `tsconfig.json` `nsh init` writes (`nsh_bundler::TSCONFIG`) only extends it
+  and includes the app's sources, so editors type-check apps without `node_modules` and a change of nsh's settings
+  (a new `lib`, a path) reaches existing apps with the next build, without an edit of theirs. An app's
+  `tsconfig.json` that an earlier `nsh init` wrote and the app never changed (`templates/tsconfig/*.json`, compared
+  byte for byte) is replaced by the new one, with a note saying so; one the app changed is never rewritten, and
+  `nsh check` warns that it does not extend `.nsh/tsconfig.json`, saying what to change.
 - Where each declaration comes from:
   - a native module's export: the `Ts` next to it in its table (`modules::Item`; the module's own interfaces in its
     `types`);
@@ -185,6 +191,13 @@ animations end: before the taps the app must be quiet for `--idle-ms` (at most 1
 at most 10 s); `--wait <ms>` runs exactly that long instead, `--duration <ms>` keeps running after the last tap.
 `--safe-area <top,right,bottom,left>` sets the environment's insets (`useSafeAreaInsets`, `SafeAreaView`, screens).
 
+Tests use the same pieces: `headless::start` (the engine with its frames, the batches to the caller),
+`headless::Screen` (that model of the native tree, public: texts in tree order, the commands sent, `press_target`
+with the `--tap` selectors) and `headless::Headless` (an app, its screen, `wait_for` / `wait_until` / `settle`,
+`press`). `EngineConfig::new(app)` is the phone-sized config the trace and the tests start from. `nsh-testing` adds
+what a TSX entry needs, the bundle and its bytecode against given sets (`compile_tsx`, `tsx`), outside nsh-engine so
+that a Rust app's tests link neither the bundler nor QuickJS.
+
 ## New apps (`nsh init --template`)
 
 `nsh init <dir> --template ts|rust|mixed` (`init.rs`) writes one of three apps; without `--template` it asks with a
@@ -235,7 +248,9 @@ fn native(registry: &mut Registry) {
 
 The attribute (`nsh-macros` `native_module.rs`) checks the specifier at compile time (a bare import specifier, not
 `nsh` or `nsh/...`) and makes a hidden entry of a fixed name, `__nsh_native_module() -> Registry`
-(`Registry::ui_set(specifier)`, then the function), which the generated code below calls. A second one in the crate
+(`Registry::ui_set(specifier)`, then the function), which the generated code below calls, and a public, documented
+`pub fn registry() -> Registry` making the same set, for the crate's tests and other Rust code
+(`rust_exports_native::registry()` next to `nsh_ui_mobile::registry()`; the hidden entry calls it). A second one in the crate
 fails as that name defined twice; one outside the crate's root fails at the attribute (a glob of `crate::*` in a
 block finds the entry or a stand-in whose bound reports where it goes: `#[diagnostic::on_unimplemented]`). The
 generated code links each listed crate under a name of its own (`app_<package>`, `-` as `_`: `app_gallery_native`)
@@ -257,7 +272,8 @@ program that describes them, builds the hosts and runners with them, and does ev
   - `describe` (nsh-core and the app's crates, nothing else): calls each crate's entry and prints one JSON document,
     `nsh_core::ui::description::Description` (format `FORMAT`, the nsh-core version that wrote it, then per crate in
     `"rust"`'s order its specifier, exports with their kinds, TypeScript declarations, re-exported runtime values and
-    types, the values nsh-js makes for it and the files it ships);
+    types, the values nsh-js makes for it, the files it ships and the exports TS sees without a doc comment, which
+    `nsh` warns of as it writes `.nsh/types`);
   - `trace` (nsh-engine with `js` and `headless`, the mobile UI and the app's sets): the headless runner of `nsh trace`
     (`nsh_engine::headless::runner`);
   - the hosts and runners, passing the sets after the mobile UI's (`vec![nsh_ui_mobile::registry(), set_app_charts(),
