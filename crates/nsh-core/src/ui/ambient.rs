@@ -47,6 +47,8 @@ pub(crate) struct Ambient {
     /// The insets of the screens or modals components are on, by host.
     insets: FxHashMap<NodeId, Signal<EdgeInsets>>,
     measure: Option<MeasureFn>,
+    /// The app's key-value storage (`nsh/storage`).
+    storage: Option<crate::storage::Store>,
 }
 
 impl Ambient {
@@ -112,6 +114,12 @@ impl super::Runtime {
             d.ambient.executor = Some(executor);
             d.ambient.status_bars = Some(status_bars);
         });
+    }
+
+    /// Where the app's storage is kept.
+    pub(crate) fn set_storage(&self, storage: crate::storage::Store) {
+        let _entered = self.enter();
+        with_data(|d| d.ambient.storage = Some(storage));
     }
 
     /// How text is measured (the core's text engine).
@@ -359,6 +367,18 @@ pub fn animate_layout(animation: LayoutAnimation) {
 /// `AccessibilityInfo.announceForAccessibility`).
 pub fn announce_for_accessibility(message: impl Into<String>) {
     act(super::services::announce(message.into()));
+}
+
+/// Runs `f` with the app's storage (`nsh/storage`, [`crate::storage::Storage`]):
+/// the one the engine was given, or one in memory when it was given none.
+pub(crate) fn with_storage<R>(f: impl FnOnce(&crate::storage::Store) -> R) -> R {
+    let storage = with_data(|d| {
+        d.ambient
+            .storage
+            .get_or_insert_with(|| crate::storage::Store::new(None))
+            .clone()
+    });
+    f(&storage)
 }
 
 /// Puts `text` on the system clipboard (TS: `Clipboard.setString`).
