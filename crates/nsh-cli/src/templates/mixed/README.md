@@ -23,3 +23,6 @@ Register more in `native/src/lib.rs` with `registry.register::<…>()` (componen
 The `nsh` commands build the app's hosts from the NSH crates `native/Cargo.toml` depends on: crates.io's at the version
 of the `nsh` you run (keep the `nsh-*` dependencies at that version when you upgrade `nsh`), or an NSH checkout's by
 path.
+
+NSH-generated files stay in `.nsh/`: runner sources in `.nsh/rust/` and default packages in `.nsh/out/`.
+Cargo keeps its normal `target/` directory and respects your existing `CARGO_TARGET_DIR`.

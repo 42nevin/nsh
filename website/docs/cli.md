@@ -150,6 +150,10 @@ Type checks the app: refreshes `.nsh/types` and `.nsh/tsconfig.json`, then runs 
 | `--tsc <TSC>` | Run this `tsc` instead (also `NSH_TSC`), for example one from `node_modules` or a copy for machines without network. |
 | `-- <TSC ARGS>` | Passed on to `tsc`, e.g. `nsh check -- --pretty false`. |
 
+NSH-generated files stay under `.nsh/`: declarations, runner sources, and default build/package outputs in
+`.nsh/out/`. Cargo keeps its normal `target/` cache and existing `CARGO_TARGET_DIR` behavior; NSH does not
+add Cargo configuration to relocate it. `--out` still overrides the output location.
+
 ## nsh build
 
 ```sh
@@ -160,7 +164,7 @@ Bundles the app and compiles it to QuickJS bytecode, for apps that embed NSH and
 
 | Flag | Default | Description |
 |---|---|---|
-| `-o, --out <OUT>` | `out` | Output directory. |
+| `-o, --out <OUT>` | `.nsh/out` | Output directory. |
 | `--release` | | Minify and strip debug info. |
 | `--split` | | Put what `import()` loads into chunk files of its own, downloaded when first imported (web apps, see [Split bundles](./web.md#split-bundles)). Without it, the bundle holds the whole app. |
 
@@ -186,7 +190,7 @@ Builds an installable app from the prebuilt runtime, in release mode. No Rust an
 | Flag | Description |
 |---|---|
 | `--target <TARGET>` | Required. `ios`: iOS devices, a signed `.ipa` (or an unsigned `.app` without `--sign`). `ios-simulator`: an ad hoc signed `.app`. `android`: a signed `.apk`. `macos`: an ad hoc signed `.app` ([macOS](./macos.md#packaging)). `linux`: a directory `<Name>/` (the executable, `nsh/`, a `.desktop` file) and `<Name>.tar.gz` ([Linux](./linux.md#packaging)). `windows`: a directory `<Name>\` (`<Name>.exe`, `nsh\`) and `<Name>.zip` ([Windows](./windows.md#packaging)). `web`: a directory `<Name>/`, a static site (`index.html` and files named by their content) ([Web](./web.md#publish-an-app)). |
-| `-o, --out <OUT>` | Output directory (default `out`). |
+| `-o, --out <OUT>` | Output directory (default `.nsh/out`). |
 | `--name <NAME>` | Display name. |
 | `--id <ID>` | Bundle identifier, e.g. `com.example.app`. |
 | `--app-version <VERSION>` | Version, e.g. `1.2.0`. |
@@ -252,7 +256,7 @@ Builds the app in release mode and signs it into a package. Metadata comes from 
 |---|---|
 | `--key <KEY>` | The release key's secret key. |
 | `--cert <CERT>` | Its certificate (`nsh certify`). |
-| `-o, --out <OUT>` | The package to write. Default: `out/<id>-<build>.nshpkg`. |
+| `-o, --out <OUT>` | The package to write. Default: `.nsh/out/<id>-<build>.nshpkg`. |
 | `--id <ID>` | App id. |
 | `--app-version <VERSION>` | Version. |
 | `--build <BUILD>` | Build number: must grow with every release. |

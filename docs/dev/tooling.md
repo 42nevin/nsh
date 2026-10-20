@@ -66,7 +66,15 @@ downloaded from the npm registry's tarball URL the first time (ureq, no npm clie
 and the integrities (`npm view @typescript/typescript-<os>-<arch>@<version> dist.integrity`). The distribution
 (`cargo xtask dist`) does not ship the compiler: it is 24 MB per platform and most runs of `nsh` never check types.
 
+## Project files
+
+NSH-generated declarations, runner workspaces, tests and default build/package outputs live under `.nsh/`.
+Default bundles and packages are `.nsh/out/`; `--out` still overrides that location. Cargo keeps its normal
+`target/` cache and existing `CARGO_TARGET_DIR` behavior. NSH does not add Cargo configuration to relocate it.
+Existing directories are never deleted automatically. Follow the CoC project constraint in `AGENTS.md`.
+
 ## Output
+
 
 The CLI's terminal output is `crates/nsh-cli/src/ui.rs` (`website/docs/cli.md`, "Output", shows it): one line per
 step, the details only when something fails. Every command prints through it:
