@@ -111,7 +111,7 @@ before every `cargo run`): `✓` lines for its builds, cargo's and the tools' ou
   runtime in a checkout and prints the page's address (`docs/dev/web.md`, "The CLI's web target").
 - Watching ignores `Access` events: inotify (Linux) reports reads, FSEvents does not, so the build's own reads of the
   sources would start the next build, forever.
-- `nsh run` defaults to the host that runs on this machine: `--target catalyst` on macOS, `--target linux` (the GTK
+- `nsh dev` and `nsh run` default to the host that runs on this machine: `--target macos` on macOS, `--target linux` (the GTK
   host, `crates/nsh-linux-host`, run in place: it needs no app bundle) on Linux, `--target windows` (the Win32 host,
   `crates/nsh-windows-host`, run in place too) on Windows. `--target macos` runs the AppKit host
   (`crates/nsh-macos-host`) in place too: it makes itself a regular app without a bundle. `--target gpui` runs the
@@ -127,8 +127,8 @@ before every `cargo run`): `✓` lines for its builds, cargo's and the tools' ou
   the next run sets it again). Otherwise a host left on the device keeps reaching whatever dev server listens on that port
   next, of any app. Ctrl-C reaches the run through `ui::Stoppable`: while one is held, the signal handler records
   SIGINT / SIGTERM instead of ending the process, the dev session's watch loop returns, the command undoes what it set
-  up, and `main` then ends the process by the same signal; a second signal ends it at once. `nsh dev` sets nothing
-  up on devices.
+  up, and `main` then ends the process by the same signal; a second signal ends it at once. `nsh dev --server-only` serves hosts started separately. Mobile targets
+  use an explicit `--target ios` or `--target android`.
 - Hosts that cannot run the app: several hosts on one session is intended (a phone joining), but a host serves only the
   UI sets it was built with, and dev hosts keep reconnecting, so a host built for another app (an Android host left on
   the emulator, whose `adb reverse` still reaches this port) can connect. The hello reports the host's platform and
@@ -410,11 +410,13 @@ program that describes them, builds the hosts and runners with them, and does ev
     (`RustApp::gpui_workspace`), so builds for the other targets never resolve GPUI's crates.
 
   They take nsh's crates where the app's crates do (`rust_app::Nsh::of`, from each crate's dependencies through `cargo
-  metadata --no-deps`): from crates.io at the version of the running `nsh` (`=0.1.1` for nsh 0.1.1: the code it
+  metadata`): from crates.io at the version of the running `nsh` (`=0.1.1` for nsh 0.1.1: the code it
   generates calls their API, and the description and the trace protocol must be the ones it reads), which the app's
   requirements must accept, or by path from the checkout the app's crates depend on (nsh's own examples, as
   `examples/gallery-rs`, through the workspace's path dependencies), which must be of that version, with the app's
-  crates.io dependencies on nsh patched to it (all of nsh's crates but the bundler, which nothing there builds).
+  crates.io dependencies on nsh patched to it. Git dependencies use the checkout Cargo resolves from the app’s
+  lockfile, including registry dependencies redirected by its patches. The generated workspaces patch both crates.io
+  and the Git repository to that checkout, so the app and its hosts share the same core and native module types.
   Requirements of another version, or crates taking nsh from two places, stop the command with what to change, rather
   than a build failing later on two `nsh-core`s. They build in the app's own `target/`, as a Cargo project in the app's
   directory does (`nsh init` ignores it), or in `CARGO_TARGET_DIR` when it is set (one directory several checkouts or

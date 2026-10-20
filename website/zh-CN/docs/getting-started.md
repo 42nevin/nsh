@@ -95,16 +95,16 @@ mount(App);
 
 `nsh run` 会启动开发服务器、构建应用、启动加载该应用的开发宿主，并在你编辑时持续重新构建。应用的日志（`console.log`、错误）会显示在终端中。
 
-不传 `--target` 时，`nsh run` 使用你所在的机器：Windows 上是一个 Win32 窗口，Linux 上是一个 GTK 窗口，macOS 上是一个以 iPhone 的样子显示应用的 Mac Catalyst 窗口。用 `--target` 选择其他平台：
+不传 `--target` 时，`nsh run` 使用你所在的机器：Windows 上是一个 Win32 窗口，Linux 上是一个 GTK 窗口，macOS 上是一个 AppKit 窗口。用 `--target` 选择其他平台：
 
 | 目标 | 命令 | 在哪里运行 |
 |---|---|---|
 | iOS 模拟器 | `nsh run my-app/App.tsx --target ios` | 装有 Xcode 的 macOS |
 | Android | `nsh run my-app/App.tsx --target android` | macOS、Windows、Linux |
-| macOS（AppKit） | `nsh run my-app/App.tsx --target macos` | macOS |
+| macOS（AppKit） | `nsh run my-app/App.tsx` | macOS（默认） |
 | Windows | `nsh run my-app/App.tsx` | Windows（默认） |
 | Linux（GTK 4） | `nsh run my-app/App.tsx` | Linux（默认） |
-| Mac Catalyst | `nsh run my-app/App.tsx` | macOS（默认） |
+| Mac Catalyst | `nsh run my-app/App.tsx --target catalyst` | macOS |
 
 #### iOS 模拟器
 
@@ -149,10 +149,10 @@ nsh run my-app/App.tsx
 
 应用会在一个 GTK 窗口（390×844 点）中打开。需要 GTK 4.14 及以上；见 [Linux](./linux.md)。
 
-#### Mac Catalyst（macOS 上默认）
+#### Mac Catalyst
 
 ```sh
-nsh run my-app/App.tsx
+nsh run my-app/App.tsx --target catalyst
 ```
 
 应用会在 Mac 上一个 iPhone 尺寸（390×844 点）的窗口中打开。这是查看模块在手机上效果最快的方式：不需要启动模拟器。它和 iOS 一样使用 UIKit，所以看到的效果就是 iPhone 上的效果，只有 Mac 特有的行为除外，例如用鼠标滚轮滚动。要运行 Mac 应用本身，请用 `--target macos`。

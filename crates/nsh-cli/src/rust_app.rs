@@ -40,8 +40,8 @@
 //! The workspace takes nsh's crates where the app's crates do
 //! ([`Nsh::of`]): from crates.io at this `nsh`'s version ([`VERSION`]: the
 //! generated code calls their API), or from the checkout they depend on by
-//! path, with the app's crates.io dependencies on nsh patched to it. It
-//! builds in the app's own `target`, as a Cargo project in the app's
+//! path or Git, with the app's crates.io and Git dependencies on nsh patched
+//! to that checkout. It builds in the app's own `target`, as a Cargo project in the app's
 //! directory would, or in `CARGO_TARGET_DIR`.
 
 use std::{
@@ -154,6 +154,8 @@ enum Nsh {
     /// --template rust --nsh-source <dir>`): nsh's own examples, or an app
     /// trying changes to nsh.
     Source(PathBuf),
+    /// The Git checkout Cargo resolved for the app, and its repository URL.
+    Git { checkout: PathBuf, url: String },
 }
 
 /// The version of nsh's crates an app builds with: this command line's, as
@@ -164,8 +166,9 @@ impl Nsh {
     /// Where the app's `crates` take nsh's crates from, as their
     /// dependencies say (`cargo metadata --no-deps`): from crates.io, which
     /// must accept [`VERSION`], or by path from one checkout of that
-    /// version. Mixed, or another version, stops the command with what to
-    /// change, rather than a build failing later on two `nsh-core`s.
+    /// version. Git dependencies use Cargo's resolved checkout, including
+    /// patched registry dependencies. Mixed sources, or another version,
+    /// stop the command before a build fails on two `nsh-core`s.
     fn of(crates: &[AppCrate]) -> anyhow::Result<Nsh> {
         let wanted = semver::Version::parse(VERSION).context("nsh's own version")?;
         // The first dependency on nsh seen, and what it is (for errors).
@@ -184,7 +187,14 @@ impl Nsh {
                         })?;
                         let what =
                             format!("{} takes {name} from {}", c.package, checkout.display());
-                        (Nsh::Source(checkout), what)
+                        let nsh = match dep["git"].as_str() {
+                            Some(url) => Nsh::Git {
+                                checkout,
+                                url: url.into(),
+                            },
+                            None => Nsh::Source(checkout),
+                        };
+                        (nsh, what)
                     }
                     None => {
                         if !semver::VersionReq::parse(req).is_ok_and(|r| r.matches(&wanted)) {
@@ -209,7 +219,7 @@ impl Nsh {
             }
         }
         let nsh = first.map_or(Nsh::Registry, |(nsh, _)| nsh);
-        if let Nsh::Source(dir) = &nsh {
+        if let Some(dir) = nsh.source() {
             let version = checkout_version(dir)?;
             if version != VERSION {
                 bail!(
@@ -225,7 +235,7 @@ impl Nsh {
     fn source(&self) -> Option<&Path> {
         match self {
             Nsh::Registry => None,
-            Nsh::Source(dir) => Some(dir),
+            Nsh::Source(dir) | Nsh::Git { checkout: dir, .. } => Some(dir),
         }
     }
 
@@ -235,7 +245,7 @@ impl Nsh {
     fn dep(&self, name: &str, extra: &str) -> String {
         match self {
             Nsh::Registry => format!("{{ version = \"={VERSION}\"{extra} }}"),
-            Nsh::Source(dir) => format!(
+            Nsh::Source(dir) | Nsh::Git { checkout: dir, .. } => format!(
                 "{{ path = {:?}{extra} }}",
                 nsh_crate(dir, name).to_string_lossy()
             ),
@@ -560,6 +570,7 @@ const NSH_CRATES: &[&str] = &[
     "nsh-package",
     "nsh-js",
     "nsh-engine",
+    "nsh-testing",
     "nsh-bundler",
     "nsh-dev",
     "nsh-platform-ios",
@@ -603,7 +614,7 @@ fn nsh_dependencies(c: &AppCrate) -> anyhow::Result<Vec<serde_json::Value>> {
                 .find(|p| p["name"].as_str() == Some(&c.package))
         })
         .with_context(|| format!("cargo metadata has no package {}", c.package))?;
-    Ok(package["dependencies"]
+    let mut dependencies: Vec<_> = package["dependencies"]
         .as_array()
         .into_iter()
         .flatten()
@@ -613,7 +624,87 @@ fn nsh_dependencies(c: &AppCrate) -> anyhow::Result<Vec<serde_json::Value>> {
                 .is_some_and(|n| NSH_CRATES.contains(&n))
         })
         .cloned()
-        .collect())
+        .collect();
+    if dependencies.iter().any(|dep| {
+        dep["source"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("git+"))
+    }) {
+        // --no-deps reports declarations, not the locked Git checkout or
+        // registry dependencies redirected by the app's [patch] tables.
+        let output = Command::new(cargo())
+            .args(["metadata", "--format-version", "1", "--manifest-path"])
+            .arg(&manifest)
+            .output()
+            .context("resolve the app's nsh Git dependencies")?;
+        if !output.status.success() {
+            bail!(
+                "cargo cannot resolve {}:\n{}",
+                manifest.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let resolved: serde_json::Value =
+            serde_json::from_slice(&output.stdout).context("cargo metadata's resolved output")?;
+        resolve_git_dependencies(&mut dependencies, &resolved, &c.package)?;
+    }
+    Ok(dependencies)
+}
+
+/// Replace Git declarations and patched registry declarations with Cargo's
+/// resolved checkout, keeping the repository URL for generated patches.
+fn resolve_git_dependencies(
+    dependencies: &mut [serde_json::Value],
+    metadata: &serde_json::Value,
+    package: &str,
+) -> anyhow::Result<()> {
+    let packages = metadata["packages"]
+        .as_array()
+        .context("cargo metadata packages")?;
+    let app = packages
+        .iter()
+        .find(|p| p["name"] == package)
+        .context("cargo metadata app package")?;
+    let node = metadata["resolve"]["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|node| node["id"] == app["id"]))
+        .context("cargo metadata app dependencies")?;
+    for dep in dependencies {
+        let name = dep["rename"]
+            .as_str()
+            .or(dep["name"].as_str())
+            .unwrap_or_default()
+            .replace('-', "_");
+        let Some(edge) = node["deps"]
+            .as_array()
+            .and_then(|deps| deps.iter().find(|d| d["name"] == name))
+        else {
+            continue;
+        };
+        let resolved = packages
+            .iter()
+            .find(|p| p["id"] == edge["pkg"])
+            .context("cargo metadata resolved dependency")?;
+        if let Some(source) = resolved["source"]
+            .as_str()
+            .and_then(|s| s.strip_prefix("git+"))
+        {
+            let url = source
+                .split(['?', '#'])
+                .next()
+                .context("Git repository URL")?;
+            let path = Path::new(
+                resolved["manifest_path"]
+                    .as_str()
+                    .context("Git manifest path")?,
+            )
+            .parent()
+            .context("Git crate directory")?;
+            dep["path"] = path.to_string_lossy().as_ref().into();
+            dep["git"] = url.into();
+        }
+    }
+    Ok(())
 }
 
 /// The `name` of the `[package]` of `manifest`.
@@ -1208,7 +1299,10 @@ opt-level = 3
             // A checkout's own, so edits to it apply; from crates.io the
             // published crate's, copied next to the module when it is built.
             js: match &self.nsh {
-                Nsh::Source(source) => source.join("crates/nsh-platform-web/web/nsh.js"),
+                Nsh::Source(source)
+                | Nsh::Git {
+                    checkout: source, ..
+                } => source.join("crates/nsh-platform-web/web/nsh.js"),
                 Nsh::Registry => out.join("nsh.js"),
             },
         };
@@ -1324,19 +1418,24 @@ opt-level = 3
     fn write_workspace_manifest(&self, ws: &Path, base: &str, gpui: bool) -> anyhow::Result<()> {
         let path = ws.join("Cargo.toml");
         let mut manifest = base.to_owned();
-        if let Nsh::Source(source) = &self.nsh {
+        if let Some(source) = self.nsh.source() {
             manifest.push_str("\n[patch.crates-io]\n");
-            // The generated crates never build the bundler (nor does an
-            // app's), and Cargo warns of a patch that goes unused.
+            let mut patches = String::new();
             for name in NSH_CRATES
                 .iter()
                 .filter(|name| gpui || **name != "nsh-platform-gpui")
-                .filter(|name| **name != "nsh-bundler")
+                .filter(|name| nsh_crate(source, name).join("Cargo.toml").is_file())
             {
-                manifest.push_str(&format!(
+                patches.push_str(&format!(
                     "{name} = {{ path = {:?} }}\n",
                     nsh_crate(source, name).to_string_lossy()
                 ));
+            }
+            manifest.push_str(&patches);
+            if let Nsh::Git { url, .. } = &self.nsh {
+                // The app still declares Git dependencies. Redirect those
+                // too so its types and the generated hosts share one core.
+                manifest.push_str(&format!("\n[patch.{url:?}]\n{patches}"));
             }
         }
         write(&path, &manifest)
@@ -2468,6 +2567,105 @@ mod tests {
         assert!(error.contains("from one place"), "{error}");
         // No nsh at all: crates.io (the build then asks for the entry).
         assert_eq!(of(&[("a", "serde = \"1\"\n".into())]), Ok(Nsh::Registry));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_resolution_uses_patched_registry_dependencies_and_renamed_edges() {
+        let mut dependencies = vec![serde_json::json!({
+            "name": "nsh-core", "rename": "core_runtime", "req": "=0.1.1",
+            "source": "registry+https://github.com/rust-lang/crates.io-index"
+        })];
+        let metadata = serde_json::json!({
+            "packages": [
+                {"name": "app-native", "id": "app"},
+                {"name": "nsh-core", "id": "core",
+                 "source": "git+https://example.com/nsh.git?branch=main#locked-revision",
+                 "manifest_path": "/cargo/git/checkouts/nsh/locked/crates/nsh-core/Cargo.toml"}
+            ],
+            "resolve": {"nodes": [
+                {"id": "app", "deps": [{"name": "core_runtime", "pkg": "core"}]}
+            ]}
+        });
+        super::resolve_git_dependencies(&mut dependencies, &metadata, "app-native").unwrap();
+        assert_eq!(dependencies[0]["git"], "https://example.com/nsh.git");
+        assert_eq!(
+            dependencies[0]["path"],
+            "/cargo/git/checkouts/nsh/locked/crates/nsh-core"
+        );
+    }
+
+    #[test]
+    fn git_dependencies_use_the_locked_checkout_and_patch_both_sources() {
+        let dir = std::env::temp_dir().join(format!("nsh-rust-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("repo");
+        write_crate(&repo.join("crates/nsh-core"), "nsh-core", "", "");
+        write_crate(&repo.join("crates/nsh-base"), "nsh-base", "", "");
+        std::fs::write(repo.join("Cargo.toml"), format!(
+            "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"3\"\n[workspace.package]\nversion = {:?}\n", super::VERSION
+        )).unwrap();
+        for args in [
+            vec!["init"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=NSH test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let repo_path = dunce::canonicalize(&repo).unwrap();
+        let url = format!(
+            "{}{}",
+            if cfg!(windows) { "file:///" } else { "file://" },
+            repo_path.to_string_lossy().replace('\\', "/")
+        );
+        let native = dir.join("app/native");
+        write_crate(
+            &native,
+            "git-app",
+            "",
+            &format!("nsh-core = {{ git = {url:?} }}\nnsh-base = {{ git = {url:?} }}\n"),
+        );
+        let nsh = Nsh::of(&[AppCrate {
+            package: "git-app".into(),
+            dir: native.clone(),
+        }])
+        .unwrap();
+        let Nsh::Git {
+            checkout,
+            url: resolved_url,
+        } = &nsh
+        else {
+            panic!("Git dependencies must keep their resolved source: {nsh:?}");
+        };
+        assert_eq!(resolved_url, &url);
+        assert_ne!(checkout, &repo);
+        assert!(checkout.join("crates/nsh-core/Cargo.toml").is_file());
+        let mut app = app(&dir.join("app"), &[("git-app", native)], None);
+        app.nsh = nsh;
+        app.write_workspace().unwrap();
+        let manifest = std::fs::read_to_string(app.workspace.join("Cargo.toml")).unwrap();
+        assert!(manifest.contains("[patch.crates-io]"), "{manifest}");
+        assert!(manifest.contains(&format!("[patch.{url:?}]")), "{manifest}");
+        let host = std::fs::read_to_string(app.workspace.join("ios-host/Cargo.toml")).unwrap();
+        assert!(host.contains("nsh-ios-host = { path ="), "{host}");
+        assert!(!host.contains("version = \"="), "{host}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

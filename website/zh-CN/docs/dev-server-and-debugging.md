@@ -10,21 +10,23 @@ group: tools
 开发期间，NSH 会在每次保存时构建应用，并推送给所有已连接的宿主，宿主就地更新。有两条命令可以做到这一点：
 
 - `nsh run` 启动开发服务器，**并且** 启动一个开发宿主：Mac Catalyst 或 AppKit 窗口、Linux 上的 GTK 窗口、Windows 上的 Win32 窗口、iOS 模拟器，或者 Android 真机或模拟器。
-- `nsh dev` 只启动开发服务器，宿主由你自己启动：集成了开发版 SDK 的自有应用、网络中的某台设备，或同时连接多个宿主。
+- `nsh dev --server-only` 启动开发服务器，宿主由你自己启动：集成了开发版 SDK 的自有应用、网络中的某台设备，或同时连接多个宿主。
 
 ```sh
-nsh run App.tsx                     # Mac Catalyst window, 390×844 (macOS); GTK window (Linux); Win32 window (Windows)
+nsh run App.tsx                     # AppKit window (macOS); GTK window (Linux); Win32 window (Windows)
 nsh run App.tsx --target macos      # AppKit window (macOS)
 nsh run App.tsx --target ios        # iOS simulator
 nsh run App.tsx --target android    # Android device or emulator
-nsh dev App.tsx                     # server only
+nsh dev App.tsx --server-only       # server only
 ```
+
+`nsh dev` 默认也打开原生宿主；移动端需要指定 `--target ios` 或 `--target android`。
 
 ## `nsh run`
 
 | 参数 | 说明 |
 |---|---|
-| `--target <catalyst \| ios \| android \| macos \| linux \| windows>` | 在哪里运行。macOS 上默认 `catalyst`（一个 iPhone 尺寸、390×844 的 Mac 窗口），Linux 上默认 `linux`，Windows 上默认 `windows`。 |
+| `--target <catalyst \| ios \| android \| macos \| linux \| windows>` | 在哪里运行。macOS 上默认 `macos`（AppKit 窗口），Linux 上默认 `linux`，Windows 上默认 `windows`。 |
 | `--device <name or UDID>` | 要使用的 iOS 模拟器。默认：已启动的那个，否则使用最新的 iPhone（会自动为你启动）。 |
 | `--port <port>` | 开发服务器端口。默认 8790；如被占用，则使用下一个空闲端口。 |
 | `--release` | 提供 release 构建（压缩、无调试信息、无热更新）。 |

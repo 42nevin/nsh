@@ -156,7 +156,7 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Serve an app to dev hosts (simulators, devices) and push rebuilds.
+    /// Run an app in this system’s native host with hot reload.
     Dev {
         /// The entry module, or the app's directory (default: the current one),
         /// whose `App.tsx` is the entry.
@@ -176,16 +176,23 @@ enum Command {
         /// alone runs with. Without it the app runs on its own, with none.
         #[arg(long, value_name = "LIMITS", num_args = 0..=1, default_missing_value = "", value_parser = parse_limits)]
         limits: Option<nsh_core::js::HostLimits>,
+        /// Where to run; defaults to this system's native desktop host.
+        #[arg(long, value_enum, default_value_t = run::Target::native())]
+        target: run::Target,
+        /// iOS simulator to use (name or UDID).
+        #[arg(long)]
+        device: Option<String>,
+        /// Serve hot reload to hosts you start yourself.
+        #[arg(long, conflicts_with_all = ["target", "device"])]
+        server_only: bool,
     },
     /// Package an installable app from the prebuilt runtime (no Rust
     /// needed). Metadata comes from `nsh.json` next to the entry, overridden
     /// by the flags below.
     Package(Box<PackageArgs>),
-    /// Like `dev`, and also run the app in a development host: the Mac
-    /// Catalyst app (default on macOS), the macOS (AppKit) app, the Linux
-    /// app (default on Linux), the Windows app (default on Windows), the
-    /// GPUI app (on any of the three), an iOS simulator, an Android device
-    /// or emulator, or a browser.
+    /// Run an app in a development host with hot reload. Defaults to
+    /// AppKit on macOS, GTK on Linux and Win32 on Windows; select mobile
+    /// hosts, Mac Catalyst, GPUI or a browser with --target.
     Run {
         /// The entry module, or the app's directory (default: the current one),
         /// whose `App.tsx` is the entry.
@@ -472,7 +479,14 @@ fn run(mut command: Command) -> anyhow::Result<()> {
     // run and packaged.
     let rust_command = matches!(
         command,
-        Command::Build { .. } | Command::Test { .. } | Command::Package(_) | Command::Run { .. }
+        Command::Build { .. }
+            | Command::Test { .. }
+            | Command::Package(_)
+            | Command::Run { .. }
+            | Command::Dev {
+                server_only: false,
+                ..
+            }
     );
     if let Some(entry) = command.entry_mut()
         && rust_app::is_root(entry)
@@ -563,11 +577,30 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             port,
             release,
             limits,
+            target,
+            device,
+            server_only,
         } => {
             no_limits_for_rust(&entry, limits)?;
-            let session = dev::DevSession::start(&entry, port, release, limits)?;
-            session.print_urls();
-            session.watch(|| Ok(false))
+            if server_only {
+                let session = dev::DevSession::start(&entry, port, release, limits)?;
+                session.print_urls();
+                session.watch(|| Ok(false))
+            } else {
+                run::run(
+                    &entry,
+                    port,
+                    release,
+                    run::HostFlags {
+                        limits,
+                        trace: false,
+                        fps: false,
+                    },
+                    target,
+                    device.as_deref(),
+                    run::HostWindow::default(),
+                )
+            }
         }
         Command::Package(args) => {
             let PackageArgs {
@@ -686,5 +719,65 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             packages,
             out,
         } => sign::revoke_list(&root, extend.as_deref(), sequence, &keys, &packages, &out),
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Command, run::Target};
+
+    #[test]
+    fn dev_and_run_default_to_this_systems_desktop_host() {
+        let expected = if cfg!(target_os = "macos") {
+            Target::Macos
+        } else if cfg!(target_os = "linux") {
+            Target::Linux
+        } else if cfg!(windows) {
+            Target::Windows
+        } else {
+            Target::Web
+        };
+        for command in ["dev", "run"] {
+            let cli = Cli::try_parse_from(["nsh", command]).unwrap();
+            let target = match cli.command {
+                Command::Dev {
+                    target,
+                    server_only: false,
+                    ..
+                }
+                | Command::Run { target, .. } => target,
+                _ => panic!("expected a host command"),
+            };
+            assert_eq!(target, expected);
+        }
+    }
+
+    #[test]
+    fn mobile_hosts_are_selected_explicitly() {
+        for command in ["dev", "run"] {
+            for (value, expected) in [("ios", Target::Ios), ("android", Target::Android)] {
+                let cli = Cli::try_parse_from(["nsh", command, "--target", value]).unwrap();
+                let target = match cli.command {
+                    Command::Dev { target, .. } | Command::Run { target, .. } => target,
+                    _ => panic!("expected a host command"),
+                };
+                assert_eq!(target, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn dev_can_serve_hosts_started_separately() {
+        let cli = Cli::try_parse_from(["nsh", "dev", "--server-only"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Dev {
+                server_only: true,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["nsh", "dev", "--server-only", "--target", "ios"]).is_err());
     }
 }

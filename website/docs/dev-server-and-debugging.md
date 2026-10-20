@@ -12,22 +12,24 @@ Two commands do this:
 
 - `nsh run` starts the dev server **and** launches a development host: a Mac Catalyst or AppKit window, a GTK window on
   Linux, a Win32 window on Windows, an iOS simulator or an Android device or emulator.
-- `nsh dev` starts only the dev server, for hosts you start yourself: your own app with the development SDK, a device
+- `nsh dev --server-only` starts the dev server, for hosts you start yourself: your own app with the development SDK, a device
   on the network, or several hosts at once.
 
 ```sh
-nsh run App.tsx                     # Mac Catalyst window, 390×844 (macOS); GTK window (Linux); Win32 window (Windows)
+nsh run App.tsx                     # AppKit window (macOS); GTK window (Linux); Win32 window (Windows)
 nsh run App.tsx --target macos      # AppKit window (macOS)
 nsh run App.tsx --target ios        # iOS simulator
 nsh run App.tsx --target android    # Android device or emulator
-nsh dev App.tsx                     # server only
+nsh dev App.tsx --server-only       # server only
 ```
+
+`nsh dev` also opens the native host by default; mobile hosts use `--target ios` or `--target android`.
 
 ## `nsh run`
 
 | Flag | Description |
 |---|---|
-| `--target <catalyst \| ios \| android \| macos \| linux \| windows>` | Where to run. Default `catalyst` on macOS (an iPhone-sized, 390×844 Mac window), `linux` on Linux, `windows` on Windows. |
+| `--target <catalyst \| ios \| android \| macos \| linux \| windows>` | Where to run. Default `macos` on macOS (AppKit), `linux` on Linux, `windows` on Windows. |
 | `--device <name or UDID>` | The iOS simulator to use. Default: a booted one, else the newest iPhone (booted for you). |
 | `--port <port>` | Dev server port. Default 8790; the next free port is used if it is taken. |
 | `--release` | Serve release builds (minified, no debug info, no hot updates). |

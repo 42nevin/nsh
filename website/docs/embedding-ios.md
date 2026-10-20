@@ -27,8 +27,8 @@ nsh run my-app --target ios --device "iPhone 16 Pro"
 
 `nsh` uses a booted simulator, or boots the newest iPhone, installs the development host into it and keeps the app up
 to date as you save, with logs in the terminal. `--device` picks a simulator by name or UDID. For a quicker loop
-without a simulator, plain `nsh run` on a Mac opens the same UIKit backend in an iPhone-sized
-[Mac Catalyst](./getting-started.md#mac-catalyst-default-on-macos) window.
+without a simulator, `nsh run --target catalyst` on a Mac opens the same UIKit backend in an iPhone-sized
+[Mac Catalyst](./getting-started.md#mac-catalyst) window.
 
 ## Packaging
 

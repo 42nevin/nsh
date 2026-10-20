@@ -215,7 +215,7 @@ echo 'await app.press("label:Plan"); await app.wait(500)' | ./target/debug/nsh t
 ./target/debug/nsh package examples/gallery --target ios-simulator --run   # installable app (.app / .ipa / .apk)
 cargo xtask android [--release] [--dev]                                            # Android runtime into target/android/<profile>[-dev]
 cargo xtask dist                                                                   # the distribution in dist/nsh
-./target/debug/nsh dev examples/counter                                    # dev server only (for simulators / devices); prints local and LAN URLs
+./target/debug/nsh dev examples/counter --server-only                      # dev server only (for simulators / devices); prints local and LAN URLs
 ./target/debug/nsh build examples/counter --release                        # writes bundle.js / bundle.nshc
 ./target/debug/nsh keygen keys/root && ./target/debug/nsh keygen keys/release      # signing keys (.secret / .pub)
 ./target/debug/nsh certify --root keys/root.secret --key keys/release.pub --apps 'com.example.*' -o keys/release.cert

@@ -95,16 +95,16 @@ Line by line:
 
 `nsh run` starts a dev server, builds the app, launches a development host that loads it, and keeps rebuilding while you edit. Logs from the app (`console.log`, errors) appear in the terminal.
 
-Without `--target`, `nsh run` uses the machine you are on: a Win32 window on Windows, a GTK window on Linux, and on macOS a Mac Catalyst window that shows the app as an iPhone would. Pick another platform with `--target`:
+Without `--target`, `nsh run` uses the machine you are on: a Win32 window on Windows, a GTK window on Linux, and on macOS an AppKit window. Pick another platform with `--target`:
 
 | Target | Command | Runs from |
 |---|---|---|
 | iOS simulator | `nsh run my-app/App.tsx --target ios` | macOS with Xcode |
 | Android | `nsh run my-app/App.tsx --target android` | macOS, Windows, Linux |
-| macOS (AppKit) | `nsh run my-app/App.tsx --target macos` | macOS |
+| macOS (AppKit) | `nsh run my-app/App.tsx` | macOS (the default) |
 | Windows | `nsh run my-app/App.tsx` | Windows (the default) |
 | Linux (GTK 4) | `nsh run my-app/App.tsx` | Linux (the default) |
-| Mac Catalyst | `nsh run my-app/App.tsx` | macOS (the default) |
+| Mac Catalyst | `nsh run my-app/App.tsx --target catalyst` | macOS |
 
 #### iOS simulator
 
@@ -149,10 +149,10 @@ nsh run my-app/App.tsx
 
 The app opens in a GTK window (390×844 points). It needs GTK 4.14 or later; see [Linux](./linux.md).
 
-#### Mac Catalyst (default on macOS)
+#### Mac Catalyst
 
 ```sh
-nsh run my-app/App.tsx
+nsh run my-app/App.tsx --target catalyst
 ```
 
 The app opens in an iPhone-sized window (390×844 points) on your Mac. This is the quickest way to see a module as a phone shows it: no simulator to boot. It uses UIKit like iOS, so what you see is what an iPhone shows, apart from Mac-specific behavior such as scrolling with a mouse wheel. For the Mac app itself, use `--target macos`.

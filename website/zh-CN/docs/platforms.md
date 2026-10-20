@@ -25,11 +25,11 @@ NSH 运行在手机、桌面和网页上：iOS、Android、macOS、Windows、Lin
 
 - **[GPUI](./gpui.md)** 用姊妹项目 GPUI Kit 所基于的 [GPUI](https://gpui-kit.com) 绘制模块，在 macOS、Windows 和 Linux 上表现一致：一套渲染覆盖三个桌面平台，`AppView` 可以放进 GPUI 和 GPUI Kit 应用自己的元素树。
 - **[Web](./web.md)** 把应用渲染成浏览器页面里的 HTML：`nsh package --target web` 发布一个静态网站，可部署到任意 Web 服务器或 CDN；你自己的网页可以用 `createPlayer` 或 iframe 嵌入应用。本站的在线示例和 [Playground](/playground) 也由它运行。
-- **Mac Catalyst** 在 Mac 上用 iPhone 尺寸的窗口（390×844）运行 iOS 后端，用于开发。它是 macOS 上 `nsh run` 的默认目标：最快看到模块在手机上的样子。
+- **Mac Catalyst** 在 Mac 上用 iPhone 尺寸的窗口（390×844）运行 iOS 后端，用于开发。用 `--target catalyst` 选择它，快速查看模块在手机上的样子。
 
 ## 开发与打包
 
-不传 `--target` 时，`nsh run` 选择本机的平台：macOS 上是 Mac Catalyst，Linux 上是 GTK 窗口，Windows 上是 Win32 窗口。手机要从电脑上连接：iOS 需要装有 Xcode 的 Mac，Android 可以在装有 Android SDK 的 macOS、Linux 或 Windows 上开发（[安装](./installation.md#各平台可用的命令)）。
+不传 `--target` 时，`nsh run` 选择本机的平台：macOS 上是 AppKit，Linux 上是 GTK 窗口，Windows 上是 Win32 窗口。手机要从电脑上连接：iOS 需要装有 Xcode 的 Mac，Android 可以在装有 Android SDK 的 macOS、Linux 或 Windows 上开发（[安装](./installation.md#各平台可用的命令)）。
 
 ```sh
 nsh run my-app --target macos      # 或 ios、android、windows、linux、gpui、web、catalyst

@@ -25,11 +25,11 @@ On every platform, NSH's main use is the same: modules embedded in a native app 
 
 - **[GPUI](./gpui.md)** draws modules with [GPUI](https://gpui-kit.com), the framework of the sibling project GPUI Kit, on macOS, Windows and Linux alike: one renderer for all three desktops, and an `AppView` that GPUI and GPUI Kit apps place in their own element tree.
 - **[Web](./web.md)** renders apps as HTML in a browser page: `nsh package --target web` publishes a static site for any web server or CDN, and a page of your own embeds an app with `createPlayer` or an iframe. It also runs the live demos and the [playground](/playground) on this site.
-- **Mac Catalyst** runs the iOS backend in an iPhone-sized window (390×844) on a Mac, for development. It is `nsh run`'s default target on macOS: the quickest way to see how a module looks on a phone.
+- **Mac Catalyst** runs the iOS backend in an iPhone-sized window (390×844) on a Mac, for development. Select it with `--target catalyst` to see how a module looks on a phone.
 
 ## Develop and package
 
-`nsh run` picks the machine's own platform when you give no `--target`: Mac Catalyst on macOS, the GTK window on Linux and the Win32 window on Windows. Phones are reached from a computer: iOS from a Mac with Xcode, Android from macOS, Linux or Windows with the Android SDK ([Installation](./installation.md#what-works-where)).
+`nsh run` picks the machine's own platform when you give no `--target`: AppKit on macOS, the GTK window on Linux and the Win32 window on Windows. Phones are reached from a computer: iOS from a Mac with Xcode, Android from macOS, Linux or Windows with the Android SDK ([Installation](./installation.md#what-works-where)).
 
 ```sh
 nsh run my-app --target macos      # or ios, android, windows, linux, gpui, web, catalyst

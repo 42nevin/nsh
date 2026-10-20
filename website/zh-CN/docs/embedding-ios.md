@@ -24,8 +24,8 @@ nsh run my-app --target ios --device "iPhone 16 Pro"
 ```
 
 `nsh` 会使用已启动的模拟器，或者启动最新的 iPhone，把开发宿主安装进去，并在你保存时更新应用，日志显示在终端中。`--device`
-按名称或 UDID 选择模拟器。想要不用模拟器、更快的开发循环，在 Mac 上直接运行 `nsh run`，会在一个 iPhone 尺寸的
-[Mac Catalyst](./getting-started.md#mac-catalystmacos-上默认) 窗口中打开同一个 UIKit 后端。
+按名称或 UDID 选择模拟器。想要不用模拟器、更快的开发循环，在 Mac 上运行 `nsh run --target catalyst`，会在一个 iPhone 尺寸的
+[Mac Catalyst](./getting-started.md#mac-catalyst) 窗口中打开同一个 UIKit 后端。
 
 ## 打包
 
