@@ -9,6 +9,7 @@ use nsh_animation::{
 use nsh_core::{
     Color, Command, EventKind, LayoutAnimation, NodeId, Op, Prop, Style, StyleDecl, StyleError,
     StylePatch, StyleValue, TransformKind,
+    geometry::{Percentage, Points, point, px},
     js::{
         host::{HostCx, HostInput, HostList, HostProps, HostValue},
         protocol::*,
@@ -190,8 +191,8 @@ pub(crate) fn decode_command<'js>(
                 animated: o
                     .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
                     .unwrap_or(true),
-                view_position: f("viewPosition")?.unwrap_or(0.0),
-                view_offset: f("viewOffset")?.unwrap_or(0.0),
+                view_position: Percentage(f("viewPosition")?.unwrap_or(0.0)),
+                view_offset: Points(f("viewOffset")?.unwrap_or(0.0)),
             }
         }
         "scrollToEnd" => Command::ScrollToEnd {
@@ -213,7 +214,7 @@ pub(crate) fn decode_command<'js>(
                 scale: field("scale").unwrap_or(1.0) as f32,
                 center: field("x")
                     .zip(field("y"))
-                    .map(|(x, y)| (x as f32, y as f32)),
+                    .map(|(x, y)| point(Points(x as f32), Points(y as f32))),
                 animated: arg
                     .as_object()
                     .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
@@ -226,8 +227,8 @@ pub(crate) fn decode_command<'js>(
                     .and_then(|o| o.get::<_, Option<f64>>(key).ok().flatten())
             };
             Command::ScrollTo {
-                x: field("x").unwrap_or(0.0) as f32,
-                y: field("y").unwrap_or(0.0) as f32,
+                x: Points(field("x").unwrap_or(0.0) as f32),
+                y: Points(field("y").unwrap_or(0.0) as f32),
                 animated: arg
                     .as_object()
                     .and_then(|o| o.get::<_, Option<bool>>("animated").ok().flatten())
@@ -457,9 +458,9 @@ fn decode_style<'js>(
         }
         if key == "textShadowOffset" {
             let offset = match value.as_object() {
-                Some(o) => Some((
-                    o.get::<_, Option<f64>>("width")?.unwrap_or(0.0) as f32,
-                    o.get::<_, Option<f64>>("height")?.unwrap_or(0.0) as f32,
+                Some(o) => Some(point(
+                    px(o.get::<_, Option<f64>>("width")?.unwrap_or(0.0) as f32),
+                    px(o.get::<_, Option<f64>>("height")?.unwrap_or(0.0) as f32),
                 )),
                 None => None,
             };
@@ -469,9 +470,9 @@ fn decode_style<'js>(
         if key == "shadowOffset" {
             // `{ width, height }`; null / undefined restores the default.
             let offset = match value.as_object() {
-                Some(o) => Some((
-                    o.get::<_, Option<f64>>("width")?.unwrap_or(0.0) as f32,
-                    o.get::<_, Option<f64>>("height")?.unwrap_or(0.0) as f32,
+                Some(o) => Some(point(
+                    px(o.get::<_, Option<f64>>("width")?.unwrap_or(0.0) as f32),
+                    px(o.get::<_, Option<f64>>("height")?.unwrap_or(0.0) as f32),
                 )),
                 None if value.is_null() || value.is_undefined() => None,
                 None => {
@@ -1001,6 +1002,21 @@ mod tests {
         assert_eq!(style("{ transform: undefined }"), style("{}"));
         // `null` still sets the default over classes.
         assert_ne!(style("{ backgroundColor: null }"), style("{}"));
+    }
+
+    #[test]
+    fn style_longhands_win_whatever_the_key_order() {
+        // As React Native flattens the styles of an array into one object,
+        // the longhand of a later style wins too.
+        let longhand_last = style("{ borderWidth: 2, borderTopWidth: 5, padding: 4 }");
+        assert_eq!(
+            style("{ borderTopWidth: 5, padding: 4, borderWidth: 2 }"),
+            longhand_last
+        );
+        assert_eq!(
+            style("[{ borderTopWidth: 5 }, { padding: 4, borderWidth: 2 }]"),
+            longhand_last
+        );
     }
 
     #[test]

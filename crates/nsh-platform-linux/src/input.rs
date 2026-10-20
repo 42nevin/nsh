@@ -56,6 +56,7 @@ use gtk4::{self as gtk, gdk, glib, glib::translate::ToGlibPtr, graphene, prelude
 use nsh_core::{
     Command, Cursor, EventKind, EventMask, EventPayload, GestureValues, NodeId, PanActivation,
     PayloadValue, PointerEvents, ROOT_ID, TouchEvent, TouchPhase, TouchPoint, ViewKind,
+    geometry::{Points, point},
     tailwind::state::{HOVERED, PRESSED},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -237,7 +238,7 @@ impl Gate {
         dx: f32,
         dy: f32,
     ) -> (Option<NodeId>, bool) {
-        match self.activation.decide(dx, dy) {
+        match self.activation.decide(Points(dx), Points(dy)) {
             Some(true) => {
                 candidates.truncate(self.outer);
                 (Some(self.id), false)
@@ -686,10 +687,8 @@ fn context_menu(surface: &Surface, x: f32, y: f32, state: gdk::ModifierType) -> 
         if listens {
             let (location_x, location_y) = local(surface, &v, x, y);
             let event = nsh_core::ContextMenuEvent {
-                location_x,
-                location_y,
-                page_x: x,
-                page_y: y,
+                location: point(Points(location_x), Points(location_y)),
+                page: point(Points(x), Points(y)),
                 modifiers: nsh_core::keymap::Modifiers {
                     ctrl: state.contains(gdk::ModifierType::CONTROL_MASK),
                     alt: state.contains(gdk::ModifierType::ALT_MASK),
@@ -900,10 +899,10 @@ fn pick_in(view: &NshView, p: graphene::Point) -> Option<Hit> {
                 s.kind,
                 ViewKind::Scroll | ViewKind::Image | ViewKind::Stack | ViewKind::Input
             );
-        let (w, h) = (s.frame.width, s.frame.height);
+        let (w, h) = (s.frame.size.width.0, s.frame.size.height.0);
         let (x, y) = (p.x(), p.y());
         let inside = x >= 0.0 && y >= 0.0 && x < w && y < h;
-        let slop = s.props.hit_slop;
+        let slop = s.props.hit_slop.map(|v| v.0);
         let in_slop =
             x >= -slop.left && y >= -slop.top && x < w + slop.right && y < h + slop.bottom;
         let children = if clip {
@@ -911,7 +910,10 @@ fn pick_in(view: &NshView, p: graphene::Point) -> Option<Hit> {
         } else if laid_out(s.kind, s.id) {
             in_slop
                 || s.overflow.is_some_and(|e| {
-                    x >= e.x && y >= e.y && x < e.x + e.width && y < e.y + e.height
+                    x >= e.origin.x.0
+                        && y >= e.origin.y.0
+                        && x < e.origin.x.0 + e.size.width.0
+                        && y < e.origin.y.0 + e.size.height.0
                 })
         } else {
             // The platform places these views' children (screens, header
@@ -1383,10 +1385,8 @@ fn report(surface: &Surface, phase: TouchPhase, changed: &Pointer, activated: Op
                     } else {
                         Vec::new()
                     },
-                    page_x: p.x,
-                    page_y: p.y,
-                    location_x: lx,
-                    location_y: ly,
+                    page: point(Points(p.x), Points(p.y)),
+                    location: point(Points(lx), Points(ly)),
                     changed: is_changed,
                 }
             })
@@ -1528,12 +1528,12 @@ fn cancel_press(surface: &Rc<Surface>, p: &mut Pointer) {
 fn released_inside(surface: &Surface, view: &NshView, x: f32, y: f32) -> bool {
     let (lx, ly) = local(surface, view, x, y);
     let s = view.state();
-    let slop = s.props.hit_slop;
+    let slop = s.props.hit_slop.map(|v| v.0);
     let r = PRESS_RETENTION;
     lx >= -slop.left - r
         && ly >= -slop.top - r
-        && lx <= s.frame.width + slop.right + r
-        && ly <= s.frame.height + slop.bottom + r
+        && lx <= s.frame.size.width.0 + slop.right + r
+        && ly <= s.frame.size.height.0 + slop.bottom + r
 }
 
 // --- Pans ---------------------------------------------------------------------------
@@ -1541,12 +1541,11 @@ fn released_inside(surface: &Surface, view: &NshView, x: f32, y: f32) -> bool {
 fn pan_payload(surface: &Surface, id: NodeId, t: (f32, f32), v: (f32, f32)) -> EventPayload {
     let (value_x, value_y) = surface.anim.borrow().pan_values(id);
     EventPayload::Pan {
-        translation_x: t.0,
-        translation_y: t.1,
+        translation: point(Points(t.0), Points(t.1)),
         velocity_x: v.0,
         velocity_y: v.1,
-        value_x,
-        value_y,
+        value_x: value_x.map(Points),
+        value_y: value_y.map(Points),
     }
 }
 
@@ -1868,10 +1867,8 @@ fn hover_moved(surface: &Surface, x: f32, y: f32, state: gdk::ModifierType) {
         };
         let (location_x, location_y) = local(surface, &v, x, y);
         let event = nsh_core::HoverEvent {
-            location_x,
-            location_y,
-            page_x: x,
-            page_y: y,
+            location: point(Points(location_x), Points(location_y)),
+            page: point(Points(x), Points(y)),
             modifiers: nsh_core::keymap::Modifiers {
                 ctrl: state.contains(gdk::ModifierType::CONTROL_MASK),
                 alt: state.contains(gdk::ModifierType::ALT_MASK),
@@ -1986,7 +1983,10 @@ fn wheel_input(
             *input.latch.borrow_mut() = Some((view.clone(), horizontal, time));
             let (dx, dy) = if notches {
                 let s = view.state();
-                (dx * notch(s.frame.width), dy * notch(s.frame.height))
+                (
+                    dx * notch(s.frame.size.width.0),
+                    dy * notch(s.frame.size.height.0),
+                )
             } else {
                 (dx, dy)
             };
@@ -2176,7 +2176,7 @@ mod tests {
     fn gates_decide_on_their_offsets() {
         let gate = Gate {
             id: 7,
-            activation: PanActivation::horizontal(6.0, 8.0),
+            activation: PanActivation::horizontal(Points(6.0), Points(8.0)),
             outer: 0,
         };
         let mut candidates = Vec::new();

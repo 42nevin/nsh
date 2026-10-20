@@ -37,7 +37,9 @@ use nsh_core::{
     EventKind, EventMask, Filter, Gradient, GradientKind, GradientSize, ImageOptions, ImageSource,
     InputConfig, KeyboardDismissMode, KeyboardTaps, Keyframes, ModalConfig, MountItem, NativeProps,
     ResizeMode, ResolvedTextStyle, ScreenConfig, ScrollBehavior, TextAlign, TextTransform,
-    TransformKind, VideoProps, ViewKind, ViewProps, ViewStyle, WebProps, WebSource, ui::PropEnum,
+    TransformKind, VideoProps, ViewKind, ViewProps, ViewStyle, WebProps, WebSource,
+    geometry::{DefiniteLength, Percentage, Points, REM_SIZE},
+    ui::PropEnum,
 };
 
 /// The platforms whose props are written `<platform>.<name>` in scripts as
@@ -440,7 +442,10 @@ impl Mounted {
         .into_iter()
         .enumerate()
         {
-            out.put(key, num(s.corner_radius[i].unwrap_or(s.border_radius)));
+            out.put(
+                key,
+                num(s.corner_radius.to_array()[i].unwrap_or(s.border_radius)),
+            );
         }
         out.put(
             "borderCurve",
@@ -452,6 +457,7 @@ impl Mounted {
             .into(),
         );
         let b = s.borders;
+        let widths = b.widths.to_array();
         for (i, side) in ["Top", "Right", "Bottom", "Left"].into_iter().enumerate() {
             let (width, colour) = match side {
                 "Top" => ("borderTopWidth", "borderTopColor"),
@@ -459,11 +465,11 @@ impl Mounted {
                 "Bottom" => ("borderBottomWidth", "borderBottomColor"),
                 _ => ("borderLeftWidth", "borderLeftColor"),
             };
-            out.put(width, num(b.widths[i]));
+            out.put(width, num(widths[i]));
             out.put(colour, color(b.colors[i]));
         }
-        if b.widths.iter().all(|w| *w == b.widths[0]) {
-            out.put("borderWidth", num(b.widths[0]));
+        if widths.iter().all(|w| *w == widths[0]) {
+            out.put("borderWidth", num(widths[0]));
         }
         if b.colors.iter().all(|c| *c == b.colors[0]) {
             out.put("borderColor", color(b.colors[0]));
@@ -487,9 +493,9 @@ impl Mounted {
         if let Some(c) = s.tint_color {
             out.put("tintColor", color(c));
         }
-        let origin = |o: nsh_core::OriginLen| match o {
-            nsh_core::OriginLen::Px(v) => num(v),
-            nsh_core::OriginLen::Fraction(f) => format!("{}%", num(f * 100.0)),
+        let origin = |o: DefiniteLength| match o {
+            DefiniteLength::Absolute(v) => num(v.to_points(REM_SIZE)),
+            DefiniteLength::Fraction(f) => format!("{}%", num(f.0 * 100.0)),
         };
         out.put(
             "transformOrigin",
@@ -774,8 +780,26 @@ impl Object {
     }
 }
 
+/// What `num` writes: a bare number, or a length in points.
+pub(crate) trait Num {
+    fn value(self) -> f32;
+}
+
+impl Num for f32 {
+    fn value(self) -> f32 {
+        self
+    }
+}
+
+impl Num for Points {
+    fn value(self) -> f32 {
+        self.0
+    }
+}
+
 /// A number with at most 3 decimals, without trailing zeros.
-pub(crate) fn num(v: f32) -> String {
+pub(crate) fn num(v: impl Num) -> String {
+    let v = v.value();
     let r = (v as f64 * 1000.0).round() / 1000.0;
     // `-0` reads as `0`.
     let r = if r == 0.0 { 0.0 } else { r };
@@ -796,7 +820,7 @@ fn or_none(s: String) -> String {
 }
 
 /// `{ width, height }`: both members are required.
-fn size(width: f32, height: f32) -> String {
+fn size(width: impl Num, height: impl Num) -> String {
     format!("width={} height={}", num(width), num(height))
 }
 
@@ -809,7 +833,7 @@ fn insets(e: &EdgeInsets) -> String {
         ("bottom", e.bottom),
         ("left", e.left),
     ] {
-        o.opt(name, (v != 0.0).then(|| num(v)));
+        o.opt(name, (v.0 != 0.0).then(|| num(v)));
     }
     o.done()
 }
@@ -882,7 +906,7 @@ fn filters(list: &[Filter]) -> String {
             Filter::Brightness(v) => format!("brightness({})", num(v)),
             Filter::Contrast(v) => format!("contrast({})", num(v)),
             Filter::Grayscale(v) => format!("grayscale({})", num(v)),
-            Filter::HueRotate(v) => format!("hue-rotate({}deg)", num(v)),
+            Filter::HueRotate(v) => format!("hue-rotate({}deg)", num(v.to_degrees())),
             Filter::Invert(v) => format!("invert({})", num(v)),
             Filter::Opacity(v) => format!("opacity({})", num(v)),
             Filter::Saturate(v) => format!("saturate({})", num(v)),
@@ -905,9 +929,12 @@ fn filters(list: &[Filter]) -> String {
 }
 
 fn gradient(g: &Gradient) -> String {
-    let at = |x: f32, y: f32| format!("at {}% {}%", num(x * 100.0), num(y * 100.0));
+    let at =
+        |x: Percentage, y: Percentage| format!("at {}% {}%", num(x.0 * 100.0), num(y.0 * 100.0));
     let (name, head) = match g.kind {
-        GradientKind::Linear { angle } => ("linear-gradient", format!("{}deg", num(angle))),
+        GradientKind::Linear { angle } => {
+            ("linear-gradient", format!("{}deg", num(angle.to_degrees())))
+        }
         GradientKind::LinearCorner { right, bottom } => (
             "linear-gradient",
             format!(
@@ -932,11 +959,16 @@ fn gradient(g: &Gradient) -> String {
         ),
         GradientKind::Conic { from, x, y } => (
             "conic-gradient",
-            format!("from {}deg {}", num(from), at(x, y)),
+            format!("from {}deg {}", num(from.to_degrees()), at(x, y)),
         ),
     };
     let stops = g.stops.iter().map(|s| match s.position {
-        Some(p) => format!("{} {}%", color(s.color), num(p * 100.0)),
+        Some(DefiniteLength::Fraction(p)) => {
+            format!("{} {}%", color(s.color), num(p.0 * 100.0))
+        }
+        Some(DefiniteLength::Absolute(l)) => {
+            format!("{} {}", color(s.color), num(l.to_points(REM_SIZE)))
+        }
         None => color(s.color),
     });
     format!(
@@ -1010,8 +1042,8 @@ fn values_are_written_as_apps_write_them() {
     assert_eq!(transform(&style), "rotate(45deg) scale(2) translateX(50%)");
     assert_eq!(
         insets(&EdgeInsets {
-            top: 4.0,
-            left: 2.0,
+            top: Points(4.0),
+            left: Points(2.0),
             ..Default::default()
         }),
         "top=4 left=2"
@@ -1071,7 +1103,7 @@ impl Later {
         match item {
             MountItem::Command { command, .. } => match *command {
                 nsh_core::Command::StatusBar(config) => self.status_bar = Some(config),
-                nsh_core::Command::ScrollTo { x, y, .. } => self.offset = Some((x, y)),
+                nsh_core::Command::ScrollTo { x, y, .. } => self.offset = Some((x.0, y.0)),
                 nsh_core::Command::ZoomTo { scale, .. } => self.zoom = Some(scale),
                 nsh_core::Command::SetSelection { start, end } => {
                     self.selection = Some((start, end));
@@ -1080,10 +1112,10 @@ impl Later {
             },
             MountItem::ScrollBy { dx, dy, .. } => {
                 let (x, y) = self.offset.unwrap_or_default();
-                self.offset = Some((x + dx, y + dy));
+                self.offset = Some((x + dx.0, y + dy.0));
             }
             MountItem::StickyCells { cells, .. } => {
-                self.sticky = Some(cells.iter().map(|c| (c.start, c.end)).collect());
+                self.sticky = Some(cells.iter().map(|c| (c.start.0, c.end.0)).collect());
             }
             MountItem::Gestures { values, .. } => {
                 self.gestures = Some([values.pan_x, values.pan_y, values.pinch, values.rotation]);

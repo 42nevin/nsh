@@ -32,11 +32,11 @@ pub fn SafeAreaView(props: SafeAreaViewProps, cx: Scope<NoEvent>) -> impl IntoEl
     view()
         .inset_padding(move || {
             let insets = cx.insets();
-            let pick = |edge: Edge, v: f32| {
+            let pick = |edge: Edge, v: Points| {
                 let on = props
                     .edges
                     .with(|e| e.as_ref().is_none_or(|e| e.contains(&edge)));
-                if on { v } else { 0.0 }
+                if on { v } else { Points::ZERO }
             };
             EdgeInsets {
                 top: pick(Edge::Top, insets.top),

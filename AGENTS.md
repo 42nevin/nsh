@@ -24,7 +24,7 @@ the module docs of the code (`//!`, Javadoc), which are the reference for how a 
 
 ```
 crates/
-  nsh-core/            Platform-independent core: shadow tree, styles (RN semantics), Taffy layout (flex + grid), text merging, list virtualization,
+  nsh-core/            Platform-independent core: typed units and geometry (`geometry/`, as GPUI's), shadow tree, styles (RN semantics), Taffy layout (flex + grid), text merging, list virtualization,
                        mount items; CSS values (`css.rs`: colors, lengths, shadows, gradients, filters), effects (`effects.rs`), Tailwind (`tailwind/`);
                        the reactive graph both sides run on (`reactive.rs`, Solid's algorithm, generic over the host), the loads of
                        resources both faces share (`resource.rs`);
@@ -158,6 +158,7 @@ are never linked into the CLI: it reads their UI sets as data (`nsh_core::ui::de
 | API names: anything apps use, its props, events, slots and parts | `docs/dev/api-naming.md` |
 | elements, touch, accessibility, the environment | `docs/dev/elements.md`, `text.md` |
 | styles, Tailwind, effects | `docs/dev/styles.md` |
+| units and geometry (`Points`, `Length`, `Bounds`, ...) | `docs/dev/geometry.md` |
 | scroll views, zooming, `List` | `docs/dev/scrolling-and-lists.md` |
 | animation, canvas, images | `docs/dev/animation.md`, `canvas.md`, `images.md` |
 | VM limits, capabilities, signed packages | `docs/dev/sandbox.md`, `signed-packages.md` |
@@ -285,7 +286,7 @@ repository's `target/`; dependencies only it uses are declared in `crates/gpui/C
   only widen; inputs gain optional members only; behavior and defaults stay (new behavior is opt-in); formats
   (`.nshpkg`, certificates) are read forever. Every API change, additive ones included, is recorded in `api/`
   (`cargo xtask api`), one record that only grows; the only removals are security closures listed in
-  `api/closed.txt`. A new API lands with its test, a fixture whose script checks it (`api/cases/`, `cargo xtask api
+  `api/closed.txt` (beside one pre-release alignment with Tailwind CSS). A new API lands with its test, a fixture whose script checks it (`api/cases/`, `cargo xtask api
   --keep`); fixtures and their steps never change, and while they pass, old apps keep working
   (`docs/dev/compatibility.md`).
 - **No styles in NSH.** Nothing NSH ships has a look of its own: no default colors, paddings, radii, fonts or variants
@@ -296,6 +297,11 @@ repository's `target/`; dependencies only it uses are declared in `crates/gpui/C
   `active:`), no built-in strings (every label comes from the app); system UI keeps the platform's look (iOS / Android
   headers; `AlertDialog`, drawn in the platform's dialog style where the system has no dialog to show). React Native and
   UIKit are references for which capabilities exist, not APIs to be compatible with.
+- **CSS and Tailwind as in a browser.** CSS values (colors, lengths, gradients, filters, shadows, transforms,
+  alignment keywords, ...) and Tailwind utilities and variants mean exactly what they mean in a browser and in
+  Tailwind CSS (v4); Tailwind's generated CSS is the reference for each utility. What NSH cannot support is
+  unsupported (an unknown class, a rejected value with a warning), never given a different meaning: nothing
+  NSH-specific, so there are no traps (`docs/dev/styles.md`).
 - **Components are Rust.** Rust components live in `crates/nsh-base` or in an app's own crate (its UI set,
   `#[native_module("…")]`), run in the core and render primitives with typed styles (GPUI-style `Styled` methods,
   never class strings); props and events are derived types, their JS face is made from the specs (`nsh-js`
@@ -325,6 +331,13 @@ repository's `target/`; dependencies only it uses are declared in `crates/gpui/C
 ## Code conventions
 
 - Formatting: `cargo +nightly fmt --all`, configured in `.rustfmt.toml`.
+- Units and geometry are typed, as GPUI's are (`nsh_core::geometry`): a length is `Points` (GPUI's `Pixels`), `Rems`,
+  a `Percentage` (a fraction, 0.5 is 50%) or a style length (`AbsoluteLength`, `DefiniteLength`, `Length`), an angle is
+  `Radians`, shapes are `Point` / `Size` / `Bounds` / `Edges` / `Corners` of a unit. Public API never takes or returns a
+  bare `f32` / `f64` for a length, an angle or a fraction; platform boundaries (taffy, the toolkits, JS decoding) convert.
+  Enforced: nsh-core's `unit_types` test (and nsh-js's and nsh-engine's `public_api_is_typed`) fails on a bare float
+  in public API that the crate's `unitless.txt` (unitless quantities, with reasons) or its shrinking `untyped.txt`
+  (legacy, to migrate) does not list (`docs/dev/geometry.md`).
 - TSX tags are PascalCase, everywhere (examples, docs, tests): every tag names a binding in scope, only `<If>` and
   `<Each>` are globals that need no import. The primitives have one home each: `View`, `Text`, `Scroll`, `Input` from
   `nsh`, `Image` from `nsh/image`, `List` from `nsh/list`, `Canvas` from `nsh/canvas`, `WebView` from `nsh/webview`,
@@ -336,6 +349,10 @@ repository's `target/`; dependencies only it uses are declared in `crates/gpui/C
   - Every public API has a doc comment.
   - Items in private modules are `pub(crate)`, never `pub`.
 - Everything is written in English: code comments, docs, logs and this file. Comments explain why, not what the code says.
+- Colors in Rust are GPUI's: `Hsla` (`nsh_core::color`) is the color code holds, passes and computes with (theme
+  colors, typed styles, props, every new signature: `impl Into<Hsla>` or `AdaptiveColor`), `Rgba` is only for
+  conversions; the packed `Color` (`0xRRGGBBAA`) is only the storage and wire form (styles, mount items, the
+  platforms) (`docs/dev/styles.md` "Colors").
 - Library crates only log through the `log` facade (no `eprintln!`); performance logs use target `nsh::perf`, JS logs target `js`. Binaries install the logger.
   The CLI prints through `nsh-cli`'s `ui.rs` (steps, captured tools, `error` reports), xtask through `term.rs`.
 - Dependencies are declared once in the root `Cargo.toml` `[workspace.dependencies]` (the GPUI backend's in `crates/gpui/Cargo.toml`); crates only write `.workspace = true`.

@@ -20,7 +20,13 @@ use std::sync::LazyLock;
 use rustc_hash::FxHashMap;
 
 use super::style::AdaptiveColor;
-use crate::{JsonValue, style::Color, tailwind};
+use crate::{
+    JsonValue,
+    color::{Hsla, opaque_grey},
+    geometry::Points,
+    style::Color,
+    tailwind,
+};
 
 macro_rules! theme_colors {
     ($( $(#[doc = $doc:literal])* $field:ident = $key:literal $(| $alias:literal)* ),* $(,)?) => {
@@ -170,12 +176,12 @@ theme_colors! {
 pub struct Theme {
     /// The semantic colors.
     pub colors: ThemeColors,
-    /// The corner radius of controls (buttons, inputs), in points.
-    pub radius: f32,
+    /// The corner radius of controls (buttons, inputs).
+    pub radius: Points,
     /// The corner radius of large surfaces (cards, sheets, dialogs).
-    pub radius_lg: f32,
-    /// The base font size, in points.
-    pub font_size: f32,
+    pub radius_lg: Points,
+    /// The base font size.
+    pub font_size: Points,
     /// Colors and numbers under the keys the fields above do not have.
     custom: Custom,
 }
@@ -210,9 +216,9 @@ impl std::error::Error for ThemeError {}
 static DEFAULT: LazyLock<Theme> = LazyLock::new(|| {
     let mut theme = Theme {
         colors: ThemeColors::default(),
-        radius: 0.0,
-        radius_lg: 0.0,
-        font_size: 0.0,
+        radius: Points(0.0),
+        radius_lg: Points(0.0),
+        font_size: Points(0.0),
         custom: Custom::default(),
     };
     theme
@@ -228,9 +234,11 @@ impl Default for Theme {
 }
 
 /// A CSS color or a Tailwind palette name.
-fn color(value: &JsonValue) -> Option<Color> {
+fn color(value: &JsonValue) -> Option<Hsla> {
     let s = value.as_str()?;
-    Color::parse(s).or_else(|| PALETTE.colors.get(s).copied())
+    Color::parse(s)
+        .or_else(|| PALETTE.colors.get(s).copied())
+        .map(Hsla::from)
 }
 
 type Field = fn(&mut ThemeColors) -> &mut AdaptiveColor;
@@ -258,14 +266,10 @@ static PRESSED: &[(&str, &str, Field)] = &[
     ("link", "link.active", |c| &mut c.link_active),
 ];
 
-/// `c` moved `amount` of the way to gray level `level` (alpha kept): a
-/// pressed shade, darker in light appearance, lighter in dark.
-fn mix(c: Color, level: u8, amount: f32) -> Color {
-    let channel = |shift: u32| {
-        let v = ((c.0 >> shift) & 0xff) as f32;
-        ((v + (f32::from(level) - v) * amount).round() as u32) << shift
-    };
-    Color(channel(24) | channel(16) | channel(8) | c.0 & 0xff)
+/// The pressed shade of `c`: 12% black over it in light appearance, 12%
+/// white in dark (its alpha kept).
+pub(crate) fn pressed(c: Hsla, dark: bool) -> Hsla {
+    c.blend(opaque_grey(if dark { 1.0 } else { 0.0 }, 0.12))
 }
 
 static PALETTE: LazyLock<tailwind::Theme> = LazyLock::new(tailwind::Theme::default);
@@ -301,9 +305,9 @@ impl Theme {
     /// any other number a theme sets).
     pub fn number(&self, key: &str) -> Option<f32> {
         match key {
-            "radius" => Some(self.radius),
-            "radius.lg" => Some(self.radius_lg),
-            "font.size" => Some(self.font_size),
+            "radius" => Some(self.radius.0),
+            "radius.lg" => Some(self.radius_lg.0),
+            "font.size" => Some(self.font_size.0),
             key => self.custom.numbers.get(key).copied(),
         }
     }
@@ -311,9 +315,9 @@ impl Theme {
     /// Sets the number of theme key `key`.
     pub fn set_number(&mut self, key: &str, value: f32) {
         match key {
-            "radius" => self.radius = value,
-            "radius.lg" => self.radius_lg = value,
-            "font.size" => self.font_size = value,
+            "radius" => self.radius = Points(value),
+            "radius.lg" => self.radius_lg = Points(value),
+            "font.size" => self.font_size = Points(value),
             key => {
                 self.custom.numbers.insert(key.into(), value);
             }
@@ -330,9 +334,9 @@ impl Theme {
 
     /// Each number by key.
     pub(crate) fn each_number(&self, mut f: impl FnMut(&str, f32)) {
-        f("radius", self.radius);
-        f("radius.lg", self.radius_lg);
-        f("font.size", self.font_size);
+        f("radius", self.radius.0);
+        f("radius.lg", self.radius_lg.0);
+        f("font.size", self.font_size.0);
         for (key, n) in &self.custom.numbers {
             f(key, *n);
         }
@@ -367,13 +371,13 @@ impl Theme {
             };
             let number = |key: &str| entry.get(key).and_then(JsonValue::as_f64).map(|n| n as f32);
             if let Some(r) = number("radius") {
-                self.radius = r;
+                self.radius = Points(r);
             }
             if let Some(r) = number("radius.lg") {
-                self.radius_lg = r;
+                self.radius_lg = Points(r);
             }
             if let Some(s) = number("font.size") {
-                self.font_size = s;
+                self.font_size = Points(s);
             }
             // Other numbers (`radius.card`, `mono_font.size`) are
             // tokens for classes.
@@ -397,9 +401,9 @@ impl Theme {
                 {
                     let field = field(&mut self.colors);
                     if dark {
-                        field.dark = mix(c, 0xff, 0.12);
+                        field.dark = pressed(c, true);
                     } else {
-                        field.light = mix(c, 0x00, 0.12);
+                        field.light = pressed(c, false);
                     }
                 }
             }
@@ -444,16 +448,45 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::rgb;
+    use crate::{color::rgb, geometry::px};
+
+    fn hsla(hex: u32) -> Hsla {
+        rgb(hex).into()
+    }
+
+    /// The pressed shades the theme derived before it computed them with
+    /// `Hsla::blend`: each channel moved 12% of the way to black or white.
+    #[test]
+    fn pressed_shades_pack_as_before() {
+        let before = |c: Color, level: u8| {
+            let channel = |shift: u32| {
+                let v = ((c.0 >> shift) & 0xff) as f32;
+                ((v + (f32::from(level) - v) * 0.12).round() as u32) << shift
+            };
+            Color(channel(24) | channel(16) | channel(8) | c.0 & 0xff)
+        };
+        let mut colors: Vec<Color> = PALETTE.colors.values().copied().collect();
+        Theme::default()
+            .each_color(|_, c| colors.extend([Color::from(c.light), Color::from(c.dark)]));
+        colors.extend((0..=0xffu32).map(|v| Color(v << 24 | v << 16 | v << 8 | 0xff)));
+        for c in colors {
+            assert_eq!(Color::from(pressed(c.into(), false)), before(c, 0), "{c:?}");
+            assert_eq!(
+                Color::from(pressed(c.into(), true)),
+                before(c, 0xff),
+                "{c:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_default_theme_has_every_color_in_both_modes() {
         let theme = Theme::default();
-        assert_eq!(theme.primary.light, rgb(0x171717));
-        assert_eq!(theme.primary.dark, rgb(0xfafafa));
+        assert_eq!(theme.primary.light, hsla(0x171717));
+        assert_eq!(theme.primary.dark, hsla(0xfafafa));
         assert_eq!(
             (theme.radius, theme.radius_lg, theme.font_size),
-            (12.0, 16.0, 16.0)
+            (px(12.0), px(16.0), px(16.0))
         );
     }
 
@@ -467,13 +500,13 @@ mod tests {
             ] }"##,
         )
         .unwrap();
-        assert_eq!(theme.primary.light, rgb(0x7c3aed));
+        assert_eq!(theme.primary.light, hsla(0x7c3aed));
         // Left out: darker in light appearance; set: as given.
-        assert_eq!(theme.primary_active.light, mix(rgb(0x7c3aed), 0, 0.12));
-        assert_eq!(theme.primary_active.dark, rgb(0xffffff));
+        assert_eq!(theme.primary_active.light, pressed(hsla(0x7c3aed), false));
+        assert_eq!(theme.primary_active.dark, hsla(0xffffff));
         // Palette names; keys only desktop components use are ignored.
-        assert_eq!(theme.border.light, PALETTE.colors["red-500"]);
-        assert_eq!(theme.radius, 8.0);
+        assert_eq!(theme.border.light, PALETTE.colors["red-500"].into());
+        assert_eq!(theme.radius, px(8.0));
         assert_eq!(theme.secondary, Theme::default().secondary);
         assert!(Theme::from_json(r#"{ "themes": [{ "colors": { "ring": 3 } }] }"#).is_err());
     }
@@ -492,7 +525,7 @@ mod tests {
         let sidebar = theme.color("sidebar.background").unwrap();
         assert_eq!(
             (sidebar.light, sidebar.dark),
-            (rgb(0xeeeeee), rgb(0x111111))
+            (hsla(0xeeeeee), hsla(0x111111))
         );
         // Set in one mode only: both.
         let up = theme.color("chart.up").unwrap();
@@ -501,13 +534,13 @@ mod tests {
         assert_eq!(theme.color("title_bar.background"), None);
         assert_eq!(theme.color("primary.background"), Some(theme.primary));
         assert_eq!(theme.number("radius.card"), Some(10.0));
-        assert_eq!(theme.number("radius"), Some(theme.radius));
+        assert_eq!(theme.number("radius"), Some(theme.radius.0));
         let mut host = Theme::default();
-        host.set_color("sidebar.background", rgb(0x222222).into());
+        host.set_color("sidebar.background", hsla(0x222222).into());
         host.inherit(&theme);
         assert_eq!(
             host.color("sidebar.background").unwrap().dark,
-            rgb(0x222222)
+            hsla(0x222222)
         );
         assert_eq!(host.color("chart.up"), Some(up));
         assert_eq!(host.number("radius.card"), Some(10.0));
@@ -527,10 +560,10 @@ mod tests {
         assert_eq!(theme.primary, default.primary);
         assert_eq!(theme.primary_active, default.primary_active);
         assert_eq!(theme.radius, default.radius);
-        assert_eq!(theme.ring.dark, rgb(0xff0000));
+        assert_eq!(theme.ring.dark, hsla(0xff0000));
         assert_eq!(theme.ring.light, default.ring.light);
         // A null pressed color follows its base color.
-        assert_eq!(theme.danger_active.dark, mix(rgb(0xff0000), 0xff, 0.12));
+        assert_eq!(theme.danger_active.dark, pressed(hsla(0xff0000), true));
     }
 
     /// Text on the status colors, at rest and pressed, reads in both
@@ -540,21 +573,7 @@ mod tests {
     fn text_on_status_colors_stands_out() {
         let theme = Theme::default();
         // WCAG's relative luminance.
-        let luminance = |c: Color| {
-            let channel = |shift: u32| {
-                let v = f32::from(((c.0 >> shift) & 0xff) as u8) / 255.0;
-                if v <= 0.039_28 {
-                    v / 12.92
-                } else {
-                    ((v + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * channel(24) + 0.7152 * channel(16) + 0.0722 * channel(8)
-        };
-        let contrast = |a: Color, b: Color| {
-            let (a, b) = (luminance(a), luminance(b));
-            (a.max(b) + 0.05) / (a.min(b) + 0.05)
-        };
+        let contrast = |a: Hsla, b: Hsla| a.contrast_ratio(b);
         for (background, text) in [
             (theme.danger, theme.danger_foreground),
             (theme.danger_active, theme.danger_foreground),

@@ -47,8 +47,8 @@ use std::{
 
 use gtk4::{self as gtk, gdk, glib, graphene, gsk, prelude::*, subclass::prelude::*};
 use nsh_core::{
-    EdgeInsets, EventKind, EventPayload, ModalAnimation, ModalConfig, NodeId, PayloadValue,
-    ROOT_ID, Rect, ScreenAnimation, ScreenConfig, Size, ViewKind,
+    Bounds, EdgeInsets, EventKind, EventPayload, ModalAnimation, ModalConfig, NodeId, PayloadValue,
+    Point, Points, ROOT_ID, ScreenAnimation, ScreenConfig, Size, ViewKind,
 };
 use nsh_engine::ColorScheme;
 use rustc_hash::FxHashMap;
@@ -148,7 +148,7 @@ struct ScreenNav {
     /// The header items the app inserted (only the `header` one shows).
     items: Vec<NshView>,
     /// The size and insets last reported.
-    reported: Option<(Size, EdgeInsets)>,
+    reported: Option<(Size<Points>, EdgeInsets)>,
     /// The size the background was placed at.
     backdrop_size: (f32, f32),
 }
@@ -173,7 +173,7 @@ struct ModalNav {
     /// The user closed it natively (`closeOnEscape`) and it was reported:
     /// the app's removal only forgets it.
     closed: bool,
-    reported: Option<(Size, EdgeInsets)>,
+    reported: Option<(Size<Points>, EdgeInsets)>,
     /// Watches it while it is presented: keeps its last image.
     paintable: Option<gtk::WidgetPaintable>,
     /// What had the keyboard focus when it was presented: it gets it back
@@ -214,7 +214,7 @@ enum Motion {
         dismiss: Option<NodeId>,
         layer: Layer,
         /// Where the modal was.
-        frame: Rect,
+        frame: Bounds<Points>,
         fade: bool,
     },
 }
@@ -264,12 +264,16 @@ fn dark(surface: &Surface) -> bool {
     surface.environment.get().color_scheme == ColorScheme::Dark
 }
 
-fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
-    Rect {
-        x,
-        y,
-        width,
-        height,
+fn rect(x: f32, y: f32, width: f32, height: f32) -> Bounds<Points> {
+    Bounds {
+        origin: Point {
+            x: Points(x),
+            y: Points(y),
+        },
+        size: Size {
+            width: Points(width),
+            height: Points(height),
+        },
     }
 }
 
@@ -303,10 +307,10 @@ fn safe_area(surface: &Surface) -> EdgeInsets {
 fn insets_payload(i: EdgeInsets) -> EventPayload {
     let n = |v: f32| PayloadValue::Number(v as f64);
     EventPayload::Map(vec![
-        ("top", n(i.top)),
-        ("right", n(i.right)),
-        ("bottom", n(i.bottom)),
-        ("left", n(i.left)),
+        ("top", n(i.top.0)),
+        ("right", n(i.right.0)),
+        ("bottom", n(i.bottom.0)),
+        ("left", n(i.left.0)),
     ])
 }
 
@@ -314,11 +318,11 @@ fn insets_payload(i: EdgeInsets) -> EventPayload {
 fn report(
     surface: &Surface,
     id: NodeId,
-    last: &mut Option<(Size, EdgeInsets)>,
-    size: Size,
+    last: &mut Option<(Size<Points>, EdgeInsets)>,
+    size: Size<Points>,
     insets: EdgeInsets,
 ) {
-    if size.width <= 0.0 || *last == Some((size, insets)) {
+    if size.width <= Points::ZERO || *last == Some((size, insets)) {
         return;
     }
     let insets_changed = last.is_none_or(|(_, i)| i != insets);
@@ -410,10 +414,10 @@ impl ScreenNav {
         let f = stack.state().frame;
         let mut insets = safe_area(surface);
         if self.config.header_view.is_some() {
-            insets.top = 0.0;
+            insets.top = Points::ZERO;
         }
         let id = self.view.id();
-        let size = Size::new(f.width, f.height);
+        let size = f.size;
         report(surface, id, &mut self.reported, size, insets);
     }
 
@@ -427,7 +431,7 @@ impl ScreenNav {
     fn layout(&mut self) {
         let (w, h) = {
             let f = self.view.state().frame;
-            (f.width, f.height)
+            (f.size.width.0, f.size.height.0)
         };
         if self.backdrop_size != (w, h) {
             self.backdrop_size = (w, h);
@@ -494,7 +498,7 @@ impl Nav {
                 below,
                 fade,
             } => {
-                let w = stack.state().frame.width;
+                let w = stack.state().frame.size.width.0;
                 if *fade {
                     set_fade(entering, e);
                 } else {
@@ -514,19 +518,19 @@ impl Nav {
                 let f = stack.state().frame;
                 match leaving {
                     Leaving::View(v) if *fade => set_fade(v, 1.0 - e),
-                    Leaving::View(v) => set_shift(v, (f.width * e, 0.0)),
+                    Leaving::View(v) => set_shift(v, (f.size.width.0 * e, 0.0)),
                     Leaving::Image(layer) => {
                         let x = if *fade {
                             layer.set_opacity((1.0 - e) as f64);
                             0.0
                         } else {
-                            f.width * e
+                            f.size.width.0 * e
                         };
-                        stack.set_native(layer, rect(x, 0.0, f.width, f.height));
+                        stack.set_native(layer, rect(x, 0.0, f.size.width.0, f.size.height.0));
                     }
                 }
                 if let (Some(below), false) = (below, fade) {
-                    set_shift(below, (-PARALLAX * f.width * (1.0 - e), 0.0));
+                    set_shift(below, (-PARALLAX * f.size.width.0 * (1.0 - e), 0.0));
                 }
             }
             Motion::ModalIn { view, fade } => {
@@ -534,24 +538,25 @@ impl Nav {
                     set_fade(view, e);
                 } else {
                     // From below the window's bottom edge.
-                    let h = surface.root.state().frame.height;
-                    let y = view.state().frame.y;
+                    let h = surface.root.state().frame.size.height.0;
+                    let y = view.state().frame.origin.y.0;
                     set_shift(view, (0.0, (h - y) * (1.0 - e)));
                 }
             }
             Motion::ModalOut {
                 layer, frame, fade, ..
             } => {
-                let h = surface.root.state().frame.height;
+                let h = surface.root.state().frame.size.height.0;
                 let y = if *fade {
                     layer.set_opacity((1.0 - e) as f64);
-                    frame.y
+                    frame.origin.y.0
                 } else {
-                    frame.y + (h - frame.y) * e
+                    frame.origin.y.0 + (h - frame.origin.y.0) * e
                 };
-                surface
-                    .root
-                    .set_native(layer, rect(frame.x, y, frame.width, frame.height));
+                surface.root.set_native(
+                    layer,
+                    rect(frame.origin.x.0, y, frame.size.width.0, frame.size.height.0),
+                );
             }
         }
     }
@@ -699,7 +704,7 @@ impl Nav {
             (Some(old), Some((watched, paintable)))
                 if Some(old) != new && *watched == old && find(old).is_none() =>
             {
-                image_of(paintable, frame.width, frame.height)
+                image_of(paintable, frame.size.width.0, frame.size.height.0)
             }
             _ => None,
         };
@@ -740,7 +745,7 @@ impl Nav {
         let (Some(old), Some(new)) = (old, new) else {
             return;
         };
-        if old == new || frame.width <= 0.0 {
+        if old == new || frame.size.width.0 <= 0.0 {
             return;
         }
         let pushing = !prev.contains(&new);
@@ -890,7 +895,9 @@ impl Nav {
             view.unparent();
         }
         let image = match (motion, paintable) {
-            (Some(_), Some(paintable)) if mapped => image_of(&paintable, frame.width, frame.height),
+            (Some(_), Some(paintable)) if mapped => {
+                image_of(&paintable, frame.size.width.0, frame.size.height.0)
+            }
             _ => None,
         };
         set_shift(&view, (0.0, 0.0));
@@ -1037,12 +1044,12 @@ impl Nav {
         };
         let Some(view) = &m.view else { return };
         let f = surface.root.state().frame;
-        let frame = rect(0.0, 0.0, f.width, f.height);
+        let frame = rect(0.0, 0.0, f.size.width.0, f.size.height.0);
         if std::mem::replace(&mut view.state_mut().frame, frame) != frame {
             view.queue_allocate();
             view.moved();
         }
-        let size = Size::new(frame.width, frame.height);
+        let size = frame.size;
         report(surface, id, &mut m.reported, size, safe_area(surface));
     }
 

@@ -45,8 +45,8 @@
 use std::rc::Rc;
 
 use nsh_core::{
-    Color, EdgeInsets, EventKind, EventPayload, ModalAnimation, ModalConfig, NodeId, PayloadValue,
-    ROOT_ID, Rect, ScreenAnimation, ScreenConfig, Size, ViewKind,
+    Bounds, Color, EdgeInsets, EventKind, EventPayload, ModalAnimation, ModalConfig, NodeId,
+    PayloadValue, Point, Points, ROOT_ID, ScreenAnimation, ScreenConfig, Size, ViewKind,
 };
 use nsh_engine::ColorScheme;
 use objc2::{
@@ -178,7 +178,7 @@ struct ScreenNav {
     /// The header items the app inserted (only the `header` one shows).
     items: Vec<NshView>,
     /// The size and insets last reported.
-    reported: Option<(Size, EdgeInsets)>,
+    reported: Option<(Size<Points>, EdgeInsets)>,
     /// The size the background was placed at.
     backdrop_size: (f32, f32),
 }
@@ -205,7 +205,7 @@ struct ModalNav {
     /// The user closed it natively (`closeOnEscape`) and it was reported:
     /// the app's removal only forgets it.
     closed: bool,
-    reported: Option<(Size, EdgeInsets)>,
+    reported: Option<(Size<Points>, EdgeInsets)>,
     /// The input or pressable view that had the keyboard focus when it was
     /// presented (a popover's trigger, a field; held weakly, as the app
     /// may remove it meanwhile): it gets the focus back when the modal
@@ -246,7 +246,7 @@ enum Motion {
         dismiss: Option<NodeId>,
         image: Shot,
         /// Where the modal was.
-        frame: Rect,
+        frame: Bounds<Points>,
         fade: bool,
     },
 }
@@ -296,12 +296,16 @@ fn dark(surface: &Surface) -> bool {
     surface.environment.get().color_scheme == ColorScheme::Dark
 }
 
-fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
-    Rect {
-        x,
-        y,
-        width,
-        height,
+fn rect(x: f32, y: f32, width: f32, height: f32) -> Bounds<Points> {
+    Bounds {
+        origin: Point {
+            x: Points(x),
+            y: Points(y),
+        },
+        size: Size {
+            width: Points(width),
+            height: Points(height),
+        },
     }
 }
 
@@ -335,10 +339,10 @@ fn safe_area(surface: &Surface) -> EdgeInsets {
 fn insets_payload(i: EdgeInsets) -> EventPayload {
     let n = |v: f32| PayloadValue::Number(v as f64);
     EventPayload::Map(vec![
-        ("top", n(i.top)),
-        ("right", n(i.right)),
-        ("bottom", n(i.bottom)),
-        ("left", n(i.left)),
+        ("top", n(i.top.0)),
+        ("right", n(i.right.0)),
+        ("bottom", n(i.bottom.0)),
+        ("left", n(i.left.0)),
     ])
 }
 
@@ -346,11 +350,11 @@ fn insets_payload(i: EdgeInsets) -> EventPayload {
 fn report(
     surface: &Surface,
     id: NodeId,
-    last: &mut Option<(Size, EdgeInsets)>,
-    size: Size,
+    last: &mut Option<(Size<Points>, EdgeInsets)>,
+    size: Size<Points>,
     insets: EdgeInsets,
 ) {
-    if size.width <= 0.0 || *last == Some((size, insets)) {
+    if size.width <= Points::ZERO || *last == Some((size, insets)) {
         return;
     }
     let insets_changed = last.is_none_or(|(_, i)| i != insets);
@@ -479,7 +483,7 @@ fn shadow_room(view: &NshView) -> f32 {
 fn image_of(surface: &Surface, view: &NshView) -> Option<CFRetained<CGImage>> {
     let layer = view.ns().layer()?;
     let f = view.state().frame;
-    if f.width <= 0.0 || f.height <= 0.0 {
+    if f.size.width.0 <= 0.0 || f.size.height.0 <= 0.0 {
         return None;
     }
     let scale = surface
@@ -488,8 +492,8 @@ fn image_of(surface: &Surface, view: &NshView) -> Option<CFRetained<CGImage>> {
         .window()
         .map_or(2.0, |w| w.backingScaleFactor());
     let (pw, ph) = (
-        (f.width as f64 * scale).ceil() as usize,
-        (f.height as f64 * scale).ceil() as usize,
+        (f.size.width.0 as f64 * scale).ceil() as usize,
+        (f.size.height.0 as f64 * scale).ceil() as usize,
     );
     let space = CGColorSpace::new_device_rgb()?;
     // SAFETY: CoreGraphics allocates the pixels (null data) for an RGBA
@@ -583,10 +587,10 @@ impl ScreenNav {
         let f = stack.state().frame;
         let mut insets = safe_area(surface);
         if self.config.header_view.is_some() {
-            insets.top = 0.0;
+            insets.top = Points::ZERO;
         }
         let id = self.view.id();
-        let size = Size::new(f.width, f.height);
+        let size = f.size;
         report(surface, id, &mut self.reported, size, insets);
     }
 
@@ -595,7 +599,7 @@ impl ScreenNav {
     fn layout(&mut self, surface: &Surface) {
         let (w, h) = {
             let f = self.view.state().frame;
-            (f.width, f.height)
+            (f.size.width.0, f.size.height.0)
         };
         if self.backdrop_size != (w, h) {
             self.backdrop_size = (w, h);
@@ -675,7 +679,7 @@ impl Nav {
                 below,
                 fade,
             } => {
-                let w = stack.state().frame.width;
+                let w = stack.state().frame.size.width.0;
                 if *fade {
                     set_fade(entering, e);
                 } else {
@@ -695,19 +699,19 @@ impl Nav {
                 let f = stack.state().frame;
                 match leaving {
                     Leaving::View(v) if *fade => set_fade(v, 1.0 - e),
-                    Leaving::View(v) => set_shift(v, (f.width * e, 0.0)),
+                    Leaving::View(v) => set_shift(v, (f.size.width.0 * e, 0.0)),
                     Leaving::Image(image) => {
                         let x = if *fade {
                             image.set_opacity(1.0 - e);
                             0.0
                         } else {
-                            f.width * e
+                            f.size.width.0 * e
                         };
-                        stack.set_native(image, rect(x, 0.0, f.width, f.height));
+                        stack.set_native(image, rect(x, 0.0, f.size.width.0, f.size.height.0));
                     }
                 }
                 if let (Some(below), false) = (below, fade) {
-                    set_shift(below, (-PARALLAX * f.width * (1.0 - e), 0.0));
+                    set_shift(below, (-PARALLAX * f.size.width.0 * (1.0 - e), 0.0));
                 }
             }
             Motion::ModalIn { view, fade } => {
@@ -716,24 +720,25 @@ impl Nav {
                 } else {
                     // From below the window's bottom edge (its shadow
                     // too).
-                    let h = surface.root.state().frame.height + shadow_room(view);
-                    let y = view.state().frame.y;
+                    let h = surface.root.state().frame.size.height.0 + shadow_room(view);
+                    let y = view.state().frame.origin.y.0;
                     set_shift(view, (0.0, (h - y) * (1.0 - e)));
                 }
             }
             Motion::ModalOut {
                 image, frame, fade, ..
             } => {
-                let h = surface.root.state().frame.height;
+                let h = surface.root.state().frame.size.height.0;
                 let y = if *fade {
                     image.set_opacity(1.0 - e);
-                    frame.y
+                    frame.origin.y.0
                 } else {
-                    frame.y + (h - frame.y) * e
+                    frame.origin.y.0 + (h - frame.origin.y.0) * e
                 };
-                surface
-                    .root
-                    .set_native(image, rect(frame.x, y, frame.width, frame.height));
+                surface.root.set_native(
+                    image,
+                    rect(frame.origin.x.0, y, frame.size.width.0, frame.size.height.0),
+                );
             }
         }
     }
@@ -903,7 +908,7 @@ impl Nav {
         let (Some(old), Some(new)) = (old, new) else {
             return;
         };
-        if old == new || frame.width <= 0.0 {
+        if old == new || frame.size.width.0 <= 0.0 {
             return;
         }
         let pushing = !prev.contains(&new);
@@ -1084,9 +1089,15 @@ impl Nav {
         set_fade(&view, 1.0);
         match (motion, image) {
             (Some((duration, fade)), Some(image)) => {
-                surface
-                    .root
-                    .set_native(&image, rect(frame.x, frame.y, frame.width, frame.height));
+                surface.root.set_native(
+                    &image,
+                    rect(
+                        frame.origin.x.0,
+                        frame.origin.y.0,
+                        frame.size.width.0,
+                        frame.size.height.0,
+                    ),
+                );
                 let motion = Motion::ModalOut {
                     dismiss: (!reported).then_some(id),
                     image,
@@ -1190,11 +1201,11 @@ impl Nav {
         };
         let Some(view) = &m.view else { return };
         let f = surface.root.state().frame;
-        let frame = rect(0.0, 0.0, f.width, f.height);
+        let frame = rect(0.0, 0.0, f.size.width.0, f.size.height.0);
         if std::mem::replace(&mut view.state_mut().frame, frame) != frame {
             view.moved();
         }
-        let size = Size::new(frame.width, frame.height);
+        let size = frame.size;
         report(surface, id, &mut m.reported, size, safe_area(surface));
     }
 

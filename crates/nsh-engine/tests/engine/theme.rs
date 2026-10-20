@@ -34,14 +34,14 @@ fn start(app_theme: Option<Theme>, host_theme: Option<Theme>) -> (Engine, Receiv
     }
     let config = EngineConfig {
         app: App::Rust(root),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
         websocket: None,
         filesystem: None,
         assets: None,
         environment: Environment::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
@@ -125,14 +125,14 @@ fn a_tsx_apps_token_classes_follow_the_host_theme() {
     let config = EngineConfig {
         // SAFETY: compiled just now by this runtime.
         app: App::Js(unsafe { nsh_engine::Bundle::bytecode(bytecode) }),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
         websocket: None,
         filesystem: None,
         assets: None,
         environment: Environment::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
@@ -140,10 +140,16 @@ fn a_tsx_apps_token_classes_follow_the_host_theme() {
         storage: None,
     };
     let engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
-    assert_eq!(backgrounds(&rx), vec![Theme::default().primary.light]);
+    assert_eq!(
+        backgrounds(&rx),
+        vec![Color::from(Theme::default().primary.light)]
+    );
     engine.control().set_theme(Some(themed("#00ff00")));
     assert_eq!(backgrounds(&rx), vec![Color(0x00ff00ff)]);
     engine.control().set_theme(None);
-    assert_eq!(backgrounds(&rx), vec![Theme::default().primary.light]);
+    assert_eq!(
+        backgrounds(&rx),
+        vec![Color::from(Theme::default().primary.light)]
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

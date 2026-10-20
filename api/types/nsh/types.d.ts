@@ -156,8 +156,14 @@ export type TransformStep =
   | { skewY: number | string }
   | { perspective: number };
 
-type Align = "flex-start" | "flex-end" | "center" | "stretch" | "baseline";
-type Distribute = "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
+/** `start` / `end` (and `self-start` / `self-end`, by the item's own
+ * direction) follow the writing direction, as in CSS; `flex-start` /
+ * `flex-end` follow the flex direction; `normal` is CSS's (`stretch` for
+ * items without an aspect ratio). */
+type Align = "flex-start" | "flex-end" | "center" | "stretch" | "baseline" | "start" | "end" | "self-start" | "self-end" | "normal";
+/** `normal` is the default: `flex-start` in flex containers, while grid
+ * tracks sized `auto` stretch to fill the container (CSS). */
+type Distribute = "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly" | "start" | "end" | "normal";
 
 /** Layout (flexbox with React Native's defaults: `column`, no shrinking; CSS grid). */
 export interface LayoutStyle {
@@ -203,14 +209,14 @@ export interface LayoutStyle {
   columnGap?: LengthValue;
   /** Order among siblings (stable); also the native stacking order. */
   zIndex?: number;
-  /** CSS grid tracks: `"repeat(3, 1fr)"`, `"200px 1fr"`, `minmax()`, `auto-fill` / `auto-fit`, line names. */
+  /** CSS grid tracks: `"repeat(3, 1fr)"`, `"200px 1fr"`, `minmax()`, `auto-fill` / `auto-fit`, line names (`"[full-start] 1fr [content-start] 2fr [content-end full-end]"`). */
   gridTemplateColumns?: string;
   gridTemplateRows?: string;
   /** Tracks of implicitly created columns. */
   gridAutoColumns?: string;
   gridAutoRows?: string;
   gridAutoFlow?: "row" | "column" | "dense" | "row dense" | "column dense";
-  /** `"1 / 3"`, `"span 2"`, a line number or name. */
+  /** `"1 / 3"`, `"span 2"`, a line number or name (`"content-start / full-end"`, `"span col"`). */
   gridColumn?: number | string;
   gridColumnStart?: number | string;
   gridColumnEnd?: number | string;

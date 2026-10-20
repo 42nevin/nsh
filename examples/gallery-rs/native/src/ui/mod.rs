@@ -25,6 +25,7 @@ mod icons;
 mod layout;
 mod page;
 mod parts;
+mod shapes;
 mod sheet;
 mod theme;
 
@@ -43,6 +44,7 @@ pub(crate) use self::{
         RoundButton, Row, Section, Stat, caption, code, header, header_style, legend, titled,
         with_header,
     },
+    shapes::{lengths, pt, rect},
     sheet::{Sheet, SheetEvent, SheetProps},
     theme::{Finish, Finished, MONO, Tone, colors, inset_shadow, motion, radius, rgb_a, tints},
 };

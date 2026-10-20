@@ -3,7 +3,7 @@ use std::sync::Arc;
 use nsh_animation::{AnimationOp, AnimationProp};
 
 use crate::{
-    geometry::{Rect, Size},
+    geometry::{Bounds, Points, Size},
     ops::{
         AutoCapitalize, Command, EventMask, ImageSource, KeyboardAppearance, KeyboardDismissMode,
         KeyboardTaps, KeyboardType, ModalAnimation, ModalPresentation, NodeId, ResizeMode,
@@ -142,9 +142,9 @@ pub struct ScrollBehavior {
     /// Stops at multiples of the viewport.
     pub paging: bool,
     /// Stops at multiples of this length (0: off).
-    pub snap_interval: f32,
+    pub snap_interval: Points,
     /// Stops at these offsets.
-    pub snap_offsets: Vec<f32>,
+    pub snap_offsets: Vec<Points>,
     /// Which point of a snap page aligns with the viewport.
     pub snap_alignment: SnapAlignment,
     /// Velocity kept per millisecond after a fling (0: platform default).
@@ -176,7 +176,7 @@ impl Default for ScrollBehavior {
     fn default() -> Self {
         Self {
             paging: false,
-            snap_interval: 0.0,
+            snap_interval: Points::ZERO,
             snap_offsets: Vec::new(),
             snap_alignment: SnapAlignment::Start,
             deceleration: 0.0,
@@ -202,7 +202,7 @@ impl ScrollBehavior {
 
     /// Whether flings end at snap points.
     pub fn snaps(&self) -> bool {
-        self.snap_interval > 0.0 || !self.snap_offsets.is_empty()
+        self.snap_interval.0 > 0.0 || !self.snap_offsets.is_empty()
     }
 
     /// The snap point a fling ends at, as in React Native: `offset` is
@@ -214,15 +214,16 @@ impl ScrollBehavior {
     /// `None` without snapping.
     pub fn snap_target(
         &self,
-        offset: f32,
-        projected: f32,
+        offset: Points,
+        projected: Points,
         velocity: f32,
-        viewport: f32,
-        content: f32,
-    ) -> Option<f32> {
-        let max = (content - viewport).max(0.0);
-        let points: Vec<f32> = if self.snap_interval > 0.0 {
-            let interval = self.snap_interval;
+        viewport: Points,
+        content: Points,
+    ) -> Option<Points> {
+        let (offset, projected, viewport) = (offset.0, projected.0, viewport.0);
+        let max = (content.0 - viewport).max(0.0);
+        let points: Vec<f32> = if self.snap_interval.0 > 0.0 {
+            let interval = self.snap_interval.0;
             // Aligns the item at `k * interval` with the viewport.
             let shift = match self.snap_alignment {
                 SnapAlignment::Start => 0.0,
@@ -236,7 +237,7 @@ impl ScrollBehavior {
         } else if !self.snap_offsets.is_empty() {
             self.snap_offsets
                 .iter()
-                .map(|o| o.clamp(0.0, max))
+                .map(|o| o.0.clamp(0.0, max))
                 .collect()
         } else if self.paging {
             let page = viewport.max(1.0);
@@ -264,7 +265,11 @@ impl ScrollBehavior {
         } else {
             nearest(&points, projected)
         };
-        Some(target.unwrap_or(if velocity > 0.0 { max } else { 0.0 }))
+        Some(Points(target.unwrap_or(if velocity > 0.0 {
+            max
+        } else {
+            0.0
+        })))
     }
 }
 
@@ -281,9 +286,9 @@ pub struct StickyCell {
     /// The cell.
     pub cell: NodeId,
     /// Its position along the main axis (content coordinates).
-    pub start: f32,
+    pub start: Points,
     /// Where the next sticky cell pushes it out (may be infinite).
-    pub end: f32,
+    pub end: Points,
 }
 
 /// The header heights a platform without a native header gives the core
@@ -292,7 +297,7 @@ pub struct StickyCell {
 /// is placed at its top instead, as wide as the page and as tall as it lays
 /// out, and the content starts below it; the native header's options
 /// (`title`, `headerLeft`, `headerStyle`, ...) are ignored.
-pub const NO_NATIVE_HEADER: (f32, f32) = (0.0, 0.0);
+pub const NO_NATIVE_HEADER: (Points, Points) = (Points::ZERO, Points::ZERO);
 
 /// Options of a screen: its header and transitions.
 ///
@@ -344,7 +349,7 @@ pub struct ScreenConfig {
     /// Height of the header area at the top of the screen, as the core laid
     /// the content out below it: the native header's (status bar included),
     /// or the `header` view's without a native header.
-    pub header_height: f32,
+    pub header_height: Points,
 }
 
 impl Default for ScreenConfig {
@@ -366,7 +371,7 @@ impl Default for ScreenConfig {
             right: None,
             title_view: None,
             header_view: None,
-            header_height: 0.0,
+            header_height: Points::ZERO,
         }
     }
 }
@@ -527,7 +532,7 @@ pub struct ImageOptions {
     /// `defaultSource`: shown until the image loads (and if it fails).
     pub placeholder: Option<ImageSource>,
     /// `blurRadius` in points (0: sharp).
-    pub blur_radius: f32,
+    pub blur_radius: Points,
     /// `fadeDuration` in milliseconds; the platform's default when `None`
     /// (React Native: 300 on Android, none on iOS).
     pub fade_ms: Option<f32>,
@@ -584,7 +589,7 @@ pub enum MountItem {
         /// View.
         id: NodeId,
         /// New frame.
-        frame: Rect,
+        frame: Bounds<Points>,
     },
     /// The area the view's descendants cover outside its bounds, in its
     /// own coordinates (it contains the bounds), while overflow is visible;
@@ -597,7 +602,7 @@ pub enum MountItem {
         /// View.
         id: NodeId,
         /// The area, or `None`.
-        extent: Option<Rect>,
+        extent: Option<Bounds<Points>>,
     },
     /// Set the visual style of a view.
     ViewStyle {
@@ -615,7 +620,7 @@ pub enum MountItem {
         /// The final layout, ready to draw.
         layout: TextLayout,
         /// Where `layout` goes inside the view (inside padding and border).
-        content: Rect,
+        content: Bounds<Points>,
     },
     /// Set which events the view must report.
     Events {
@@ -657,7 +662,7 @@ pub enum MountItem {
         /// Scroll view.
         id: NodeId,
         /// Content size.
-        size: Size,
+        size: Size<Points>,
     },
     /// Shift the scroll position, keeping visible content in place when
     /// items above the viewport change size.
@@ -665,9 +670,9 @@ pub enum MountItem {
         /// Scroll view.
         id: NodeId,
         /// Horizontal shift.
-        dx: f32,
+        dx: Points,
         /// Vertical shift.
-        dy: f32,
+        dy: Points,
     },
     /// The surface lays out right to left (or no longer): native controls
     /// mirror.
@@ -776,7 +781,7 @@ pub enum MountItem {
         /// Input view.
         id: NodeId,
         /// Content box relative to the view.
-        content: Rect,
+        content: Bounds<Points>,
     },
     /// Configure a screen (sent before the screen is inserted into its
     /// stack, and on every change).
@@ -836,6 +841,7 @@ pub struct MountBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::px;
 
     #[test]
     fn snap_targets() {
@@ -846,58 +852,58 @@ mod tests {
         // Pages of 300 in 1000 points of content (the last page is short):
         // one page per fling, wherever the fling would glide.
         assert_eq!(
-            paging.snap_target(100.0, 100.0, 0.0, 300.0, 1000.0),
-            Some(0.0)
+            paging.snap_target(px(100.0), px(100.0), 0.0, px(300.0), px(1000.0)),
+            Some(px(0.0))
         );
         assert_eq!(
-            paging.snap_target(100.0, 900.0, 1.0, 300.0, 1000.0),
-            Some(300.0)
+            paging.snap_target(px(100.0), px(900.0), 1.0, px(300.0), px(1000.0)),
+            Some(px(300.0))
         );
         assert_eq!(
-            paging.snap_target(650.0, 900.0, 1.0, 300.0, 1000.0),
-            Some(700.0)
+            paging.snap_target(px(650.0), px(900.0), 1.0, px(300.0), px(1000.0)),
+            Some(px(700.0))
         );
         assert_eq!(
-            paging.snap_target(250.0, 0.0, -1.0, 300.0, 1000.0),
-            Some(0.0)
+            paging.snap_target(px(250.0), px(0.0), -1.0, px(300.0), px(1000.0)),
+            Some(px(0.0))
         );
         let interval = ScrollBehavior {
-            snap_interval: 120.0,
+            snap_interval: px(120.0),
             snap_alignment: SnapAlignment::Center,
             ..Default::default()
         };
         // Items of 120 centered in a 300 viewport: k * 120 - 90.
         assert_eq!(
-            interval.snap_target(200.0, 200.0, 0.0, 300.0, 2000.0),
-            Some(150.0)
+            interval.snap_target(px(200.0), px(200.0), 0.0, px(300.0), px(2000.0)),
+            Some(px(150.0))
         );
         // A fast fling glides past several items, rounded forward.
         assert_eq!(
-            interval.snap_target(200.0, 700.0, 2.0, 300.0, 2000.0),
-            Some(750.0)
+            interval.snap_target(px(200.0), px(700.0), 2.0, px(300.0), px(2000.0)),
+            Some(px(750.0))
         );
         let one = ScrollBehavior {
             one_step: true,
             ..interval.clone()
         };
         assert_eq!(
-            one.snap_target(200.0, 700.0, 2.0, 300.0, 2000.0),
-            Some(270.0)
+            one.snap_target(px(200.0), px(700.0), 2.0, px(300.0), px(2000.0)),
+            Some(px(270.0))
         );
         let offsets = ScrollBehavior {
-            snap_offsets: vec![0.0, 500.0, 900.0],
+            snap_offsets: vec![px(0.0), px(500.0), px(900.0)],
             ..Default::default()
         };
         assert_eq!(
-            offsets.snap_target(520.0, 600.0, 2.0, 300.0, 2000.0),
-            Some(900.0)
+            offsets.snap_target(px(520.0), px(600.0), 2.0, px(300.0), px(2000.0)),
+            Some(px(900.0))
         );
         assert_eq!(
-            offsets.snap_target(520.0, 520.0, 0.0, 300.0, 2000.0),
-            Some(500.0)
+            offsets.snap_target(px(520.0), px(520.0), 0.0, px(300.0), px(2000.0)),
+            Some(px(500.0))
         );
         assert_eq!(
-            ScrollBehavior::default().snap_target(10.0, 10.0, 1.0, 300.0, 2000.0),
+            ScrollBehavior::default().snap_target(px(10.0), px(10.0), 1.0, px(300.0), px(2000.0)),
             None
         );
     }

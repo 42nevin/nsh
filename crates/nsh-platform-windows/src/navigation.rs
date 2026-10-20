@@ -45,8 +45,8 @@
 use std::{cell::Cell, rc::Rc};
 
 use nsh_core::{
-    Color, EdgeInsets, EventKind, EventPayload, ModalAnimation, ModalConfig, NodeId, PayloadValue,
-    ROOT_ID, Rect, ScreenAnimation, ScreenConfig, Size, ViewKind,
+    Bounds, Color, EdgeInsets, EventKind, EventPayload, ModalAnimation, ModalConfig, NodeId,
+    PayloadValue, Points, ROOT_ID, ScreenAnimation, ScreenConfig, Size, ViewKind,
 };
 use rustc_hash::FxHashMap;
 use windows::Win32::Graphics::Direct2D::{
@@ -103,7 +103,7 @@ fn layer_view() -> NshView {
     NshView::new(LAYER_ID, ViewKind::View)
 }
 
-fn set_frame(view: &NshView, frame: Rect) {
+fn set_frame(view: &NshView, frame: Bounds<Points>) {
     let changed = std::mem::replace(&mut view.state_mut().frame, frame) != frame;
     if changed {
         view.moved();
@@ -233,10 +233,10 @@ fn safe_area(surface: &Surface) -> EdgeInsets {
 fn insets_payload(i: EdgeInsets) -> EventPayload {
     let n = |v: f32| PayloadValue::Number(v as f64);
     EventPayload::Map(vec![
-        ("top", n(i.top)),
-        ("right", n(i.right)),
-        ("bottom", n(i.bottom)),
-        ("left", n(i.left)),
+        ("top", n(i.top.0)),
+        ("right", n(i.right.0)),
+        ("bottom", n(i.bottom.0)),
+        ("left", n(i.left.0)),
     ])
 }
 
@@ -244,11 +244,11 @@ fn insets_payload(i: EdgeInsets) -> EventPayload {
 fn report(
     surface: &Surface,
     id: NodeId,
-    last: &mut Option<(Size, EdgeInsets)>,
-    size: Size,
+    last: &mut Option<(Size<Points>, EdgeInsets)>,
+    size: Size<Points>,
     insets: EdgeInsets,
 ) {
-    if size.width <= 0.0 || *last == Some((size, insets)) {
+    if size.width <= Points::ZERO || *last == Some((size, insets)) {
         return;
     }
     let insets_changed = last.is_none_or(|(_, i)| i != insets);
@@ -402,7 +402,7 @@ struct ScreenNav {
     /// The header items the app inserted (only the `header` one shows).
     items: Vec<NshView>,
     /// The size and insets last reported.
-    reported: Option<(Size, EdgeInsets)>,
+    reported: Option<(Size<Points>, EdgeInsets)>,
 }
 
 impl ScreenNav {
@@ -426,10 +426,10 @@ impl ScreenNav {
         let f = stack.state().frame;
         let mut insets = safe_area(surface);
         if self.config.header_view.is_some() {
-            insets.top = 0.0;
+            insets.top = Points::ZERO;
         }
         let id = self.view.id();
-        let size = Size::new(f.width, f.height);
+        let size = f.size;
         report(surface, id, &mut self.reported, size, insets);
     }
 
@@ -438,7 +438,7 @@ impl ScreenNav {
     fn layout(&mut self, surface: &Surface) {
         let (w, h) = {
             let f = self.view.state().frame;
-            (f.width, f.height)
+            (f.size.width.0, f.size.height.0)
         };
         let frame = rect(0.0, 0.0, w, h);
         // Hosted once, then again only when the size changes (hosting
@@ -489,7 +489,7 @@ struct ModalNav {
     /// The user closed it natively (`closeOnEscape`) and it was reported:
     /// the app's removal only forgets it.
     closed: bool,
-    reported: Option<(Size, EdgeInsets)>,
+    reported: Option<(Size<Points>, EdgeInsets)>,
     /// The field that had the keyboard focus when it was presented: it
     /// gets it back when the modal closes, as a desktop dialog gives it
     /// back.
@@ -511,7 +511,7 @@ impl Dim {
         });
         let item: Rc<dyn Hosted> = fill.clone();
         let f = view.state().frame;
-        view.set_native(&item, rect(0.0, 0.0, f.width, f.height));
+        view.set_native(&item, rect(0.0, 0.0, f.size.width.0, f.size.height.0));
         Dim {
             view: view.clone(),
             fill,
@@ -654,7 +654,7 @@ impl Nav {
                 dim,
                 fade,
             } => {
-                let w = stack.state().frame.width;
+                let w = stack.state().frame.size.width.0;
                 if *fade {
                     set_fade(entering, e);
                 } else {
@@ -675,7 +675,7 @@ impl Nav {
                 fade,
                 ..
             } => {
-                let w = stack.state().frame.width;
+                let w = stack.state().frame.size.width.0;
                 let v = match leaving {
                     Leaving::View(v) | Leaving::Image(v) => v,
                 };
@@ -696,8 +696,8 @@ impl Nav {
                     set_fade(view, e);
                 } else {
                     // From below the window's bottom edge.
-                    let h = surface.root.state().frame.height;
-                    let y = view.state().frame.y;
+                    let h = surface.root.state().frame.size.height.0;
+                    let y = view.state().frame.origin.y.0;
                     set_shift(view, (0.0, (h - y) * (1.0 - e)));
                 }
             }
@@ -705,8 +705,8 @@ impl Nav {
                 if *fade {
                     set_fade(layer, 1.0 - e);
                 } else {
-                    let h = surface.root.state().frame.height;
-                    let y = layer.state().frame.y;
+                    let h = surface.root.state().frame.size.height.0;
+                    let y = layer.state().frame.origin.y.0;
                     set_shift(layer, (0.0, (h - y) * e));
                 }
             }
@@ -868,7 +868,7 @@ impl Nav {
         let (Some(old), Some(new)) = (old, new) else {
             return;
         };
-        if old == new || frame.width <= 0.0 {
+        if old == new || frame.size.width.0 <= 0.0 {
             return;
         }
         let pushing = !prev.contains(&new);
@@ -912,9 +912,15 @@ impl Nav {
                         return;
                     };
                     let layer = layer_view();
-                    set_frame(&layer, rect(0.0, 0.0, frame.width, frame.height));
+                    set_frame(
+                        &layer,
+                        rect(0.0, 0.0, frame.size.width.0, frame.size.height.0),
+                    );
                     let item: Rc<dyn Hosted> = Rc::new(picture);
-                    layer.set_native(&item, rect(0.0, 0.0, frame.width, frame.height));
+                    layer.set_native(
+                        &item,
+                        rect(0.0, 0.0, frame.size.width.0, frame.size.height.0),
+                    );
                     layer.insert_before(&stack, None);
                     Leaving::Image(layer)
                 }
@@ -1025,7 +1031,7 @@ impl Nav {
         // Recorded when the batch began tearing it down, or now (the user
         // closed it: it is whole).
         let image = match motion {
-            Some(_) if frame.width > 0.0 => {
+            Some(_) if frame.size.width.0 > 0.0 => {
                 recorded.or_else(|| is_shown(&view).then(|| record(surface, &view)).flatten())
             }
             _ => None,
@@ -1047,7 +1053,10 @@ impl Nav {
                 let layer = layer_view();
                 set_frame(&layer, frame);
                 let item: Rc<dyn Hosted> = Rc::new(picture);
-                layer.set_native(&item, rect(0.0, 0.0, frame.width, frame.height));
+                layer.set_native(
+                    &item,
+                    rect(0.0, 0.0, frame.size.width.0, frame.size.height.0),
+                );
                 layer.insert_before(&surface.root, None);
                 let motion = Motion::ModalOut {
                     dismiss: (!reported).then_some(id),
@@ -1168,9 +1177,9 @@ impl Nav {
         };
         let Some(view) = &m.view else { return };
         let f = surface.root.state().frame;
-        let frame = rect(0.0, 0.0, f.width, f.height);
+        let frame = rect(0.0, 0.0, f.size.width.0, f.size.height.0);
         set_frame(view, frame);
-        let size = Size::new(frame.width, frame.height);
+        let size = frame.size;
         report(surface, id, &mut m.reported, size, safe_area(surface));
     }
 

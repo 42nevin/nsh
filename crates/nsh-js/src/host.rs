@@ -98,7 +98,8 @@ impl Shared {
 }
 
 /// Measures the width of one line of `text` in `font`, in points.
-pub type TextMeasurer = Box<dyn Fn(&nsh_core::canvas::CanvasFont, &str) -> f32>;
+pub type TextMeasurer =
+    Box<dyn Fn(&nsh_core::canvas::CanvasFont, &str) -> nsh_core::geometry::Points>;
 
 /// One QuickJS runtime + context with the nsh host APIs installed.
 pub struct Host {
@@ -1081,20 +1082,20 @@ fn payload_object<'js>(ctx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resu
             }
         }
         EventPayload::Hover(e) => {
-            obj.set("locationX", e.location_x)?;
-            obj.set("locationY", e.location_y)?;
-            obj.set("pageX", e.page_x)?;
-            obj.set("pageY", e.page_y)?;
+            obj.set("locationX", e.location.x.0)?;
+            obj.set("locationY", e.location.y.0)?;
+            obj.set("pageX", e.page.x.0)?;
+            obj.set("pageY", e.page.y.0)?;
             obj.set("altKey", e.modifiers.alt)?;
             obj.set("ctrlKey", e.modifiers.ctrl)?;
             obj.set("metaKey", e.modifiers.cmd)?;
             obj.set("shiftKey", e.modifiers.shift)?;
         }
         EventPayload::ContextMenu(e) => {
-            obj.set("locationX", e.location_x)?;
-            obj.set("locationY", e.location_y)?;
-            obj.set("pageX", e.page_x)?;
-            obj.set("pageY", e.page_y)?;
+            obj.set("locationX", e.location.x.0)?;
+            obj.set("locationY", e.location.y.0)?;
+            obj.set("pageX", e.page.x.0)?;
+            obj.set("pageY", e.page.y.0)?;
             obj.set("altKey", e.modifiers.alt)?;
             obj.set("ctrlKey", e.modifiers.ctrl)?;
             obj.set("metaKey", e.modifiers.cmd)?;
@@ -1116,55 +1117,50 @@ fn payload_object<'js>(ctx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resu
             for (i, l) in lines.iter().enumerate() {
                 let line = rquickjs::Object::new(ctx.clone())?;
                 line.set("text", l.text.as_str())?;
-                line.set("x", l.x)?;
-                line.set("y", l.y)?;
-                line.set("width", l.width)?;
-                line.set("height", l.height)?;
-                line.set("ascender", l.ascender)?;
-                line.set("descender", l.descender)?;
-                line.set("capHeight", l.cap_height)?;
-                line.set("xHeight", l.x_height)?;
+                line.set("x", l.x.0)?;
+                line.set("y", l.y.0)?;
+                line.set("width", l.width.0)?;
+                line.set("height", l.height.0)?;
+                line.set("ascender", l.ascender.0)?;
+                line.set("descender", l.descender.0)?;
+                line.set("capHeight", l.cap_height.0)?;
+                line.set("xHeight", l.x_height.0)?;
                 list.set(i, line)?;
             }
             obj.set("lines", list)?;
         }
-        EventPayload::Layout {
-            x,
-            y,
-            width,
-            height,
-        } => {
-            obj.set("x", *x)?;
-            obj.set("y", *y)?;
-            obj.set("width", *width)?;
-            obj.set("height", *height)?;
+        EventPayload::Layout(frame) => {
+            obj.set("x", frame.origin.x.0)?;
+            obj.set("y", frame.origin.y.0)?;
+            obj.set("width", frame.size.width.0)?;
+            obj.set("height", frame.size.height.0)?;
         }
         EventPayload::Pan {
-            translation_x,
-            translation_y,
+            translation,
             velocity_x,
             velocity_y,
             value_x,
             value_y,
         } => {
-            obj.set("translationX", *translation_x)?;
-            obj.set("translationY", *translation_y)?;
+            obj.set("translationX", translation.x.0)?;
+            obj.set("translationY", translation.y.0)?;
             obj.set("velocityX", *velocity_x)?;
             obj.set("velocityY", *velocity_y)?;
             if let Some(v) = value_x {
-                obj.set("valueX", *v)?;
+                obj.set("valueX", v.0)?;
             }
             if let Some(v) = value_y {
-                obj.set("valueY", *v)?;
+                obj.set("valueY", v.0)?;
             }
         }
-        EventPayload::Scroll { x, y } => {
-            obj.set("x", *x)?;
-            obj.set("y", *y)?;
+        EventPayload::Scroll(offset) => {
+            obj.set("x", offset.x.0)?;
+            obj.set("y", offset.y.0)?;
         }
-        EventPayload::Image { width, height } => {
-            obj.set("width", *width)?;
-            obj.set("height", *height)?;
+        // The numbers JS always got (pixels are whole).
+        EventPayload::Image(size) => {
+            obj.set("width", size.width.0 as f32)?;
+            obj.set("height", size.height.0 as f32)?;
         }
         EventPayload::Error { message } => obj.set("message", message.as_str())?,
         EventPayload::Text { text, .. } => obj.set("text", text.as_str())?,
@@ -1189,10 +1185,10 @@ fn payload_object<'js>(ctx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resu
                     path.set(j, *id)?;
                 }
                 o.set("path", path)?;
-                o.set("pageX", p.page_x)?;
-                o.set("pageY", p.page_y)?;
-                o.set("locationX", p.location_x)?;
-                o.set("locationY", p.location_y)?;
+                o.set("pageX", p.page.x.0)?;
+                o.set("pageY", p.page.y.0)?;
+                o.set("locationX", p.location.x.0)?;
+                o.set("locationY", p.location.y.0)?;
                 o.set("changed", p.changed)?;
                 o.set("timestamp", touch.timestamp)?;
                 points.set(i, o)?;
@@ -1408,7 +1404,10 @@ fn handle_id(id: Opt<Value<'_>>) -> Option<u32> {
 mod tests {
     use std::time::Duration;
 
-    use nsh_core::{EventKind, Op};
+    use nsh_core::{
+        EventKind, Op,
+        geometry::{point, px},
+    };
 
     use super::*;
 
@@ -1868,10 +1867,8 @@ const report = (v) => text(String(v));
     fn hover_payload_has_both_positions_and_the_modifiers() {
         let host = Host::new().unwrap();
         let event = nsh_core::HoverEvent {
-            location_x: 3.0,
-            location_y: 4.5,
-            page_x: 30.0,
-            page_y: 40.5,
+            location: point(px(3.0), px(4.5)),
+            page: point(px(30.0), px(40.5)),
             modifiers: nsh_core::keymap::Modifiers {
                 shift: true,
                 cmd: true,
@@ -1901,10 +1898,8 @@ const report = (v) => text(String(v));
     fn context_menu_payload_has_both_positions() {
         let host = Host::new().unwrap();
         let event = nsh_core::ContextMenuEvent {
-            location_x: 1.0,
-            location_y: 2.0,
-            page_x: 11.0,
-            page_y: 22.0,
+            location: point(px(1.0), px(2.0)),
+            page: point(px(11.0), px(22.0)),
             modifiers: nsh_core::keymap::Modifiers {
                 ctrl: true,
                 ..Default::default()
@@ -1967,9 +1962,12 @@ const report = (v) => text(String(v));
         assert_eq!(format!("{:?}", style.layout.flex_direction), "Row");
         assert_eq!(style.view.background_color, nsh_core::Color(0xff00_00ff));
         let shadow = style.view.shadow;
-        assert_eq!((shadow.offset_x, shadow.offset_y), (2.0, 6.0));
-        assert_eq!((shadow.opacity, shadow.radius), (0.25, 10.0));
-        assert_eq!(style.view.radii().to_array(), [12.0, 12.0, 12.0, 0.0]);
+        assert_eq!((shadow.offset_x.0, shadow.offset_y.0), (2.0, 6.0));
+        assert_eq!((shadow.opacity, shadow.radius.0), (0.25, 10.0));
+        assert_eq!(
+            style.view.radii().to_array().map(|r| r.0),
+            [12.0, 12.0, 12.0, 0.0]
+        );
         assert_eq!(styles[1].view.shadow, nsh_core::Shadow::DEFAULT);
     }
 

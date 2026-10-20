@@ -10,8 +10,8 @@ use std::{
 };
 
 use nsh_core::{
-    AccessibilityRole, Command, Dialog, EventKind, EventMask, InputConfig, MountBatch, MountItem,
-    NodeId, Rect, Size, ViewKind, ui::PropEnum,
+    AccessibilityRole, Bounds, Command, Dialog, EventKind, EventMask, InputConfig, MountBatch,
+    MountItem, NodeId, Points, Size, ViewKind, ui::PropEnum,
 };
 
 use super::selector::{Matcher, Selector, TextMatch};
@@ -89,7 +89,7 @@ struct View {
     test_id: Option<Arc<str>>,
     label: Option<Arc<str>>,
     text: Option<String>,
-    frame: Rect,
+    frame: Bounds<Points>,
     input: Option<Input>,
     scroll: Option<Scroll>,
     /// A screen that asks before going back (`preventBack`).
@@ -132,12 +132,12 @@ pub(crate) struct Input {
 #[derive(Debug, Default)]
 pub(crate) struct Scroll {
     /// The content offset.
-    pub(crate) x: f32,
-    pub(crate) y: f32,
+    pub(crate) x: Points,
+    pub(crate) y: Points,
     /// The scrolls the core asked for (`ScrollBy`, `ScrollTo`) applied.
     pub(crate) applied: u32,
     pub(crate) horizontal: bool,
-    content: Option<Size>,
+    content: Option<Size<Points>>,
 }
 
 impl Screen {
@@ -240,9 +240,9 @@ impl Screen {
                 if let Some(scroll) = self.scroll_mut(*id) {
                     scroll.applied = scroll.applied.wrapping_add(1);
                     if scroll.horizontal {
-                        scroll.x += dx;
+                        scroll.x += *dx;
                     } else {
-                        scroll.y += dy;
+                        scroll.y += *dy;
                     }
                 }
             }
@@ -280,9 +280,9 @@ impl Screen {
                 let end = self.scroll_end(id);
                 if let Some(scroll) = self.scroll_mut(id) {
                     if scroll.horizontal {
-                        scroll.x = x.clamp(0.0, end);
+                        scroll.x = x.clamp(Points::ZERO, end);
                     } else {
-                        scroll.y = y.clamp(0.0, end);
+                        scroll.y = y.clamp(Points::ZERO, end);
                     }
                     scroll.applied = scroll.applied.wrapping_add(1);
                     self.scrolled.push(id);
@@ -792,17 +792,19 @@ impl Screen {
 
     /// How far scroll view `id` goes along its axis: its content past its
     /// frame (unbounded while the content's size is not known).
-    pub(crate) fn scroll_end(&self, id: NodeId) -> f32 {
+    pub(crate) fn scroll_end(&self, id: NodeId) -> Points {
         let Some(view) = self.nodes.get(&id) else {
-            return 0.0;
+            return Points::ZERO;
         };
         let Some(scroll) = &view.scroll else {
-            return 0.0;
+            return Points::ZERO;
         };
         match scroll.content {
-            Some(content) if scroll.horizontal => (content.width - view.frame.width).max(0.0),
-            Some(content) => (content.height - view.frame.height).max(0.0),
-            None => f32::INFINITY,
+            Some(content) if scroll.horizontal => {
+                (content.width - view.frame.size.width).max(Points::ZERO)
+            }
+            Some(content) => (content.height - view.frame.size.height).max(Points::ZERO),
+            None => Points(f32::INFINITY),
         }
     }
 
@@ -828,7 +830,7 @@ mod tests {
                 ..Default::default()
             }),
             layout: nsh_core::TextLayout(Arc::new(())),
-            content: Rect::default(),
+            content: Bounds::default(),
         }
     }
 

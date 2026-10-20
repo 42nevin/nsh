@@ -345,8 +345,8 @@ impl<M: TextEngine> Core<M> {
             return crate::ListContentStyle::default();
         };
         let px = |l: taffy::LengthPercentage| match l.expand() {
-            taffy::style::ExpandedLengthPercentage::Length(v) => v,
-            _ => 0.0,
+            taffy::style::ExpandedLengthPercentage::Length(v) => crate::geometry::Points(v),
+            _ => crate::geometry::Points::ZERO,
         };
         let p = &style.layout.padding;
         crate::ListContentStyle {
@@ -382,7 +382,7 @@ impl<M: TextEngine> Core<M> {
                 let group = |_: &str| 0;
                 let cx = Context {
                     env: self.class_env,
-                    window: (self.viewport.width, self.viewport.height),
+                    window: self.viewport,
                     rtl: node.rtl,
                     states: 0,
                     position: 0,
@@ -717,7 +717,7 @@ impl<M: TextEngine> Core<M> {
                 0
             };
             let positional = pos != 0 && node.parent != NO_KEY;
-            let window = (self.viewport.width, self.viewport.height);
+            let window = self.viewport;
             let cx = Context {
                 env: self.class_env,
                 window,

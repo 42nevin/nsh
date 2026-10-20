@@ -294,7 +294,37 @@ macro_rules! number {
 }
 
 number!(any: f32, f64);
+
+/// A number of points.
+impl JsValue for crate::geometry::Points {
+    fn ts_type(_types: &mut TsTypes) -> String {
+        "number".into()
+    }
+
+    fn from_js(value: JsIn<'_>) -> Result<Self, PropError> {
+        f32::from_js(value).map(Self)
+    }
+
+    fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+        self.0.to_js(host)
+    }
+}
 number!(whole: i16, i32, i64, u16, u32, u64, usize);
+
+/// A whole number of pixels (an image's size).
+impl JsValue for crate::geometry::DevicePixels {
+    fn ts_type(types: &mut TsTypes) -> String {
+        i32::ts_type(types)
+    }
+
+    fn from_js(value: JsIn<'_>) -> Result<Self, PropError> {
+        i32::from_js(value).map(Self)
+    }
+
+    fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+        self.0.to_js(host)
+    }
+}
 
 impl JsValue for SharedString {
     fn ts_type(_types: &mut TsTypes) -> String {
@@ -324,6 +354,22 @@ impl JsValue for String {
 
     fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
         Ok(JsOwned::new(host, host.new_string(self)?))
+    }
+}
+
+/// A CSS color string from JS (`"#2563eb"`, `"rgb(0 0 0 / 0.5)"`), as
+/// [`Color`] takes it: the color of Rust components' props.
+impl JsValue for crate::Hsla {
+    fn ts_type(types: &mut TsTypes) -> String {
+        Color::ts_type(types)
+    }
+
+    fn from_js(value: JsIn<'_>) -> Result<Self, PropError> {
+        Color::from_js(value).map(Into::into)
+    }
+
+    fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+        Color::from(*self).to_js(host)
     }
 }
 

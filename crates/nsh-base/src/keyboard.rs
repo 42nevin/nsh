@@ -29,7 +29,7 @@ pub struct KeyboardAvoidingViewProps {
     /// Added to the keyboard's height while it shows (a tab bar below the
     /// view, say).
     #[prop(default)]
-    pub offset: Prop<f32>,
+    pub offset: Prop<Points>,
     /// The content.
     pub children: Prop<Children>,
 }
@@ -76,10 +76,10 @@ pub fn KeyboardAvoidingView(props: KeyboardAvoidingViewProps) -> impl IntoElemen
     });
     let lift = computed(move || {
         let height = keyboard_height();
-        if !props.enabled.get() || height == 0.0 {
-            0.0
+        if !props.enabled.get() || height == Points::ZERO {
+            Points::ZERO
         } else {
-            (height + props.offset.get()).max(0.0)
+            (height + props.offset.get()).max(Points::ZERO)
         }
     });
     // The room it makes, by `behavior`.
@@ -88,7 +88,7 @@ pub fn KeyboardAvoidingView(props: KeyboardAvoidingViewProps) -> impl IntoElemen
             bottom: if props.behavior.get() == behavior {
                 lift.get()
             } else {
-                0.0
+                Points::ZERO
             },
             ..EdgeInsets::default()
         }

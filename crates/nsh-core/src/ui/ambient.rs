@@ -24,10 +24,10 @@ use super::{
     task::{self, Action, Answer, ClipboardImage, DialogAnswer, Executor, ImageSize},
 };
 use crate::{
-    Command, Dialog, EdgeInsets, LayoutAnimation, NodeId, Size,
+    Command, Dialog, EdgeInsets, LayoutAnimation, NodeId, Points, Size,
     canvas::CanvasFont,
+    color::Hsla,
     platform::{Appearance, Idiom, Locale, Os},
-    style::Color,
     time::Instant,
 };
 
@@ -59,10 +59,10 @@ impl Ambient {
 /// the readers of the parts that changed).
 struct EnvSignals {
     env: Signal<Environment>,
-    window: Memo<Size>,
+    window: Memo<Size<Points>>,
     safe_area: Memo<EdgeInsets>,
-    title_bar: Memo<crate::platform::Insets>,
-    keyboard_height: Memo<f32>,
+    title_bar: Memo<crate::geometry::Edges<crate::geometry::Points>>,
+    keyboard_height: Memo<Points>,
     keyboard_duration: Memo<f32>,
     dark: Memo<bool>,
     font_scale: Memo<f32>,
@@ -186,7 +186,7 @@ fn act(action: Action) {
 // --- The environment ---------------------------------------------------------
 
 /// The surface's size in points (TS: `windowSize()`).
-pub fn window() -> Size {
+pub fn window() -> Size<Points> {
     env(|e| e.window)
 }
 
@@ -197,7 +197,7 @@ pub fn safe_area() -> EdgeInsets {
 
 /// The software keyboard's height over the surface, 0 when hidden (TS:
 /// `keyboardFrame().height`).
-pub fn keyboard_height() -> f32 {
+pub fn keyboard_height() -> Points {
     env(|e| e.keyboard_height)
 }
 
@@ -212,9 +212,9 @@ pub fn dark() -> bool {
     env(|e| e.dark)
 }
 
-/// `color` for the appearance now (props that take a [`Color`], such as an
+/// `color` for the appearance now (props that take one color, such as an
 /// input's placeholder color; styles take theme colors as they are).
-pub fn color(color: impl Into<AdaptiveColor>) -> Color {
+pub fn color(color: impl Into<AdaptiveColor>) -> Hsla {
     let color = color.into();
     if dark() { color.dark } else { color.light }
 }
@@ -246,9 +246,9 @@ pub fn pixel_ratio() -> f32 {
 
 /// `points` rounded to whole device pixels (TS:
 /// `PixelRatio.roundToNearestPixel`).
-pub fn round_to_nearest_pixel(points: f32) -> f32 {
+pub fn round_to_nearest_pixel(points: Points) -> Points {
     let ratio = pixel_ratio().max(f32::MIN_POSITIVE);
-    (points * ratio).round() / ratio
+    Points((points.0 * ratio).round() / ratio)
 }
 
 /// The user's locale (TS: what `Intl` formats for by default).
@@ -297,10 +297,10 @@ pub fn theme() -> Arc<Theme> {
 /// The width of `text` on one line in `font` (the CSS `font` shorthand; an
 /// invalid one measures in `10px sans-serif`), by the platform's text engine
 /// (TS: a canvas's `measureText(text).width`).
-pub fn measure_text(font: &str, text: &str) -> f32 {
+pub fn measure_text(font: &str, text: &str) -> Points {
     let font = CanvasFont::parse(font).unwrap_or_default();
     let measure = with_data(|d| d.ambient.measure.clone()).expect("the core sets the text engine");
-    measure(&font, text)
+    Points(measure(&font, text))
 }
 
 /// The surface's `G`: one signal per type, made with `Default` the first
@@ -787,7 +787,7 @@ pub fn on_back_press(f: impl Fn() -> bool + 'static) {
     cleanup(move || drop(subscription));
 }
 
-pub(crate) fn title_bar() -> crate::platform::Insets {
+pub(crate) fn title_bar() -> crate::geometry::Edges<crate::geometry::Points> {
     env(|e| e.title_bar)
 }
 

@@ -115,7 +115,8 @@ use std::{
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use nsh_core::{
     ApproxTextEngine, ContextMenuEvent, EventKind, EventPayload, HoverEvent, MountBatch, MountItem,
-    NodeId, PayloadValue, Rect, Size, TouchEvent, TouchPhase, TouchPoint,
+    NodeId, PayloadValue, Points, Size, TouchEvent, TouchPhase, TouchPoint,
+    geometry::{DevicePixels, point, px},
     keymap::Modifiers,
     platform::{Environment, Idiom, Os},
     tailwind::state,
@@ -226,7 +227,7 @@ impl Views {
                     self.nodes.entry(*id).or_default().text = Some(text.text.clone());
                 }
                 MountItem::Frame { id, frame, .. } => {
-                    self.nodes.entry(*id).or_default().frame = Some(*frame);
+                    self.nodes.entry(*id).or_default().frame = Some(Rect::from(*frame));
                 }
                 _ => {}
             }
@@ -349,7 +350,7 @@ struct Run {
 impl Run {
     fn start(
         bundle: Bundle,
-        viewport: Size,
+        viewport: Size<Points>,
         environment: Environment,
         assets: &Path,
         data_dir: Option<PathBuf>,
@@ -367,7 +368,7 @@ impl Run {
             filesystem: None,
             assets: Some(Arc::new(AppAssets(assets.to_path_buf()))),
             environment,
-            header_heights: (44.0, 96.0),
+            header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
             limits: nsh_engine::Limits::default(),
             ui_sets: vec![nsh_base::registry()],
             runtime: None,
@@ -531,12 +532,12 @@ pub(crate) fn run(code: String, script: &str, dir: &Path) -> Result<(), Failure>
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .peekable();
-    let mut viewport = Size::new(390.0, 844.0);
+    let mut viewport = Size::new(nsh_core::geometry::px(390.0), nsh_core::geometry::px(844.0));
     let mut environment = Environment::default();
     while let Some(line) = lines.peek() {
         if let Some(size) = line.strip_prefix("viewport ") {
             let (w, h) = size.split_once(' ').ok_or("viewport <width> <height>")?;
-            viewport = Size::new(w.parse().unwrap(), h.parse().unwrap());
+            viewport = Size::new(px(w.parse().unwrap()), px(h.parse().unwrap()));
         } else if let Some(platform) = line.strip_prefix("platform ") {
             let mut words = platform.split_whitespace();
             environment.os = match words.next() {
@@ -841,7 +842,7 @@ pub(crate) fn run(code: String, script: &str, dir: &Path) -> Result<(), Failure>
                 let Some(id) = run.views.find_view(&selector) else {
                     return failed("no such view".into(), &run);
                 };
-                run.control.scroll(id, x, y, 0);
+                run.control.scroll(id, point(px(x), px(y)), 0);
                 if let Some(view) = run.views.nodes.get_mut(&id) {
                     view.mounted.scrolled(x, y);
                 }
@@ -892,7 +893,7 @@ pub(crate) fn run(code: String, script: &str, dir: &Path) -> Result<(), Failure>
             "keyboard" => {
                 let [height, duration] = numbers::<2>(arg)
                     .ok_or_else(|| format!("`{line}`: keyboard <height> <duration>"))?;
-                environment.keyboard_height = height;
+                environment.keyboard_height = px(height);
                 environment.keyboard_duration = duration;
                 run.control.set_environment(environment);
             }
@@ -1006,10 +1007,8 @@ impl Device {
                 id: 1,
                 target,
                 path,
-                page_x: left + x,
-                page_y: top + y,
-                location_x: x,
-                location_y: y,
+                page: point(px(left + x), px(top + y)),
+                location: point(px(x), px(y)),
                 changed: true,
             }],
         }
@@ -1123,18 +1122,14 @@ fn event_payload(
             };
             if kind == EventKind::HoverMove {
                 EventPayload::Hover(HoverEvent {
-                    location_x,
-                    location_y,
-                    page_x,
-                    page_y,
+                    location: point(px(location_x), px(location_y)),
+                    page: point(px(page_x), px(page_y)),
                     modifiers,
                 })
             } else {
                 EventPayload::ContextMenu(ContextMenuEvent {
-                    location_x,
-                    location_y,
-                    page_x,
-                    page_y,
+                    location: point(px(location_x), px(location_y)),
+                    page: point(px(page_x), px(page_y)),
                     modifiers,
                 })
             }
@@ -1163,12 +1158,14 @@ fn event_payload(
                 .collect(),
         ),
         EventKind::PanStart | EventKind::PanEnd => EventPayload::Pan {
-            translation_x: num("translationX").unwrap_or(0.0),
-            translation_y: num("translationY").unwrap_or(0.0),
+            translation: point(
+                px(num("translationX").unwrap_or(0.0)),
+                px(num("translationY").unwrap_or(0.0)),
+            ),
             velocity_x: num("velocityX").unwrap_or(0.0),
             velocity_y: num("velocityY").unwrap_or(0.0),
-            value_x: num("valueX"),
-            value_y: num("valueY"),
+            value_x: num("valueX").map(px),
+            value_y: num("valueY").map(px),
         },
         EventKind::ScrollEnd
         | EventKind::ScrollBeginDrag
@@ -1177,15 +1174,15 @@ fn event_payload(
         | EventKind::MomentumScrollEnd
             if only(&["x", "y"]) =>
         {
-            EventPayload::Scroll {
-                x: num("x").unwrap_or(0.0),
-                y: num("y").unwrap_or(0.0),
-            }
+            EventPayload::Scroll(point(
+                px(num("x").unwrap_or(0.0)),
+                px(num("y").unwrap_or(0.0)),
+            ))
         }
-        EventKind::Load if only(&["width", "height"]) => EventPayload::Image {
-            width: num("width").unwrap_or(0.0),
-            height: num("height").unwrap_or(0.0),
-        },
+        EventKind::Load if only(&["width", "height"]) => EventPayload::Image(Size::new(
+            DevicePixels(num("width").unwrap_or(0.0) as i32),
+            DevicePixels(num("height").unwrap_or(0.0) as i32),
+        )),
         EventKind::Error if only(&["message"]) => match get("message") {
             Some(Field::Str(message)) => EventPayload::Error {
                 message: message.clone(),
@@ -1227,6 +1224,26 @@ fn touch_path(views: &Views, id: NodeId) -> Vec<NodeId> {
         at = view.parent;
     }
     path
+}
+
+/// A view's frame in points relative to its parent, as the steps read it.
+#[derive(Clone, Copy)]
+struct Rect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+impl From<nsh_core::Bounds<Points>> for Rect {
+    fn from(b: nsh_core::Bounds<Points>) -> Self {
+        Rect {
+            x: b.origin.x.0,
+            y: b.origin.y.0,
+            width: b.size.width.0,
+            height: b.size.height.0,
+        }
+    }
 }
 
 /// Where view `id` is on screen: its frames' origins added up.

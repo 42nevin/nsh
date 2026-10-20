@@ -53,7 +53,7 @@ pub(crate) fn Sheet(props: SheetProps, cx: Scope<SheetEvent>) -> impl IntoElemen
         if let Some(task) = closing.replace(None) {
             task.cancel();
         }
-        offset.set(window().height);
+        offset.set(window().height.0);
         offset.spring(0.0, settle(None));
     };
     // Slides away, then tells the app.
@@ -61,7 +61,7 @@ pub(crate) fn Sheet(props: SheetProps, cx: Scope<SheetEvent>) -> impl IntoElemen
         if closing.with(|c| c.is_some()) {
             return;
         }
-        let end = offset.timing(untracked(window).height, 220.0, Easing::EaseIn);
+        let end = offset.timing(untracked(window).height.0, 220.0, Easing::EaseIn);
         closing.replace(Some(spawn(async move {
             // Ended or interrupted: closed either way.
             let _ = end.await;
@@ -91,7 +91,7 @@ pub(crate) fn Sheet(props: SheetProps, cx: Scope<SheetEvent>) -> impl IntoElemen
                     .absolute()
                     .inset_0()
                     .bg(move || theme().overlay)
-                    .bind_opacity(&offset.interpolate(&[0.0, height], &[1.0, 0.0]))
+                    .bind_opacity(&offset.interpolate(&[0.0, height.0], &[1.0, 0.0]))
                     .label("Close")
                     // For the pointer: Escape and the back button close it
                     // from the keyboard, which goes straight to the panel.
@@ -105,16 +105,16 @@ pub(crate) fn Sheet(props: SheetProps, cx: Scope<SheetEvent>) -> impl IntoElemen
                     .right_0()
                     .bottom_0()
                     .pt_2()
-                    .pb(move || px(safe_area().bottom + 16.0))
+                    .pb(move || px(safe_area().bottom.0 + 16.0))
                     .px_4()
                     .gap_3()
-                    .rounded_t(move || px(theme().radius_lg.max(16.0)))
+                    .rounded_t(move || theme().radius_lg.max(px(16.0)))
                     .bg(colors::SURFACE)
                     .shadow_lg()
                     .bind_translate_y(&offset)
                     .pan_values(None, Some(&offset))
                     .on_pan_end(move |e: &PanEvent| {
-                        if e.translation_y > CLOSE_DISTANCE || e.velocity_y > CLOSE_VELOCITY {
+                        if e.translation.y.0 > CLOSE_DISTANCE || e.velocity_y > CLOSE_VELOCITY {
                             close();
                         } else {
                             offset.spring(0.0, settle(Some(e.velocity_y)));

@@ -42,14 +42,14 @@ fn start() -> (Engine, Receiver<MountBatch>) {
         app: App::Rust(Root::new::<Counter>(|| CounterProps {
             label: "Taps".into(),
         })),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
         websocket: None,
         filesystem: None,
         assets: None,
         environment: Environment::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         // Nothing registered: Rust renders its components by type.
         ui_sets: Vec::new(),
@@ -110,14 +110,14 @@ fn a_rust_app_starts_in_its_appearance() {
     let config = EngineConfig {
         // `nsh.json` `"appearance": "dark"` of a Rust app (`nsh.json` "root").
         app: App::Rust(Root::of::<WithCard>().appearance(nsh_core::platform::Appearance::Dark)),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
         websocket: None,
         filesystem: None,
         assets: None,
         environment: Environment::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
@@ -160,14 +160,14 @@ fn rust_components_navigate_with_native_stacks() {
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
         app: App::Rust(Root::of::<Navigation>()),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
         websocket: None,
         filesystem: None,
         assets: None,
         environment: Environment::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
@@ -246,14 +246,14 @@ fn rust_components_pass_content_to_rust_components() {
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
         app: App::Rust(Root::of::<WithCard>()),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
         websocket: None,
         filesystem: None,
         assets: None,
         environment: Environment::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
@@ -340,14 +340,14 @@ fn rust_components_take_the_back_button() {
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
         app: App::Rust(Root::of::<BackCounter>()),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
         websocket: None,
         filesystem: None,
         assets: None,
         environment: Environment::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
@@ -399,14 +399,14 @@ fn Measured() -> impl IntoElement {
     let scrolled = signal(0.0_f32);
     view()
         .flex_1()
-        .on_layout(move |frame: &nsh_core::Rect| width.set(frame.width))
+        .on_layout(move |frame: &nsh_core::Bounds<nsh_core::Points>| width.set(frame.size.width.0))
         .child(text(move || {
             format!("width {} scrolled {}", width.get(), scrolled.get())
         }))
         .child(
             scroll()
                 .flex_1()
-                .on_scroll(move |e: &ScrollEvent| scrolled.set(e.y))
+                .on_scroll(move |e: &ScrollEvent| scrolled.set(e.offset.y.0))
                 .child(view().h(px(2000.0))),
         )
 }
@@ -416,14 +416,14 @@ fn rust_components_hear_layouts_and_scrolls() {
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
         app: App::Rust(Root::of::<Measured>()),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
         websocket: None,
         filesystem: None,
         assets: None,
         environment: Environment::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
@@ -455,7 +455,11 @@ fn rust_components_hear_layouts_and_scrolls() {
     let mut scroll = None;
     assert!(wait("width 390 scrolled 0", &mut scroll), "the layout came");
     let scroll = scroll.expect("a scroll view");
-    engine.control().scroll(scroll, 0.0, 120.0, 0);
+    engine.control().scroll(
+        scroll,
+        nsh_core::geometry::point(nsh_core::geometry::px(0.0), nsh_core::geometry::px(120.0)),
+        0,
+    );
     assert!(wait("width 390 scrolled 120", &mut None), "the scroll came");
 }
 
@@ -484,14 +488,14 @@ fn nested_components_in_list_rows_reach_the_list_owner() {
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
         app: App::Rust(Root::of::<ButtonRows>()),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
         websocket: None,
         filesystem: None,
         assets: None,
         environment: Environment::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
@@ -547,14 +551,14 @@ fn content_a_component_does_not_place_is_not_shown() {
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
         app: App::Rust(Root::of::<WithSheet>()),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
         websocket: None,
         filesystem: None,
         assets: None,
         environment: Environment::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,

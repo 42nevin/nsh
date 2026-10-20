@@ -1,5 +1,11 @@
 # Styles, classes and effects
 
+- **CSS and Tailwind as in a browser**: CSS values (colors, lengths, gradients, filters, shadows, transforms,
+  alignment keywords, ...) and Tailwind utilities and variants mean exactly what they mean in a browser and in Tailwind
+  CSS (v4), whose generated CSS is the reference for each utility (the tests compare against it). What NSH cannot
+  support is unsupported (an unknown class, a rejected value with a warning), never given a different meaning. Inline
+  style objects keep React Native's defaults for unset keys (a column, `flexShrink: 0`, `alignContent: flex-start`
+  outside grids).
 - **Tailwind** (`class` / `classList` on every element): JS only passes the strings; the core resolves them (how, and
   what is cached: `crates/nsh-core/src/tailwind/mod.rs`, `core/classes.rs`). The inline `style` always wins over classes; a key set to `undefined` sets nothing, so the class value (or the default) stays, while `null` sets the default.
   Later utilities win over earlier ones (components append a `class` prop, no `tailwind-merge`); variant rules apply
@@ -41,15 +47,32 @@
   components: `SafeAreaView`, `KeyboardAvoidingView`) are added to the resolved padding / margin, so classes and
   styles keep their own.
 - **Effects** (styles and classes; `effects.rs`): `boxShadow` (CSS syntax, several, `inset`; also `shadow-*` / `ring-*`),
-  `experimental_backgroundImage` / `backgroundImage` (linear / radial / conic gradients, drawn over `backgroundColor` as in
-  CSS; but press feedback must show, so a background color an interaction state sets (`active:` / `hover:` / `focus:` /
+  `experimental_backgroundImage` / `backgroundImage` (linear / radial / conic gradients and their `repeating-` forms,
+  drawn over `backgroundColor` as in CSS; stops at percentages, at lengths along linear and radial gradients
+  (a `DefiniteLength::Absolute` position: `Gradient::resolve_stops` places them against `Gradient::line_length` of the box when it is
+  drawn, so every native backend passes the view's size; Android's `Decor.Gradient.resolve` does the same for the
+  gradients `encode.rs` sends as written, with their stop count negated; the web hands them to the browser as `px`), or
+  at angles around conic ones (fractions of a turn), up to two per stop; transition hints are not parsed; a gradient
+  that does not parse is logged (inline styles, `bg-[…]` classes, Rust components' `Style`); but press feedback must show, so a background color an interaction state sets (`active:` / `hover:` / `focus:` /
   `focus-within:` / `group-*:` classes, Rust components' `.active(..)`, `activeStyle` / `hoverStyle` / `focusStyle` / `disabledStyle`) or a native
   animation drives (`Animated` `backgroundColor`) replaces the gradients, unless that state sets a gradient of its own:
   done in the core, so every platform shows it alike), `filter` (`brightness`, `contrast`,
   `grayscale`, `hue-rotate`, `invert`, `saturate`, `sepia`, `opacity`, `blur`, `drop-shadow`; color filters are composed into one
   matrix), `backdropFilter` (blur), `mixBlendMode`, `outline*`, `visibility`, `cursor`, `transition*` (CSS: property groups,
   duration, delay, easing) and `animation*` (Tailwind's `spin` / `ping` / `pulse` / `bounce`), `display: grid` with
-  `gridTemplateColumns/Rows`, `gridAutoFlow/Columns/Rows`, `gridColumn/Row(Start/End)`, `justifyItems/Self`; text
+  `gridTemplateColumns/Rows` (line names: `grid.rs` turns them into taffy's `grid_template_*_names`, one set per
+  line between components, a `repeat()` counting as one), `gridAutoFlow/Columns/Rows`, `gridColumn/Row(Start/End)` (by
+  number or name, `span name`), `justifyItems/Self`; CSS's logical `start` / `end` / `self-start` / `self-end` (taffy's,
+  right to left aware) besides `flex-start` / `flex-end`; an unset `alignContent` / `justifyContent` is taffy's `normal`,
+  which `style::resolve_normal_alignment` makes `flex-start` outside grids when a style reaches the tree, so grids
+  stretch their `auto` tracks as CSS does while flex keeps React Native's default (the alignment and grid classes set
+  exactly what Tailwind CSS generates for them: `content-start` is `flex-start`, `place-content-start` /
+  `place-items-*` / `place-self-*` `start` / `end`, `justify-items-*` `start` / `end` / `normal`, `justify-normal`
+  `normal`, `justify-self-*` / `items-*` / `self-*` `flex-start` / `flex-end`; `content-normal` sets `stretch`, which
+  is what CSS's `normal` does in flex and grid containers, since the style's `normal` is the unset value; a type hint
+  is dropped from an arbitrary value (`col-[number:2]` is line 2), classes Tailwind has no negative of
+  (`-grid-cols-*`, `-col-span-*`, `-auto-cols-*`) are unknown, and an invalid arbitrary `col-[…]` / `row-[…]` /
+  `auto-cols-[…]` / `auto-rows-[…]` sets nothing, as a browser drops the declaration); text
   `textDecorationStyle` (`double` / `dotted` / `dashed` / `wavy`), `textDecorationThickness`, `textUnderlineOffset`, `em`
   letter spacing and unitless line heights (multiples). Translations by a fraction of the size (`translate-x-1/2`) are resolved by
   the core against the frame and sent again when the size changes.
@@ -75,11 +98,69 @@
   defaults: offset `(0, -3)`, radius 3, opacity 0), `tintColor` (images), `android={{ elevation }}` (a prop, not a style: Android's material shadow, with
   `shadowColor` from API 28), `transformOrigin` (keywords / percentages / lengths; iOS conjugates the matrix around it,
   Android sets the pivot), `backfaceVisibility` (iOS `doubleSided`; Android hides the view while its rotations turn it away). `style` may be an array of styles merged left to right
-  (falsy entries skipped), decoded in Rust. Text adds `textShadowColor` / `textShadowOffset` / `textShadowRadius`,
+  (falsy entries skipped), decoded in Rust. In one style object (an array is flattened into one, as React Native does) a
+  longhand wins over its shorthand whatever the key order (`StylePatch::set`, `StyleKey::longhands`: border widths and
+  colors per side, margin / padding sides and axes, `rowGap` / `columnGap`, `flexGrow` / `flexShrink` / `flexBasis`,
+  grid start / end): a shorthand set after its longhands is recorded before them and they apply again, and a `null`
+  longhand of a shorthand in the same object is dropped (unset, as in Yoga). Corner radii keep their own fields
+  (`corner_radius` over `border_radius`), start / end properties are placed after the physical ones
+  (`apply_direction`). Between layers (classes, then the inline style; a Rust component's own style, then the app's)
+  order still decides, and classes keep "later wins". `outlineStyle: "none"` hides the outline whatever the width, and
+  the `animation*` timing keys apply with or before `animationName` (`Style::pending` keeps them); `transition*` keys
+  already combine in any order (`transitionProperty` defaults to `all`). Text adds `textShadowColor` / `textShadowOffset` / `textShadowRadius`,
   `fontVariant` (OpenType `smcp` / `onum` / `lnum` / `tnum` / `pnum`: CoreText feature settings, `Paint.setFontFeatureSettings`)
   and `writingDirection`.
   On Apple everything is drawn by Core Animation, escalating only as needed (`crates/nsh-platform-ios/src/decor.rs`
   describes the paths and their limits); Android draws in `Decor.java`.
+
+## Colors
+
+Colors in Rust follow GPUI's design (`nsh_core::color`; GPUI is a reference, not a dependency). **`Hsla`** is the
+color Rust code holds, passes and computes with: theme colors (`AdaptiveColor { light: Hsla, dark: Hsla }`), the
+`Styled` color methods (`.bg(..)`, `.text_color(..)`: anything `Into<AdaptiveColor>`, so an `Hsla`, an `Rgba` or a
+theme color), host element setters (`.placeholder_color(..)`, `.header_tint_color(..)`), the canvas painter, the
+palette (`palette::SKY.shade(500)`), `color(..)` (an adaptive color for the appearance now) and Rust components'
+props (decoded from the same CSS strings as `Color`, so their TypeScript is unchanged). **`Rgba`** is for conversions,
+as in GPUI; `rgb(0x2563eb)` and `rgba(0x2563eb80)` build one, `hsla(h, s, l, a)` (each `0..=1`, the hue in turns) and
+`hsl(deg, %, %)` (gpui-kit's) build an `Hsla`, and `black()`, `white()`, `transparent_black()`, `opaque_grey(l, a)` are
+GPUI's constants. `Rgba::to_hsla` and `Rgba::to_packed` are `const`, for colors in `const`s.
+
+The packed **`Color`** (`0xRRGGBBAA`) is only the storage and wire form: what the style pipeline diffs and caches
+(`Style`, `BoxShadow`, gradient stops, `Prop` values), mount items, the Android and web encodings and the fixtures'
+`#rrggbbaa`. A color becomes packed where it enters a style, a prop or an operation (`Declaration::lower`, the host
+setters), and nowhere earlier.
+
+Adjusting a color is a method of `Hsla`, so state colors are derived rather than picked (the theme's pressed shades
+are `c.blend(opaque_grey(0.0, 0.12))` in light appearance and `opaque_grey(1.0, 0.12)` in dark,
+`ui/theme.rs` `pressed`):
+
+| Method | Does |
+|---|---|
+| `opacity(f)`, `alpha(a)`, `fade_out(f)` | alpha times `f`; set to `a`; times `1 - f` (in place) |
+| `lighten(f)`, `darken(f)` | lightness times `1 + f` (at most 1), times `1 - f` (gpui-kit's) |
+| `saturate(f)`, `desaturate(f)`, `grayscale()` | the same for the saturation; no saturation |
+| `spin(deg)`, `hue(h)`, `saturation(s)`, `lightness(l)`, `apply(base)` | rotate the hue; set one channel; take `base`'s hue and saturation |
+| `invert()`, `invert_l()` | `1 - x` for hue, saturation and lightness; for the lightness only |
+| `blend(over)` | `over` drawn on top by its alpha (source over, sRGB), keeping this alpha |
+| `mix(other, f)`, `mix_oklab(other, f)` | `f` of this color, in HSL (the hue the short way) or in Oklab (CSS `color-mix(in oklab, …)`) |
+| `luminance()`, `contrast_ratio(other)`, `readable_text()` | WCAG's relative luminance and contrast ratio; white or black, whichever reads better on it |
+| `to_hex()`, `Hsla::parse_hex(..)`, `"…".parse::<Hsla>()` | `#RRGGBB(AA)`; hex; any CSS color NSH reads |
+
+`AdaptiveColor::opacity(f)` and `AdaptiveColor::map(|c| ..)` apply one to both appearances.
+
+**Rounding** is fixed so that TSX apps render exactly as before and every packed color survives a round trip: packed
+to float is `byte / 255`; float to packed clamps to `0..=1`, scales by 255 and rounds halves away from zero (the rule
+`rgb()`, `hsl()` and `oklch()` in CSS pack with); HSL to RGB is CSS Color 4's formula (`color::hsl_to_rgb`, shared
+with `hsl()`), so `hsla(h, s, l, a)` packs as `hsl(h·360 s·100% l·100% / a)` does. Tests hold all of it: every 24-bit
+color through `Hsla` and back, a table of CSS color strings with their packed values (`css.rs`), the theme's pressed
+shades against the per-channel mix they replaced, `opacity` against the packed alpha scaling it replaced (the same for
+opaque colors; for translucent ones within one alpha step, where `alpha · factor` is exactly a half).
+
+**Deviations from GPUI**, on purpose: packing rounds (GPUI's `From<Rgba> for u32` truncates, which loses colors on a
+round trip); parsing takes every CSS color, not only hex, and fails with `ColorParseError` instead of `anyhow`;
+gpui-kit's `Colorize` methods are inherent methods of `Hsla` (no trait to import), without `divide` (it sets the alpha:
+`alpha`), and `lighten` clamps the lightness to 1; `saturate`, `desaturate`, `spin`, `luminance`, `contrast_ratio`,
+`readable_text` and the `const` conversions are NSH's; no serde, schemars or proptest implementations.
 
 ## Android differences
 

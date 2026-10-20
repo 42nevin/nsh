@@ -294,7 +294,7 @@ pub(crate) fn index() -> Screen {
                                         .text_size(px(13.0))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(colors::MUTED)
-                                        .letter_spacing(0.4),
+                                        .letter_spacing(px(0.4)),
                                 )
                                 .child(
                                     text(group.demos.len().to_string())

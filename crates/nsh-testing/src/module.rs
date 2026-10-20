@@ -353,10 +353,10 @@ pub struct OpenOptions {
     /// `*` matches any text): a response, or a function of the request that
     /// returns one; a request not listed fails. `"live"`: the network.
     pub network: Option<NetworkOption>,
-    /// The viewport's width in points (390).
-    pub width: Option<f64>,
-    /// The viewport's height in points (844).
-    pub height: Option<f64>,
+    /// The viewport's width (390 points).
+    pub width: Option<Points>,
+    /// The viewport's height (844 points).
+    pub height: Option<Points>,
     /// The safe area insets in points (none).
     pub safe_area: Option<SafeArea>,
     /// The text on the clipboard at the start (none).
@@ -460,16 +460,16 @@ impl From<&nsh_core::Dialog> for Dialog {
 pub struct SafeArea {
     /// The top inset.
     #[prop(default)]
-    pub top: f64,
+    pub top: Points,
     /// The right inset.
     #[prop(default)]
-    pub right: f64,
+    pub right: Points,
     /// The bottom inset.
     #[prop(default)]
-    pub bottom: f64,
+    pub bottom: Points,
     /// The left inset.
     #[prop(default)]
-    pub left: f64,
+    pub left: Points,
 }
 
 /// String entries by key: TS `Record<string, string>`.
@@ -638,8 +638,8 @@ impl From<&HttpRequest> for StubRequest {
 pub(crate) struct Launch {
     pub(crate) storage: Entries,
     pub(crate) network: NetworkSetup,
-    pub(crate) width: Option<f64>,
-    pub(crate) height: Option<f64>,
+    pub(crate) width: Option<Points>,
+    pub(crate) height: Option<Points>,
     pub(crate) safe_area: SafeArea,
     pub(crate) clipboard: Option<String>,
     pub(crate) color_scheme: ColorScheme,
@@ -892,7 +892,10 @@ impl App {
         selector: String,
         distance: f64,
     ) -> Result<(), String> {
-        step(&this, move |app| app.scroll(&selector, distance as f32)).await
+        step(&this, move |app| {
+            app.scroll(&selector, nsh_core::geometry::px(distance as f32))
+        })
+        .await
     }
 
     /// Lets the app run for `ms` milliseconds (timers and animations).
@@ -1043,7 +1046,7 @@ impl App {
     /// Makes the viewport `width` × `height` points (a rotation, a resized
     /// window) and resolves once the app laid itself out again.
     pub async fn set_viewport(this: Instance<Self>, width: f64, height: f64) -> Result<(), String> {
-        let size = nsh_core::Size::new(width as f32, height as f32);
+        let size = nsh_core::Size::new(Points(width as f32), Points(height as f32));
         step(&this, move |app| app.set_viewport(size)).await
     }
 

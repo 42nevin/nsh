@@ -6,10 +6,11 @@ use std::{cell::RefCell, sync::Arc};
 use dispatch2::{DispatchQueue, MainThreadBound};
 use nsh_animation::{AnimationProp, AnimationValue};
 use nsh_core::{
-    Color, Command, EventKind, EventMask, EventPayload, GestureValues, ImageSource,
+    Bounds, Color, Command, EventKind, EventMask, EventPayload, GestureValues, ImageSource,
     KeyboardDismissMode, LayoutAnimation, LayoutCurve, LayoutProperty, LayoutTransition,
-    MountBatch, MountItem, NodeId, PayloadValue, Rect, ResizeMode, StickyCell, SubmitBehavior,
+    MountBatch, MountItem, NodeId, PayloadValue, Points, ResizeMode, StickyCell, SubmitBehavior,
     ViewKind, ViewProps, ViewStyle,
+    geometry::{DevicePixels, point, size},
 };
 use nsh_engine::EngineControl;
 use objc2::{
@@ -212,10 +213,10 @@ fn innermost(view: &UIView, point: CGPoint) -> Retained<UIView> {
 
 fn ui_insets(i: nsh_core::EdgeInsets) -> objc2_ui_kit::UIEdgeInsets {
     objc2_ui_kit::UIEdgeInsets {
-        top: i.top as CGFloat,
-        left: i.left as CGFloat,
-        bottom: i.bottom as CGFloat,
-        right: i.right as CGFloat,
+        top: i.top.0 as CGFloat,
+        left: i.left.0 as CGFloat,
+        bottom: i.bottom.0 as CGFloat,
+        right: i.right.0 as CGFloat,
     }
 }
 
@@ -636,7 +637,10 @@ impl Mounter {
                     let origin = view.frame().origin;
                     view.setFrame(CGRect::new(
                         origin,
-                        CGSize::new(frame.width as CGFloat, frame.height as CGFloat),
+                        CGSize::new(
+                            frame.size.width.0 as CGFloat,
+                            frame.size.height.0 as CGFloat,
+                        ),
                     ));
                     return false;
                 }
@@ -647,10 +651,10 @@ impl Mounter {
                 {
                     // The keyboard places it and sets its width.
                     let old = view.frame();
-                    let height = frame.height as CGFloat;
+                    let height = frame.size.height.0 as CGFloat;
                     view.setFrame(CGRect::new(
                         old.origin,
-                        CGSize::new(old.size.width.max(frame.width as CGFloat), height),
+                        CGSize::new(old.size.width.max(frame.size.width.0 as CGFloat), height),
                     ));
                     if old.size.height != height {
                         let view = Retained::into_super(view.clone());
@@ -679,7 +683,7 @@ impl Mounter {
                         _ => set_frame(view, frame),
                     }
                     if let Some(Refresh::Custom { spinner, .. }) = &s.gestures.refresh {
-                        place_spinner(spinner, frame.width);
+                        place_spinner(spinner, frame.size.width.0);
                     }
                     if let Native::Video(video) = &s.native {
                         video.layout();
@@ -698,7 +702,7 @@ impl Mounter {
                     crate::interaction::keyframes(
                         &s.native.view().layer(),
                         Some(&a),
-                        frame.height as f64,
+                        frame.size.height.0 as f64,
                     );
                 }
                 // The origin of the transform depends on the size.
@@ -716,8 +720,8 @@ impl Mounter {
                 if let Some(view) = self.slot(id).and_then(|s| s.native.nsh()) {
                     view.set_overflow(extent.map(|e| {
                         CGRect::new(
-                            CGPoint::new(e.x as CGFloat, e.y as CGFloat),
-                            CGSize::new(e.width as CGFloat, e.height as CGFloat),
+                            CGPoint::new(e.origin.x.0 as CGFloat, e.origin.y.0 as CGFloat),
+                            CGSize::new(e.size.width.0 as CGFloat, e.size.height.0 as CGFloat),
                         )
                     }));
                 }
@@ -815,7 +819,7 @@ impl Mounter {
                     },
                 ) = self.slot(id)
                 {
-                    let size = CGSize::new(size.width as CGFloat, size.height as CGFloat);
+                    let size = CGSize::new(size.width.0 as CGFloat, size.height.0 as CGFloat);
                     match s.zoom_view() {
                         Some(zoom) => crate::zoom::layout(scroll, &zoom, size, s.centers()),
                         None => scroll.setContentSize(size),
@@ -830,7 +834,10 @@ impl Mounter {
                 {
                     self.target.scroll_applied(id);
                     let o = scroll.contentOffset();
-                    scroll.setContentOffset(CGPoint::new(o.x + dx as CGFloat, o.y + dy as CGFloat));
+                    scroll.setContentOffset(CGPoint::new(
+                        o.x + dx.0 as CGFloat,
+                        o.y + dy.0 as CGFloat,
+                    ));
                 }
             }
             MountItem::StickyCells { id, cells } => {
@@ -1065,8 +1072,8 @@ impl Mounter {
                 let max_x = (size.width + inset.right - bounds.width).max(-inset.left);
                 let max_y = (size.height + inset.bottom - bounds.height).max(-inset.top);
                 let offset = CGPoint::new(
-                    (x as CGFloat).clamp(-inset.left, max_x),
-                    (y as CGFloat).clamp(-inset.top, max_y),
+                    (x.0 as CGFloat).clamp(-inset.left, max_x),
+                    (y.0 as CGFloat).clamp(-inset.top, max_y),
                 );
                 self.target.scroll_applied(id);
                 scroll.setContentOffset_animated(offset, animated);
@@ -1080,6 +1087,7 @@ impl Mounter {
                 Native::Scroll(scroll),
             ) => {
                 if crate::zoom::zoom_view(scroll).is_some() {
+                    let center = center.map(|c| (c.x.0, c.y.0));
                     crate::zoom::zoom_to(scroll, scale, center, animated);
                 }
             }
@@ -1484,13 +1492,15 @@ impl Mounter {
                 content.height,
             )
         };
-        let snapped = b.snap_target(
-            at as f32,
-            projected as f32,
-            v as f32,
-            viewport as f32,
-            length as f32,
-        )? as CGFloat;
+        let snapped = b
+            .snap_target(
+                Points(at as f32),
+                Points(projected as f32),
+                v as f32,
+                Points(viewport as f32),
+                Points(length as f32),
+            )?
+            .0 as CGFloat;
         Some(if *horizontal {
             CGPoint::new(snapped, target.y)
         } else {
@@ -1693,10 +1703,8 @@ impl Mounter {
         // UIKeyModifierShift, Control, Alternate, Command.
         let has = |bit: u32| modifiers & (1 << bit) != 0;
         let event = nsh_core::HoverEvent {
-            location_x: local.x as f32,
-            location_y: local.y as f32,
-            page_x: page.x as f32,
-            page_y: page.y as f32,
+            location: point(Points(local.x as f32), Points(local.y as f32)),
+            page: point(Points(page.x as f32), Points(page.y as f32)),
             modifiers: nsh_core::keymap::Modifiers {
                 ctrl: has(18),
                 alt: has(19),
@@ -1721,10 +1729,8 @@ impl Mounter {
         // UIKeyModifierShift, Control, Alternate, Command.
         let has = |bit: u32| modifiers & (1 << bit) != 0;
         let event = nsh_core::ContextMenuEvent {
-            location_x: local.x as f32,
-            location_y: local.y as f32,
-            page_x: page.x as f32,
-            page_y: page.y as f32,
+            location: point(Points(local.x as f32), Points(local.y as f32)),
+            page: point(Points(page.x as f32), Points(page.y as f32)),
             modifiers: nsh_core::keymap::Modifiers {
                 ctrl: has(18),
                 alt: has(19),
@@ -1846,7 +1852,7 @@ impl Mounter {
                 .map(|e| &e.filters[..])
                 .unwrap_or(&[]);
             let look = crate::image::Look {
-                blur: s.image_options.blur_radius + nsh_core::blur_radius(filters),
+                blur: s.image_options.blur_radius.0 + nsh_core::blur_radius(filters).0,
                 matrix: nsh_core::compose_color_matrices(filters),
             };
             let (source, placeholder) = (
@@ -2016,10 +2022,10 @@ impl Mounter {
                 self.control.dispatch_event(
                     id,
                     EventKind::Load,
-                    EventPayload::Image {
-                        width: decoded.width as f32,
-                        height: decoded.height as f32,
-                    },
+                    EventPayload::Image(size(
+                        DevicePixels(decoded.width as i32),
+                        DevicePixels(decoded.height as i32),
+                    )),
                 );
             }
             Err(message) if s.events.contains(EventKind::Error) => {
@@ -2630,12 +2636,11 @@ impl Mounter {
         let Some(s) = self.slot(id) else { return };
         let (values, events) = (s.values, s.events);
         let payload = |m: &Self| EventPayload::Pan {
-            translation_x: t.x as f32,
-            translation_y: t.y as f32,
+            translation: point(Points(t.x as f32), Points(t.y as f32)),
             velocity_x: v.x as f32,
             velocity_y: v.y as f32,
-            value_x: values.pan_x.map(|n| m.animator.value(n)),
-            value_y: values.pan_y.map(|n| m.animator.value(n)),
+            value_x: values.pan_x.map(|n| Points(m.animator.value(n))),
+            value_y: values.pan_y.map(|n| Points(m.animator.value(n))),
         };
         if state == UIGestureRecognizerState::Began {
             // Grabbing an animating value stops it where it is.
@@ -2813,7 +2818,7 @@ impl Mounter {
                 let base = s
                     .behavior
                     .as_ref()
-                    .map_or(0.0, |b| b.content_inset.top as CGFloat);
+                    .map_or(0.0, |b| b.content_inset.top.0 as CGFloat);
                 inset.top = base + if on { REFRESH_INSET } else { 0.0 };
                 if on {
                     spinner.startAnimating();
@@ -2885,7 +2890,7 @@ impl Mounter {
         let offset = if l.horizontal { offset.x } else { offset.y } as f32;
         for c in cells {
             let Some(s) = self.slot(c.cell) else { continue };
-            let t = (offset - c.start).clamp(0.0, c.end - c.start) as CGFloat;
+            let t = (offset - c.start.0).clamp(0.0, c.end.0 - c.start.0) as CGFloat;
             let (x, y) = if l.horizontal { (t, 0.0) } else { (0.0, t) };
             s.native
                 .view()
@@ -2995,15 +3000,18 @@ fn toggle<G: AsRef<UIGestureRecognizer>>(
 /// Sets a frame through `bounds` + `center`: `frame` is undefined for
 /// transformed views, and a scroll view's bounds origin is its scroll
 /// offset, which must be kept.
-fn set_frame(view: &UIView, frame: Rect) {
+fn set_frame(view: &UIView, frame: Bounds<Points>) {
     let origin = view.bounds().origin;
     view.setBounds(CGRect::new(
         origin,
-        CGSize::new(frame.width as CGFloat, frame.height as CGFloat),
+        CGSize::new(
+            frame.size.width.0 as CGFloat,
+            frame.size.height.0 as CGFloat,
+        ),
     ));
     view.setCenter(CGPoint::new(
-        (frame.x + frame.width / 2.0) as CGFloat,
-        (frame.y + frame.height / 2.0) as CGFloat,
+        (frame.origin.x.0 + frame.size.width.0 / 2.0) as CGFloat,
+        (frame.origin.y.0 + frame.size.height.0 / 2.0) as CGFloat,
     ));
 }
 
@@ -3057,8 +3065,11 @@ fn dynamic_transform(slot: &Slot, animator: &Animator) -> CATransform3D {
         // Around the origin rather than the layer's center (its anchor):
         // to the origin, transform, and back (row vectors).
         let size = slot.native.view().bounds().size;
-        let (dx, dy, dz) = origin.offset(size.width as f32, size.height as f32);
-        let (dx, dy, dz) = (dx as CGFloat, dy as CGFloat, dz as CGFloat);
+        let (d, dz) = origin.offset(nsh_core::geometry::size(
+            Points(size.width as f32),
+            Points(size.height as f32),
+        ));
+        let (dx, dy, dz) = (d.x.0 as CGFloat, d.y.0 as CGFloat, dz.0 as CGFloat);
         m = mat_mul(
             &mat_mul(&translation(-dx, -dy, -dz), &m),
             &translation(dx, dy, dz),
@@ -3155,7 +3166,7 @@ fn bound_style(slot: &Slot, animator: &Animator) -> Option<ViewStyle> {
                 shadow = true;
             }
             (AnimationProp::ShadowRadius, v) => {
-                style.shadow.radius = v.number().max(0.0);
+                style.shadow.radius = Points(v.number().max(0.0));
                 shadow = true;
             }
             _ => {}
@@ -3190,13 +3201,13 @@ fn apply_bound_decor(slot: &Slot, animator: &Animator) {
                 shadow.get_or_insert(slot.style.shadow).opacity = v.number()
             }
             (AnimationProp::ShadowRadius, v) => {
-                shadow.get_or_insert(slot.style.shadow).radius = v.number()
+                shadow.get_or_insert(slot.style.shadow).radius = Points(v.number())
             }
             _ => {}
         }
     }
     if let Some(s) = shadow {
-        slot.decor.set_shadow(view, s.color, s.opacity, s.radius);
+        slot.decor.set_shadow(view, s.color, s.opacity, s.radius.0);
     }
 }
 

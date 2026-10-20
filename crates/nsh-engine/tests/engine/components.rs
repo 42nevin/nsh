@@ -9,9 +9,9 @@ use std::time::Duration;
 use crossbeam_channel::Receiver;
 use nsh_core::{
     ApproxTextEngine, Command, EventKind, EventPayload, KeyboardAppearance, KeyboardType,
-    MountBatch, MountItem, PayloadValue, ROOT_ID, Size, StatusBarStyle,
+    MountBatch, MountItem, PayloadValue, Points, ROOT_ID, Size, StatusBarStyle, geometry::px,
 };
-use nsh_engine::{Bundle, Engine, EngineConfig, Environment, Insets};
+use nsh_engine::{Bundle, Edges, Engine, EngineConfig, Environment};
 
 use crate::ChannelSink;
 
@@ -66,14 +66,14 @@ fn start_with(
                 .with_capabilities_json(capabilities)
                 .unwrap(),
         ),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
         websocket: None,
         filesystem: None,
         assets: None,
         environment,
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets,
         runtime: None,
@@ -120,7 +120,9 @@ fn rows_know_whether_they_are_last() {
             _ => None,
         })
     };
-    let rounded = |c: [Option<f32>; 4]| c.iter().map(|r| r.is_some()).collect::<Vec<_>>();
+    let rounded = |c: nsh_core::Corners<Option<nsh_core::Points>>| {
+        c.to_array().iter().map(|r| r.is_some()).collect::<Vec<_>>()
+    };
     let wrapper = |name| parent_of(&first, text_ids(&first, name).unwrap()).unwrap();
     let (a, b, c) = (wrapper("A"), wrapper("B"), wrapper("C"));
     // The first row rounds its top corners, the last its bottom ones.
@@ -320,7 +322,7 @@ fn nsh_json_gives_the_status_bar_its_default() {
     );
 }
 
-fn frame_of(batches: &[MountBatch], id: u32) -> Option<nsh_core::Rect> {
+fn frame_of(batches: &[MountBatch], id: u32) -> Option<nsh_core::Bounds<nsh_core::Points>> {
     batches.iter().rev().find_map(|b| {
         b.items.iter().rev().find_map(|i| match i {
             MountItem::Frame { id: f, frame } if *f == id => Some(*frame),
@@ -515,7 +517,7 @@ fn slots_children_and_events() {
     };
     let title_parent = parent_of(text_ids(&first, "Title").unwrap()).unwrap();
     let body_parent = parent_of(text_ids(&first, "Body").unwrap()).unwrap();
-    assert!(frame(title_parent).unwrap().y < frame(body_parent).unwrap().y);
+    assert!(frame(title_parent).unwrap().origin.y.0 < frame(body_parent).unwrap().origin.y.0);
     let button = first
         .items
         .iter()
@@ -688,12 +690,12 @@ mount(() => (
 #[test]
 fn safe_area_and_keyboard_avoiding_views() {
     let environment = Environment {
-        window: (390.0, 844.0),
-        safe_area: Insets {
-            top: 47.0,
-            right: 10.0,
-            bottom: 34.0,
-            left: 10.0,
+        window: Size::new(px(390.0), px(844.0)),
+        safe_area: Edges {
+            top: Points(47.0),
+            right: Points(10.0),
+            bottom: Points(34.0),
+            left: Points(10.0),
         },
         ..Default::default()
     };
@@ -704,15 +706,15 @@ fn safe_area_and_keyboard_avoiding_views() {
         .find_map(|b| text_ids(b, "inside"))
         .expect("the text");
     let frame = frame_of(&first, text).expect("laid out");
-    assert_eq!((frame.x, frame.y), (4.0, 51.0));
+    assert_eq!((frame.origin.x.0, frame.origin.y.0), (4.0, 51.0));
     assert!(
         first.iter().any(|b| shows(b, "top 47")),
         "the environment's accessor"
     );
     engine.control().set_environment(Environment {
-        keyboard_height: 300.0,
-        safe_area: Insets {
-            top: 20.0,
+        keyboard_height: px(300.0),
+        safe_area: Edges {
+            top: Points(20.0),
             ..environment.safe_area
         },
         ..environment
@@ -723,10 +725,9 @@ fn safe_area_and_keyboard_avoiding_views() {
         "the accessor follows"
     );
     assert!(
-        after
-            .iter()
-            .flat_map(|b| &b.items)
-            .any(|i| matches!(i, MountItem::Frame { frame, .. } if frame.height == 844.0 - 300.0)),
+        after.iter().flat_map(|b| &b.items).any(
+            |i| matches!(i, MountItem::Frame { frame, .. } if frame.size.height.0 == 844.0 - 300.0)
+        ),
         "the safe area view above the keyboard"
     );
 }
@@ -874,9 +875,11 @@ fn measure_reports_frames_and_page_positions() {
             .any(|t| t == "at 20,520 350x30 page 20,587 null"),
         "{shown:?}"
     );
-    engine
-        .control()
-        .scroll(scroll.expect("scroll view"), 0.0, 400.0, 0);
+    engine.control().scroll(
+        scroll.expect("scroll view"),
+        nsh_core::geometry::point(nsh_core::geometry::px(0.0), nsh_core::geometry::px(400.0)),
+        0,
+    );
     let after = until(&rx, |b| shows(b, "scrolled 187"));
     assert!(after.iter().any(|b| shows(b, "scrolled 187")));
 }
@@ -1171,7 +1174,7 @@ fn components_place_the_apps_children_and_rows() {
     };
     let top_border = |id| {
         first.items.iter().any(|i| {
-            matches!(i, MountItem::ViewStyle { id: v, style } if *v == id && style.borders.widths[0] == 1.0)
+            matches!(i, MountItem::ViewStyle { id: v, style } if *v == id && style.borders.widths.top.0 == 1.0)
         })
     };
     let a = parent_of(text_ids(&first, "First").expect("First")).unwrap();
@@ -1182,7 +1185,7 @@ fn components_place_the_apps_children_and_rows() {
     let row1 = parent_of(text_ids(&first, "Row 1").expect("Row 1")).unwrap();
     assert!(row0 % 2 == 1 && row1 % 2 == 1);
     assert_eq!(
-        frame(text_ids(&first, "Row 0").unwrap()).map(|f| f.x),
+        frame(text_ids(&first, "Row 0").unwrap()).map(|f| f.origin.x.0),
         Some(16.0)
     );
     assert!(!top_border(row0) && top_border(row1));

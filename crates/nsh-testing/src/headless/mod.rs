@@ -33,7 +33,8 @@ use std::{
 use crossbeam_channel::{Receiver, Sender};
 use nsh_core::{
     ApproxTextEngine, Command, Dialog, DialogButtonStyle, EventKind, EventPayload, MountBatch,
-    MountItem, NodeId, PayloadValue, ROOT_ID, Size, SubmitBehavior,
+    MountItem, NodeId, PayloadValue, Point, Points, ROOT_ID, Size, SubmitBehavior,
+    geometry::{point, px},
 };
 use nsh_engine::{
     AppError, AppErrorKind, Engine, EngineConfig, EngineControl, Environment, MountSink,
@@ -64,7 +65,7 @@ const SETTLE: Duration = Duration::from_secs(2);
 /// How long [`Headless::idle`] may take at most.
 const MAX_IDLE: Duration = Duration::from_secs(10);
 /// How far a scroll moves per display frame, in points.
-const SCROLL_STEP: f32 = 10.0;
+const SCROLL_STEP: Points = Points(10.0);
 
 struct ChannelSink {
     batches: Sender<MountBatch>,
@@ -194,7 +195,7 @@ pub struct Headless {
     exited: bool,
     /// The surface's environment and size, as the platform last reported.
     environment: Environment,
-    viewport: Size,
+    viewport: Size<Points>,
     observer: Option<Observer>,
 }
 
@@ -223,10 +224,10 @@ impl Headless {
 
     /// The step `setViewport(<w>, <h>)`: the surface becomes `size` (a
     /// rotation, a resized window), as a platform reports it.
-    pub fn set_viewport(&mut self, size: Size) -> Result<(), String> {
+    pub fn set_viewport(&mut self, size: Size<Points>) -> Result<(), String> {
         self.step(format!("setViewport({}, {})", size.width, size.height));
         self.viewport = size;
-        self.environment.window = (size.width, size.height);
+        self.environment.window = size;
         self.engine.control().resize(size);
         self.engine.control().set_environment(self.environment);
         self.done()
@@ -339,8 +340,8 @@ impl Headless {
         for id in self.screen.take_scrolled() {
             if let Some(scroll) = self.screen.scroll(id) {
                 let (x, y) = (scroll.x, scroll.y);
-                control.scroll(id, x, y, scroll.applied);
-                self.animator.scrolled(id, x, y);
+                control.scroll(id, point(x, y), scroll.applied);
+                self.animator.scrolled(id, point(x, y));
             }
         }
         for modal in self.screen.take_presented() {
@@ -910,7 +911,7 @@ impl Headless {
     /// it, else the first in it) by `distance` points along its axis
     /// (negative: back), 10 points per display frame, within its content.
     /// Fails if it cannot move that way at all.
-    pub fn scroll(&mut self, selector: &str, distance: f32) -> Result<(), String> {
+    pub fn scroll(&mut self, selector: &str, distance: Points) -> Result<(), String> {
         let parsed = Selector::parse(selector)?;
         self.step(format!("scroll({selector}, {distance})"));
         let pick = self.screen.scroll_view(&parsed);
@@ -918,22 +919,21 @@ impl Headless {
         let at = |screen: &Screen| {
             screen
                 .scroll(id)
-                .map_or(0.0, |s| if s.horizontal { s.x } else { s.y })
+                .map_or(Points::ZERO, |s| if s.horizontal { s.x } else { s.y })
         };
         let start = at(&self.screen);
-        let target = (start + distance).clamp(0.0, self.screen.scroll_end(id));
-        if (target - start).abs() < 0.5 {
+        let target = (start + distance).clamp(Points::ZERO, self.screen.scroll_end(id));
+        if (target - start).abs() < px(0.5) {
             return Err(format!(
-                "`{selector}` cannot scroll by {distance}: it is at {start} of {}",
-                self.screen.scroll_end(id)
+                "`{selector}` cannot scroll by {}: it is at {} of {}",
+                distance.0,
+                start.0,
+                self.screen.scroll_end(id).0
             ));
         }
         let offset = |screen: &Screen| {
             let s = screen.scroll(id);
-            EventPayload::Scroll {
-                x: s.map_or(0.0, |s| s.x),
-                y: s.map_or(0.0, |s| s.y),
-            }
+            EventPayload::Scroll(s.map_or(Point::default(), |s| point(s.x, s.y)))
         };
         self.send(id, EventKind::ScrollBeginDrag, offset(&self.screen));
         // The core may shift the offset meanwhile (`ScrollBy`): each frame
@@ -941,7 +941,7 @@ impl Headless {
         let mut frames = ((target - start).abs() / SCROLL_STEP).ceil() as usize * 2 + 10;
         loop {
             let now = at(&self.screen);
-            if (target - now).abs() < 0.5 || frames == 0 {
+            if (target - now).abs() < px(0.5) || frames == 0 {
                 break;
             }
             frames -= 1;
@@ -959,8 +959,8 @@ impl Headless {
                 scroll.y = next;
             }
             let (x, y, applied) = (scroll.x, scroll.y, scroll.applied);
-            self.engine.control().scroll(id, x, y, applied);
-            self.animator.scrolled(id, x, y);
+            self.engine.control().scroll(id, point(x, y), applied);
+            self.animator.scrolled(id, point(x, y));
             // One display frame per step; a frame that needs nothing
             // produces no batch, and a late one is applied with the next.
             let frame = Instant::now() + FRAME;
@@ -1030,12 +1030,16 @@ pub fn print_batch(out: &mut dyn Write, step: &str, batch: &MountBatch) {
             } => writeln!(
                 out,
                 "   Text {{ id: {id}, text: {:?}, content: {}x{} @ {},{} }}",
-                text.text, content.width, content.height, content.x, content.y
+                text.text,
+                content.size.width.0,
+                content.size.height.0,
+                content.origin.x.0,
+                content.origin.y.0
             ),
             MountItem::Frame { id, frame } => writeln!(
                 out,
                 "   Frame {{ id: {id}, x: {}, y: {}, w: {}, h: {} }}",
-                frame.x, frame.y, frame.width, frame.height
+                frame.origin.x.0, frame.origin.y.0, frame.size.width.0, frame.size.height.0
             ),
             other => writeln!(out, "   {other:?}"),
         };
@@ -1162,7 +1166,7 @@ mod tests {
                 scroll()
                     .test_id("rows")
                     .flex_1()
-                    .on_scroll(move |e: &ScrollEvent| at.set(e.y))
+                    .on_scroll(move |e: &ScrollEvent| at.set(e.offset.y.0))
                     .children((0..100).map(|i| view().h(px(50.0)).child(text(format!("Row {i}"))))),
             )
     }
@@ -1172,12 +1176,12 @@ mod tests {
         let mut app = Headless::start(EngineConfig::new(Root::of::<Rows>())).unwrap();
         app.first_render().unwrap();
         // A row names the scroll view it is in.
-        app.scroll("Row 3", 1000.0).unwrap();
+        app.scroll("Row 3", px(1000.0)).unwrap();
         app.wait_for("At 1000").unwrap();
-        app.scroll("id:rows", -400.0).unwrap();
+        app.scroll("id:rows", px(-400.0)).unwrap();
         app.wait_for("At 600").unwrap();
         // Not past the end: 100 rows of 50 in what the screen leaves.
-        app.scroll("id:rows", 100_000.0).unwrap();
+        app.scroll("id:rows", px(100_000.0)).unwrap();
         let Pick::One(rows) = app
             .screen()
             .scroll_view(&Selector::parse("id:rows").unwrap())
@@ -1185,9 +1189,9 @@ mod tests {
             panic!("one list");
         };
         let end = app.screen().scroll_end(rows);
-        assert!(end > 4000.0 && end < 5000.0, "{end}");
-        app.wait_for(&format!("At {end}")).unwrap();
-        let error = app.scroll("id:rows", 10.0).unwrap_err();
+        assert!(end > px(4000.0) && end < px(5000.0), "{end}");
+        app.wait_for(&format!("At {}", end.0)).unwrap();
+        let error = app.scroll("id:rows", px(10.0)).unwrap_err();
         assert!(
             error.starts_with("`id:rows` cannot scroll by 10: it is at "),
             "{error}"

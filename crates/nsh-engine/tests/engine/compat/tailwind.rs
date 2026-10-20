@@ -303,6 +303,175 @@ fn diff(path: &str, value: &str, default: &str, out: &mut Vec<String>) {
     out.push(format!("{path}={}", lengths(value)));
 }
 
+/// `value` (a `{:?}`) with the core's typed values written as the bare
+/// numbers the record was taken with: the record holds what classes do,
+/// not how the core's types print. Points are numbers, percentages
+/// fractions, angles degrees; an `Edges` / `Corners` is the array of its
+/// sides / corners, a `Point` the tuple of its coordinates, and a
+/// transform origin's coordinates `Px(..)` / `Fraction(..)`.
+fn untyped(value: &str) -> String {
+    let value = shapes(value, "TransformOrigin { ", |parts| {
+        let coordinate = |p: &str| match p.strip_suffix('%') {
+            Some(f) => format!("Fraction({})", fraction(f)),
+            None => format!("Px({})", number(p.strip_suffix("pt").unwrap_or(p))),
+        };
+        let field = |i: usize| parts[i].split_once(": ").map_or(parts[i], |(_, v)| v);
+        format!(
+            "TransformOrigin {{ x: {}, y: {}, z: {} }}",
+            coordinate(field(0)),
+            coordinate(field(1)),
+            field(2)
+        )
+    });
+    let value = shapes(&value, "Edges { ", |parts| bracketed(parts, "[", "]"));
+    let value = shapes(&value, "Corners { ", |parts| bracketed(parts, "[", "]"));
+    let value = shapes(&value, "Point { ", |parts| bracketed(parts, "(", ")"));
+    units(&value)
+}
+
+/// `value` with each `{:?}` of a struct that starts with `open` replaced by
+/// what `f` makes of its fields.
+fn shapes(value: &str, open: &str, f: impl Fn(&[&str]) -> String) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(i) = rest.find(open) {
+        let boundary = i == 0 || !rest.as_bytes()[i - 1].is_ascii_alphanumeric();
+        out.push_str(&rest[..i]);
+        let after = &rest[i + open.len()..];
+        let mut depth = 1;
+        let mut end = None;
+        for (j, c) in after.char_indices() {
+            match c {
+                '{' | '(' | '[' => depth += 1,
+                '}' | ')' | ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match end.filter(|_| boundary) {
+            Some(j) => {
+                let body = after[..j].trim_end();
+                out.push_str(&f(&split_top(body)));
+                rest = &after[j + 1..];
+            }
+            None => {
+                out.push_str(open);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The values of `fields` (`name: value`) between `open` and `close`.
+fn bracketed(fields: &[&str], open: &str, close: &str) -> String {
+    let values: Vec<&str> = fields
+        .iter()
+        .map(|f| f.split_once(": ").map_or(*f, |(_, v)| v))
+        .collect();
+    format!("{open}{}{close}", values.join(", "))
+}
+
+/// `value` with `<n>pt`, `<n>%` and `<n>rad` as bare numbers, fractions
+/// and degrees.
+fn units(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut i = 0;
+    let mut copied = 0;
+    while i < bytes.len() {
+        // Strings (font families) are not values.
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                i += if bytes[i] == b'\\' { 2 } else { 1 };
+            }
+            i += 1;
+            continue;
+        }
+        let starts = (bytes[i].is_ascii_digit() || bytes[i] == b'-')
+            && (i == 0
+                || !(bytes[i - 1].is_ascii_alphanumeric()
+                    || bytes[i - 1] == b'.'
+                    || bytes[i - 1] == b'_'));
+        if !starts {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < bytes.len()
+            && (bytes[j].is_ascii_digit()
+                || bytes[j] == b'.'
+                || (bytes[j] == b'e'
+                    && bytes
+                        .get(j + 1)
+                        .is_some_and(|c| c.is_ascii_digit() || *c == b'-'))
+                || (bytes[j] == b'-' && bytes[j - 1] == b'e'))
+        {
+            j += 1;
+        }
+        let n = &value[i..j];
+        let rest = &value[j..];
+        let unit = ["pt", "rad", "%"].into_iter().find(|u| {
+            rest.starts_with(u)
+                && !rest[u.len()..]
+                    .bytes()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
+        });
+        match unit {
+            Some(u) if n.parse::<f32>().is_ok() => {
+                out.push_str(&value[copied..i]);
+                out.push_str(&match u {
+                    "pt" => number(n),
+                    "%" => fraction(n),
+                    _ => degrees(n),
+                });
+                i = j + u.len();
+                copied = i;
+            }
+            _ => i = j,
+        }
+    }
+    out.push_str(&value[copied..]);
+    out
+}
+
+/// `n` as `f32`'s `{:?}`.
+fn number(n: &str) -> String {
+    format!("{:?}", n.parse::<f32>().expect("a number"))
+}
+
+/// The shortest `f32` near `start` for which `matches` holds, as `{:?}`.
+fn shortest(start: f32, matches: impl Fn(f32) -> bool) -> String {
+    let bits = start.to_bits() as i64;
+    (-64i64..=64)
+        .filter_map(|d| u32::try_from(bits + d).ok().map(f32::from_bits))
+        .filter(|c| matches(*c))
+        .map(|c| format!("{c:?}"))
+        .min_by_key(|s| s.len())
+        .unwrap_or_else(|| format!("{start:?}"))
+}
+
+/// The fraction a percentage (`{:?}` of a `Percentage`, its fraction times
+/// 100) was made of.
+fn fraction(n: &str) -> String {
+    let p: f32 = n.parse().expect("a percentage");
+    shortest(p / 100.0, |c| c * 100.0 == p)
+}
+
+/// The degrees an angle in radians was made of.
+fn degrees(n: &str) -> String {
+    let r: f32 = n.parse().expect("an angle");
+    shortest(r.to_degrees(), |c| c.to_radians() == r)
+}
+
 /// Whether the bracket `s` starts with closes at its last character.
 fn closes_at_end(s: &str) -> bool {
     let mut depth = 0i32;
@@ -374,8 +543,8 @@ struct Resolver {
 impl Resolver {
     fn new() -> Self {
         let defaults = (
-            format!("{:?}", Style::default()),
-            format!("{:?}", ClassProps::default()),
+            untyped(&format!("{:?}", Style::default())),
+            untyped(&format!("{:?}", ClassProps::default())),
         );
         Self {
             theme: Theme::default(),
@@ -398,7 +567,10 @@ impl Resolver {
         };
         let cx = Context {
             env: place.env,
-            window: place.window,
+            window: nsh_core::Size::new(
+                nsh_core::Points(place.window.0),
+                nsh_core::Points(place.window.1),
+            ),
             rtl: place.rtl,
             states: place.states,
             position: place.position,
@@ -408,8 +580,18 @@ impl Resolver {
         let mut props = ClassProps::default();
         list.apply(&cx, &self.theme, &mut style, &mut props, |_| {});
         let mut set = Vec::new();
-        diff("", &format!("{style:?}"), &self.defaults.0, &mut set);
-        diff("props", &format!("{props:?}"), &self.defaults.1, &mut set);
+        diff(
+            "",
+            &untyped(&format!("{style:?}")),
+            &self.defaults.0,
+            &mut set,
+        );
+        diff(
+            "props",
+            &untyped(&format!("{props:?}")),
+            &self.defaults.1,
+            &mut set,
+        );
         set.sort_unstable();
         if set.is_empty() {
             "-".into()

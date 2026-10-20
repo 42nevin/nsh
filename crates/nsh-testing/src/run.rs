@@ -25,7 +25,7 @@ use nsh_core::{
     ui::{Callback, Registry, Root, prelude::timer},
 };
 use nsh_engine::{
-    AppError, AppErrorKind, Bundle, Engine, EngineConfig, Environment, Insets, MountSink,
+    AppError, AppErrorKind, Bundle, Edges, Engine, EngineConfig, Environment, MountSink,
 };
 
 use crate::{
@@ -348,19 +348,19 @@ impl Session {
         let default = EngineConfig::new(app);
         let config = EngineConfig {
             viewport: nsh_core::Size::new(
-                launch.width.map_or(default.viewport.width, |w| w as f32),
-                launch.height.map_or(default.viewport.height, |h| h as f32),
+                launch.width.unwrap_or(default.viewport.width),
+                launch.height.unwrap_or(default.viewport.height),
             ),
             trace: self.run.trace.is_some(),
             network: Some(requests.clone()),
             assets: Some(Arc::new(DirectoryAssets::new(dir, files))),
             storage: Some(storage.clone()),
             environment: Environment {
-                safe_area: Insets {
-                    top: safe_area.top as f32,
-                    right: safe_area.right as f32,
-                    bottom: safe_area.bottom as f32,
-                    left: safe_area.left as f32,
+                safe_area: Edges {
+                    top: safe_area.top,
+                    right: safe_area.right,
+                    bottom: safe_area.bottom,
+                    left: safe_area.left,
                 },
                 color_scheme: launch.color_scheme.into(),
                 locale: locale.unwrap_or(Locale::EN_US),

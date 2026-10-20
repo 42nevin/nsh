@@ -37,6 +37,7 @@ use self::{
     utilities::{Parts, touched},
 };
 use crate::{
+    geometry::{Points, Size},
     ops::ResizeMode,
     props::PointerEvents,
     style::{Color, EllipsizeMode, Style, TextShadow},
@@ -131,7 +132,7 @@ pub struct Context<'a> {
     /// The appearance, platform and motion setting.
     pub env: ClassEnvironment,
     /// The window (root view) size.
-    pub window: (f32, f32),
+    pub window: Size<Points>,
     /// Right-to-left layout.
     pub rtl: bool,
     /// [`state`] bits of the node.
@@ -175,11 +176,11 @@ impl Condition {
             || self
                 .reduce_motion
                 .is_some_and(|r| r != cx.env.reduce_motion)
-            || self.min_width.is_some_and(|w| cx.window.0 < w)
-            || self.max_width.is_some_and(|w| cx.window.0 >= w)
+            || self.min_width.is_some_and(|w| cx.window.width.0 < w)
+            || self.max_width.is_some_and(|w| cx.window.width.0 >= w)
             || self
                 .landscape
-                .is_some_and(|l| l != (cx.window.0 > cx.window.1))
+                .is_some_and(|l| l != (cx.window.width > cx.window.height))
             || cx.states & self.states != self.states
             || cx.states & self.not_states != 0
         {

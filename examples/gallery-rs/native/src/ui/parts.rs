@@ -62,7 +62,7 @@ pub(crate) fn header_style(
     tint: AdaptiveColor,
 ) -> impl Fn() -> Style + 'static {
     move || {
-        let hex = |c: AdaptiveColor| PatchValue::Str(format!("#{:08x}", color(c).0).into());
+        let hex = |c: AdaptiveColor| PatchValue::Str(color(c).to_hex().into());
         Style::from_decls([
             StyleDecl::Set(StyleKey::BackgroundColor, hex(background)),
             StyleDecl::Set(StyleKey::Color, hex(title)),
@@ -204,7 +204,7 @@ impl IntoElement for PageHeader {
                 .on_press(|_: &()| crate::nav::pop())
                 .child(
                     view()
-                        .rotate(180.0)
+                        .rotate(deg(180.0))
                         .child(icon(IconName::Chevron, 18.0, tint)),
                 )
         });
@@ -580,7 +580,7 @@ impl IntoElement for Figure {
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(colors::TEXT)
             .tabular_nums()
-            .letter_spacing(-0.5)
+            .letter_spacing(px(-0.5))
             .children(self.unit.map(|unit| {
                 text(unit.map(|unit| SharedString::from(format!(" {unit}"))))
                     .text_size(px(17.0))
@@ -1092,7 +1092,9 @@ impl IntoElement for Meter {
             .bg(colors::RAISED)
             .child(
                 view()
-                    .w(self.value.map(|v| relative(v.clamp(0.0, 1.0))))
+                    .w(self
+                        .value
+                        .map(|v| Length::from(relative(v.clamp(0.0, 1.0)))))
                     .h(px(6.0))
                     .rounded(px(3.0))
                     .bg(self.tone.map(Tone::color)),

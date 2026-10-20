@@ -10,7 +10,7 @@ use std::{
 };
 
 use nsh_animation::{Finished, Graph, NodeId as ValueId};
-use nsh_core::{MountItem, NodeId};
+use nsh_core::{MountItem, NodeId, Point, Points};
 
 /// A display frame at 60 Hz.
 pub(crate) const FRAME: Duration = Duration::from_micros(16_667);
@@ -65,10 +65,10 @@ impl Animator {
     }
 
     /// A scroll view moved: feeds its offset's value.
-    pub(crate) fn scrolled(&mut self, id: NodeId, x: f32, y: f32) {
+    pub(crate) fn scrolled(&mut self, id: NodeId, offset: Point<Points>) {
         if let Some(&(value, horizontal)) = self.scrolls.get(&id) {
-            self.graph
-                .set(value, if horizontal { x } else { y }, &mut self.finished);
+            let along = if horizontal { offset.x } else { offset.y };
+            self.graph.set(value, along.0, &mut self.finished);
             self.wake();
         }
     }

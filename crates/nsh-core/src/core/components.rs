@@ -19,6 +19,7 @@ use super::{Core, Kind, NO_KEY, views::Anchor};
 use crate::{
     ApplyError, Command, EdgeInsets, EventKind, EventMask, EventPayload, NodeId, Op, Prop, ROOT_ID,
     Tag, TextEngine,
+    geometry::Points,
     tailwind::ClassList,
     ui::{
         Action, AnswerSlot, AnyInstance, AnyValue, Attrs, Child, ClipboardRead, ComponentError,
@@ -403,7 +404,11 @@ impl ClipboardAnswer {
         // can hold (the web's player encodes its own).
         answer.image = uri
             .filter(|u| u.starts_with("data:") && crate::platform::clipboard::uri_within_limit(u))
-            .map(|uri| crate::ui::ClipboardImage { uri, width, height });
+            .map(|uri| crate::ui::ClipboardImage {
+                uri,
+                width: pixels(width),
+                height: pixels(height),
+            });
         answer
     }
 }
@@ -567,7 +572,7 @@ impl Default for Components {
 }
 
 impl Components {
-    pub(super) fn for_viewport(viewport: crate::Size) -> Self {
+    pub(super) fn for_viewport(viewport: crate::Size<crate::Points>) -> Self {
         let mut components = Self::default();
         components.environment.window = viewport;
         // What components that run once read of the core.
@@ -748,7 +753,7 @@ impl<M: TextEngine> Core<M> {
     }
 
     /// The surface's size changed (the environment's window).
-    pub(super) fn components_viewport(&mut self, size: crate::Size) {
+    pub(super) fn components_viewport(&mut self, size: crate::Size<crate::Points>) {
         let environment = Environment {
             window: size,
             ..self.components.environment
@@ -3572,8 +3577,8 @@ impl<M: TextEngine> Core<M> {
                 command: Command::ScrollToIndex {
                     index,
                     animated: false,
-                    view_position: 0.0,
-                    view_offset: 0.0,
+                    view_position: crate::geometry::Percentage(0.0),
+                    view_offset: Points::ZERO,
                 },
             });
         }
@@ -4431,7 +4436,10 @@ impl<M: TextEngine> Core<M> {
                     _ => None,
                 };
                 let size = match (number("width"), number("height"), error) {
-                    (Some(width), Some(height), None) => Ok(ImageSize { width, height }),
+                    (Some(width), Some(height), None) => Ok(ImageSize {
+                        width: pixels(width),
+                        height: pixels(height),
+                    }),
                     (_, _, error) => Err(error.unwrap_or_else(|| "no size".into())),
                 };
                 self.answer_image_info(request as u32, size);
@@ -4447,10 +4455,10 @@ impl<M: TextEngine> Core<M> {
             }
             EventKind::Insets => {
                 let insets = EdgeInsets {
-                    top: number("top").unwrap_or(0.0) as f32,
-                    right: number("right").unwrap_or(0.0) as f32,
-                    bottom: number("bottom").unwrap_or(0.0) as f32,
-                    left: number("left").unwrap_or(0.0) as f32,
+                    top: Points(number("top").unwrap_or(0.0) as f32),
+                    right: Points(number("right").unwrap_or(0.0) as f32),
+                    bottom: Points(number("bottom").unwrap_or(0.0) as f32),
+                    left: Points(number("left").unwrap_or(0.0) as f32),
                 };
                 // The views reading them follow (`drain_views`).
                 self.components.insets.insert(id, insets);
@@ -4540,7 +4548,12 @@ impl<M: TextEngine> Core<M> {
             }
             match node.kind {
                 // Not reported yet: a screen's header covers the top.
-                Kind::Screen => return EdgeInsets { top: 0.0, ..safe },
+                Kind::Screen => {
+                    return EdgeInsets {
+                        top: Points::ZERO,
+                        ..safe
+                    };
+                }
                 Kind::Modal => return safe,
                 _ => {}
             }
@@ -4662,4 +4675,10 @@ fn row_position(
         }
         None => Position::fixed(index, count),
     }
+}
+
+/// A pixel count a platform reports as a number (whole for what it
+/// decodes).
+fn pixels(n: f64) -> crate::geometry::DevicePixels {
+    crate::geometry::DevicePixels(n.round() as i32)
 }

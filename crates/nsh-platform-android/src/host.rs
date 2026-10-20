@@ -17,10 +17,13 @@ use jni::{
     signature::{Primitive, ReturnType},
     sys::{jboolean, jfloat, jfloatArray, jint, jlong},
 };
-use nsh_core::{EventKind, EventPayload, MountBatch, MountItem, NodeId, PayloadValue, Size};
+use nsh_core::{
+    EventKind, EventPayload, MountBatch, MountItem, NodeId, PayloadValue, Points, Size,
+    geometry::{DevicePixels, point, px, size},
+};
 use nsh_engine::{
-    App, Assets, Bundle, ColorScheme, Engine, EngineConfig, EngineControl, Environment, Idiom,
-    Insets, Locale, MountSink, Policy, Root,
+    App, Assets, Bundle, ColorScheme, Edges, Engine, EngineConfig, EngineControl, Environment,
+    Idiom, Locale, MountSink, Policy, Root,
 };
 
 use crate::{
@@ -41,7 +44,7 @@ pub(crate) struct Host {
     answers: Mutex<Option<EngineControl>>,
     /// The app, waiting for the first non-empty size.
     pending: Mutex<Option<App>>,
-    viewport: Mutex<Size>,
+    viewport: Mutex<Size<Points>>,
     environment: Mutex<Environment>,
     /// Animation items of submitted batches, by batch number, applied on the
     /// UI thread once Java has applied that batch.
@@ -91,7 +94,7 @@ impl Host {
         };
         *self.access.lock().expect("access") = Arc::new(access);
         let viewport = *self.viewport.lock().expect("viewport");
-        if viewport.width <= 0.0 || viewport.height <= 0.0 {
+        if viewport.width <= px(0.0) || viewport.height <= px(0.0) {
             *self.pending.lock().expect("pending") = Some(app);
             return;
         }
@@ -110,7 +113,7 @@ impl Host {
             assets: Some(Arc::new(ViewAssets(self.clone()))),
             environment: *self.environment.lock().expect("environment"),
             // Android's toolbar is 56dp; it has no large titles.
-            header_heights: (56.0, 56.0),
+            header_heights: (nsh_core::Points(56.0), nsh_core::Points(56.0)),
             limits: *self.limits.lock().expect("limits"),
             ui_sets: crate::ui_sets(),
             runtime: None,
@@ -381,7 +384,7 @@ extern "system" fn Java_com_longbridge_nsh_Native_create(
         engine: Mutex::new(None),
         answers: Mutex::new(None),
         pending: Mutex::new(None),
-        viewport: Mutex::new(Size::new(0.0, 0.0)),
+        viewport: Mutex::new(Size::new(px(0.0), px(0.0))),
         environment: Mutex::new(Environment::default()),
         animation_queue: Mutex::new(VecDeque::new()),
         seq: AtomicU64::new(0),
@@ -641,9 +644,9 @@ extern "system" fn Java_com_longbridge_nsh_Native_resize(
 ) {
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
-    let size = Size::new(width, height);
+    let size = Size::new(Points(width), Points(height));
     *host.viewport.lock().expect("viewport") = size;
-    host.environment.lock().expect("environment").window = (width, height);
+    host.environment.lock().expect("environment").window = size;
     if let Some(control) = host.control() {
         control.resize(size);
         control.set_environment(*host.environment.lock().expect("environment"));
@@ -672,13 +675,13 @@ extern "system" fn Java_com_longbridge_nsh_Native_environment(
         return;
     }
     let mut environment = host.environment.lock().expect("environment");
-    environment.safe_area = Insets {
-        top: v[0],
-        right: v[1],
-        bottom: v[2],
-        left: v[3],
+    environment.safe_area = Edges {
+        top: Points(v[0]),
+        right: Points(v[1]),
+        bottom: Points(v[2]),
+        left: Points(v[3]),
     };
-    environment.keyboard_height = v[4];
+    environment.keyboard_height = Points(v[4]);
     environment.keyboard_duration = v[5];
     environment.font_scale = v[6];
     environment.rtl = v[7] != 0.0;
@@ -737,11 +740,11 @@ extern "system" fn Java_com_longbridge_nsh_Native_event(
         | EventKind::ScrollBeginDrag
         | EventKind::ScrollEndDrag
         | EventKind::MomentumScrollBegin
-        | EventKind::MomentumScrollEnd => EventPayload::Scroll { x, y },
-        EventKind::Load => EventPayload::Image {
-            width: x,
-            height: y,
-        },
+        | EventKind::MomentumScrollEnd => EventPayload::Scroll(point(px(x), px(y))),
+        // The bitmap's width and height: whole pixels.
+        EventKind::Load => {
+            EventPayload::Image(size(DevicePixels(x as i32), DevicePixels(y as i32)))
+        }
         EventKind::Error => EventPayload::Error {
             message: read_text(),
         },
@@ -783,10 +786,8 @@ extern "system" fn Java_com_longbridge_nsh_Native_hover(
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
     let event = nsh_core::HoverEvent {
-        location_x: x,
-        location_y: y,
-        page_x,
-        page_y,
+        location: point(px(x), px(y)),
+        page: point(px(page_x), px(page_y)),
         modifiers: nsh_core::keymap::Modifiers {
             ctrl: modifiers & 1 != 0,
             alt: modifiers & 2 != 0,
@@ -861,10 +862,8 @@ extern "system" fn Java_com_longbridge_nsh_Native_touch(
                 id: ids[i] as u32,
                 target: targets[i] as NodeId,
                 path,
-                page_x: c[i * 4],
-                page_y: c[i * 4 + 1],
-                location_x: c[i * 4 + 2],
-                location_y: c[i * 4 + 3],
+                page: point(px(c[i * 4]), px(c[i * 4 + 1])),
+                location: point(px(c[i * 4 + 2]), px(c[i * 4 + 3])),
                 changed: flags[i] != 0,
             }
         })
@@ -1040,7 +1039,7 @@ extern "system" fn Java_com_longbridge_nsh_Native_scroll(
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
     if let Some(control) = host.control() {
-        control.scroll(id as NodeId, x, y, applied as u32);
+        control.scroll(id as NodeId, point(px(x), px(y)), applied as u32);
     }
     let mut ui = host.ui.lock().expect("ui");
     if !ui.scrolled(id as u32, x, y) {
@@ -1105,12 +1104,11 @@ extern "system" fn Java_com_longbridge_nsh_Native_pan(
     }
     let (value_x, value_y) = ui.pan_values(id as u32);
     let payload = EventPayload::Pan {
-        translation_x: tx,
-        translation_y: ty,
+        translation: point(px(tx), px(ty)),
         velocity_x: vx,
         velocity_y: vy,
-        value_x,
-        value_y,
+        value_x: value_x.map(Points),
+        value_y: value_y.map(Points),
     };
     match (state, &control) {
         (0, Some(c)) => c.dispatch_event(id as NodeId, EventKind::PanStart, payload),
@@ -1188,12 +1186,12 @@ extern "system" fn Java_com_longbridge_nsh_Native_rootSize(
     if let Some(control) = host.control() {
         control.set_root_size(
             id as NodeId,
-            Size::new(width, height),
+            Size::new(Points(width), Points(height)),
             nsh_core::EdgeInsets {
-                top,
-                right,
-                bottom,
-                left,
+                top: px(top),
+                right: px(right),
+                bottom: px(bottom),
+                left: px(left),
             },
         );
     }
@@ -1302,6 +1300,6 @@ extern "system" fn Java_com_longbridge_nsh_Native_componentSize(
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
     if let Some(control) = host.control() {
-        control.set_component_size(id as NodeId, Size::new(width, height));
+        control.set_component_size(id as NodeId, Size::new(Points(width), Points(height)));
     }
 }

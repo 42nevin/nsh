@@ -83,13 +83,17 @@ fn label(content: &'static str) -> Text {
 /// shaded (bound: it follows the window, the insets and the keyboard).
 fn safe_area_diagram() -> AnyElement {
     let width = 76.0;
-    let band = move |pt: f32| px((pt * width / window().width.max(1.0)).round().max(0.0));
+    let band = move |pt: f32| {
+        px((pt * width / window().width.max(px(1.0)).0)
+            .round()
+            .max(0.0))
+    };
     view()
         .w(px(width))
-        .h(move || px((window().height * width / window().width.max(1.0)).round()))
+        .h(move || px((window().height * width / window().width.max(px(1.0))).round()))
         .rounded(px(14.0))
         .border_curve(BorderCurve::Continuous)
-        .border(1.5)
+        .border(px(1.5))
         .border_color(colors::BORDER)
         .bg(colors::SURFACE)
         .finish_fill(Finish::Card)
@@ -98,7 +102,7 @@ fn safe_area_diagram() -> AnyElement {
             [inset_shadow(1.0, 0.0, rgb_a(0xffffff, 0.06))],
         )
         .overflow_hidden()
-        .child(view().h(move || band(safe_area().top)).bg(tints::INFO))
+        .child(view().h(move || band(safe_area().top.0)).bg(tints::INFO))
         .child(
             view()
                 .flex_1()
@@ -108,8 +112,8 @@ fn safe_area_diagram() -> AnyElement {
                 .border_color(colors::LINE)
                 .border_dashed(),
         )
-        .child(view().h(move || band(keyboard_height())).bg(tints::WARN))
-        .child(view().h(move || band(safe_area().bottom)).bg(tints::INFO))
+        .child(view().h(move || band(keyboard_height().0)).bg(tints::WARN))
+        .child(view().h(move || band(safe_area().bottom.0)).bg(tints::INFO))
         .into_element()
 }
 
@@ -117,16 +121,16 @@ fn safe_area_diagram() -> AnyElement {
 fn environment() -> AnyElement {
     type Edge = fn(EdgeInsets) -> f32;
     let insets: [(&str, Edge); 4] = [
-        ("Top", |i| i.top),
-        ("Right", |i| i.right),
-        ("Bottom", |i| i.bottom),
-        ("Left", |i| i.left),
+        ("Top", |i| i.top.0),
+        ("Right", |i| i.right.0),
+        ("Bottom", |i| i.bottom.0),
+        ("Left", |i| i.left.0),
     ];
     let insets = insets.map(|(label, value)| {
         Stat::new(label, move || value(safe_area()).round().to_string()).width(0.25)
     });
     let keyboard_stat =
-        || Stat::new("Keyboard", || format!("{} pt", keyboard_height().round())).width(0.5);
+        || Stat::new("Keyboard", || format!("{} pt", keyboard_height().0.round())).width(0.5);
     Card::new()
         .icon(IconName::System)
         .title("Environment")
@@ -145,7 +149,11 @@ fn environment() -> AnyElement {
                             view().gap(px(2.0)).child(label("Window")).child(
                                 Figure::new(|| {
                                     let window = window();
-                                    format!("{} × {}", window.width.round(), window.height.round())
+                                    format!(
+                                        "{} × {}",
+                                        window.width.0.round(),
+                                        window.height.0.round()
+                                    )
                                 })
                                 .unit("pt"),
                             ),
@@ -155,7 +163,7 @@ fn environment() -> AnyElement {
                                 .flex_row()
                                 .child(
                                     If::new(
-                                        || keyboard_height() > 0.0,
+                                        || keyboard_height() > px(0.0),
                                         move || keyboard_stat().tone(Tone::Warn),
                                     )
                                     .otherwise(keyboard_stat),

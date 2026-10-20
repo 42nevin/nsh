@@ -94,7 +94,7 @@ pub(crate) fn Button(props: ButtonProps, cx: Scope<ButtonEvent>) -> impl IntoEle
         .justify_center()
         .px_4()
         .py_3()
-        .rounded(move || px(theme().radius))
+        .rounded(move || theme().radius)
         .bg(move || colors.get().0)
         .active(|s| s.bg(move || colors.get().1))
         .style_when(props.disabled, |v| v.opacity(0.5))
@@ -109,7 +109,7 @@ pub(crate) fn Button(props: ButtonProps, cx: Scope<ButtonEvent>) -> impl IntoEle
         .on_press(move |_: &()| cx.emit(ButtonEvent::Press))
         .child(
             text(props.title)
-                .text_size(move || px(theme().font_size))
+                .text_size(move || theme().font_size)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(move || colors.get().2),
         )
@@ -200,7 +200,7 @@ pub(crate) fn ListView(props: ListViewProps, _cx: Scope<NoEvent>) -> impl IntoEl
         props.items,
         move |list| {
             list.flex_1()
-                .estimated_item_size(48.0)
+                .estimated_item_size(px(48.0))
                 .content_padding(move || if inset.get() { 16.0_f32 } else { 0.0 })
         },
         move |row, at| {

@@ -5,7 +5,9 @@
 use std::time::Duration;
 
 use crossbeam_channel::Receiver;
-use nsh_core::{ApproxTextEngine, EventKind, EventPayload, MountBatch, MountItem, Size};
+use nsh_core::{
+    ApproxTextEngine, EventKind, EventPayload, MountBatch, MountItem, Points, Size, geometry::px,
+};
 use nsh_engine::{Bundle, Engine, EngineConfig};
 
 use crate::ChannelSink;
@@ -59,14 +61,14 @@ fn start() -> (Engine, Receiver<MountBatch>) {
     let config = EngineConfig {
         // SAFETY: compiled just now by this runtime.
         app: nsh_engine::App::Js(unsafe { Bundle::bytecode(bytecode) }),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
         websocket: None,
         filesystem: None,
         assets: None,
         environment: Default::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
@@ -176,17 +178,17 @@ mount(() => (
 "#;
 
 fn start_app(app: &str) -> (Engine, Receiver<MountBatch>) {
-    start_app_with(app, (44.0, 96.0))
+    start_app_with(app, (px(44.0), px(96.0)))
 }
 
 /// [`start_app`] on a platform whose screen headers are `header_heights`
 /// ([`nsh_core::NO_NATIVE_HEADER`]: none, as on the desktops and the web).
-fn start_app_with(app: &str, header_heights: (f32, f32)) -> (Engine, Receiver<MountBatch>) {
+fn start_app_with(app: &str, header_heights: (Points, Points)) -> (Engine, Receiver<MountBatch>) {
     let dir = std::env::temp_dir().join(format!(
         "nsh-compiled-nav-{}-{}-{}",
         std::process::id(),
         app.len(),
-        header_heights.0
+        header_heights.0.0
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -214,7 +216,7 @@ fn start_app_with(app: &str, header_heights: (f32, f32)) -> (Engine, Receiver<Mo
     let config = EngineConfig {
         // SAFETY: compiled just now by this runtime.
         app: nsh_engine::App::Js(unsafe { Bundle::bytecode(bytecode) }),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
         websocket: None,
@@ -1092,7 +1094,7 @@ mount(() => (
 ));
 "#;
 
-fn frame_of(batch: &MountBatch, id: u32) -> Option<nsh_core::Rect> {
+fn frame_of(batch: &MountBatch, id: u32) -> Option<nsh_core::Bounds<Points>> {
     batch.items.iter().rev().find_map(|i| match i {
         MountItem::Frame { id: v, frame } if *v == id => Some(*frame),
         _ => None,
@@ -1119,23 +1121,28 @@ fn pages_place_their_header_without_a_native_one() {
     let header = config.header_view.expect("its header");
     let frame = frame_of(&first, header).expect("the header's frame");
     assert_eq!(
-        (frame.x, frame.y, frame.width, frame.height),
-        (0.0, 0.0, 390.0, 60.0)
+        (
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height
+        ),
+        (px(0.0), px(0.0), px(390.0), px(60.0))
     );
-    assert_eq!(config.header_height, 60.0);
+    assert_eq!(config.header_height, px(60.0));
     let content = children_of(&first, screen)
         .into_iter()
         .filter(|&c| Some(c) != config.header_view && Some(c) != config.right)
-        .find(|&c| frame_of(&first, c).is_some_and(|f| f.height == 10.0))
+        .find(|&c| frame_of(&first, c).is_some_and(|f| f.size.height == px(10.0)))
         .expect("the content");
-    assert_eq!(frame_of(&first, content).unwrap().y, 60.0);
+    assert_eq!(frame_of(&first, content).unwrap().origin.y, px(60.0));
 
     let (_engine, rx) = start_app(PAGE_HEADER);
     let first = rx
         .recv_timeout(Duration::from_secs(5))
         .expect("first frame");
     let (_, config) = screen_config_of(&first).expect("a page");
-    assert_eq!(config.header_height, 44.0);
+    assert_eq!(config.header_height, px(44.0));
 }
 
 const INPUT_AND_LIST: &str = r#"import { mount, signal, Input, Text, View } from "nsh";

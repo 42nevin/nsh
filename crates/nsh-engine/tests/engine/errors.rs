@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use nsh_core::{ApproxTextEngine, MountBatch, Size};
+use nsh_core::{ApproxTextEngine, MountBatch, Size, geometry::px};
 use nsh_engine::{AppError, AppErrorKind, Bundle, Engine, EngineConfig, MountSink};
 
 struct Sink {
@@ -34,14 +34,14 @@ impl MountSink for ReportSink {
 fn config(bundle: Bundle, limits: nsh_engine::Limits) -> EngineConfig {
     EngineConfig {
         app: nsh_engine::App::Js(bundle),
-        viewport: Size::new(100.0, 100.0),
+        viewport: Size::new(px(100.0), px(100.0)),
         trace: false,
         network: None,
         websocket: None,
         filesystem: None,
         assets: None,
         environment: Default::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits,
         ui_sets: Vec::new(),
         runtime: None,
@@ -110,14 +110,14 @@ fn first_error(bundle: Bundle) -> String {
     };
     let config = EngineConfig {
         app: nsh_engine::App::Js(bundle),
-        viewport: Size::new(100.0, 100.0),
+        viewport: Size::new(px(100.0), px(100.0)),
         trace: false,
         network: None,
         websocket: None,
         filesystem: None,
         assets: None,
         environment: Default::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,

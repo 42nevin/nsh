@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use nsh_core::{
     ApproxTextEngine, Core, EventKind, EventPayload, ListBind, MountItem, Size, ViewKind,
+    geometry::{point, px},
 };
 use nsh_js::Host;
 
@@ -180,10 +181,10 @@ impl App {
         .unwrap();
         // The runtime reads the environment while it loads.
         host.set_environment(&nsh_js::Environment {
-            window: (390.0, 844.0),
+            window: Size::new(px(390.0), px(844.0)),
             ..Default::default()
         });
-        let mut core = Core::new(ApproxTextEngine, Size::new(390.0, 844.0));
+        let mut core = Core::new(ApproxTextEngine, Size::new(px(390.0), px(844.0)));
         core.set_components(crate::test_ui::registry());
         Self {
             host,
@@ -304,7 +305,8 @@ fn rows(entry: &str) {
     let mut y = 0.0;
     for _ in 0..4000 {
         y += 8.0;
-        app.core.set_scroll_offset(list, 0.0, y, u32::MAX);
+        app.core
+            .set_scroll_offset(list, point(px(0.0), px(y)), u32::MAX);
         app.turn(|_| {});
         if app.ops_applied > 0 {
             js += app.js;

@@ -10,6 +10,7 @@
 
 pub mod access;
 pub mod canvas;
+pub mod color;
 mod core;
 mod css;
 mod css_named;
@@ -17,7 +18,7 @@ pub mod desktop;
 mod effects;
 mod fenwick;
 pub mod filesystem;
-mod geometry;
+pub mod geometry;
 mod grid;
 pub mod js;
 pub mod keymap;
@@ -47,13 +48,14 @@ pub use nsh_animation;
 pub use serde_json::Value as JsonValue;
 
 pub use crate::{
+    color::{Hsla, Rgba},
     core::{ApplyError, Core, ListBind, Measurement},
     effects::{
         BlendMode, BoxShadow, ColorStop, Cursor, Effects, Filter, Gradient, GradientKind,
         GradientSize, KeyframeAnimation, Keyframes, Outline, Transition, TransitionProps,
         blur_radius, compose_color_matrices,
     },
-    geometry::{Rect, Size},
+    geometry::{Bounds, Corners, Edges, Point, Points, Size},
     mount::{
         ImageOptions, InputConfig, ModalConfig, MountBatch, MountItem, NO_NATIVE_HEADER,
         NativeProps, ScreenConfig, ScrollBehavior, StickyCell, VideoProps, ViewKind, WebProps,
@@ -75,8 +77,8 @@ pub use crate::{
     },
     style::{
         BorderStyle, Borders, Color, CornerRadii, DecorationStyle, EllipsizeMode, FontFamily,
-        FontVariant, OriginLen, PatchValue, Shadow, Style, StyleDecl, StyleError, StyleKey,
-        StylePatch, StyleValue, TextAlign, TextDecoration, TextShadow, TextStyle, TextTransform,
+        FontVariant, PatchValue, Shadow, Style, StyleDecl, StyleError, StyleKey, StylePatch,
+        StyleValue, TextAlign, TextDecoration, TextShadow, TextStyle, TextTransform,
         TransformOrigin, ViewStyle,
     },
     text::{

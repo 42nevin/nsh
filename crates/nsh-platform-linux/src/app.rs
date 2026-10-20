@@ -9,7 +9,10 @@ use std::{
 };
 
 use gtk4::{self as gtk, glib, prelude::*};
-use nsh_core::platform::{Appearance, Locale};
+use nsh_core::{
+    geometry::px,
+    platform::{Appearance, Locale},
+};
 use nsh_engine::{App, Bundle, ColorScheme, EngineConfig, Environment, Idiom, Limits, Os, Root};
 
 use crate::{
@@ -208,7 +211,7 @@ impl AppView {
         let options = self.options.borrow();
         let config = EngineConfig {
             app,
-            viewport: nsh_core::Size::new(0.0, 0.0),
+            viewport: nsh_core::Size::new(px(0.0), px(0.0)),
             trace: options.trace,
             network: Some(crate::net::network()),
             websocket: None,
@@ -286,7 +289,7 @@ impl AppView {
 
 fn initial_environment() -> Environment {
     Environment {
-        window: (0.0, 0.0),
+        window: nsh_core::Size::new(nsh_core::geometry::px(0.0), nsh_core::geometry::px(0.0)),
         color_scheme: ColorScheme::Light,
         os: Os::Linux,
         idiom: Idiom::Desktop,
