@@ -1,10 +1,9 @@
 use std::cell::Cell;
 
-use nsh_animation::{AnimationOp, AnimationProp};
-
 use super::*;
 use crate::{
     Color, EventKind, StyleValue,
+    animation::{AnimationOp, AnimationProp},
     geometry::{point, px},
 };
 
@@ -221,7 +220,39 @@ fn values_of_calls_into_rust_that_panic_as_they_drop_stay_in_the_core() {
 }
 
 fn core() -> Core<FakeEngine> {
-    Core::new(FakeEngine::default(), size_pt(320.0, 480.0))
+    let mut c = Core::new(FakeEngine::default(), size_pt(320.0, 480.0));
+    c.set_tokens(crate::ui::tokens::sample());
+    c
+}
+
+/// The tokens of a theme file of the tests' own format, `{ "key":
+/// "#rrggbb", … }` over the sample's (`None`: the sample's): the core reads
+/// `uiTheme` with what a UI set brings.
+fn test_tokens(json: Option<&str>) -> Result<crate::ui::Tokens, String> {
+    let mut tokens = crate::ui::tokens::sample();
+    let Some(json) = json else {
+        return Ok(tokens);
+    };
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    for (key, value) in value.as_object().ok_or("not an object")? {
+        let color = value.as_str().and_then(Color::parse).ok_or("not a color")?;
+        tokens.set_color(key, color.into());
+    }
+    Ok(tokens)
+}
+
+/// Tokens with just `colors`.
+fn tokens_with(colors: &[(&str, crate::ui::AdaptiveColor)]) -> crate::ui::Tokens {
+    let mut tokens = crate::ui::Tokens::default();
+    for (key, color) in colors {
+        tokens.set_color(key, *color);
+    }
+    tokens
+}
+
+/// Color token `key` of the tokens apps have.
+fn token(key: &str) -> crate::ui::AdaptiveColor {
+    crate::ui::tokens::sample().color(key).unwrap()
 }
 
 fn style(props: &[(&str, StyleValue<'_>)]) -> Box<Style> {
@@ -4972,7 +5003,7 @@ mod components {
     fn Swatch(_props: SwatchProps) -> impl IntoElement {
         view()
             .size_10()
-            .bg(move || theme().primary)
+            .bg(move || tokens().color("primary.background").unwrap())
             .active(|s| s.bg(rgb(0xff0000)))
     }
 
@@ -4980,7 +5011,7 @@ mod components {
     fn theme_colors_and_press_styles_switch_natively() {
         let mut c = core();
         let mut registry = Registry::new();
-        registry.register::<Swatch>();
+        registry.register::<Swatch>().tokens_from(test_tokens);
         c.set_components(registry);
         apply(
             &mut c,
@@ -5006,9 +5037,9 @@ mod components {
                 _ => None,
             })
         };
-        let theme = crate::ui::Theme::default();
+        let primary = token("primary.background");
         let batch = c.commit().unwrap();
-        assert_eq!(background(&batch), Some(Color::from(theme.primary.light)));
+        assert_eq!(background(&batch), Some(Color::from(primary.light)));
         assert_eq!(frame_of(&batch, 2).map(|f| f.size.width.0), Some(40.0));
         // The platform reports presses on it (`active`).
         assert!(batch.items.iter().any(|i| matches!(
@@ -5021,7 +5052,7 @@ mod components {
             ..Default::default()
         });
         let batch = c.commit().unwrap();
-        assert_eq!(background(&batch), Some(Color::from(theme.primary.dark)));
+        assert_eq!(background(&batch), Some(Color::from(primary.dark)));
         c.set_states(2, crate::tailwind::state::PRESSED);
         let batch = c.commit().unwrap();
         assert_eq!(background(&batch), Some(Color(0xff0000ff)));
@@ -5031,7 +5062,7 @@ mod components {
     fn the_host_theme_wins_over_the_apps_until_cleared() {
         let mut c = core();
         let mut registry = Registry::new();
-        registry.register::<Swatch>();
+        registry.register::<Swatch>().tokens_from(test_tokens);
         c.set_components(registry);
         apply(
             &mut c,
@@ -5057,14 +5088,12 @@ mod components {
                 _ => None,
             })
         };
-        let themed = |hex: &str| {
-            crate::ui::Theme::from_json(&format!(
-                r#"{{ "themes": [{{ "colors": {{ "primary.background": "{hex}" }} }}] }}"#
-            ))
-            .unwrap()
+        let themed = |hex: u32| {
+            tokens_with(&[("primary.background", rgb(hex).into())])
+                .over(&test_tokens(None).unwrap())
         };
         c.commit().unwrap();
-        c.set_host_theme(Some(themed("#00ff00")));
+        c.set_host_tokens(Some(themed(0x00ff00)));
         assert_eq!(
             c.commit().as_ref().and_then(background),
             Some(Color::from(rgb(0x00ff00)))
@@ -5074,19 +5103,17 @@ mod components {
             &mut c,
             vec![Op::SetProp {
                 id: ROOT_ID,
-                prop: Prop::UiTheme(
-                    r##"{ "themes": [{ "colors": { "primary.background": "#0000ff" } }] }"##.into(),
-                ),
+                prop: Prop::UiTheme(r##"{ "primary.background": "#0000ff" }"##.into()),
             }],
         );
         assert_eq!(c.commit().as_ref().and_then(background), None);
-        c.set_host_theme(None);
+        c.set_host_tokens(None);
         assert_eq!(
             c.commit().as_ref().and_then(background),
             Some(Color::from(rgb(0x0000ff)))
         );
         // Setting the same theme again renders nothing.
-        c.set_theme(themed("#0000ff"));
+        c.set_tokens(themed(0x0000ff));
         assert_eq!(c.commit().as_ref().and_then(background), None);
     }
 
@@ -5096,22 +5123,18 @@ mod components {
         view_with_classes(&mut c, 2, "w-10 h-10 bg-primary");
         view_with_classes(&mut c, 4, "w-10 h-10 bg-chart-up");
         view_with_classes(&mut c, 6, "w-10 h-10 bg-red-500");
-        let default = crate::ui::Theme::default();
         let batch = c.commit().unwrap();
         assert_eq!(
             view_style_of(&batch, 2).unwrap().background_color,
-            Color::from(default.primary.light)
+            Color::from(token("primary.background").light)
         );
         // Not a token of the app's theme.
         assert!(view_style_of(&batch, 4).is_none());
-        let host = crate::ui::Theme::from_json(
-            r##"{ "themes": [
-                { "mode": "light", "colors": { "primary.background": "#00ff00", "chart.up": "#0000ff" } },
-                { "mode": "dark", "colors": { "primary.background": "#004400" } }
-            ] }"##,
-        )
-        .unwrap();
-        c.set_host_theme(Some(host.clone()));
+        let host = tokens_with(&[
+            ("primary.background", AdaptiveColor::rgb(0x00ff00, 0x004400)),
+            ("chart.up", rgb(0x0000ff).into()),
+        ]);
+        c.set_host_tokens(Some(host.clone()));
         let batch = c.commit().unwrap();
         assert_eq!(
             view_style_of(&batch, 2).unwrap().background_color,
@@ -5134,7 +5157,7 @@ mod components {
         // New values of the same tokens: only their classes are resolved.
         let mut changed = host;
         changed.set_color("primary.background", rgb(0xff00ff).into());
-        c.set_host_theme(Some(changed));
+        c.set_host_tokens(Some(changed));
         let batch = c.commit().unwrap();
         assert_eq!(
             view_style_of(&batch, 2).unwrap().background_color,
@@ -5148,7 +5171,7 @@ mod components {
     fn the_apps_token_classes_on_a_component_follow_the_theme() {
         let mut c = core();
         let mut registry = Registry::new();
-        registry.register::<Swatch>();
+        registry.register::<Swatch>().tokens_from(test_tokens);
         c.set_components(registry);
         apply(
             &mut c,
@@ -5173,11 +5196,7 @@ mod components {
             ],
         );
         c.commit().unwrap();
-        let host = crate::ui::Theme::from_json(
-            r##"{ "themes": [{ "colors": { "chart.up": "#0000ff" } }] }"##,
-        )
-        .unwrap();
-        c.set_host_theme(Some(host));
+        c.set_host_tokens(Some(tokens_with(&[("chart.up", rgb(0x0000ff).into())])));
         let batch = c.commit().unwrap();
         // The app's class wins over the component's own background.
         assert_eq!(
@@ -5189,17 +5208,18 @@ mod components {
     #[test]
     fn a_host_theme_keeps_the_apps_own_tokens() {
         let mut c = core();
+        let mut registry = Registry::new();
+        registry.tokens_from(test_tokens);
+        c.set_components(registry);
         apply(
             &mut c,
             vec![Op::SetProp {
                 id: ROOT_ID,
-                prop: Prop::UiTheme(
-                    r##"{ "themes": [{ "colors": { "chart.up": "#0000ff" } }] }"##.into(),
-                ),
+                prop: Prop::UiTheme(r##"{ "chart.up": "#0000ff" }"##.into()),
             }],
         );
         view_with_classes(&mut c, 2, "w-10 h-10 bg-chart-up");
-        c.set_host_theme(Some(crate::ui::Theme::default()));
+        c.set_host_tokens(Some(crate::ui::tokens::sample()));
         let batch = c.commit().unwrap();
         assert_eq!(
             view_style_of(&batch, 2).unwrap().background_color,
@@ -5967,12 +5987,12 @@ mod components {
             .collect();
         // The value and its interpolation, in the core's id range.
         let value = match animations[0] {
-            nsh_animation::AnimationOp::CreateValue { node, value: 0.0 } => node,
+            crate::animation::AnimationOp::CreateValue { node, value: 0.0 } => node,
             ref op => panic!("{op:?}"),
         };
         assert_eq!(value % 2, 1, "the core's ids are odd");
         assert!(
-            matches!(animations[1], nsh_animation::AnimationOp::CreateInterpolate { input, .. } if input == value)
+            matches!(animations[1], crate::animation::AnimationOp::CreateInterpolate { input, .. } if input == value)
         );
         assert_eq!(texts(&batch), ["resting"]);
 
@@ -5990,17 +6010,19 @@ mod components {
             .items
             .iter()
             .find_map(|i| match i {
-                MountItem::Animation(nsh_animation::AnimationOp::Start {
-                    node, animation, ..
+                MountItem::Animation(crate::animation::AnimationOp::Start {
+                    node,
+                    animation,
+                    ..
                 }) if *node == value => Some(*animation),
                 _ => None,
             })
             .expect("a spring");
         assert_eq!(texts(&batch), ["springing"]);
         let mut finished = vec![
-            nsh_animation::Finished::new(animation, true),
+            crate::animation::Finished::new(animation, true),
             // JS's (even ids) stay for JS.
-            nsh_animation::Finished::new(8, true),
+            crate::animation::Finished::new(8, true),
         ];
         c.animations_finished(&mut finished);
         assert_eq!(finished.len(), 1);
@@ -6029,7 +6051,7 @@ mod components {
             .filter(|i| {
                 matches!(
                     i,
-                    MountItem::Animation(nsh_animation::AnimationOp::Release { .. })
+                    MountItem::Animation(crate::animation::AnimationOp::Release { .. })
                 )
             })
             .count();
@@ -6089,7 +6111,7 @@ mod components {
                 },
             ],
         );
-        let animations = |batch: &MountBatch| -> Vec<nsh_animation::AnimationOp> {
+        let animations = |batch: &MountBatch| -> Vec<crate::animation::AnimationOp> {
             batch
                 .items
                 .iter()
@@ -6113,8 +6135,8 @@ mod components {
         let ops = animations(&batch);
         let fade = match ops[..] {
             [
-                nsh_animation::AnimationOp::CreateValue { node, value: 1.0 },
-                nsh_animation::AnimationOp::Start { node: started, .. },
+                crate::animation::AnimationOp::CreateValue { node, value: 1.0 },
+                crate::animation::AnimationOp::Start { node: started, .. },
             ] if started == node => node,
             _ => panic!("{ops:?}"),
         };
@@ -6146,7 +6168,7 @@ mod components {
         let batch = c.commit().unwrap();
         assert_eq!(
             animations(&batch),
-            [nsh_animation::AnimationOp::Set {
+            [crate::animation::AnimationOp::Set {
                 node: fade,
                 value: 0.5
             }]
@@ -6184,7 +6206,7 @@ mod components {
             .collect();
         assert_eq!(
             released,
-            [nsh_animation::AnimationOp::Release { node: fade }]
+            [crate::animation::AnimationOp::Release { node: fade }]
         );
     }
 
@@ -8040,7 +8062,7 @@ mod views {
                 "{} {} {}",
                 if dark() { "dark" } else { "light" },
                 ticks.get(),
-                theme().radius
+                tokens().number("radius").unwrap()
             )
         }))
     }
@@ -8178,8 +8200,8 @@ mod views {
         let colors = |batch: &MountBatch| {
             batch.items.iter().find_map(|i| match i {
                 MountItem::Animation(
-                    nsh_animation::AnimationOp::CreateInterpolate { output, .. }
-                    | nsh_animation::AnimationOp::SetOutput { output, .. },
+                    crate::animation::AnimationOp::CreateInterpolate { output, .. }
+                    | crate::animation::AnimationOp::SetOutput { output, .. },
                 ) => Some(output.clone()),
                 _ => None,
             })
@@ -8188,7 +8210,9 @@ mod views {
         c.mount_root(&Root::new::<Track>(|| ()));
         assert_eq!(
             colors(&c.commit().unwrap()),
-            Some(nsh_animation::Output::Colors(vec![0xeeeeeeff, 0x00ff00ff]))
+            Some(crate::animation::Output::Colors(vec![
+                0xeeeeeeff, 0x00ff00ff
+            ]))
         );
         c.set_environment(crate::ui::Environment {
             dark: true,
@@ -8198,11 +8222,13 @@ mod views {
         let batch = c.commit().unwrap();
         assert_eq!(
             colors(&batch),
-            Some(nsh_animation::Output::Colors(vec![0x222222ff, 0x00ff00ff]))
+            Some(crate::animation::Output::Colors(vec![
+                0x222222ff, 0x00ff00ff
+            ]))
         );
         assert!(!batch.items.iter().any(|i| matches!(
             i,
-            MountItem::Animation(nsh_animation::AnimationOp::CreateInterpolate { .. })
+            MountItem::Animation(crate::animation::AnimationOp::CreateInterpolate { .. })
         )));
     }
 
@@ -8235,8 +8261,8 @@ mod views {
                 .iter()
                 .filter_map(|i| match i {
                     MountItem::Animation(
-                        nsh_animation::AnimationOp::CreateInterpolate { output, .. }
-                        | nsh_animation::AnimationOp::SetOutput { output, .. },
+                        crate::animation::AnimationOp::CreateInterpolate { output, .. }
+                        | crate::animation::AnimationOp::SetOutput { output, .. },
                     ) => Some(output.clone()),
                     _ => None,
                 })
@@ -8244,7 +8270,7 @@ mod views {
             outputs.sort_by_key(|o| format!("{o:?}"));
             outputs
         };
-        let colors = |off: u32| nsh_animation::Output::Colors(vec![off, 0x00ff00ff]);
+        let colors = |off: u32| crate::animation::Output::Colors(vec![off, 0x00ff00ff]);
         let mut c = core();
         c.mount_root(&Root::new::<SharedLight>(|| ()));
         assert_eq!(outputs(&c.commit().unwrap()), vec![colors(0x000000ff); 3]);
