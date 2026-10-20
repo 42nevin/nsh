@@ -1181,7 +1181,7 @@ impl<M: TextEngine> Core<M> {
                         }
                         result
                     }
-                    Err(message) => Err(message),
+                    Err(message) => Err(message.into()),
                 };
                 self.apply_actions();
                 self.settle(call, result);
@@ -1208,7 +1208,7 @@ impl<M: TextEngine> Core<M> {
                         }),
                     );
                 }
-                Err(message) => self.settle(call, Err(message)),
+                Err(message) => self.settle(call, Err(message.into())),
             },
             RustCall::Method(host, method) => {
                 let mut failed = None;
@@ -1221,16 +1221,16 @@ impl<M: TextEngine> Core<M> {
                     Some(Inner::Component(inner)) => match caught(|| inner.call(method)) {
                         Ok(Some(result)) => result,
                         Ok(None) => {
-                            Err(format!("{} has no ref of this method's type", inner.name()))
+                            Err(format!("{} has no ref of this method's type", inner.name()).into())
                         }
                         Err(message) => {
                             failed = Some(message.clone());
-                            Err(message)
+                            Err(message.into())
                         }
                     },
                     _ => {
                         drop_caught(method);
-                        Err(format!("node {host} hosts no Rust component"))
+                        Err(format!("node {host} hosts no Rust component").into())
                     }
                 };
                 self.apply_actions();
