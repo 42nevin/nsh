@@ -18,6 +18,17 @@ default = ["js"]
 js = ["nsh-engine/js"]
 # Development support: dev server client, log forwarding, error overlay.
 dev = ["js", "dep:nsh-dev"]
+# Opt-in fixture driven by a separate trusted SDK client on a window server.
+accessibility-tests = ["js"]
+
+[[test]]
+name = "accessibility"
+path = "tests/accessibility/main.rs"
+harness = false
+required-features = ["accessibility-tests"]
+
+[dev-dependencies]
+nsh-bundler.workspace = true
 
 [dependencies]
 log.workspace = true

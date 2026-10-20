@@ -2449,6 +2449,7 @@ dependencies = [
  "libc",
  "log",
  "nsh-animation",
+ "nsh-bundler",
  "nsh-core",
  "nsh-dev",
  "nsh-engine",

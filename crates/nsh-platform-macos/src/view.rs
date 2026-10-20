@@ -30,22 +30,23 @@ use std::{
 };
 
 use nsh_core::{
-    EventMask, MAX_TRANSFORMS, Matrix, NodeId, PointerEvents, ROOT_ID, Rect, ViewKind, ViewProps,
-    ViewStyle,
+    EventKind, EventMask, EventPayload, MAX_TRANSFORMS, Matrix, NodeId, PointerEvents, ROOT_ID,
+    Rect, ViewKind, ViewProps, ViewStyle,
 };
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
     rc::Retained,
-    runtime::{AnyObject, ProtocolObject},
+    runtime::{AnyObject, ProtocolObject, Sel},
+    sel,
 };
 use objc2_app_kit::{
-    NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventType, NSResponder,
-    NSTrackingArea, NSTrackingAreaOptions, NSView, NSViewLayerContentsRedrawPolicy,
-    NSWindowOrderingMode,
+    NSAccessibilityUnignoredChildren, NSDragOperation, NSDraggingDestination, NSDraggingInfo,
+    NSEvent, NSEventType, NSResponder, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSViewLayerContentsRedrawPolicy, NSWindowOrderingMode,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGContext;
-use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect};
+use objc2_foundation::{NSArray, NSObject, NSObjectProtocol, NSPoint, NSRect};
 use objc2_quartz_core::{CALayer, CALayerDelegate, CATransform3D};
 
 use crate::surface::{Surface, quiet};
@@ -452,6 +453,26 @@ define_class!(
     }
 
     impl ViewObj {
+        #[unsafe(method_id(accessibilityChildren))]
+        fn accessibility_children(&self) -> Retained<NSArray<AnyObject>> {
+            self.live_accessibility_children()
+        }
+
+        #[unsafe(method(isAccessibilitySelectorAllowed:))]
+        fn accessibility_selector_allowed(&self, selector: Sel) -> bool {
+            if selector == sel!(accessibilityPerformPress) {
+                self.accessibility_press_target().is_some()
+            } else {
+                // SAFETY: Delegate other public accessibility selectors to NSView.
+                unsafe { msg_send![super(self), isAccessibilitySelectorAllowed: selector] }
+            }
+        }
+
+        #[unsafe(method(accessibilityPerformPress))]
+        fn accessibility_perform_press(&self) -> bool {
+            self.perform_accessibility_press()
+        }
+
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
             true
@@ -721,6 +742,98 @@ define_class!(
 );
 
 impl ViewObj {
+    fn live_accessibility_children(&self) -> Retained<NSArray<AnyObject>> {
+        let concealed = self
+            .ivars()
+            .state
+            .try_borrow()
+            .map_or(true, |state| state.access.hides_children());
+        if concealed {
+            return NSArray::new();
+        }
+        // AppKit's stored empty children do not resume default traversal
+        // when reset to nil. Query real current subviews instead, including
+        // scroll containers and hosted native controls. Release state before
+        // AppKit recursively asks descendants for their own semantics.
+        let children = self.subviews();
+        // SAFETY: Every retained NSView is an Objective-C object. AppKit
+        // returns its public unignored representations, including cells.
+        unsafe { NSAccessibilityUnignoredChildren(children.cast_unchecked::<AnyObject>()) }
+    }
+
+    fn perform_accessibility_press(&self) -> bool {
+        self.accessibility_press_target()
+            .is_some_and(|(surface, id, kind)| {
+                // Same asynchronous event channel as ordinary input; never wait
+                // for JS or synthesize pointer events for assistive activation.
+                surface.event(id, kind, EventPayload::None);
+                true
+            })
+    }
+
+    /// Admission is shared by advertisement and invocation, so passive wrappers
+    /// never advertise a duplicate action and a retained old view cannot route
+    /// its reused node id into a replacement engine.
+    fn accessibility_press_target(&self) -> Option<(std::rc::Rc<Surface>, NodeId, EventKind)> {
+        let (id, kind) = {
+            let state = self.ivars().state.try_borrow().ok()?;
+            if state.props.accessibility.state.disabled
+                || state.access.is_hidden()
+                || state.style.hidden
+                || state.live.as_ref().is_some_and(|live| live.dying())
+            {
+                return None;
+            }
+            // The semantics already expose both kinds as pressable. Prefer the
+            // primary press when both exist; a long-only element still has one
+            // activation, without synthesizing a held pointer or dispatching twice.
+            let kind = if state.events.contains(EventKind::Press) {
+                EventKind::Press
+            } else if state.events.contains(EventKind::LongPress) {
+                EventKind::LongPress
+            } else {
+                return None;
+            };
+            (state.id, kind)
+        };
+        // pointerEvents and focusable govern touch/keyboard, not assistive
+        // activation. Visibility and lifecycle admission remain independent.
+        if self.window().is_none() || self.isHiddenOrHasHiddenAncestor() {
+            return None;
+        }
+        let mut parent = superview(self);
+        while let Some(native) = parent {
+            if let Some(ancestor) = native.downcast_ref::<ViewObj>() {
+                let concealed = {
+                    let state = ancestor.ivars().state.try_borrow().ok()?;
+                    state.access.hides_children()
+                        || state.style.hidden
+                        || state.live.as_ref().is_some_and(|live| live.dying())
+                };
+                if concealed {
+                    return None;
+                }
+            }
+            parent = superview(&native);
+        }
+        let surface = self.keyboard_surface()?;
+        let current = surface
+            .mounter
+            .try_borrow()
+            .ok()?
+            .views
+            .get(&id)
+            .is_some_and(|mounted| std::ptr::eq(mounted.ns(), &**self));
+        if !current {
+            return None;
+        }
+        // Only the main thread mutates this surface's lifecycle, so a running
+        // control cannot disappear between admission and the immediate send.
+        let mut running = false;
+        surface.control(|_| running = true);
+        running.then_some((surface, id, kind))
+    }
+
     // Only the root stores a surface. A focused pressable child uses its
     // ancestors for keyboard handling; drawing and pointer hooks stay root-only.
     fn keyboard_surface(&self) -> Option<std::rc::Rc<Surface>> {

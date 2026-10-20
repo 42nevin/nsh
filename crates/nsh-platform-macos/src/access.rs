@@ -20,7 +20,10 @@
 //!
 //! Live regions are emulated by announcing a changed label or text
 //! (`NSAccessibilityAnnouncementRequestedNotification`);
-//! `accessibilityActions` are not exposed.
+//! `accessibilityActions` are not exposed. Public children are derived from
+//! the current AppKit hierarchy by `ViewObj`; grouping suppresses that query
+//! without freezing a child list. Press callbacks use the existing event
+//! channel after live accessibility admission on the same view.
 //!
 //! Every update is diffed against what was last given to AppKit
 //! ([`Applied`]): `ViewProps` also carries touch properties, and `Text`
@@ -82,6 +85,18 @@ struct AxState {
     grouped: bool,
     /// The value's lower and upper bounds.
     range: (Option<u64>, Option<u64>),
+}
+
+impl Applied {
+    /// Whether the current semantics conceal descendants from accessibility.
+    pub(crate) fn hides_children(&self) -> bool {
+        self.ax.grouped
+    }
+
+    /// Whether this element itself is hidden from accessibility.
+    pub(crate) fn is_hidden(&self) -> bool {
+        self.ax.hidden
+    }
 }
 
 /// The kinds of element nsh makes.
