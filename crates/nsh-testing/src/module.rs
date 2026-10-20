@@ -136,7 +136,7 @@ pub struct OpenOptions {
     pub clipboard: Option<String>,
 }
 
-/// A dialog the app showed (`Alert.alert`, an action sheet).
+/// A dialog the app showed (`AlertDialog.show`, an action sheet).
 #[derive(Debug, Clone, PartialEq, JsObject)]
 pub struct Dialog {
     /// Its title.
@@ -468,7 +468,7 @@ impl App {
 
     /// Holds a finger on what `selector` names (or the nearest view around
     /// it that hears long presses or presses) for its `delayLongPress`
-    /// (500 ms): `onPressIn`, `onLongPress`, `onPressOut`.
+    /// (500 ms): `onPressDown`, `onLongPress`, `onPressUp`.
     pub async fn long_press(this: Instance<Self>, selector: String) -> Result<(), String> {
         step(&this, move |app| app.long_press(&selector)).await
     }
@@ -526,7 +526,7 @@ impl App {
         step(&this, Headless::back).await
     }
 
-    /// Answers the dialogs the app shows from now on (`Alert.alert`, action
+    /// Answers the dialogs the app shows from now on (`AlertDialog.show`, action
     /// sheets): `handler` returns the text of the button to press, or
     /// `null` to close it without one. Without a handler, a dialog's cancel
     /// button is pressed, else it is closed when it can be, else the step

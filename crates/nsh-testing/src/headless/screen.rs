@@ -36,7 +36,10 @@ pub(crate) enum Back {
     /// This screen prevents going back: it is asked.
     Ask(NodeId),
     /// The modal asks to close, and closes when the user may close it.
-    Close { modal: NodeId, dismissible: bool },
+    Close {
+        modal: NodeId,
+        close_on_escape: bool,
+    },
     /// Nothing to go back from.
     Nothing,
 }
@@ -91,9 +94,9 @@ struct View {
     scroll: Option<Scroll>,
     /// A screen that asks before going back (`preventBack`).
     prevent_back: bool,
-    /// A modal the user can close natively (`ModalConfig::dismissible`).
-    dismissible: bool,
-    /// Its `accessibilityRole`.
+    /// A modal the user's back closes natively (`ModalConfig::close_on_escape`).
+    close_on_escape: bool,
+    /// Its `role`.
     role: AccessibilityRole,
     /// It takes no presses (`disabled`, its accessibility state).
     disabled: bool,
@@ -191,7 +194,7 @@ impl Screen {
                 self.nodes.entry(*id).or_default().prevent_back = config.prevent_back;
             }
             MountItem::ModalConfig { id, config } => {
-                self.nodes.entry(*id).or_default().dismissible = config.dismissible;
+                self.nodes.entry(*id).or_default().close_on_escape = config.close_on_escape;
             }
             MountItem::Frame { id, frame } => self.nodes.entry(*id).or_default().frame = *frame,
             MountItem::Events { id, events } => self.nodes.entry(*id).or_default().events = *events,
@@ -388,7 +391,7 @@ impl Screen {
         match modal {
             Some(modal) => Back::Close {
                 modal,
-                dismissible: self.nodes.get(&modal).is_some_and(|v| v.dismissible),
+                close_on_escape: self.nodes.get(&modal).is_some_and(|v| v.close_on_escape),
             },
             None => Back::Nothing,
         }
@@ -414,7 +417,7 @@ impl Screen {
         std::mem::take(&mut self.back_asked)
     }
 
-    /// The dialogs shown so far, in order (`Alert.alert`, action sheets).
+    /// The dialogs shown so far, in order (`AlertDialog.show`, action sheets).
     pub fn dialogs(&self) -> &[Dialog] {
         &self.dialogs
     }

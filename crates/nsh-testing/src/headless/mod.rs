@@ -118,7 +118,7 @@ type Observer = Box<dyn FnMut(&str, &MountBatch) + Send>;
 /// Answers a dialog ([`Headless::on_dialog`]).
 type DialogHandler = Box<dyn FnMut(&Dialog) -> DialogAnswer + Send>;
 
-/// The answer to a dialog (`Alert.alert`, an action sheet).
+/// The answer to a dialog (`AlertDialog.show`, an action sheet).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogAnswer {
     /// Press the button with this text.
@@ -511,12 +511,12 @@ impl Headless {
     }
 
     /// The step `back`: goes back as the user does (a header's back button,
-    /// swiping a sheet down): in the newest modal, else the whole screen,
-    /// the innermost stack that can go back pops its top screen (`onDismiss`
-    /// to it), or asks it (`onBackRequest`) when it prevents going back;
-    /// without one, the newest modal asks to close (`onRequestClose`, and
-    /// `onDismiss` when the user may close it). Fails when there is nothing
-    /// to go back from.
+    /// the back key): in the newest modal, else the whole screen, the
+    /// innermost stack that can go back tells its top page (`onBackPress`,
+    /// when it listens) and pops it (`onDismiss`) unless the page keeps the
+    /// user (`popOnBack={false}`); without one, the newest dialog gets a
+    /// close attempt (`onCancel`, reason `"cancel"`) and closes when
+    /// `closeOnEscape`. Fails when there is nothing to go back from.
     pub fn back(&mut self) -> Result<(), String> {
         self.step("back");
         if !self.go_back() {
@@ -530,15 +530,24 @@ impl Headless {
         let control = self.engine.control();
         match self.screen.back_target() {
             Back::Pop(screen) => {
+                // Platforms tell a page that listens of every back press.
+                if self.screen.hears(screen, EventKind::BackRequest) {
+                    control.dispatch_event(screen, EventKind::BackRequest, EventPayload::None);
+                }
                 self.screen.pop(screen);
                 control.dispatch_event(screen, EventKind::Dismiss, EventPayload::None);
             }
             Back::Ask(screen) => {
                 control.dispatch_event(screen, EventKind::BackRequest, EventPayload::None);
             }
-            Back::Close { modal, dismissible } => {
-                control.dispatch_event(modal, EventKind::RequestClose, EventPayload::None);
-                if dismissible {
+            Back::Close {
+                modal,
+                close_on_escape,
+            } => {
+                let reason =
+                    EventPayload::Map(vec![("reason", PayloadValue::Str("cancel".into()))]);
+                control.dispatch_event(modal, EventKind::RequestClose, reason);
+                if close_on_escape {
                     self.screen.close(modal);
                     control.dispatch_event(modal, EventKind::Dismiss, EventPayload::None);
                 }
@@ -683,13 +692,13 @@ impl Headless {
     /// The step `press(<selector>)`: presses what `selector` names, as a
     /// tap does ([`Screen::press_target`]: `"Save"` presses the button
     /// whose test id, label or text it is), sending the view's
-    /// `onPressIn`, `onPressOut` and `onPress`.
+    /// `onPressDown`, `onPressUp` and `onPress`.
     pub fn press(&mut self, selector: &str) -> Result<(), String> {
         let parsed = Selector::parse(selector)?;
         self.step(format!("press({selector})"));
         let pick = self.screen.pressable(&parsed);
         let id = self.picked(pick, selector, "pressable view")?;
-        for kind in [EventKind::PressIn, EventKind::PressOut, EventKind::Press] {
+        for kind in [EventKind::PressDown, EventKind::PressUp, EventKind::Press] {
             self.send(id, kind, EventPayload::None);
         }
         self.done()
@@ -698,14 +707,14 @@ impl Headless {
     /// The step `longPress(<selector>)`: holds a finger on what `selector`
     /// names (or the nearest view around it that hears long presses or
     /// presses) for its `delayLongPress` (500 ms), as a long press does:
-    /// `onPressIn`, `onLongPress`, then `onPressOut`; no `onPress` follows.
+    /// `onPressDown`, `onLongPress`, then `onPressUp`; no `onPress` follows.
     pub fn long_press(&mut self, selector: &str) -> Result<(), String> {
         let parsed = Selector::parse(selector)?;
         self.step(format!("longPress({selector})"));
         let pick = self.screen.long_pressable(&parsed);
         let id = self.picked(pick, selector, "pressable view")?;
         let delay = self.screen.long_press_delay(id).unwrap_or(500.0).max(0.0);
-        self.send(id, EventKind::PressIn, EventPayload::None);
+        self.send(id, EventKind::PressDown, EventPayload::None);
         let held = Instant::now() + Duration::from_secs_f64(f64::from(delay) / 1000.0);
         while Instant::now() < held {
             if let Pumped::Exited = self.pump(held) {
@@ -713,7 +722,7 @@ impl Headless {
             }
         }
         self.send(id, EventKind::LongPress, EventPayload::None);
-        self.send(id, EventKind::PressOut, EventPayload::None);
+        self.send(id, EventKind::PressUp, EventPayload::None);
         self.done()
     }
 
@@ -743,7 +752,7 @@ impl Headless {
     /// input `selector` names (the matching view, or the first input in
     /// it; `text:` also matches what an input holds or its placeholder),
     /// as a keyboard does: the input takes the focus, then each character
-    /// is a key (`onKeyPress`) and an edit (`onChangeText`); a line break
+    /// is a key (`onKeyPress`) and an edit (`onChange`); a line break
     /// in a single-line input is the return key ([`Headless::submit`]). A
     /// character past `maxLength` is dropped.
     pub fn type_text(&mut self, selector: &str, text: &str) -> Result<(), String> {
@@ -760,7 +769,7 @@ impl Headless {
     }
 
     /// The step `submit(<selector>)`: the return key in the input
-    /// `selector` names, as its `submitBehavior` says: `onSubmitEditing`
+    /// `selector` names, as its `submitBehavior` says: `onSubmit`
     /// (and the focus leaves it, by default in a single line), or a line
     /// break in a multiline input.
     pub fn submit(&mut self, selector: &str) -> Result<(), String> {
@@ -1062,9 +1071,9 @@ mod tests {
                     .placeholder("Your name")
                     .max_length(5_u32)
                     .value(move || name.get())
-                    .on_change_text(move |text: &str| name.set(text.to_owned()))
+                    .on_change(move |text: &str| name.set(text.to_owned()))
                     .on_key_press(move |_: &str| keys.update(|k| *k += 1))
-                    .on_submit_editing(move |text: &str| {
+                    .on_submit(move |text: &str| {
                         sent.set(text.to_owned());
                         name.set(String::new());
                     }),
@@ -1072,7 +1081,7 @@ mod tests {
             .child(text(move || format!("Hello, {}", name.get())))
             .child(text(move || format!("Sent: {}", sent.get())))
             .child(text(move || format!("Keys: {}", keys.get())))
-            .child(input().test_id("note").editable(false))
+            .child(input().test_id("note").readonly(true))
     }
 
     #[test]

@@ -46,4 +46,4 @@ getrandom-stdlib.workspace = true
 brotli.workspace = true
 flate2.workspace = true
 zstd.workspace = true
-nsh-ui-mobile.workspace = true
+nsh-base.workspace = true

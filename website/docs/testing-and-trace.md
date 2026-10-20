@@ -92,11 +92,11 @@ one: a selector matching several fails the step, and the error says how to narro
 
 | Step | Description |
 |---|---|
-| `await app.press(selector)` | Presses the view, or the nearest view around it that hears presses (the button around a text): `onPressIn`, `onPressOut`, `onPress`. Rejects when it is disabled. |
-| `await app.longPress(selector)` | Holds a finger on it for its `delayLongPress` (500 ms): `onPressIn`, `onLongPress`, `onPressOut`; no `onPress` follows. |
+| `await app.press(selector)` | Presses the view, or the nearest view around it that hears presses (the button around a text): `onPressDown`, `onPressUp`, `onPress`. Rejects when it is disabled. |
+| `await app.longPress(selector)` | Holds a finger on it for its `delayLongPress` (500 ms): `onPressDown`, `onLongPress`, `onPressUp`; no `onPress` follows. |
 | `await app.clear(selector)` | Empties the input, as selecting all and deleting does. |
-| `await app.type(selector, text)` | Types into the input (or the first input inside the view; `text:` also matches an input's text or placeholder) at the end of what it holds, key by key: it takes the focus, then each character is an `onKeyPress` and an `onChangeText`, within `maxLength`. A `\n` in a single-line input is the return key. |
-| `await app.submit(selector)` | The return key in the input, as its `submitBehavior` says: `onSubmitEditing` (and the focus leaves a single-line input), or a line break in a multiline one. |
+| `await app.type(selector, text)` | Types into the input (or the first input inside the view; `text:` also matches an input's text or placeholder) at the end of what it holds, key by key: it takes the focus, then each character is an `onKeyPress` and an `onChange`, within `maxLength`. A `\n` in a single-line input is the return key. |
+| `await app.submit(selector)` | The return key in the input, as its `submitBehavior` says: `onSubmit` (and the focus leaves a single-line input), or a line break in a multiline one. |
 | `await app.scroll(selector, distance)` | Drags the scroll view or list (the view, the one around it, or the first inside it) by `distance` points along its axis, 10 points per frame, within its content. Negative scrolls back. |
 | `await app.wait(ms)` | Lets the app run for `ms` milliseconds: timers, animations, requests. |
 | `await app.waitFor(selector, options?)` | Resolves once a view matches, or with `{ state: "gone" }` once none does; rejects after `timeout` ms (5000). |
@@ -316,7 +316,7 @@ Espresso / UI Automator, Appium, Maestro), give views a `testID`:
 | iOS | The view's `accessibilityIdentifier` (`app.otherElements["add-to-cart"]` in XCUITest). |
 | Android | The accessibility node's view id resource name (`By.res("add-to-cart")` in UI Automator). |
 
-`testID` is a prop of every element and of the components in `nsh/ui/mobile`. It does not change what screen readers
+`testID` is a prop of every element and of every Rust component (`SafeAreaView`, `KeyboardAvoidingView`, ...). It does not change what screen readers
 say; use `accessibilityLabel` for that (see [Accessibility](./accessibility.md)). In `--trace` output it appears in
 the view's `ViewProps` item as `test_id: Some("add-to-cart")`.
 

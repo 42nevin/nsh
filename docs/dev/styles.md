@@ -9,8 +9,12 @@
   `flow-root` use Taffy's block layout; `inline` / `inline-block` lay out as views (there is no inline formatting
   context). Variants: `dark:`, `sm:`…`2xl:` / `max-*:` / `min-[..]:`, `portrait:` /
   `landscape:`, `ios:` / `android:` / `web:`, `rtl:` / `ltr:`, `motion-safe:` / `motion-reduce:`, `active:` / `hover:` /
-  `focus:` / `focus-within:` / `disabled:` / `enabled:`, `group-*:` (named groups `group/name`), `first:` / `last:` /
-  `odd:` / `even:` / `only:`, `placeholder:`, `!` (important). `disabled` (any element) applies `disabled:` and drops
+  `focus:` / `focus-within:` / `disabled:` / `enabled:` / `selected:` (`accessibilityState.selected`, a `Button`'s
+  `selected`), `group-*:` (named groups `group/name`), `first:` / `last:` /
+  `odd:` / `even:` / `only:`, `placeholder:` / `selection:` (a color only: the `placeholderColor` / `selectionColor`
+  style keys), `!` (important). The state classes have style props of their own (`activeStyle`, `hoverStyle`,
+  `focusStyle`, `disabledStyle`, a `Button`'s `selectedStyle`), resolved the same way: later states win, `disabled`
+  over all. `disabled` (any element) applies `disabled:` and drops
   the node's press listeners from what is mounted, so it shows no press feedback either. `dark:` follows the appearance
   shown: the app's own when it set one (`nsh.json` `"appearance"`, `setColorScheme`; `Core::set_appearance`), else the
   system's. The theme is Tailwind 4's
@@ -27,7 +31,8 @@
   their nodes (and the app's classes on Rust components) again; when the names change, every class. `nsh build` / `nsh dev` warn about unknown static classes in app code (`file:line:col:
   unknown class '...'`, target `nsh::build`); the core logs each unknown class once at run time. Class-only settings
   that are props in React Native (`line-clamp-*`, `truncate`, `whitespace-nowrap`, `pointer-events-*`, `object-*`,
-  `placeholder:text-*`, `caret-*`) lose to explicit props. Not supported: `peer-*`, pseudo-elements, arbitrary CSS
+  `caret-*`) lose to explicit props; `placeholder:text-*` / `selection:text-*` lose to the `placeholderColor` /
+  `selectionColor` style keys. Not supported: `peer-*`, pseudo-elements, arbitrary CSS
   properties; `space-x/y-*` are gaps.
 - **Text style inheritance** (CSS-like): a view's text properties (color, font, size, alignment, ...) pass to the texts and inputs
   inside it, so `class="text-white"` on a button styles its label. Inset padding / margin (set by Rust
@@ -36,7 +41,7 @@
 - **Effects** (styles and classes; `effects.rs`): `boxShadow` (CSS syntax, several, `inset`; also `shadow-*` / `ring-*`),
   `experimental_backgroundImage` / `backgroundImage` (linear / radial / conic gradients, drawn over `backgroundColor` as in
   CSS; but press feedback must show, so a background color an interaction state sets (`active:` / `hover:` / `focus:` /
-  `focus-within:` / `group-*:` classes, Rust components' `.active(..)`, `underlayColor` while pressed) or a native
+  `focus-within:` / `group-*:` classes, Rust components' `.active(..)`, `activeStyle` / `hoverStyle` / `focusStyle` / `disabledStyle`) or a native
   animation drives (`Animated` `backgroundColor`) replaces the gradients, unless that state sets a gradient of its own:
   done in the core, so every platform shows it alike), `filter` (`brightness`, `contrast`,
   `grayscale`, `hue-rotate`, `invert`, `saturate`, `sepia`, `opacity`, `blur`, `drop-shadow`; color filters are composed into one

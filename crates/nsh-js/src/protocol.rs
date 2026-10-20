@@ -373,7 +373,7 @@ pub(crate) fn decode_prop<'js>(
     match decoded {
         Some(prop) => Ok(prop.map(|prop| Op::SetProp { id, prop })),
         None => {
-            if let Some(event) = EventKind::from_prop(name) {
+            if let Some(event) = EventKind::from_handler(name) {
                 return Ok(Some(Op::Listen {
                     id,
                     event,

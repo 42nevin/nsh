@@ -37,7 +37,7 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 libc.workspace = true
 
 [dev-dependencies]
-nsh-ui-mobile.workspace = true
+nsh-base.workspace = true
 # The host's shared data in `nativeModule`'s tests.
 tokio = { workspace = true, features = ["sync"] }
 nsh-bundler = { workspace = true, features = ["bundle"] }

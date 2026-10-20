@@ -147,7 +147,7 @@ Tailwind's breakpoints (`sm:`, `md:`, ...) and `portrait:` / `landscape:` give t
 
 ## Safe areas
 
-The root view covers the whole screen, under the status bar and the home indicator. Wrap screens in [`SafeAreaView`](../components/safe-area-view.md) from `nsh/ui/mobile`, which pads its content by the safe area insets, or read the insets with `safeArea()` / `useSafeAreaInsets()` and apply them yourself. Screens of a [navigation stack](./navigation.md) already sit below their header.
+The root view covers the whole screen, under the status bar and the home indicator. Wrap screens in [`SafeAreaView`](../modules/nsh-base.md#safeareaview) from `nsh/base`, which pads its content by the safe area insets, or read the insets with `safeArea()` / `safeAreaInsets()` and apply them yourself. Screens of a [navigation stack](./navigation.md) already sit below their header.
 
 ## Right to left
 

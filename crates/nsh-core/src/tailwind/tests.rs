@@ -538,13 +538,14 @@ fn unknown_classes_are_reported() {
 #[test]
 fn placeholder_and_props() {
     let (_, props) = styled_with(
-        "placeholder:text-zinc-400 caret-blue-500 line-clamp-2 pointer-events-none object-contain select-none",
+        "placeholder:text-zinc-400 selection:text-blue-500 caret-blue-500 line-clamp-2 pointer-events-none object-contain select-none",
         ClassEnvironment::default(),
         (390.0, 844.0),
         0,
     );
     assert_eq!(props.placeholder_color, Some(Color(0x9f9f_a9ff)));
     assert_eq!(props.caret_color, Some(Color(0x2b7f_ffff)));
+    assert_eq!(props.selection_color, Some(Color(0x2b7f_ffff)));
     assert_eq!(props.number_of_lines, Some(2));
     assert_eq!(
         props.pointer_events,

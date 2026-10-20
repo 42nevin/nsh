@@ -7,7 +7,7 @@
 //! | `id:<testID>` | the view with that `testID` |
 //! | `label:<label>`, `label:/<regex>/<flags>` | the view with that accessibility label |
 //! | `text:<text>`, `text:/<regex>/<flags>` | a text that reads it (spaces around it aside), an input holding it or, while empty, with that placeholder |
-//! | `role:<role>`, `role:<role>[<name>]` | a view with that `accessibilityRole`, its name (its label, else the texts in it) `<name>` (or `/<regex>/`) |
+//! | `role:<role>`, `role:<role>[<name>]` | a view with that `role`, its name (its label, else the texts in it) `<name>` (or `/<regex>/`) |
 //! | `view:<id>` | the view with that node id (as `--trace` prints it) |
 //! | anything else | a test id, else a label, else a text, as written |
 //!

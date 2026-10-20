@@ -693,9 +693,6 @@ fn props_json(p: &ViewProps) -> String {
         ",\"hitSlop\":[{},{},{},{}]",
         h.top, h.right, h.bottom, h.left
     );
-    if let Some(o) = p.active_opacity {
-        let _ = write!(s, ",\"activeOpacity\":{o}");
-    }
     if let Some(d) = p.long_press_delay {
         let _ = write!(s, ",\"longPressDelay\":{d}");
     }
@@ -1157,22 +1154,16 @@ pub(crate) fn encode(out: &mut Out, item: &MountItem) {
                 .end();
         }
         MountItem::ScreenConfig { id, config } => {
+            // NSH draws no header: the page's `header` view, placed by the
+            // core, is all there is.
             out.item("scr")
                 .num(*id)
-                .opt_str(config.title.as_deref())
-                .bool(config.header_shown)
                 .num(config.header_height)
-                .opt_str(config.background_color.map(css_color).as_deref())
-                .opt_str(config.title_color.map(css_color).as_deref())
-                .opt_str(config.tint_color.map(css_color).as_deref())
-                .bool(config.back_visible)
                 .bool(config.prevent_back);
-            for slot in [config.left, config.right, config.title_view] {
-                match slot {
-                    Some(n) => out.num(n),
-                    None => out.raw("null"),
-                };
-            }
+            match config.header_view {
+                Some(n) => out.num(n),
+                None => out.raw("null"),
+            };
             out.str(match config.animation {
                 ScreenAnimation::Default => "default",
                 ScreenAnimation::Fade => "fade",
@@ -1184,9 +1175,7 @@ pub(crate) fn encode(out: &mut Out, item: &MountItem) {
             out.item("mc")
                 .num(*id)
                 .str(enum_name(&config.animation))
-                .bool(config.transparent)
-                .bool(config.dismissible)
-                .str(enum_name(&config.presentation))
+                .bool(config.close_on_escape)
                 .end();
         }
         MountItem::NativeProps { id, props } => match props {
@@ -1369,12 +1358,8 @@ fn encode_command(out: &mut Out, id: u32, command: &Command) {
                 .str(uri)
                 .end();
         }
-        // The bar's color is the page's theme color; the browser keeps
-        // its bars' content and visibility.
-        Command::StatusBar(c) => {
-            let color = c.background.map(css_color).unwrap_or_default();
-            out.item("cmd").num(id).str("statusBar").str(&color).end();
-        }
+        // A browser's bars are the browser's.
+        Command::StatusBar(_) => {}
         other => log::debug!("web: command {other:?} is not supported"),
     }
 }

@@ -39,7 +39,7 @@ ureq.workspace = true
 [dev-dependencies]
 # The fetch tests drive a VM's network by hand (`headless/net_fetch_tests.rs`).
 nsh-js.workspace = true
-nsh-ui-mobile.workspace = true
+nsh-base.workspace = true
 
 [[test]]
 name = "testing"

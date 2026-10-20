@@ -115,8 +115,8 @@ fn headless_preserves_environment_and_data_and_stops_on_process_exit() {
 #[test]
 fn headless_runs_play_the_platform_s_part() {
     let run = TestRun {
-        ui_sets: vec![nsh_ui_mobile::registry()],
-        compile: compiler(vec![nsh_ui_mobile::registry()]),
+        ui_sets: vec![nsh_base::registry()],
+        compile: compiler(vec![nsh_base::registry()]),
         ..test_run(None)
     };
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/platform");
@@ -129,8 +129,8 @@ fn headless_runs_play_the_platform_s_part() {
 #[test]
 fn selectors_find_one_view_and_steps_act_on_it() {
     let run = TestRun {
-        ui_sets: vec![nsh_ui_mobile::registry()],
-        compile: compiler(vec![nsh_ui_mobile::registry()]),
+        ui_sets: vec![nsh_base::registry()],
+        compile: compiler(vec![nsh_base::registry()]),
         ..test_run(None)
     };
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/queries");
