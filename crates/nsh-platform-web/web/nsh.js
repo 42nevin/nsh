@@ -1572,14 +1572,9 @@ class Player {
       const [pageX, pageY] = this.point(e);
       const r = el.getBoundingClientRect();
       this.event(el._id, "onHoverMove", {
-        locationX: e.clientX - r.left,
-        locationY: e.clientY - r.top,
-        pageX,
-        pageY,
-        altKey: e.altKey,
-        ctrlKey: e.ctrlKey,
-        metaKey: e.metaKey,
-        shiftKey: e.shiftKey,
+        position: { x: e.clientX - r.left, y: e.clientY - r.top },
+        pagePosition: { x: pageX, y: pageY },
+        modifiers: { control: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, platform: e.metaKey },
       });
     });
   }
@@ -2139,7 +2134,7 @@ class Player {
       // Snapping would move the content under the thumb: back once it ends.
       el.style.scrollSnapType = "none";
       this.drive(el, 1);
-      this.scrollEvent(el, "onScrollBeginDrag");
+      this.scrollEvent(el, "onScrollDragStart");
       this.pointers.set(e.pointerId, {
         mode: "bar", scroll: el, start: h ? e.clientX : e.clientY, offset: h ? el.scrollLeft : el.scrollTop,
         touchPath: [], states: [],
@@ -2161,7 +2156,7 @@ class Player {
 
   releaseBar(el) {
     el._barHeld = false;
-    this.scrollEvent(el, "onScrollEndDrag");
+    this.scrollEvent(el, "onScrollDragEnd");
     this.drive(el, -1);
     el._restoreSnap = true;
     // Snapping views settle on the nearest snap point.
@@ -2179,7 +2174,7 @@ class Player {
     // browser's): a glide.
     if (el._released && !el._momentum && performance.now() - el._released < 150) {
       el._momentum = true;
-      this.scrollEvent(el, "onMomentumScrollBegin");
+      this.scrollEvent(el, "onMomentumStart");
     }
     // Pulled to refresh, the offset is negative, as on the native backends.
     this.call((w) => w.nsh_scroll(el._id, el.scrollLeft, el.scrollTop - (el._pull ?? 0), el._applied));
@@ -2200,7 +2195,7 @@ class Player {
     }
     if (el._momentum) {
       el._momentum = false;
-      this.scrollEvent(el, "onMomentumScrollEnd");
+      this.scrollEvent(el, "onMomentumEnd");
     }
     this.scrollEvent(el, "onScrollEnd");
   }
@@ -4082,14 +4077,9 @@ class Player {
         const [pageX, pageY] = this.point(e);
         const r = el.getBoundingClientRect();
         this.event(el._id, "onContextMenu", {
-          locationX: e.clientX - r.left,
-          locationY: e.clientY - r.top,
-          pageX,
-          pageY,
-          altKey: e.altKey,
-          ctrlKey: e.ctrlKey,
-          metaKey: e.metaKey,
-          shiftKey: e.shiftKey,
+          position: { x: e.clientX - r.left, y: e.clientY - r.top },
+          pagePosition: { x: pageX, y: pageY },
+          modifiers: { control: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, platform: e.metaKey },
         });
         return true;
       }
@@ -4435,7 +4425,7 @@ class Player {
     const h = !!el._horizontal;
     if (target == null || Math.abs(target - (h ? el.scrollLeft : el.scrollTop)) < 1) return false;
     el._momentum = true;
-    this.scrollEvent(el, "onMomentumScrollBegin");
+    this.scrollEvent(el, "onMomentumStart");
     el.scrollTo({ [h ? "left" : "top"]: target, behavior: "smooth" });
     return true;
   }
@@ -4633,7 +4623,7 @@ class Player {
         p.scrollStart = [p.scroll.scrollLeft, p.scroll.scrollTop];
         cancelAnimationFrame(p.scroll._zoomAnimation);
         this.drive(p.scroll, 1);
-        this.scrollEvent(p.scroll, "onScrollBeginDrag");
+        this.scrollEvent(p.scroll, "onScrollDragStart");
       }
       if (p.mode || Math.hypot(tx, ty) > 10) {
         this.pressOut(p, false);
@@ -4691,7 +4681,7 @@ class Player {
       const [vx, vy] = this.velocity(p);
       this.call((w) => w.nsh_pan(p.pan._id, 2, p.x - p.startX, p.y - p.startY, vx, vy));
     } else if (p.mode === "scroll") {
-      this.scrollEvent(p.scroll, "onScrollEndDrag");
+      this.scrollEvent(p.scroll, "onScrollDragEnd");
       this.glide(p.scroll, -p.vx, -p.vy);
     } else if (p.press) {
       const rect = p.press.getBoundingClientRect();
@@ -4709,14 +4699,14 @@ class Player {
     el._touchDrag = true;
     el._momentum = false;
     (this.touchDrags ??= new Set()).add(el);
-    this.scrollEvent(el, "onScrollBeginDrag");
+    this.scrollEvent(el, "onScrollDragStart");
     if (!this.touchEndListener) {
       this.touchEndListener = (e) => {
         if (e.touches.length) return;
         for (const v of this.touchDrags) {
           v._touchDrag = false;
           v._released = performance.now();
-          this.scrollEvent(v, "onScrollEndDrag");
+          this.scrollEvent(v, "onScrollDragEnd");
           // Without a glide no scroll follows (nor, sometimes, `scrollend`).
           setTimeout(() => v._released && !v._momentum && this.scrollEnded(v), 200);
         }
@@ -4737,14 +4727,14 @@ class Player {
     const end = () => {
       this.drive(s, -1);
       this.snapMarkers(s);
-      if (momentum) this.scrollEvent(s, "onMomentumScrollEnd");
+      if (momentum) this.scrollEvent(s, "onMomentumEnd");
       this.ownEnd(s);
     };
     if (!v && !w) {
       end();
       return;
     }
-    this.scrollEvent(s, "onMomentumScrollBegin");
+    this.scrollEvent(s, "onMomentumStart");
     const step = (now) => {
       const dt = now - last;
       last = now;
