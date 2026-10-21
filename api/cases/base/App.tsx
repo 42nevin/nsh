@@ -14,6 +14,7 @@ import BaseNavStack from "./base-nav-stack";
 import BasePopups from "./base-popups";
 import BaseSafeAreaKeyboard from "./base-safe-area-keyboard";
 import BaseSelectionArea from "./base-selection-area";
+import BaseSwitch from "./base-switch";
 import BaseTextView from "./base-text-view";
 
 const cases: Record<string, () => JSX.Element> = {
@@ -28,6 +29,7 @@ const cases: Record<string, () => JSX.Element> = {
   "base-safe-area-keyboard": BaseSafeAreaKeyboard,
   "base-text-view": BaseTextView,
   "base-selection-area": BaseSelectionArea,
+  "base-switch": BaseSwitch,
 };
 const shown = signal("");
 
