@@ -312,7 +312,6 @@ pub(crate) const WEBVIEW_EXPORTS: &[Item] = &[(
 pub(crate) const WEBVIEW_TYPES: &str = r#"export type { WebViewNavigation };
 
 export interface WebViewProps extends Omit<ViewProps, "children" | "ios" | "desktop">, WebViewHostProps {
-  source: string | { uri: string } | { html: string; baseUrl?: string };
   ios?: IOSWebViewHostProps;
   desktop?: DesktopWebViewHostProps;
 }
@@ -330,7 +329,7 @@ pub(crate) const VIDEO_EXPORTS: &[Item] = &[(
 
 /// `nsh/video`'s types.
 pub(crate) const VIDEO_TYPES: &str = r#"export interface VideoProps extends Omit<ViewProps, "children">, VideoHostProps {
-  source: string | { uri: string };
+  src: string;
 }
 "#;
 
