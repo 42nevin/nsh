@@ -2971,6 +2971,7 @@ name = "nsh-dev"
 version = "0.1.1"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "dunce",
  "log",
  "nsh-dev",
