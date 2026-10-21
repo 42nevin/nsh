@@ -21,25 +21,39 @@ use std::{
 use crossbeam_channel::{Receiver, Sender};
 use nsh_core::{
     ApproxTextEngine, MountBatch,
-    ui::{Registry, prelude::timer},
+    geometry::{Points, Size},
+    platform::{Locale, Os},
+    ui::{Callback, Registry, Root, prelude::timer},
 };
 use nsh_engine::{
-    AppError, AppErrorKind, Bundle, Engine, EngineConfig, Environment, Insets, MountSink,
-    headless::{DirectoryAssets, Headless, MemoryStorage, StubNetwork, UreqNetwork, print_batch},
+    AppError, AppErrorKind, Bundle, Edges, Engine, EngineConfig, Environment, MountSink,
 };
 
-use crate::module::{NetworkOption, OpenOptions};
+use crate::{
+    driver::{Driver, Host, Remote},
+    headless::{
+        DirectoryAssets, Headless, MemoryStorage, RecordingNetwork, StubNetwork, UreqNetwork, WAIT,
+        print_batch,
+    },
+    module::{Case, Hook, Item, Launch, MobilePlatform, Mode, NetworkSetup, SafeArea, Suite},
+};
 
-/// How long a test may take.
-const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Builds an entry ([`Entry`]; an app's may be its directory).
+pub type Compile = Arc<dyn Fn(&Path, Entry) -> Result<Built, String> + Send + Sync>;
 
-/// Builds an entry ([`Entry`]) to bytecode: the bundle (without its
-/// source map) and the source map.
-pub type Compile =
-    Arc<dyn Fn(&Path, Entry) -> Result<(Bundle, Option<String>), String> + Send + Sync>;
+/// What [`Compile`] built.
+#[derive(Clone)]
+pub enum Built {
+    /// A bundle: its bytecode (without its source map), and its source map.
+    Js(Box<Bundle>, Option<String>),
+    /// The root of an app of Rust only (`nsh.json` `"root"`): what `open`
+    /// of the app starts.
+    Rust(Root),
+}
 
 /// What an entry [`Compile`] builds is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Entry {
     /// An app's entry, which a test opens: built as `nsh run` builds it.
     App,
@@ -67,21 +81,56 @@ pub struct TestRun {
     /// Prints each batch of the apps the tests open, under the step it came
     /// in, and logs their commits' timings.
     pub trace: Option<Output>,
+    /// Opens the apps on a real platform's host instead of a headless
+    /// engine (`nsh test --target`).
+    pub host: Option<StartHost>,
+}
+
+/// Starts the app whose entry is the path on a real platform's host, as
+/// [`HostOptions`] say, once it connected (`nsh test --target`): what takes
+/// the test's steps.
+pub type StartHost =
+    Arc<dyn Fn(&Path, &HostOptions) -> Result<Box<dyn Host>, String> + Send + Sync>;
+
+/// How [`StartHost`] starts an app.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct HostOptions {
+    /// The window's (viewport's) size in points: the headless phone's,
+    /// 390 × 844, unless `open` says.
+    pub size: Option<Size<Points>>,
 }
 
 /// How a test ended.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct TestResult {
-    /// Its name.
+    /// Its name, after the `describe` blocks it is in (`Cart › adds`).
     pub name: String,
     /// How long it took.
     pub elapsed: Duration,
-    /// Why it failed (`None`: it passed).
+    /// Whether it ran and passed.
+    pub status: TestStatus,
+    /// Why it failed (`None` unless its status is
+    /// [`TestStatus::Failed`]).
     pub failure: Option<Failure>,
 }
 
+/// Whether a test ran and passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TestStatus {
+    /// It ran and passed.
+    Passed,
+    /// It ran and failed, or a hook it needed did.
+    Failed,
+    /// It did not run: `.skip`, or another test of the file is `.only`.
+    Skipped,
+    /// A test still to write (`test.todo`).
+    Todo,
+}
+
 /// Why a test failed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Failure {
     /// What was thrown.
     pub message: String,
@@ -108,7 +157,7 @@ pub fn run_file(
     let session = Arc::new(Session {
         dir: file.parent().unwrap_or(Path::new(".")).to_path_buf(),
         run: run.clone(),
-        bundles: Mutex::new(HashMap::new()),
+        built: Mutex::new(HashMap::new()),
         apps: Mutex::new(Vec::new()),
         events: events.clone(),
     });
@@ -122,7 +171,7 @@ pub fn run_file(
         report,
     );
     *current() = None;
-    session.close_apps();
+    session.close_apps(0);
     ended
 }
 
@@ -139,6 +188,11 @@ fn drive(
     let mut ui_sets = run.ui_sets.clone();
     ui_sets.extend(crate::test_sets());
     let config = EngineConfig {
+        // The sets' fonts load as the engine starts.
+        assets: Some(Arc::new(DirectoryAssets::new(
+            run.work_dir.clone(),
+            set_files(&ui_sets),
+        ))),
         ui_sets,
         ..EngineConfig::new(bundle)
     };
@@ -186,11 +240,13 @@ fn compile_test_file(run: &TestRun, file: &Path) -> Result<(Bundle, Option<Strin
         crate::module::RUNNER
     );
     std::fs::write(&entry, code).map_err(|e| format!("{}: {e}", entry.display()))?;
-    let (bundle, map) = (run.compile)(&entry, Entry::TestFile)?;
+    let Built::Js(bundle, map) = (run.compile)(&entry, Entry::TestFile)? else {
+        return Err(format!("{}: built as a Rust root", entry.display()));
+    };
     let map = map.map(|map| readable_sources(&map, &run.work_dir));
     let bundle = match &map {
         Some(map) => bundle.with_source_map(map.clone()),
-        None => bundle,
+        None => *bundle,
     };
     Ok((bundle, map))
 }
@@ -220,6 +276,14 @@ fn readable_sources(map: &str, dir: &Path) -> String {
     json.to_string()
 }
 
+/// The files `sets` ship, by their path among an app's assets.
+fn set_files(sets: &[Registry]) -> Vec<(String, PathBuf)> {
+    sets.iter()
+        .flat_map(Registry::asset_files)
+        .map(|file| (file.path().to_owned(), PathBuf::from(file.source)))
+        .collect()
+}
+
 /// What the test file's VM reports.
 enum Event {
     /// A test ended.
@@ -244,7 +308,15 @@ impl MountSink for VmSink {
 }
 
 /// An app a test opened: closed (`None`) when the test ends.
-pub(crate) type OpenApp = Arc<Mutex<Option<Headless>>>;
+pub(crate) type OpenApp = Arc<Mutex<Option<Box<dyn Driver>>>>;
+
+/// What `open` gives the test's `App`: the app, and on a headless engine
+/// its storage and the requests it made.
+pub(crate) type Opened = (
+    OpenApp,
+    Option<Arc<MemoryStorage>>,
+    Option<Arc<RecordingNetwork>>,
+);
 
 /// The test file being run, for its VM's calls.
 pub(crate) struct Session {
@@ -252,7 +324,7 @@ pub(crate) struct Session {
     dir: PathBuf,
     run: TestRun,
     /// The apps built so far, by entry.
-    bundles: Mutex<HashMap<PathBuf, Bundle>>,
+    built: Mutex<HashMap<PathBuf, Built>>,
     /// The apps the running test opened, in order.
     apps: Mutex<Vec<OpenApp>>,
     events: Sender<Event>,
@@ -272,49 +344,67 @@ impl Session {
     }
 
     /// Starts the app at `entry` as `options` say, once it rendered.
-    pub(crate) fn open(
-        &self,
-        entry: &str,
-        options: OpenOptions,
-    ) -> Result<(OpenApp, Arc<MemoryStorage>), String> {
+    pub(crate) fn open(&self, entry: &str, launch: Launch) -> Result<Opened, String> {
         let path = self.dir.join(entry);
         let path = dunce::canonicalize(&path).map_err(|e| format!("open({entry:?}): {e}"))?;
-        let bundle = self.bundle(&path)?;
-        let network: Arc<dyn nsh_engine::Network> = match options.network {
-            Some(NetworkOption::Live) => Arc::new(UreqNetwork::new()),
-            Some(NetworkOption::Stub(responses)) => Arc::new(StubNetwork::new(responses)),
-            None => Arc::new(StubNetwork::default()),
+        if let Some(start) = &self.run.host {
+            return self.open_on_host(entry, &path, launch, start);
+        }
+        let app = match self.build(&path)? {
+            Built::Js(bundle, Some(map)) => nsh_engine::App::Js(bundle.with_source_map(map)),
+            Built::Js(bundle, None) => nsh_engine::App::Js(*bundle),
+            Built::Rust(root) => nsh_engine::App::Rust(root),
         };
-        let storage = MemoryStorage::new(options.storage.unwrap_or_default().0);
-        let files = self
-            .run
-            .ui_sets
-            .iter()
-            .flat_map(Registry::asset_files)
-            .map(|file| (file.path().to_owned(), PathBuf::from(file.source)))
-            .collect();
+        let clock = launch
+            .clock
+            .map_or_else(nsh_engine::Clock::system, nsh_engine::Clock::manual);
+        let inner: Arc<dyn nsh_engine::Network> = match launch.network {
+            NetworkSetup::Live => Arc::new(UreqNetwork::new()),
+            NetworkSetup::Stub(routes) => {
+                Arc::new(StubNetwork::new(routes).with_clock(clock.clone()))
+            }
+            NetworkSetup::None => Arc::new(StubNetwork::default()),
+        };
+        let requests = RecordingNetwork::new(inner);
+        let locale = match &launch.locale {
+            Some(tag) => Some(
+                Locale::parse(tag)
+                    .ok_or_else(|| format!("open({entry:?}): {tag:?} is not a locale"))?,
+            ),
+            None => None,
+        };
+        let storage = MemoryStorage::new(launch.storage.0);
+        let files = set_files(&self.run.ui_sets);
         let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let safe_area = options.safe_area.unwrap_or_default();
-        let default = EngineConfig::new(bundle);
+        let safe_area = launch.safe_area;
+        let default = EngineConfig::new(app);
         let config = EngineConfig {
             viewport: nsh_core::Size::new(
-                options.width.map_or(default.viewport.width, |w| w as f32),
-                options.height.map_or(default.viewport.height, |h| h as f32),
+                launch.width.unwrap_or(default.viewport.width),
+                launch.height.unwrap_or(default.viewport.height),
             ),
             trace: self.run.trace.is_some(),
-            network: Some(network),
+            network: Some(requests.clone()),
             assets: Some(Arc::new(DirectoryAssets::new(dir, files))),
             storage: Some(storage.clone()),
             environment: Environment {
-                safe_area: Insets {
-                    top: safe_area.top as f32,
-                    right: safe_area.right as f32,
-                    bottom: safe_area.bottom as f32,
-                    left: safe_area.left as f32,
+                safe_area: Edges {
+                    top: safe_area.top,
+                    right: safe_area.right,
+                    bottom: safe_area.bottom,
+                    left: safe_area.left,
+                },
+                color_scheme: launch.color_scheme.into(),
+                locale: locale.unwrap_or(Locale::EN_US),
+                reduce_motion: launch.reduced_motion,
+                os: match launch.platform {
+                    MobilePlatform::Ios => Os::Ios,
+                    MobilePlatform::Android => Os::Android,
                 },
                 ..Default::default()
             },
             ui_sets: self.run.ui_sets.clone(),
+            clock,
             ..default
         };
         let mut app = Headless::start(config)
@@ -331,53 +421,117 @@ impl Session {
             .ok()
             .and_then(|cwd| path.strip_prefix(cwd).ok().map(Path::to_path_buf))
             .unwrap_or_else(|| path.clone());
+        // `App` answers dialogs after each step, with the test's handler.
+        app.answer_dialogs_myself();
+        app.set_clipboard(launch.clipboard);
         app.step(format!("open({})", shown.display()));
         app.first_render()?;
-        let app = Arc::new(Mutex::new(Some(app)));
+        let app: OpenApp = Arc::new(Mutex::new(Some(Box::new(app))));
         self.apps
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(app.clone());
-        Ok((app, storage))
+        Ok((app, Some(storage), Some(requests)))
+    }
+
+    /// Starts the app at `path` (`entry` as the test names it) on a real
+    /// platform's host ([`TestRun::host`]), once it rendered.
+    fn open_on_host(
+        &self,
+        entry: &str,
+        path: &Path,
+        launch: Launch,
+        start: &StartHost,
+    ) -> Result<Opened, String> {
+        // What a real platform cannot be given yet: refused rather than
+        // left out, so a test never passes on what it did not set up.
+        let refused = [
+            (!launch.storage.0.is_empty(), "`storage`"),
+            (
+                matches!(launch.network, NetworkSetup::Stub(_)),
+                "stubbed `network` routes",
+            ),
+            (launch.clipboard.is_some(), "`clipboard`"),
+            (launch.locale.is_some(), "`locale`"),
+            (launch.reduced_motion, "`reducedMotion`"),
+            (launch.safe_area != SafeArea::default(), "`safeArea`"),
+        ];
+        if let Some((_, what)) = refused.iter().find(|(set, _)| *set) {
+            return Err(format!(
+                "open({entry:?}): {what} runs headless only for now: run the test without `--target`"
+            ));
+        }
+        let size = match (launch.width, launch.height) {
+            (None, None) => None,
+            (w, h) => Some(Size::new(
+                w.unwrap_or(Points(390.0)),
+                h.unwrap_or(Points(844.0)),
+            )),
+        };
+        let options = HostOptions {
+            size: size.or(Some(Size::new(Points(390.0), Points(844.0)))),
+        };
+        let host = start(path, &options).map_err(|e| format!("open({entry:?}): {e}"))?;
+        let remote = Remote::new(host);
+        remote.take(nsh_dev::protocol::TestStep::Ready {
+            timeout_ms: WAIT.as_millis() as u64 * 2,
+        })?;
+        if launch.color_scheme == crate::module::ColorScheme::Dark {
+            remote.take(nsh_dev::protocol::TestStep::SetColorScheme { dark: true })?;
+        }
+        let app: OpenApp = Arc::new(Mutex::new(Some(Box::new(remote))));
+        self.apps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(app.clone());
+        Ok((app, None, None))
     }
 
     /// The app at `path`, built once.
-    fn bundle(&self, path: &Path) -> Result<Bundle, String> {
-        if let Some(bundle) = self
-            .bundles
+    fn build(&self, path: &Path) -> Result<Built, String> {
+        if let Some(built) = self
+            .built
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(path)
         {
-            return Ok(bundle.clone());
+            return Ok(built.clone());
         }
-        let (bundle, map) = (self.run.compile)(path, Entry::App)?;
-        let bundle = match map {
-            Some(map) => bundle.with_source_map(map),
-            None => bundle,
-        };
-        self.bundles
+        let built = (self.run.compile)(path, Entry::App)?;
+        self.built
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(path.to_path_buf(), bundle.clone());
-        Ok(bundle)
+            .insert(path.to_path_buf(), built.clone());
+        Ok(built)
     }
 
     /// Closes the apps the test opened: the texts on screen of the last.
-    fn close_apps(&self) -> Option<Vec<String>> {
-        let apps = std::mem::take(&mut *self.apps.lock().unwrap_or_else(|e| e.into_inner()));
-        let mut screen = None;
-        for app in apps {
-            if let Some(mut app) = app.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                app.catch_up();
-                screen = Some(
-                    app.screen()
-                        .texts()
-                        .into_iter()
-                        .map(str::to_owned)
-                        .collect(),
-                );
-            }
+    /// How many apps are open: a mark for [`Self::close_apps_since`].
+    fn open_apps(&self) -> usize {
+        self.apps.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Closes the apps opened since `mark`, and returns the texts on
+    /// screen of the newest app open before (a failure's screen, which
+    /// may be an app a `beforeAll` opened).
+    async fn close_apps_since(self: &Arc<Self>, mark: usize) -> Option<Vec<String>> {
+        let session = self.clone();
+        nsh_core::ui::prelude::blocking(move || session.close_apps(mark))
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// [`Self::close_apps_since`], on this thread.
+    fn close_apps(&self, mark: usize) -> Option<Vec<String>> {
+        let mut apps = self.apps.lock().unwrap_or_else(|e| e.into_inner());
+        let screen = apps.iter().rev().find_map(|app| {
+            let mut app = app.lock().unwrap_or_else(|e| e.into_inner());
+            app.as_mut()?.texts().ok()
+        });
+        let mark = mark.min(apps.len());
+        for app in apps.drain(mark..) {
+            drop(app.lock().unwrap_or_else(|e| e.into_inner()).take());
         }
         screen
     }
@@ -393,39 +547,278 @@ pub(crate) async fn run_tests() {
     let Ok(session) = Session::current() else {
         return;
     };
-    for (name, body) in crate::module::take_tests() {
-        if !session.wants(&name) {
-            continue;
+    let suite = crate::module::take_suite();
+    let run = Run {
+        only: suite.has_only(),
+        session,
+    };
+    run.suite(&suite, &Context::default()).await;
+    let _ = run.session.events.send(Event::Done);
+}
+
+/// A run of a test file's suite.
+struct Run {
+    session: Arc<Session>,
+    /// A test or a block of the file is `.only`.
+    only: bool,
+}
+
+/// Where a suite is: the blocks around it.
+#[derive(Clone, Default)]
+struct Context<'a> {
+    /// Their names, outermost first.
+    names: Vec<&'a str>,
+    /// Their `beforeEach` and `afterEach` hooks, outermost first.
+    hooks: Vec<(&'a [Hook], &'a [Hook])>,
+    /// One of them is `.skip`.
+    skipped: bool,
+    /// One of them is `.only`.
+    focused: bool,
+}
+
+impl Context<'_> {
+    /// The full name of `name` in it (`Cart › adds`).
+    fn name(&self, name: &str) -> String {
+        let mut names = self.names.clone();
+        names.push(name);
+        names.retain(|n| !n.is_empty());
+        names.join(" › ")
+    }
+}
+
+impl Suite {
+    /// It or what it holds is `.only`.
+    fn has_only(&self) -> bool {
+        self.items.iter().any(|item| match item {
+            Item::Test(case) => case.mode == Mode::Only,
+            Item::Suite(suite) => suite.mode == Mode::Only || suite.has_only(),
+        })
+    }
+}
+
+impl Run {
+    /// Whether `case` runs where `cx` is.
+    fn runs(&self, case: &Case, cx: &Context<'_>) -> bool {
+        !cx.skipped
+            && matches!(case.mode, Mode::Run | Mode::Only)
+            && (!self.only || cx.focused || case.mode == Mode::Only)
+            && self.session.wants(&cx.name(&case.name))
+    }
+
+    /// Whether a test of `suite` runs where `cx` is.
+    fn any_runs(&self, suite: &Suite, cx: &Context<'_>) -> bool {
+        let cx = cx.inside(suite);
+        suite.items.iter().any(|item| match item {
+            Item::Test(case) => self.runs(case, &cx),
+            Item::Suite(inner) => self.any_runs(inner, &cx),
+        })
+    }
+
+    /// Runs `suite` where `cx` is: its `beforeAll` hooks, its tests and
+    /// blocks in order, then its `afterAll` hooks, when any of its tests
+    /// runs.
+    fn suite<'a>(
+        &'a self,
+        suite: &'a Suite,
+        cx: &'a Context<'a>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = ()> + 'a>> {
+        Box::pin(async move {
+            let inner = cx.inside(suite);
+            let runs = self.any_runs(suite, cx);
+            let mark = self.session.open_apps();
+            // A `beforeAll` that failed fails the tests that needed it.
+            let mut setup = None;
+            if runs {
+                for hook in &suite.before_all {
+                    if let Err(failure) = self.hook("beforeAll", hook).await {
+                        setup = Some(failure);
+                        break;
+                    }
+                }
+            }
+            for item in &suite.items {
+                match item {
+                    Item::Suite(child) => match &setup {
+                        // Its tests fail as this block's do.
+                        Some(failure) => self.fail_all(child, &inner, failure),
+                        None => self.suite(child, &inner).await,
+                    },
+                    Item::Test(case) => {
+                        let name = inner.name(&case.name);
+                        if self.runs(case, &inner) {
+                            match &setup {
+                                Some(failure) => {
+                                    self.report(name, Duration::ZERO, Err(failure.clone()))
+                                }
+                                None => self.case(case, name, &inner).await,
+                            }
+                        } else if case.mode == Mode::Todo && self.session.wants(&name) {
+                            self.skip(name, TestStatus::Todo);
+                        } else if self.session.wants(&name) {
+                            self.skip(name, TestStatus::Skipped);
+                        }
+                    }
+                }
+            }
+            if runs {
+                let start = Instant::now();
+                let mut failed = None;
+                for hook in &suite.after_all {
+                    if let Err(failure) = self.hook("afterAll", hook).await {
+                        failed.get_or_insert(failure);
+                    }
+                }
+                let screen = self.session.close_apps_since(mark).await;
+                if let Some(mut failure) = failed {
+                    failure.screen = failure.screen.or(screen);
+                    self.report(
+                        cx.name(&suite.name_or("afterAll")),
+                        start.elapsed(),
+                        Err(failure),
+                    );
+                }
+            } else {
+                self.session.close_apps_since(mark).await;
+            }
+        })
+    }
+
+    /// Reports every test of `suite` that would run as failed with
+    /// `failure` (a `beforeAll` around it failed).
+    fn fail_all(&self, suite: &Suite, cx: &Context<'_>, failure: &Failure) {
+        let cx = cx.inside(suite);
+        for item in &suite.items {
+            match item {
+                Item::Test(case) if self.runs(case, &cx) => {
+                    self.report(cx.name(&case.name), Duration::ZERO, Err(failure.clone()));
+                }
+                Item::Test(_) => {}
+                Item::Suite(inner) => self.fail_all(inner, &cx, failure),
+            }
         }
+    }
+
+    /// Runs `case` (named `name`) with the `beforeEach` and `afterEach`
+    /// hooks around it, then closes the apps they opened.
+    async fn case(&self, case: &Case, name: String, cx: &Context<'_>) {
         let start = Instant::now();
-        let outcome = within(TEST_TIMEOUT, body.call_async_traced(())).await;
+        let mark = self.session.open_apps();
+        let mut failed = None;
+        'before: for (before, _) in &cx.hooks {
+            for hook in *before {
+                if let Err(failure) = self.hook("beforeEach", hook).await {
+                    failed = Some(failure);
+                    break 'before;
+                }
+            }
+        }
+        if failed.is_none()
+            && let Some(body) = &case.body
+        {
+            failed = run(body, case.timeout, "the test").await.err();
+        }
+        for (_, after) in cx.hooks.iter().rev() {
+            for hook in *after {
+                if let Err(failure) = self.hook("afterEach", hook).await {
+                    failed.get_or_insert(failure);
+                }
+            }
+        }
         // The apps go before the next test starts, whatever this one left
         // running.
-        let session_ = session.clone();
-        let screen = nsh_core::ui::prelude::blocking(move || session_.close_apps())
-            .await
-            .ok()
-            .flatten();
-        let failure = match outcome {
-            Some(Ok(())) => None,
-            Some(Err(thrown)) => Some(Failure {
-                message: thrown.message,
-                stack: thrown.stack,
-                screen,
-            }),
-            None => Some(Failure {
-                message: format!("the test did not end in {} s", TEST_TIMEOUT.as_secs()),
-                stack: None,
-                screen,
-            }),
+        let screen = self.session.close_apps_since(mark).await;
+        let outcome = match failed {
+            None => Ok(()),
+            Some(mut failure) => {
+                failure.screen = failure.screen.or(screen);
+                Err(failure)
+            }
         };
-        let _ = session.events.send(Event::Result(TestResult {
+        self.report(name, start.elapsed(), outcome);
+    }
+
+    /// Runs `hook`, a `what` hook.
+    async fn hook(&self, what: &str, hook: &Hook) -> Result<(), Failure> {
+        run(&hook.body, hook.timeout, what)
+            .await
+            .map_err(|mut failure| {
+                failure.message = format!("{what}: {}", failure.message);
+                failure
+            })
+    }
+
+    fn report(&self, name: String, elapsed: Duration, outcome: Result<(), Failure>) {
+        let (status, failure) = match outcome {
+            Ok(()) => (TestStatus::Passed, None),
+            Err(failure) => (TestStatus::Failed, Some(failure)),
+        };
+        let _ = self.session.events.send(Event::Result(TestResult {
             name,
-            elapsed: start.elapsed(),
+            elapsed,
+            status,
             failure,
         }));
     }
-    let _ = session.events.send(Event::Done);
+
+    fn skip(&self, name: String, status: TestStatus) {
+        let _ = self.session.events.send(Event::Result(TestResult {
+            name,
+            elapsed: Duration::ZERO,
+            status,
+            failure: None,
+        }));
+    }
+}
+
+impl<'a> Context<'a> {
+    /// The context of what `suite` holds.
+    fn inside(&self, suite: &'a Suite) -> Context<'a> {
+        let mut cx = self.clone();
+        cx.names.push(&suite.name);
+        cx.hooks.push((&suite.before_each, &suite.after_each));
+        cx.skipped |= suite.mode == Mode::Skip;
+        cx.focused |= suite.mode == Mode::Only;
+        cx
+    }
+}
+
+impl Suite {
+    /// `"<name> › <what>"`, or `what` for the file's.
+    fn name_or(&self, what: &str) -> String {
+        if self.name.is_empty() {
+            what.to_owned()
+        } else {
+            format!("{} › {what}", self.name)
+        }
+    }
+}
+
+/// Calls `body`, `what` (the test, a hook), bounded by `timeout`; the
+/// screen of the failure is the caller's.
+async fn run(body: &Callback, timeout: Duration, what: &str) -> Result<(), Failure> {
+    match within(timeout, body.call_async_traced(())).await {
+        Some(Ok(())) => Ok(()),
+        Some(Err(thrown)) => Err(Failure {
+            message: thrown.message,
+            stack: thrown.stack,
+            screen: None,
+        }),
+        None => Err(Failure {
+            message: format!("{what} did not end in {}", shown_duration(timeout)),
+            stack: None,
+            screen: None,
+        }),
+    }
+}
+
+/// `time` as a timeout is given: `30 s`, `250 ms`.
+fn shown_duration(time: Duration) -> String {
+    let ms = time.as_millis();
+    if ms.is_multiple_of(1000) {
+        format!("{} s", ms / 1000)
+    } else {
+        format!("{ms} ms")
+    }
 }
 
 /// `future`'s output, or `None` once `time` passed.

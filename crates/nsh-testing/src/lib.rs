@@ -1,47 +1,78 @@
-//! Headless tests of an app's TSX entry: the entry built as `nsh run`
-//! builds it, against the UI sets its hosts serve (nsh's own and each of
-//! the app's crates' `registry()`, which `#[native_module]` makes), and run
-//! on an engine without a window ([`nsh_engine::headless::Headless`]).
+//! Headless tests of nsh apps.
+//!
+//! The driver ([`Headless`], the module `headless`) runs an app on an
+//! engine without a window, with display frames at 60 Hz, applies its mount
+//! batches to a model of the native views ([`Screen`]) and takes the steps a
+//! user would on what they show: press, type, submit, scroll, wait. It needs
+//! no QuickJS: a Rust app's tests run its root with this crate's default
+//! features.
 //!
 //! ```ignore
-//! let sets = vec![nsh_ui_mobile::registry(), my_app_native::registry()];
-//! let mut app = nsh_testing::tsx("../App.tsx", sets).unwrap();
-//! app.wait_for("Ready")?;
-//! app.press("Save")?;
-//! app.wait_for("Saved")?;
+//! let mut app = nsh_testing::Headless::start(EngineConfig::new(Root::of::<my_app::App>())).unwrap();
+//! app.wait_for("Count: 0")?;
+//! app.press("Tap")?;
+//! app.wait_for("Count: 1")?;
 //! ```
 //!
-//! A Rust app's root needs no build: its tests run it on
-//! `nsh_engine::headless` directly (nsh-engine's feature `headless`).
+//! Feature `js` is `nsh test`'s side: the `nsh/test` module ([`registry`])
+//! test files import, each test file on an engine of its own
+//! ([`run_file`]), and the headless runner of an app with Rust crates
+//! ([`runner`]). Feature `bundle` builds entries in this process: a TSX
+//! entry against the UI sets its hosts serve, as `nsh run` builds it
+//! ([`compile_tsx`], [`tsx`]), and `nsh test`'s [`compiler`].
 //!
-//! It also runs the test files of `nsh test` ([`run_file`]): tests written
-//! in TypeScript with the `nsh/test` module ([`registry`]), each on an
-//! engine of its own, the apps they open on headless engines.
+//! ```ignore
+//! let sets = vec![nsh_base::registry(), my_app_native::registry()];
+//! let mut app = nsh_testing::tsx("../App.tsx", sets).unwrap();
+//! app.wait_for("Ready")?;
+//! ```
 
+#[cfg(feature = "agent")]
+pub mod agent;
+#[cfg(feature = "js")]
+mod driver;
+mod headless;
+#[cfg(feature = "js")]
 mod module;
+#[cfg(feature = "js")]
 mod run;
+#[cfg(feature = "js")]
+mod runner;
 
 #[cfg(feature = "bundle")]
 use std::{path::Path, sync::Arc};
 
+#[cfg(feature = "js")]
 use nsh_core::ui::Registry;
 #[cfg(feature = "bundle")]
 use nsh_core::ui::description::SetDescription;
-pub use nsh_engine::headless::{Headless, Screen, WAIT};
 #[cfg(feature = "bundle")]
 use nsh_engine::{Bundle, EngineConfig};
 
+#[cfg(feature = "live")]
+pub use self::headless::UreqNetwork;
+pub use self::headless::{
+    DialogAnswer, DirectoryAssets, Headless, MemoryStorage, RecordingNetwork, Screen, StubHandler,
+    StubNetwork, StubReply, StubResponse, StubRoute, WAIT, default_answer, print_batch, start,
+};
+#[cfg(feature = "js")]
 pub use self::{
+    driver::Host,
     module::{
-        App, Entries, Expectation, NetworkOption, OpenOptions, SPECIFIER, SafeArea, Testing,
-        registry,
+        App, ClockOptions, ColorScheme, Entries, Expectation, MobilePlatform, NetworkOption,
+        OpenOptions, RouteOption, SPECIFIER, SafeArea, StubRequest, Testing, registry,
     },
-    run::{Compile, Entry, Failure, Output, TestResult, TestRun, run_file},
+    run::{
+        Built, Compile, Entry, Failure, HostOptions, Output, StartHost, TestResult, TestRun,
+        TestStatus, run_file,
+    },
+    runner::{PROTOCOL, Reply, RunnerMessage, TestRequest, runner},
 };
 
 /// The sets the entry `nsh test` makes for a test file is built against
 /// besides the app's: `nsh/test` ([`registry`]) and the module that runs
 /// the file's tests.
+#[cfg(feature = "js")]
 pub fn test_sets() -> Vec<Registry> {
     vec![registry(), module::runner_registry()]
 }
@@ -80,13 +111,22 @@ fn build(entry: &Path, ui_sets: &[Registry]) -> Result<(Bundle, Option<String>),
 /// process, against `ui_sets` (and [`test_sets`] for test files).
 #[cfg(feature = "bundle")]
 pub fn compiler(ui_sets: Vec<Registry>) -> Compile {
-    Arc::new(move |entry: &Path, kind: Entry| match kind {
-        Entry::App => build(entry, &ui_sets),
-        Entry::TestFile => {
-            let mut sets = ui_sets.clone();
-            sets.extend(test_sets());
-            build(entry, &sets)
-        }
+    Arc::new(move |entry: &Path, kind: Entry| {
+        // An app's directory: its `App.tsx`.
+        let entry = &if entry.is_dir() {
+            entry.join("App.tsx")
+        } else {
+            entry.to_owned()
+        };
+        let (bundle, map) = match kind {
+            Entry::App => build(entry, &ui_sets)?,
+            Entry::TestFile => {
+                let mut sets = ui_sets.clone();
+                sets.extend(test_sets());
+                build(entry, &sets)?
+            }
+        };
+        Ok(Built::Js(Box::new(bundle), map))
     })
 }
 

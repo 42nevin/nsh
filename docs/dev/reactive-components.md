@@ -1,7 +1,8 @@
 # Reactive Rust components (design proposal)
 
 Status: implemented. `docs/dev/components.md` is the reference for the API as built; this page keeps the proposal
-and its reasons. Where the implementation differs from the proposal:
+and its reasons. The components it takes as examples (`Button`, `Stepper`, `Sheet` of `nsh-ui-mobile`) were NSH's own
+when it was written; NSH now ships capabilities and no styled components, and the same API writes an app's own. Where the implementation differs from the proposal:
 
 - **The shape.** `#[component] fn Stepper(props: StepperProps, cx: Scope<StepperEvent>) -> impl IntoElement`:
   `Scope` is typed by the event, not the component (it only emits, reads the insets and registers methods), and the
@@ -322,7 +323,7 @@ children holders, the JS glue, the declarations.
 
 ## Example: `Stepper`
 
-Today (`crates/nsh-ui-mobile/src/stepper.rs`, 230 lines): state in fields, `setup` and `props_changed` to keep the value
+At the time (`crates/nsh-ui-mobile/src/stepper.rs`, 230 lines): state in fields, `setup` and `props_changed` to keep the value
 in range, `Context` methods, a `spawn` with `this.update(..)` to repeat while held, and a render that runs again on
 every step.
 
@@ -376,16 +377,16 @@ impl Component for Stepper {
                 .size_10()
                 .items_center()
                 .justify_center()
-                .rounded(px(theme().radius))
-                .bg(theme().secondary)
-                .active(|s| s.bg(theme().secondary_active))
+                .rounded(theme().radius())
+                .bg(theme().muted())
+                .active(|s| s.bg(theme().border()))
                 .style_when(off, |s| s.opacity(0.4))
                 .disabled(off)
                 .role(AccessibilityRole::Button)
                 .label(name)
                 .on_press_in(move |_| press(direction))
                 .on_press_out(move |_| repeat.set(None))
-                .child(text(label).text_size(px(theme().font_size + 4.0)))
+                .child(text(label).text_size(theme().font_size() + px(4.0)))
         };
         view()
             .flex_row()

@@ -7,7 +7,6 @@ on:
   push:
     branches: [main]
     paths:
-      - "crates/nsh-animation/**"
       - "crates/nsh-bundler/**"
       - "crates/nsh-cli/**"
       - "crates/nsh-core/**"
@@ -20,7 +19,7 @@ on:
       - "crates/nsh-package/**"
       - "crates/nsh-platform-linux/**"
       - "crates/nsh-testing/**"
-      - "crates/nsh-ui-mobile/**"
+      - "crates/nsh-base/**"
       - "crates/xtask/**"
       - "examples/gallery/fonts/**"
       - "Cargo.toml"
@@ -30,7 +29,6 @@ on:
       - ".github/workflows/linux.yml"
   pull_request:
     paths:
-      - "crates/nsh-animation/**"
       - "crates/nsh-bundler/**"
       - "crates/nsh-cli/**"
       - "crates/nsh-core/**"
@@ -43,7 +41,7 @@ on:
       - "crates/nsh-package/**"
       - "crates/nsh-platform-linux/**"
       - "crates/nsh-testing/**"
-      - "crates/nsh-ui-mobile/**"
+      - "crates/nsh-base/**"
       - "crates/xtask/**"
       - "examples/gallery/fonts/**"
       - "Cargo.toml"

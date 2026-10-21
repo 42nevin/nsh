@@ -8,7 +8,7 @@ use anyhow::{Context as _, bail};
 use crate::ui;
 
 const APP: &str = r##"import { mount, signal, Text, View } from "nsh";
-import { SafeAreaView } from "nsh/ui/mobile";
+import { SafeAreaView } from "nsh/base";
 
 function App() {
   const count = signal(0);
@@ -17,8 +17,8 @@ function App() {
       <Text style={{ fontSize: 28, fontWeight: "600" }}>{count()}</Text>
       <View
         onPress={() => count.update((c) => c + 1)}
-        activeOpacity={0.6}
-        accessibilityRole="button"
+        activeStyle={{ opacity: 0.6 }}
+        role="button"
         style={{ paddingHorizontal: 20, paddingVertical: 12, borderRadius: 10, backgroundColor: "#0969da" }}
       >
         <Text style={{ color: "white", fontSize: 17 }}>Tap</Text>
@@ -42,10 +42,8 @@ test("counts taps", async () => {
 });
 "##;
 
-/// What an app's repository leaves out: generated types and workspaces
-/// (`.nsh`), bundles (`out`) and Cargo's builds (`target`: an app's own
-/// crate, and its hosts once `nsh.json` names a `"rust"` crate).
-const GITIGNORE: &str = ".nsh/\nout/\ntarget/\n";
+/// NSH-generated files stay in `.nsh`; Cargo keeps its standard `target`.
+const GITIGNORE: &str = ".nsh/\ntarget/\n";
 
 /// What `nsh init` makes ([`init`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -270,6 +268,7 @@ fn manifest(package: &str, source: Option<&Path>, desktop: bool) -> String {
         None => format!("{{ version = {version:?}{extra} }}"),
     };
     let core = dep("nsh-core", "");
+    let base = dep("nsh-base", "");
     let mut manifest = format!(
         r#"[package]
 name = {package:?}
@@ -281,13 +280,11 @@ publish = false
 
 [dependencies]
 nsh-core = {core}
+nsh-base = {base}
 "#
     );
     if desktop {
-        manifest.push_str(&format!(
-            "nsh-ui-mobile = {}\nenv_logger = \"0.11\"\n",
-            dep("nsh-ui-mobile", "")
-        ));
+        manifest.push_str("env_logger = \"0.11\"\n");
         for platform in ["linux", "macos", "windows"] {
             manifest.push_str(&format!(
                 r#"
@@ -570,6 +567,8 @@ mod tests {
         let dir = directory("rust");
         init(&dir, Some("123 My App".into()), Template::Rust, None).unwrap();
         let config = config(&dir);
+        assert_eq!(read(&dir, ".gitignore"), GITIGNORE);
+        assert!(!dir.join(".cargo/config.toml").exists());
         assert_eq!(config["rust"], ".");
         assert_eq!(config["root"], "App");
         assert_eq!(config["name"], "123 My App");

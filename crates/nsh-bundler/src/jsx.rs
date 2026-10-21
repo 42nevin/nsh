@@ -57,8 +57,8 @@ pub(crate) enum Compiled {
     /// The renderer's list (`nsh:rt`'s `list`).
     List,
     /// A call of the export, a native component rendering the host element
-    /// of this core tag with more to it (`Canvas`'s drawing, `Modal`'s
-    /// `visible`, `InputAccessoryView` only on iOS).
+    /// of this core tag with more to it (`Canvas`'s drawing, `Dialog`'s
+    /// `open`, `InputAccessoryView` only on iOS).
     Component(&'static str),
 }
 
@@ -74,7 +74,7 @@ pub(crate) const PRIMITIVES: &[(&str, &str, Compiled)] = &[
     ("nsh/video", "Video", Compiled::Host("video")),
     ("nsh/list", "List", Compiled::List),
     ("nsh/canvas", "Canvas", Compiled::Component("canvas")),
-    ("nsh/ui/mobile", "Modal", Compiled::Component("modal")),
+    ("nsh/base", "Dialog", Compiled::Component("modal")),
     (
         "nsh/ios",
         "InputAccessoryView",
@@ -100,6 +100,7 @@ const HELPERS: &[&str] = &[
     "each",
     "merge",
     "setup",
+    "metaUrl",
     "ref",
 ];
 
@@ -147,9 +148,11 @@ pub(crate) fn transform<'a>(
     scoping: &Scoping,
     source: &str,
     prologue: Option<&str>,
+    meta_path: Option<&str>,
     modules: &crate::compile::NativeModules,
 ) -> Result<(), String> {
     let mut compiler = Compiler {
+        meta_path,
         allocator,
         scoping,
         scopes: Vec::new(),
@@ -423,7 +426,7 @@ fn is_function(e: &Expression<'_>) -> bool {
     )
 }
 
-/// `onPress`, `onChangeText`: an event handler prop.
+/// `onPress`, `onChange`: an event handler prop.
 fn is_event(name: &str) -> bool {
     name.len() > 2 && name.starts_with("on") && name.as_bytes()[2].is_ascii_uppercase()
 }
@@ -471,6 +474,16 @@ struct Compiler<'a, 's> {
     components: &'s [(String, String)],
     /// The primitives the module imports, by local name.
     primitives: HashMap<String, Compiled>,
+    /// The module's path in the app: `import.meta.url` becomes its URL.
+    meta_path: Option<&'s str>,
+}
+
+/// Whether `e` is `import.meta.url`.
+fn is_import_meta_url(e: &Expression<'_>) -> bool {
+    let Expression::StaticMemberExpression(m) = e else {
+        return false;
+    };
+    m.property.name == "url" && matches!(&m.object, Expression::ImportMeta(_))
 }
 
 impl<'a> VisitMut<'a> for Compiler<'a, '_> {
@@ -486,7 +499,18 @@ impl<'a> VisitMut<'a> for Compiler<'a, '_> {
     }
 
     fn visit_expression(&mut self, e: &mut Expression<'a>) {
-        if matches!(e, Expression::JSXElement(_) | Expression::JSXFragment(_)) {
+        if let Some(path) = self.meta_path
+            && is_import_meta_url(e)
+        {
+            // The module's own URL, which the runtime knows: the bundle
+            // shares one `import.meta`.
+            let call = format!(
+                "{}({})",
+                self.use_helper("metaUrl"),
+                serde_json::to_string(path).expect("a path is JSON")
+            );
+            *e = self.parse(&call, Vec::new(), e.span());
+        } else if matches!(e, Expression::JSXElement(_) | Expression::JSXFragment(_)) {
             let span = e.span();
             let jsx = e.take_in(&AstBuilder::new(self.allocator));
             let mut g = Gen { holes: Vec::new() };
@@ -1347,7 +1371,8 @@ mod tests {
             source,
             None,
             None,
-            &crate::compile::NativeModules::new(&[nsh_ui_mobile::registry().into()]),
+            Some("App.tsx"),
+            &crate::compile::NativeModules::new(&[nsh_base::registry().into()]),
         )
         .map(|c| c.code)
     }
@@ -1368,6 +1393,22 @@ mod tests {
     /// The code with whitespace collapsed, for comparisons.
     fn flat(code: &str) -> String {
         code.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn import_meta_url_is_the_module_s_own() {
+        let code =
+            compile("const here = new URL(\".\", import.meta.url); const meta = import.meta;")
+                .unwrap();
+        assert!(
+            code.starts_with(r#"import { metaUrl as _$metaUrl } from "nsh:rt";"#),
+            "{code}"
+        );
+        assert!(
+            code.contains(r#"new URL(".", _$metaUrl("App.tsx"))"#),
+            "{code}"
+        );
+        assert!(code.contains("const meta = import.meta;"), "{code}");
     }
 
     #[test]
@@ -1482,9 +1523,9 @@ mod tests {
         assert!(err.contains("write <InputAccessoryView>"), "{err}");
         let err = error("export const a = <each of={[]}>{() => null}</each>;");
         assert!(err.contains("write <Each> (a global: no import)"), "{err}");
-        let err = error(r#"export const a = <button title="x" />;"#);
+        let err = error("export const a = <safe-area-view />;");
         assert!(
-            err.contains(r#"write <Button> and `import { Button } from "nsh/ui/mobile"`"#),
+            err.contains(r#"write <SafeAreaView> and `import { SafeAreaView } from "nsh/base"`"#),
             "{err}"
         );
         let err = error(
@@ -1536,7 +1577,7 @@ mod tests {
         for (module, export, _) in PRIMITIVES {
             assert!(seen.insert(*export), "{export} twice");
             assert!(
-                nsh_core::js::NATIVE_MODULES.contains(module) || *module == "nsh/ui/mobile",
+                nsh_core::js::NATIVE_MODULES.contains(module) || *module == "nsh/base",
                 "{module}"
             );
         }
@@ -1729,14 +1770,14 @@ mod tests {
     fn imports_tags_use_stay_and_type_only_ones_go() {
         let code = flat(
             &compile(
-                r#"import { Stepper, StepperRef, Card } from "nsh/ui/mobile";
-            let r: StepperRef | undefined;
-            export const a = <Stepper ref={r} />;"#,
+                r#"import { SafeAreaView, Edge, Insets } from "nsh/base";
+            let r: Insets | undefined;
+            export const a = <SafeAreaView ref={r} />;"#,
             )
             .unwrap(),
         );
         assert!(
-            code.contains(r#"import { Stepper } from "nsh/ui/mobile";"#),
+            code.contains(r#"import { SafeAreaView } from "nsh/base";"#),
             "{code}"
         );
         assert!(

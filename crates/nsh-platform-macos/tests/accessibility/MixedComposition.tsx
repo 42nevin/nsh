@@ -28,7 +28,7 @@ function Action(props) {
     pointerEvents={props.assistiveOnly ? 'none' : undefined} focusable={props.assistiveOnly ? false : undefined}
     ref={node => { ref(props.id, node); node?.command('bind_ref', { id: props.id, ref: refs[props.id] }); }} onPress={deliver} style={{ width: 220, height: 32 }} />;
   return <View ref={node => ref(props.id, node)} testID={props.id}
-    accessibilityLabel={props.title} accessibilityRole="button" accessibilityState={{ disabled: !props.enabled }}
+    accessibilityLabel={props.title} role="button" accessibilityState={{ disabled: !props.enabled }}
     pointerEvents={props.assistiveOnly ? 'none' : undefined} focusable={props.assistiveOnly ? false : undefined}
     disabled={!props.enabled} onPress={props.listening === false || props.longOnly ? undefined : () => deliver(null)}
     onLongPress={props.longOnly || props.bothHandlers ? () => deliver({ source: 'longPress' }) : undefined}

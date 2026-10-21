@@ -1,6 +1,6 @@
 # Packaging and embedding
 
-- `nsh package <entry> --target ios|ios-simulator|android|linux|macos|windows|gpui` builds an installable app from the prebuilt runtime: metadata from
+- `nsh package <entry> --target ios|ios-simulator|android|linux|macos|windows` builds an installable app from the prebuilt runtime: metadata from
   `nsh.json` next to the entry (`name`, `id`, `version`, `build`, `icon`; `appearance` also sets `UIUserInterfaceStyle`
   and a dark window theme, so the launch screen is in it) or flags. iOS: `.app`, `.ipa` with `--sign <identity>
   --profile <file.mobileprovision>` (entitlements come from the profile; icons are compiled by `actool` into `Assets.car`).
@@ -20,11 +20,8 @@
   `nsh\bundle.nshc`, `nsh\assets\` and `nsh\app.json` (the window title, the app id, which groups the app's windows in
   the taskbar, the version and the appearance, which the window opens in); plus the same as `<name>.zip`. No tools
   are needed; `--run` launches the executable.
-  GPUI: packaged as the native apps of the machine it runs on are (Linux's directory and `.tar.gz`, macOS' `.app`,
-  Windows' directory and `.zip`), with the GPUI release runner (`crates/gpui/nsh-gpui-app`) as the executable; it finds
-  `nsh/` next to itself, or `Contents/Resources/nsh` inside an app bundle (`nsh_gpui_app::resources`). The Linux
-  runner links WebKitGTK 4.1 (GTK 3) and GStreamer dynamically (features `webview`, `video`): they must be installed
-  where the package runs, as GTK 4 must for Linux packages.
+  GPUI is the backend for embedding in GPUI and GPUI Kit apps (below), which ship it in their own executable: `nsh
+  package` refuses `--target gpui` and names this OS's target, the one backend each desktop packages apps with.
 - Embedding: iOS apps link `NativeShell.xcframework` and `import NativeShell` (Swift: `NshAppView`, a `UIView`;
   `NshTrust`, `NshPackage`, `NshLimits`, `NshError`); Android apps add `nsh.aar` and use `com.longbridge.nsh.NshView`.
   `*Dev` / `-dev` variants can also load from a dev server. See `examples/embed-*`. Rust desktop apps use the platform
@@ -127,9 +124,9 @@ NSH draws (`src/layers.rs`).
 - **Overlays.** The surface draws only inside its bounds and takes the mouse only on its hitbox: GPUI Kit's dialogs,
   sheets, popovers and notifications (drawn by `Root` above the content) cover it and take the input, while its app
   keeps running.
-- **The host's theme in NSH.** `AppView::set_theme(Some(theme), cx)` gives the surface a `nsh_core::ui::Theme`
-  (re-exported as `nsh_platform_gpui::Theme`) and `set_theme_json(json, cx)` one in gpui-kit's JSON: the components of
-  the UI sets render with it instead of the app's own theme (`Core::set_host_theme`, which wins until cleared with
+- **The host's theme in NSH.** `AppView::set_theme(Some(theme), cx)` gives the surface a `nsh_base::Theme`
+  (re-exported as `nsh_platform_gpui::Theme`) and `set_theme_json(json, cx)` one in gpui-kit's JSON: the app
+  renders with its tokens instead of its own theme's (`Core::set_host_tokens`, which win until cleared with
   `None`), and the surface is drawn on its `background`. The app's classes naming its tokens (`bg-primary`,
   `bg-sidebar`, `rounded-(--radius)`; every key of the theme, so a GPUI Kit theme's own keys too) restyle with it;
   keys it lacks keep the app's values. It applies at once and to every app loaded later, in their
@@ -158,7 +155,7 @@ NSH draws (`src/layers.rs`).
   among the app's text fields, and a click focuses that handle too.
 - **Limits.** `AppOptions::limits` (or `AppView::set_limits`, from the next load) are the VM limits of the apps the
   view runs, as `NshAppView.limits` and `NshView.setLimits` on iOS and Android: `Limits::default()` (an app embedded
-  in another app) unless set; `nsh-gpui-host` and `nsh-gpui-app` run apps on their own, with `Limits::standalone()`
+  in another app) unless set; the development host `nsh-gpui-host` runs apps on its own, with `Limits::standalone()`
   (`sandbox.md`).
 - **Storage.** Each app keeps `nsh/storage` in `<data dir>/<app id>/storage.json`, which the engine picks
   (`EngineConfig::data_dir`, `app_dir_name(App::app_id())`, `default` without a valid id): the id travels with the app

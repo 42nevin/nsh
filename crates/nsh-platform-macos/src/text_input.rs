@@ -40,7 +40,9 @@ use std::{
 };
 
 use nsh_core::{
-    Color, EventKind, EventPayload, InputConfig, PayloadValue, Rect, SubmitBehavior, TextAlign,
+    Bounds, Color, EventKind, EventPayload, InputConfig, PayloadValue, Points, SubmitBehavior,
+    TextAlign,
+    geometry::{Point, Size, px},
     tailwind::state,
 };
 use objc2::{
@@ -207,7 +209,7 @@ pub(crate) struct InputState {
     /// A configuration was applied (auto focus happens on the first).
     configured: Cell<bool>,
     /// Content box; the whole view until the core sends one.
-    content: Cell<Option<Rect>>,
+    content: Cell<Option<Bounds<Points>>>,
     /// User edits reported to the engine.
     count: Cell<u32>,
     /// A change made here, not by the user, is being applied.
@@ -227,7 +229,7 @@ pub(crate) struct InputState {
     key_mods: Cell<NSEventModifierFlags>,
     /// The animated text color applied.
     anim_color: Cell<Option<Color>>,
-    ctx: Ctx,
+    cx: Ctx,
 }
 
 /// What the editors' callbacks need, without keeping anything alive.
@@ -614,7 +616,7 @@ macro_rules! define_field {
                 fn become_first_responder(&self) -> bool {
                     // AppKit selects the whole text as the field takes the
                     // focus: a step, reported (if it stays) with the focus.
-                    let input = self.ivars().get().and_then(|ctx| ctx.input.upgrade());
+                    let input = self.ivars().get().and_then(|cx| cx.input.upgrade());
                     if let Some(input) = &input {
                         input.focusing.set(true);
                     }
@@ -623,8 +625,8 @@ macro_rules! define_field {
                     if let Some(input) = &input {
                         input.focusing.set(false);
                     }
-                    if ok && let Some(ctx) = self.ivars().get() {
-                        ctx.focus_changed(true);
+                    if ok && let Some(cx) = self.ivars().get() {
+                        cx.focus_changed(true);
                     }
                     ok
                 }
@@ -634,8 +636,8 @@ macro_rules! define_field {
                     // SAFETY: NSTextField's own handling of its field
                     // editor's end (it implements NSTextDelegate).
                     let _: () = unsafe { msg_send![super(self), textDidEndEditing: notification] };
-                    if let Some(ctx) = self.ivars().get() {
-                        ctx.focus_changed(false);
+                    if let Some(cx) = self.ivars().get() {
+                        cx.focus_changed(false);
                     }
                 }
 
@@ -661,7 +663,7 @@ macro_rules! define_field {
                     ok && self
                         .ivars()
                         .get()
-                        .is_none_or(|ctx| ctx.should_change(text_view, range, replacement))
+                        .is_none_or(|cx| cx.should_change(text_view, range, replacement))
                 }
 
                 #[unsafe(method(textViewDidChangeSelection:))]
@@ -674,17 +676,17 @@ macro_rules! define_field {
                             msg_send![super(self), textViewDidChangeSelection: notification]
                         };
                     }
-                    if let Some(ctx) = self.ivars().get() {
-                        ctx.selection_changed();
+                    if let Some(cx) = self.ivars().get() {
+                        cx.selection_changed();
                     }
                 }
             }
         );
 
         impl $name {
-            fn create(mtm: MainThreadMarker, ctx: Ctx) -> Retained<NSTextField> {
+            fn create(mtm: MainThreadMarker, cx: Ctx) -> Retained<NSTextField> {
                 let cell = OnceCell::new();
-                let _ = cell.set(ctx);
+                let _ = cell.set(cx);
                 let this = Self::alloc(mtm).set_ivars(cell);
                 // SAFETY: NSTextField's designated initializer.
                 let this: Retained<Self> =
@@ -737,7 +739,7 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            let input = self.ivars().get().and_then(|ctx| ctx.input.upgrade());
+            let input = self.ivars().get().and_then(|cx| cx.input.upgrade());
             if let Some(input) = &input {
                 input.key_mods.set(event.modifierFlags());
             }
@@ -752,8 +754,8 @@ define_class!(
         fn become_first_responder(&self) -> bool {
             // SAFETY: NSTextView's own method.
             let ok: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
-            if ok && let Some(ctx) = self.ivars().get() {
-                ctx.focus_changed(true);
+            if ok && let Some(cx) = self.ivars().get() {
+                cx.focus_changed(true);
             }
             ok
         }
@@ -762,8 +764,8 @@ define_class!(
         fn resign_first_responder(&self) -> bool {
             // SAFETY: NSTextView's own method.
             let ok: bool = unsafe { msg_send![super(self), resignFirstResponder] };
-            if ok && let Some(ctx) = self.ivars().get() {
-                ctx.focus_changed(false);
+            if ok && let Some(cx) = self.ivars().get() {
+                cx.focus_changed(false);
             }
             ok
         }
@@ -973,7 +975,7 @@ impl InputState {
         }
         self.applying.set(false);
         self.update_placeholder();
-        self.ctx.selection_changed();
+        self.cx.selection_changed();
     }
 
     /// The text color: an animated one over the config's.
@@ -1022,12 +1024,12 @@ impl InputState {
 pub(crate) fn create(surface: &Rc<Surface>, view: &NshView) {
     let mtm = surface.mtm;
     let input = Rc::new_cyclic(|weak| {
-        let ctx = Ctx {
+        let cx = Ctx {
             surface: Rc::downgrade(surface),
             view: objc2::rc::Weak::new(view.ns()),
             input: weak.clone(),
         };
-        let delegate = InputDelegate::alloc(mtm).set_ivars(ctx.clone());
+        let delegate = InputDelegate::alloc(mtm).set_ivars(cx.clone());
         // SAFETY: NSObject's initializer.
         let delegate: Retained<InputDelegate> = unsafe { msg_send![super(delegate), init] };
         let placeholder = NSTextField::labelWithString(&NSString::new(), mtm);
@@ -1038,7 +1040,7 @@ pub(crate) fn create(surface: &Rc<Surface>, view: &NshView) {
             cell.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
         }
         InputState {
-            editor: RefCell::new(new_editor(mtm, &ctx, &delegate, false, false)),
+            editor: RefCell::new(new_editor(mtm, &cx, &delegate, false, false)),
             delegate,
             pad: InputPad::create(mtm),
             placeholder,
@@ -1054,7 +1056,7 @@ pub(crate) fn create(surface: &Rc<Surface>, view: &NshView) {
             focusing: Cell::new(false),
             key_mods: Cell::new(NSEventModifierFlags::empty()),
             anim_color: Cell::new(None),
-            ctx,
+            cx,
         }
     });
     view.state_mut().input = Some(input);
@@ -1063,7 +1065,7 @@ pub(crate) fn create(surface: &Rc<Surface>, view: &NshView) {
 /// A new editor, hooked to `delegate`.
 fn new_editor(
     mtm: MainThreadMarker,
-    ctx: &Ctx,
+    cx: &Ctx,
     delegate: &InputDelegate,
     multiline: bool,
     secure: bool,
@@ -1078,7 +1080,7 @@ fn new_editor(
         scroller.setAutohidesScrollers(true);
         let size = scroller.contentSize();
         let cell = OnceCell::new();
-        let _ = cell.set(ctx.clone());
+        let _ = cell.set(cx.clone());
         let this = TextArea::alloc(mtm).set_ivars(cell);
         // SAFETY: NSTextView's initializer (it makes its own text system).
         let area: Retained<TextArea> = unsafe {
@@ -1107,9 +1109,9 @@ fn new_editor(
         Editor::Area { scroller, view }
     } else {
         let field = if secure {
-            SecureField::create(mtm, ctx.clone())
+            SecureField::create(mtm, cx.clone())
         } else {
-            TextField::create(mtm, ctx.clone())
+            TextField::create(mtm, cx.clone())
         };
         field.setBezeled(false);
         field.setBordered(false);
@@ -1144,7 +1146,7 @@ pub(crate) fn config(surface: &Rc<Surface>, view: &NshView, config: &InputConfig
         let text = old.text();
         let focused = input.focused.get();
         if focused {
-            input.ctx.unfocus();
+            input.cx.unfocus();
         }
         old.host().removeFromSuperview();
         if let Editor::Area { .. } = old {
@@ -1152,7 +1154,7 @@ pub(crate) fn config(surface: &Rc<Surface>, view: &NshView, config: &InputConfig
         }
         let editor = new_editor(
             surface.mtm,
-            &input.ctx,
+            &input.cx,
             &input.delegate,
             config.multiline,
             config.secure,
@@ -1236,9 +1238,9 @@ fn paragraph(config: &InputConfig, align: NSTextAlignment) -> Retained<NSMutable
     let style = NSMutableParagraphStyle::new();
     style.setAlignment(align);
     let line_height = config.style.line_height;
-    if line_height > 0.0 {
-        style.setMinimumLineHeight(line_height as CGFloat);
-        style.setMaximumLineHeight(line_height as CGFloat);
+    if line_height > Points::ZERO {
+        style.setMinimumLineHeight(line_height.0 as CGFloat);
+        style.setMaximumLineHeight(line_height.0 as CGFloat);
     }
     style
 }
@@ -1304,23 +1306,32 @@ fn auto_focus(surface: &Rc<Surface>, input: &Rc<InputState>) {
 /// the pad at the view's size).
 fn place(view: &NshView, input: &InputState) {
     let frame = view.state().frame;
-    let bounds = Rect {
-        x: 0.0,
-        y: 0.0,
-        width: frame.width,
-        height: frame.height,
+    let bounds = Bounds {
+        origin: Point {
+            x: Points(0.0),
+            y: Points(0.0),
+        },
+        size: Size {
+            width: frame.size.width,
+            height: frame.size.height,
+        },
     };
     let content = input.content.get().unwrap_or(bounds);
-    if content.width <= 0.0 || content.height <= 0.0 {
+    if content.size.width.0 <= 0.0 || content.size.height.0 <= 0.0 {
         return;
     }
     view.set_native(&input.pad, bounds);
     let pad = &input.pad;
-    let host = |sub: &NSView, r: Rect| {
+    let host = |sub: &NSView, r: Bounds<Points>| {
         if crate::view::superview(sub).as_deref() != Some(&**pad) {
             pad.addSubview(sub);
         }
-        sub.setFrame(ns_rect(r.x, r.y, r.width, r.height));
+        sub.setFrame(ns_rect(
+            r.origin.x.0,
+            r.origin.y.0,
+            r.size.width.0,
+            r.size.height.0,
+        ));
     };
     if let Some(window) = view.ns().window()
         && !window.autorecalculatesKeyViewLoop()
@@ -1338,21 +1349,27 @@ fn place(view: &NshView, input: &InputState) {
             // the content box.
             let pad = FIELD_PADDING;
             let height = field.intrinsicContentSize().height as f32;
-            let rect = Rect {
-                x: content.x - pad,
-                y: content.y + (content.height - height) / 2.0,
-                width: content.width + 2.0 * pad,
-                height,
+            let rect = Bounds {
+                origin: Point {
+                    x: Points(content.origin.x.0 - pad),
+                    y: Points(content.origin.y.0 + (content.size.height.0 - height) / 2.0),
+                },
+                size: Size {
+                    width: Points(content.size.width.0 + 2.0 * pad),
+                    height: Points(height),
+                },
             };
             host(field, rect);
         }
         Editor::Area { scroller, .. } => {
             // The placeholder goes first: hosted views stack in order. A
             // label insets its text as a field does.
-            let label = Rect {
-                x: content.x - FIELD_PADDING,
-                width: content.width + 2.0 * FIELD_PADDING,
-                ..content
+            let label = Bounds {
+                origin: Point::new(content.origin.x - px(FIELD_PADDING), content.origin.y),
+                size: Size::new(
+                    content.size.width + px(2.0 * FIELD_PADDING),
+                    content.size.height,
+                ),
             };
             host(&input.placeholder, label);
             host(scroller, content);
@@ -1364,6 +1381,14 @@ fn place(view: &NshView, input: &InputState) {
 const FIELD_PADDING: f32 = 2.0;
 
 /// `InputValue`: JS's text, unless the user typed since JS saw `count`.
+/// The text input `view` holds now (`None`: it is no input).
+#[cfg(feature = "dev")]
+pub(crate) fn current_text(view: &NshView) -> Option<String> {
+    let input = view.state().input.clone()?;
+    let text = input.editor.borrow().text();
+    Some(text)
+}
+
 pub(crate) fn value(view: &NshView, text: &str, count: u32) {
     let Some(input) = view.state().input.clone() else {
         return;
@@ -1398,7 +1423,7 @@ pub(crate) fn animated(view: &NshView) {
 }
 
 /// `InputContent`.
-pub(crate) fn content(view: &NshView, content: Rect) {
+pub(crate) fn content(view: &NshView, content: Bounds<Points>) {
     let Some(input) = view.state().input.clone() else {
         return;
     };
@@ -1425,7 +1450,7 @@ pub(crate) fn focus(view: &NshView) {
 pub(crate) fn blur(view: &NshView) {
     let input = view.state().input.clone();
     if let Some(input) = input {
-        input.ctx.unfocus();
+        input.cx.unfocus();
     }
 }
 
