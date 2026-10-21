@@ -786,8 +786,12 @@ impl Screen {
     /// ancestor that hears long presses or presses.
     pub(crate) fn long_pressable(&self, selector: &Selector) -> Pick {
         self.pick(selector, |id| {
+            // A view watching touches hears a held finger too (a context
+            // menu's trigger).
             let target = self.up_to(id, |v| {
-                v.events.contains(EventKind::LongPress) || v.events.contains(EventKind::Press)
+                v.events.contains(EventKind::LongPress)
+                    || v.events.contains(EventKind::Press)
+                    || v.events.contains(EventKind::Touch)
             })?;
             (!self.disabled_from(id, Some(target))).then_some(target)
         })
@@ -857,6 +861,21 @@ impl Screen {
             }
         }
         None
+    }
+
+    /// The views around `id` (it included, the root too) that listen to
+    /// touches, innermost first: the path a platform reports a finger with.
+    pub(crate) fn touch_path(&self, mut id: NodeId) -> Vec<NodeId> {
+        let mut path = Vec::new();
+        loop {
+            if self.hears(id, EventKind::Touch) {
+                path.push(id);
+            }
+            match self.nodes.get(&id).and_then(|v| v.parent) {
+                Some(parent) => id = parent,
+                None => return path,
+            }
+        }
     }
 
     /// `id` and the views around it, innermost first: what a finger on it
