@@ -273,6 +273,8 @@ impl Surface {
 
     /// Starts `config`'s app, replacing what ran.
     pub(crate) fn start(self: &Rc<Self>, mut config: EngineConfig) {
+        #[cfg(feature = "engine-identity-diagnostics")]
+        let identity = crate::engine_identity::start_attempt(self.key);
         self.stop();
         let env = self.environment.get();
         config.viewport = Size::new(env.window.width, env.window.height);
@@ -287,20 +289,41 @@ impl Surface {
         };
         *self.rx.borrow_mut() = Some(rx);
         *self.pending.borrow_mut() = pending;
-        match Engine::start(config, CoreTextEngine::default, sink) {
+        #[cfg(feature = "engine-identity-diagnostics")]
+        let make_text_engine = move || {
+            let text_engine = CoreTextEngine::default();
+            crate::engine_identity::engine_enter(identity);
+            text_engine
+        };
+        #[cfg(not(feature = "engine-identity-diagnostics"))]
+        let make_text_engine = CoreTextEngine::default;
+        match Engine::start(config, make_text_engine, sink) {
             Ok(engine) => {
                 if let Some(monitor) = &*self.perf.borrow() {
                     engine.control().set_perf_monitor(Some(monitor.clone()));
                 }
                 *self.control.borrow_mut() = Some(engine.control());
                 *self.engine.borrow_mut() = Some(engine);
+                #[cfg(feature = "engine-identity-diagnostics")]
+                crate::engine_identity::start_returned(identity, true);
             }
-            Err(err) => log::error!("cannot start the engine: {err}"),
+            Err(err) => {
+                #[cfg(feature = "engine-identity-diagnostics")]
+                crate::engine_identity::start_returned(identity, false);
+                log::error!("cannot start the engine: {err}");
+            }
         }
     }
 
     /// Stops the app and removes its views.
     pub(crate) fn stop(&self) {
+        #[cfg(feature = "engine-identity-diagnostics")]
+        {
+            let has_engine = self.engine.borrow().is_some();
+            if has_engine {
+                crate::engine_identity::stop_checkpoint(self.key);
+            }
+        }
         // Dropping the engine joins its thread.
         self.control.borrow_mut().take();
         self.engine.borrow_mut().take();

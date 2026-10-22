@@ -31,6 +31,8 @@ mod chrome;
 mod decor;
 #[cfg(feature = "dev")]
 pub mod dev;
+#[cfg(feature = "engine-identity-diagnostics")]
+mod engine_identity;
 mod file_drop;
 mod fps;
 mod gpu;

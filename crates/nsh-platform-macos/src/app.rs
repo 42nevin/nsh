@@ -201,6 +201,8 @@ impl AppView {
             #[cfg(feature = "dev")]
             dev: RefCell::new(None),
         });
+        #[cfg(feature = "engine-identity-diagnostics")]
+        crate::engine_identity::view_created(Rc::as_ptr(&view) as usize, view.surface.key());
         crate::system::watch_environment(&view.surface);
         if view.options.borrow().fps {
             view.set_fps_monitor(true);
