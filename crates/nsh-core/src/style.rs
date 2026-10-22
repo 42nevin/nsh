@@ -976,6 +976,9 @@ pub(crate) struct Pending {
     outline_width: Points,
     /// `outlineStyle: "none"` / `"hidden"`.
     outline_hidden: bool,
+    /// `position: "sticky"`: laid out as `relative`, its insets where it
+    /// sticks in the viewport of the scroll view around it.
+    pub(crate) sticky_position: bool,
     /// `animationDuration`.
     animation_duration: Option<f32>,
     /// `animationDelay`.
@@ -1252,7 +1255,7 @@ macro_rules! style_keys {
 
 style_keys! {
     Display = "display": Layout "\"flex\" | \"grid\" | \"block\" | \"none\"",
-    Position = "position": Layout "\"relative\" | \"absolute\"",
+    Position = "position": Layout "\"relative\" | \"absolute\" | \"sticky\"" "`sticky`: in the flow, and while its parent shows it stays `top` (in a horizontal scroll view `left`) from the start of the viewport of the scroll view around it, as far as the end of its parent's content box; it draws above its siblings of the same `zIndex`.",
     FlexDirection = "flexDirection": Layout "\"row\" | \"column\" | \"row-reverse\" | \"column-reverse\"",
     FlexWrap = "flexWrap": Layout "\"wrap\" | \"nowrap\" | \"wrap-reverse\"",
     Flex = "flex": Layout "number",
@@ -2063,11 +2066,14 @@ impl Style {
                 }
             }
             StyleKey::Position => {
-                l.position = match keyword(value)? {
-                    None | Some("relative") => Position::Relative,
-                    Some("absolute") => Position::Absolute,
+                let (position, sticky) = match keyword(value)? {
+                    None | Some("relative") => (Position::Relative, false),
+                    Some("absolute") => (Position::Absolute, false),
+                    Some("sticky") => (Position::Relative, true),
                     Some(_) => return Err(StyleError::InvalidValue),
-                }
+                };
+                l.position = position;
+                self.pending.sticky_position = sticky;
             }
             StyleKey::FlexDirection => {
                 l.flex_direction = match keyword(value)? {

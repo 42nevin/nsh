@@ -54,6 +54,13 @@
   `caret-*`) lose to explicit props; `placeholder:text-*` / `selection:text-*` lose to the `placeholderColor` /
   `selectionColor` style keys. Not supported: `peer-*`, pseudo-elements, arbitrary CSS
   properties; `space-x/y-*` are gaps.
+- **`position: "sticky"`** is laid out `relative` with its insets kept as where it sticks (`Node::sticky`): after
+  layout the core gives it a range of travel in the offsets of the nearest scroll view or own list around it (from its
+  place less its `top`, or `left` in a horizontal one, to where its end meets its parent's content box) and sends it
+  with that view's sticky list rows (`core/sticky.rs`, `MountItem::StickyCells`), which the platforms pin on every
+  scroll. It draws above its siblings of the same `zIndex` (`Node::stack_rank`), as above a page's in-flow boxes.
+  `bottom` / `right` stickiness and a zoomable scroll view are not supported. The `sticky` class keeps the meaning
+  v0.2.0 recorded (it sets nothing).
 - **Text style inheritance** (CSS-like): a view's text properties (color, font, size, alignment, ...) pass to the texts and inputs
   inside it, so `class="text-white"` on a button styles its label. Inset padding / margin (set by Rust
   components: `SafeAreaView`, `KeyboardAvoidingView`) are added to the resolved padding / margin, so classes and
