@@ -168,6 +168,10 @@ Things that were found the hard way. Read the section of the area you change bef
   real tap through XCUITest reproduced it). `PressRecognizer` is not preventable by tap recognizers on a `UIWindow`
   (`press.rs`, `is_window_tap`); edge-gesture gates are not taps and still cancel presses.
 
+- **iOS, the screen scale**: a `UIView` that draws nothing itself keeps a `contentScaleFactor` of 1 on a 3x screen, and a
+  drawn one raises it while zoomed, so neither is the screen's scale. Images decoded at it came out at a third of their
+  pixels and blurred; the scale is the trait collection's `displayScale` (`Mounter::display_scale`).
+
 ## Android
 
 - **Android, JNI**: cache classes and method ids in `JNI_OnLoad`; wrap every call from the (permanently attached) engine thread in
