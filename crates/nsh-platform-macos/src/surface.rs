@@ -274,6 +274,8 @@ impl Surface {
     /// Starts `config`'s app, replacing what ran.
     pub(crate) fn start(self: &Rc<Self>, mut config: EngineConfig) {
         self.stop();
+        #[cfg(feature = "engine-name-diagnostics")]
+        let identity = crate::engine_name::next_start(self.key);
         let env = self.environment.get();
         config.viewport = Size::new(env.window.width, env.window.height);
         config.environment = env;
@@ -287,15 +289,29 @@ impl Surface {
         };
         *self.rx.borrow_mut() = Some(rx);
         *self.pending.borrow_mut() = pending;
-        match Engine::start(config, CoreTextEngine::default, sink) {
+        #[cfg(feature = "engine-name-diagnostics")]
+        let make_text_engine = move || {
+            let text_engine = CoreTextEngine::default();
+            crate::engine_name::engine_enter(identity);
+            text_engine
+        };
+        #[cfg(not(feature = "engine-name-diagnostics"))]
+        let make_text_engine = CoreTextEngine::default;
+        match Engine::start(config, make_text_engine, sink) {
             Ok(engine) => {
                 if let Some(monitor) = &*self.perf.borrow() {
                     engine.control().set_perf_monitor(Some(monitor.clone()));
                 }
                 *self.control.borrow_mut() = Some(engine.control());
                 *self.engine.borrow_mut() = Some(engine);
+                #[cfg(feature = "engine-name-diagnostics")]
+                crate::engine_name::installed(identity, true);
             }
-            Err(err) => log::error!("cannot start the engine: {err}"),
+            Err(err) => {
+                #[cfg(feature = "engine-name-diagnostics")]
+                crate::engine_name::installed(identity, false);
+                log::error!("cannot start the engine: {err}");
+            }
         }
     }
 

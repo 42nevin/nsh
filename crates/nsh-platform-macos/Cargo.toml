@@ -20,6 +20,8 @@ js = ["nsh-engine/js"]
 dev = ["js", "dep:nsh-dev", "dep:nsh-testing"]
 # Opt-in fixture driven by a separate trusted SDK client on a window server.
 accessibility-tests = ["js"]
+# Isolated, default-off startup-name diagnostic.
+engine-name-diagnostics = []
 
 [[test]]
 name = "accessibility"

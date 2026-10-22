@@ -201,6 +201,8 @@ impl AppView {
             #[cfg(feature = "dev")]
             dev: RefCell::new(None),
         });
+        #[cfg(feature = "engine-name-diagnostics")]
+        crate::engine_name::view_created(Rc::as_ptr(&view) as usize, view.surface.key());
         crate::system::watch_environment(&view.surface);
         if view.options.borrow().fps {
             view.set_fps_monitor(true);
@@ -247,6 +249,8 @@ impl AppView {
             .native
             .set_asset_base(options.asset_base.clone());
         self.surface.native.set_app(&config.app);
+        #[cfg(feature = "engine-name-diagnostics")]
+        let _name_load = crate::engine_name::LoadScope::new(self as *const Self as usize);
         self.surface.start(config);
     }
 
