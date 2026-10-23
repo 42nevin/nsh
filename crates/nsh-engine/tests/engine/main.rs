@@ -25,6 +25,7 @@ mod fetch;
 mod fs;
 mod handle_bench;
 mod host;
+mod host_channel;
 mod host_modules;
 mod hot;
 mod hover;

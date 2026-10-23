@@ -740,12 +740,12 @@ impl Capabilities {
 }
 
 /// What host function names (`nsh/host`) are made of, for messages.
-pub(crate) const HOST_NAME_CHARS: &str = "1 to 128 of A-Z a-z 0-9 _ . : -, without `..`";
+pub const HOST_NAME_CHARS: &str = "1 to 128 of A-Z a-z 0-9 _ . : -, without `..`";
 
 /// Whether `name` may name a function of the embedding host: 1 to 128 of
 /// `[A-Za-z0-9_.:-]`, without `..`. Hosts may put a name in a path or a URL,
 /// so no name escapes the prefix a grant gives it.
-pub(crate) fn valid_host_name(name: &str) -> bool {
+pub fn valid_host_name(name: &str) -> bool {
     (1..=128).contains(&name.len())
         && name
             .bytes()

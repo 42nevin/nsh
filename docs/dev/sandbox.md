@@ -119,3 +119,9 @@ buffers are native memory the heap limit does not count, so these bound one call
 eleven bare specifiers and nothing else: `node:` prefixes and other Node modules (`fs`, `child_process`,
 `events`, ...) do not import, so no module reaches files, processes or sockets around these checks. See
 `website/modules/standard-modules.md` for the public surface.
+
+`nsh/host`'s native SDK transport (`embedding.md` "The host channel") checks `capabilities.host` for calls and
+posts before invoking embedding code, using the same name rules and grants as the platform transport. Its bounds are checked in Rust (`nsh_core::host_channel`, `nsh-js` `host_channel.rs`): event names of 1 to 256 bytes,
+data as `protocol::to_json` bounds it (64 levels, 2^20 entries), 1024 calls waiting for answers per VM (`RangeError`
+past it) and 256 events kept for listeners not there yet (the oldest dropped), in the VM and in the channel while no
+app runs.

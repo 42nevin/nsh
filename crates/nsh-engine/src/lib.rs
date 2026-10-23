@@ -11,6 +11,7 @@
 mod access;
 mod app_directory;
 mod error;
+mod host_channel;
 mod local_storage;
 #[cfg(feature = "net")]
 pub mod net;
@@ -43,6 +44,7 @@ use nsh_core::{
     PayloadValue, TextEngine, time::Instant, ui::JsEvent,
 };
 pub use nsh_core::{
+    JsonValue,
     access::{Access, Capabilities},
     geometry::{self, Bounds, Edges, Point, Points, Size},
     js::{HostLimits, Limits},
@@ -63,8 +65,11 @@ use rustc_hash::FxHashMap;
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::{FileStorage, data_dir};
 
-pub use crate::error::{AppError, AppErrorKind, PackageInfo};
 use crate::script::{NetworkQueue, RequestId, Script};
+pub use crate::{
+    error::{AppError, AppErrorKind, PackageInfo},
+    host_channel::{HostCall, HostChannel, HostReply},
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 /// Stack size of the engine thread. QuickJS recursion (and deep Solid
@@ -681,6 +686,11 @@ pub struct EngineConfig {
     /// clipboard (a test's own: `nsh test --target`); `None`: the
     /// platform's.
     pub clipboard: Option<Arc<dyn nsh_core::clipboard::ClipboardBackend>>,
+    /// The embedding app's channel with the app (`nsh/host`): its launch
+    /// parameters, its events and its handlers of the app's calls and
+    /// posts. A view keeps one for every app it runs; the default is a
+    /// channel of the engine's own, with none of them.
+    pub host: HostChannel,
     /// Answers the app's picks (`Picker.pickImages`) in place of the
     /// platform's picker: the embedding app's own picker, or a test's
     /// files; `None`: the platform's.
@@ -774,6 +784,7 @@ impl EngineConfig {
             context: EngineContext::default(),
             pinned: EnvironmentPins::default(),
             clipboard: None,
+            host: HostChannel::default(),
             picker: None,
         }
     }
@@ -828,6 +839,7 @@ impl std::fmt::Debug for EngineConfig {
             .field("context", &self.context)
             .field("pinned", &self.pinned)
             .field("clipboard", &self.clipboard.is_some())
+            .field("host", &self.host)
             .field("picker", &self.picker.is_some())
             .finish()
     }
@@ -863,6 +875,11 @@ enum Message {
     Perf(Option<Arc<perf::PerfMonitor>>),
     /// The embedding app's design tokens.
     Tokens(Option<Box<Tokens>>),
+    /// The embedding app's event (`nsh/host`'s `host.on`): its name and
+    /// data.
+    HostEvent(String, nsh_core::JsonValue),
+    /// The embedding app's answer to call `.0` (`host.call`).
+    HostReply(u64, Result<nsh_core::JsonValue, String>),
     /// Moves a manual clock forward by this much, then calls back.
     Advance(std::time::Duration, Box<dyn FnOnce() + Send>),
     /// Sent by a dropped [`Engine`] (there is none in WebAssembly).
@@ -1028,6 +1045,8 @@ impl EngineControl {
 pub struct Engine {
     control: EngineControl,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Serializes shutdown with the embedding app's sends.
+    host: HostChannel,
     /// Interrupts running JS when the engine stops.
     stop: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -1063,6 +1082,7 @@ impl Engine {
         let engine_tx = tx.clone();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let engine_stop = stop.clone();
+        let host = config.host.clone();
         let thread = std::thread::Builder::new()
             .name("nsh-engine".into())
             .stack_size(ENGINE_STACK_SIZE)
@@ -1070,6 +1090,7 @@ impl Engine {
         Ok(Engine {
             control: EngineControl { tx },
             thread: Some(thread),
+            host,
             stop,
         })
     }
@@ -1085,8 +1106,7 @@ impl Drop for Engine {
     fn drop(&mut self) {
         // Dropped on the platform's main thread: a script still running is
         // aborted rather than waited for.
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = self.control.tx.send(Message::Shutdown);
+        self.host.shutdown(&self.control.tx, &self.stop);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -1286,6 +1306,9 @@ struct Driver<M: TextEngine + 'static> {
     /// When the last display frame ran, on a clock that moves with the
     /// display's frames: the next one comes a frame after it.
     last_frame: Option<Instant>,
+    /// The engine's attachment to the embedding app's channel: its events
+    /// come here while the engine runs.
+    _host: host_channel::HostAttachment,
 }
 
 impl<M: TextEngine + 'static> Driver<M> {
@@ -1301,6 +1324,9 @@ impl<M: TextEngine + 'static> Driver<M> {
         config.pinned.apply(&mut config.environment);
         #[cfg(feature = "js")]
         let system_tx = tx.clone();
+        #[cfg(feature = "js")]
+        let host_bridge = config.host.bridge(tx.clone());
+        let host_tx = tx.clone();
         let text_engine = Rc::new(text_engine);
         let access = Arc::new(match &config.app {
             App::Js(bundle) => bundle.policy.access(),
@@ -1428,6 +1454,7 @@ impl<M: TextEngine + 'static> Driver<M> {
             clock: config.clock.clone(),
             context: config.context.clone(),
             last_frame: None,
+            _host: config.host.attach(host_tx, rx.clone()),
         };
         let eval_us = match &config.app {
             App::Js(bundle) => {
@@ -1445,6 +1472,7 @@ impl<M: TextEngine + 'static> Driver<M> {
                         wake: Arc::new(move || {
                             let _ = system_tx.send(Message::Wake);
                         }),
+                        host: Rc::new(host_bridge),
                     }
                 };
                 #[cfg(not(feature = "js"))]
@@ -2412,6 +2440,17 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
             state.perf_commit = perf::CommitTiming::default();
         }
         Message::Tokens(tokens) => state.core.set_host_tokens(tokens.map(|t| *t)),
+        // A Rust app has no `nsh/host`: what the host sends it goes.
+        Message::HostEvent(name, data) => {
+            if let Some(script) = script {
+                script.host_event(&name, data);
+            }
+        }
+        Message::HostReply(id, result) => {
+            if let Some(script) = script {
+                script.host_reply(id, result);
+            }
+        }
         // The driver handles it ([`Driver::handle`]), and keeps the ones
         // sent before it started for after the first frame.
         Message::Advance(..) => unreachable!("the driver moves the clock"),
