@@ -7,8 +7,8 @@ group: platforms
 
 # Android
 
-NSH apps run on Android with ordinary Android views and `StaticLayout` text, from Android 9 (API 28), on `arm64-v8a`
-and `x86_64`. Whole apps written in Rust and in TSX run and package as on the other platforms, and an existing app
+NSH apps run on Android with ordinary Android views and `StaticLayout` text, from Android 9 (API 28), on `arm64-v8a`,
+`armeabi-v7a` and `x86_64`. Whole apps written in Rust and in TSX run and package as on the other platforms, and an existing app
 can embed modules in an `NshView` and load signed packages it downloads, under limits and capabilities it sets. On Android, `os()` is `Os::Android` (`platform.os` is `"android"` in TSX) and TSX's
 `android={{…}}` props apply.
 
@@ -69,7 +69,7 @@ dist/nsh/embed/android/nsh.aar       release: bundles and signed packages
 dist/nsh/embed/android/nsh-dev.aar   also connects to a `nsh dev` server
 ```
 
-The AAR holds the Java runtime and `libnsh.so` for `arm64-v8a` and `x86_64` (64-bit only). It declares the `INTERNET`
+The AAR holds the Java runtime and `libnsh.so` for `arm64-v8a`, `armeabi-v7a` and `x86_64`. It declares the `INTERNET`
 permission and needs **API 28** (Android 9) or newer.
 
 Add it to the app module, for example from a `libs` folder:
