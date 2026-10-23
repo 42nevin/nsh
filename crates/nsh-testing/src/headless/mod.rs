@@ -1121,7 +1121,8 @@ impl Headless {
     }
 
     /// A press at `at` in `view` (else the view's center), in that view
-    /// and in the root. `None` when the view has no bounds.
+    /// and in the root, as one click with no modifier keys. `None` when the
+    /// view has no bounds.
     fn press_payload(&self, view: NodeId, at: Option<Point<Points>>) -> EventPayload {
         let Some(bounds) = self.screen.bounds_in_root(view) else {
             return EventPayload::None;
@@ -1138,6 +1139,8 @@ impl Headless {
                 Points(bounds.origin.x.0 + position.x.0),
                 Points(bounds.origin.y.0 + position.y.0),
             ),
+            modifiers: nsh_core::keymap::Modifiers::default(),
+            clicks: 1,
         })
     }
 
