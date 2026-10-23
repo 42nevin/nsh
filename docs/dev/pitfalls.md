@@ -110,6 +110,11 @@ Things that were found the hard way. Read the section of the area you change bef
 
 ## iOS, UIKit and Mac Catalyst
 
+- **A standalone `UITabBar` can establish its natural height before its native component host is sized** (verified on
+  the iOS 27 simulator). Flexible-height autoresizing then adds the host's height to that initial height. In
+  `system_tab_bar.rs`, fill the immediate host's bounds exactly during layout, and report intrinsic height with
+  `sizeThatFits` at the laid-out width. `sizeToFit` changes the frame and must not run on selection updates.
+
 - **Pressed-style observers must leave ancestor clicks working**: a view with only `activeStyle` / `active:`
   has a `PressRecognizer` to report its pressed state, but yields the click to the nearest ancestor with press
   handlers. `handled_deeper` counts handlers and pressable text spans; a style-only recognizer ends as failed
