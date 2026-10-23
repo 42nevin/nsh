@@ -1,4 +1,4 @@
-//! The OS the platform reports decides `Platform` and which platform-only
+//! The OS the platform reports decides `platform` and which platform-only
 //! props (`ios={{…}}`, `android={{…}}`, `desktop={{…}}`, `web={{…}}`)
 //! apply; on the web, the idiom decides between mobile and desktop.
 
@@ -10,7 +10,7 @@ use nsh_engine::{Bundle, Engine, EngineConfig, Environment, Idiom, Os};
 use crate::ChannelSink;
 
 const APP: &str = r#"import { mount, Text, View } from "nsh";
-import { Platform } from "nsh/device";
+import { platform } from "nsh/device";
 
 mount(
   () => (
@@ -20,7 +20,7 @@ mount(
       desktop={{ accessibilityLabel: "desktop" }}
       web={{ accessibilityHint: "web" }}
     >
-      <Text>{`${Platform.OS} ${Platform.isDesktop} ${Platform.select({ ios: "i", mobile: "m", desktop: "d" })} ${Platform.select({ native: "n", default: "-" })}`}</Text>
+      <Text>{`${platform.os} ${platform.idiom === "desktop"} ${platform.select({ ios: "i", mobile: "m", desktop: "d" })} ${platform.select({ native: "n", default: "-" })}`}</Text>
     </View>
   ),
 );
@@ -62,8 +62,14 @@ fn first_frame(os: Os, idiom: Idiom) -> (Vec<String>, Vec<String>) {
         ui_sets: Vec::new(),
         runtime: None,
         data_dir: None,
+        cache: nsh_engine::CacheOptions::off(),
         storage: None,
         clock: Default::default(),
+        context: Default::default(),
+        pinned: Default::default(),
+        clipboard: None,
+        host: Default::default(),
+        picker: None,
     };
     let _engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
     let batch = rx

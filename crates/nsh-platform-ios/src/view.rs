@@ -37,9 +37,14 @@ struct State {
     options: SurfaceOptions,
     /// The embedding app's locale and text size.
     host: nsh_engine::HostEnvironment,
+    /// The embedding app's theme overrides.
+    host_tokens: Option<nsh_engine::Tokens>,
     on_error: Option<ErrorHandler>,
     #[cfg(feature = "dev")]
     dev: Option<crate::dev::DevSession>,
+    /// A test session's model of the app, for every surface from now on.
+    #[cfg(feature = "dev")]
+    test_model: Option<std::sync::Arc<nsh_testing::agent::Model>>,
 }
 
 impl AppView {
@@ -56,9 +61,12 @@ impl AppView {
                     surface: None,
                     options,
                     host: nsh_engine::HostEnvironment::default(),
+                    host_tokens: None,
                     on_error: None,
                     #[cfg(feature = "dev")]
                     dev: None,
+                    #[cfg(feature = "dev")]
+                    test_model: None,
                 }),
             }),
         }
@@ -117,10 +125,29 @@ impl AppView {
             .register(name, factory);
     }
 
+    /// The channel with the apps this view runs (`nsh/host`): their
+    /// launch parameters ([`nsh_engine::HostChannel::set_params`], read when
+    /// an app starts), events to them ([`nsh_engine::HostChannel::send`])
+    /// and handlers of their calls and posts
+    /// ([`nsh_engine::HostChannel::handle`], run on the engine thread). One
+    /// channel for every app the view loads.
+    pub fn host(&self) -> nsh_engine::HostChannel {
+        self.inner.state.borrow().options.host.clone()
+    }
+
     /// The VM limits of the apps this view loads. Applies from the next
     /// [`AppView::load`].
     pub fn set_limits(&self, limits: nsh_engine::Limits) {
         self.inner.set_limits(limits);
+    }
+
+    /// Where the apps this view loads keep their caches (the images they
+    /// downloaded) and how much each keeps ([`SurfaceOptions::cache`]). A
+    /// change applies from the next [`AppView::load`].
+    pub fn set_cache(&self, cache: nsh_engine::CacheOptions) {
+        if self.inner.state.borrow().options.cache != cache {
+            self.reconfigure(|options| options.cache = cache);
+        }
     }
 
     /// The directory the storage (`nsh/storage`) of the apps this view loads
@@ -149,6 +176,24 @@ impl AppView {
     /// system's again.
     pub fn set_font_scale(&self, scale: Option<f32>) {
         self.set_host(|host| host.font_scale = scale);
+    }
+
+    /// The embedding app's theme overrides: a theme file of shadcn/ui's
+    /// (`{ "cssVars": { "theme": { … }, "light": { … }, "dark": { … } } }`,
+    /// values as CSS writes them, as `nsh.json`'s `"theme"`), whose
+    /// tokens win over the app's of the same names, light and dark, while
+    /// the app's others stay (a brand's `primary` and `radius`). Classes
+    /// naming them (`bg-primary`) are resolved again at once, and every
+    /// app loaded later starts with them. `None` gives the app its own
+    /// theme back. Fails, changing nothing, on a file that does not parse.
+    pub fn set_theme_overrides(&self, json: Option<&str>) -> Result<(), nsh_base::ThemeError> {
+        let tokens = json.map(nsh_base::theme_overrides).transpose()?;
+        let mut state = self.inner.state.borrow_mut();
+        state.host_tokens = tokens;
+        if let Some(surface) = &state.surface {
+            surface.set_host_tokens(state.host_tokens.clone());
+        }
+        Ok(())
     }
 
     fn set_host(&self, change: impl FnOnce(&mut nsh_engine::HostEnvironment)) {
@@ -219,6 +264,9 @@ impl Inner {
             UIViewAutoresizing::FlexibleWidth | UIViewAutoresizing::FlexibleHeight,
         );
         surface.set_host_environment(state.host);
+        surface.set_host_tokens(state.host_tokens.clone());
+        #[cfg(feature = "dev")]
+        surface.set_test_model(state.test_model.clone());
         let weak: Weak<Inner> = Rc::downgrade(this);
         surface.set_error_handler(move |message| {
             if let Some(inner) = weak.upgrade() {
@@ -247,6 +295,24 @@ impl Inner {
             .surface
             .as_ref()
             .is_some_and(|s| s.hot_update(update))
+    }
+
+    #[cfg(feature = "dev")]
+    /// Keeps `model` of the app for `nsh test --target ios`, in the surface
+    /// running now and those to come.
+    #[cfg(feature = "dev")]
+    pub(crate) fn set_test_model(&self, model: std::sync::Arc<nsh_testing::agent::Model>) {
+        let mut state = self.state.borrow_mut();
+        if let Some(surface) = &state.surface {
+            surface.set_test_model(Some(model.clone()));
+        }
+        state.test_model = Some(model);
+    }
+
+    /// `f` with the running app's mounter.
+    #[cfg(feature = "dev")]
+    pub(crate) fn with_mounter<R>(&self, f: impl FnOnce(&crate::mount::Mounter) -> R) -> Option<R> {
+        self.state.borrow().surface.as_ref()?.with_mounter(f)
     }
 
     #[cfg(feature = "dev")]

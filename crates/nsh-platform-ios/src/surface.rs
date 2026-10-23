@@ -14,7 +14,7 @@ use nsh_engine::{
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
     rc::{Retained, Weak},
-    runtime::ProtocolObject,
+    runtime::{AnyObject, ProtocolObject},
 };
 use objc2_core_foundation::{CGRect, CGSize};
 use objc2_foundation::{
@@ -37,6 +37,10 @@ use crate::{
 type ErrorHandler = Box<dyn Fn(&str)>;
 type SharedErrorHandler = Arc<MainThreadBound<RefCell<Option<ErrorHandler>>>>;
 type SharedHandler = Arc<MainThreadBound<RefCell<Option<Box<dyn Fn()>>>>>;
+/// A test session's model of the app (`nsh test --target ios`): every
+/// batch and error goes to it.
+#[cfg(feature = "dev")]
+type TestModel = Arc<std::sync::Mutex<Option<Arc<nsh_testing::agent::Model>>>>;
 
 /// Forwards mount batches and errors from the engine thread to the main
 /// thread.
@@ -44,10 +48,16 @@ struct MainThreadSink {
     mounter: SharedMounter,
     on_error: SharedErrorHandler,
     on_hot_failed: SharedHandler,
+    #[cfg(feature = "dev")]
+    test_model: TestModel,
 }
 
 impl MountSink for MainThreadSink {
     fn submit(&self, batch: MountBatch) {
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self.test_model.lock().unwrap_or_else(|e| e.into_inner()) {
+            model.apply(&batch);
+        }
         let mounter = self.mounter.clone();
         DispatchQueue::main().exec_async(move || {
             let mtm = MainThreadMarker::new().expect("main queue runs on the main thread");
@@ -78,6 +88,10 @@ impl MountSink for MainThreadSink {
     }
 
     fn report_error(&self, message: &str) {
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self.test_model.lock().unwrap_or_else(|e| e.into_inner()) {
+            model.error(message);
+        }
         let on_error = self.on_error.clone();
         let message = message.to_owned();
         DispatchQueue::main().exec_async(move || {
@@ -111,8 +125,12 @@ pub(crate) struct RootViewIvars {
     /// The embedding app's locale and text size over the system's
     /// ([`Surface::set_host_environment`]).
     host: Cell<nsh_engine::HostEnvironment>,
+    /// The embedding app's theme overrides ([`Surface::set_host_tokens`]).
+    host_tokens: RefCell<Option<nsh_engine::Tokens>>,
     /// Keyboard notification registrations.
     observers: RefCell<Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>>,
+    #[cfg(feature = "dev")]
+    test_model: TestModel,
 }
 
 define_class!(
@@ -145,6 +163,29 @@ define_class!(
             }
         }
 
+        /// VoiceOver's escape gesture (a two-finger scrub) from inside the
+        /// surface, where no screen or modal took it: the app's going back
+        /// (the top overlay's `onCancel` first), as Escape and the back
+        /// button are elsewhere. A menu sheet's backdrop takes no focus,
+        /// so this is how a VoiceOver user leaves it.
+        #[unsafe(method(accessibilityPerformEscape))]
+        fn accessibility_perform_escape(&self) -> bool {
+            let shared = self
+                .ivars()
+                .running
+                .borrow()
+                .as_ref()
+                .map(|r| r.mounter.clone());
+            let taken = shared.is_some_and(|shared| {
+                shared
+                    .get(self.mtm())
+                    .try_borrow()
+                    .is_ok_and(|m| m.as_ref().is_some_and(Mounter::escape))
+            });
+            // SAFETY: calling the superclass implementation.
+            taken || unsafe { msg_send![super(self), accessibilityPerformEscape] }
+        }
+
         #[unsafe(method(safeAreaInsetsDidChange))]
         fn safe_area_insets_did_change(&self) {
             // SAFETY: calling the superclass implementation.
@@ -157,6 +198,58 @@ define_class!(
             // SAFETY: calling the superclass implementation.
             let _: () = unsafe { msg_send![super(self), traitCollectionDidChange: previous] };
             self.publish_environment();
+            let Some(mounter) = self
+                .ivars()
+                .running
+                .borrow()
+                .as_ref()
+                .map(|r| r.mounter.clone())
+            else {
+                return;
+            };
+            // On the next turn: a batch being applied may hold the mounter.
+            DispatchQueue::main().exec_async(move || {
+                let mtm = MainThreadMarker::new().expect("main queue");
+                if let Some(m) = mounter.get(mtm).borrow_mut().as_mut() {
+                    m.traits_changed();
+                }
+            });
+        }
+
+        /// Hardware keys no responder inside handled: the app's shortcuts
+        /// (`nsh/keymap`) take those they bind.
+        #[unsafe(method(pressesBegan:withEvent:))]
+        fn presses_began(&self, presses: &AnyObject, event: Option<&AnyObject>) {
+            let consumed = self
+                .target()
+                .is_some_and(|target| crate::keymap::root_began(&target, presses));
+            if !consumed {
+                // SAFETY: calling the superclass implementation.
+                let _: () = unsafe { msg_send![super(self), pressesBegan: presses, withEvent: event] };
+            }
+        }
+
+        #[unsafe(method(pressesEnded:withEvent:))]
+        fn presses_ended(&self, presses: &AnyObject, event: Option<&AnyObject>) {
+            let consumed = self
+                .target()
+                .is_some_and(|target| crate::keymap::ended(&target, presses));
+            if !consumed {
+                // SAFETY: calling the superclass implementation.
+                let _: () = unsafe { msg_send![super(self), pressesEnded: presses, withEvent: event] };
+            }
+        }
+
+        #[unsafe(method(pressesCancelled:withEvent:))]
+        fn presses_cancelled(&self, presses: &AnyObject, event: Option<&AnyObject>) {
+            let consumed = self
+                .target()
+                .is_some_and(|target| crate::keymap::ended(&target, presses));
+            if !consumed {
+                // SAFETY: calling the superclass implementation.
+                let _: () =
+                    unsafe { msg_send![super(self), pressesCancelled: presses, withEvent: event] };
+            }
         }
     }
 );
@@ -178,10 +271,25 @@ impl RootView {
             keyboard: Cell::new((0.0, 0.25)),
             environment: Cell::new(None),
             host: Cell::default(),
+            host_tokens: RefCell::new(None),
             observers: RefCell::new(Vec::new()),
+            #[cfg(feature = "dev")]
+            test_model: TestModel::default(),
         });
         // SAFETY: UIView's designated initializer.
         unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    /// The running app's event target.
+    fn target(&self) -> Option<Retained<crate::target::EventTarget>> {
+        let running = self.ivars().running.borrow();
+        let mounter = running
+            .as_ref()?
+            .mounter
+            .get(self.mtm())
+            .try_borrow()
+            .ok()?;
+        mounter.as_ref().map(|m| m.target().clone())
     }
 
     /// What JS sees through `windowSize()`, `safeArea()`, `keyboard()`...
@@ -232,6 +340,9 @@ impl RootView {
             locale: current_locale(),
             // Only read for the web: iOS keys are always Apple's.
             apple_keyboard: true,
+            // No host answers `nsh/host` here: an embedding app talks to its
+            // apps through its own UI sets (`nsh/native`).
+            host: false,
         };
         // The embedding app's settings over the system's.
         self.ivars().host.get().apply(&mut env);
@@ -390,7 +501,8 @@ impl RootView {
             App::Rust(_) => Policy::default().access(),
         });
         let mounter: SharedMounter = Arc::new(MainThreadBound::new(RefCell::new(None), mtm));
-        let config = EngineConfig {
+        #[allow(unused_mut)]
+        let mut config = EngineConfig {
             app,
             viewport,
             trace: self.ivars().options.trace,
@@ -406,25 +518,59 @@ impl RootView {
             ui_sets: crate::ui_sets(),
             runtime: None,
             data_dir: self.ivars().options.data_dir.clone(),
+            cache: system_cache(self.ivars().options.cache.clone()),
             storage: self.ivars().options.storage.as_ref().map(|dir| {
                 nsh_engine::FileStorage::open(dir) as Arc<dyn nsh_engine::StorageBackend>
             }),
             clock: Default::default(),
+            context: Default::default(),
+            pinned: Default::default(),
+            clipboard: None,
+            host: self.ivars().options.host.clone(),
+            picker: None,
         };
+        // A test session's app: the test's storage, network and trace.
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self
+            .ivars()
+            .test_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+        {
+            model.set_up_engine(&mut config);
+        }
         let sink = MainThreadSink {
             mounter: mounter.clone(),
             on_error: self.ivars().on_error.clone(),
             on_hot_failed: self.ivars().on_hot_failed.clone(),
+            #[cfg(feature = "dev")]
+            test_model: self.ivars().test_model.clone(),
         };
-        let engine = match Engine::start(config, CoreTextEngine::default, sink) {
+        // The embedding app's theme overrides are in the first frame.
+        let tokens = self.ivars().host_tokens.borrow().clone();
+        let engine = match Engine::start_with(config, CoreTextEngine::default, sink, |control| {
+            if tokens.is_some() {
+                control.set_tokens(tokens);
+            }
+        }) {
             Ok(engine) => engine,
             Err(err) => return log::error!("failed to start the engine: {err}"),
         };
+        // The test moves its clock through the engine.
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self
+            .ivars()
+            .test_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+        {
+            model.engine_started(engine.control());
+        }
         // Batches are queued on the main queue, so none can run before the
         // mounter is installed here.
         let root = Retained::into_super(self.retain());
         let asset_base = self.ivars().options.asset_base.clone();
-        *mounter.get(mtm).borrow_mut() = Some(Mounter::new(
+        let mut installed = Mounter::new(
             mtm,
             root,
             engine.control(),
@@ -432,7 +578,10 @@ impl RootView {
             asset_base,
             access,
             self.ivars().options.components.clone(),
-        ));
+        );
+        // The app's downloaded images go through its disk cache.
+        installed.set_image_cache(engine.image_cache());
+        *mounter.get(mtm).borrow_mut() = Some(installed);
         *self.ivars().running.borrow_mut() = Some(Running { engine, mounter });
         self.ivars().environment.set(Some(self.environment()));
     }
@@ -482,8 +631,17 @@ pub struct SurfaceOptions {
     /// (`storage.json` in it), overriding their own in
     /// [`SurfaceOptions::data_dir`]; `None`: theirs.
     pub storage: Option<std::path::PathBuf>,
+    /// Where the apps keep their caches (the images they downloaded) and
+    /// how much each keeps: by default `nsh` in the app's Caches
+    /// ([`nsh_engine::CacheLocation::System`]), each app in
+    /// `<dir>/<app id>`.
+    pub cache: nsh_engine::CacheOptions,
     /// The native components the apps can use (`nsh/native`).
     pub components: crate::component::Components,
+    /// The embedding app's channel with the apps (`nsh/host`): launch
+    /// parameters, events and handlers of their calls and posts, one for
+    /// every app the surface runs.
+    pub host: nsh_engine::HostChannel,
 }
 
 impl Default for SurfaceOptions {
@@ -495,7 +653,9 @@ impl Default for SurfaceOptions {
             granted: None,
             data_dir: data_dir(),
             storage: None,
+            cache: nsh_engine::CacheOptions::default(),
             components: crate::component::Components::default(),
+            host: nsh_engine::HostChannel::default(),
         }
     }
 }
@@ -505,6 +665,21 @@ impl Default for SurfaceOptions {
 /// its id.
 fn data_dir() -> Option<std::path::PathBuf> {
     nsh_engine::data_dir().map(|dir| dir.join("nsh"))
+}
+
+/// `cache` with [`nsh_engine::CacheLocation::System`] made iOS's: `nsh` in
+/// the (embedding or standalone) app's Caches, as its data is in its
+/// Application Support.
+fn system_cache(mut cache: nsh_engine::CacheOptions) -> nsh_engine::CacheOptions {
+    if cache.location == nsh_engine::CacheLocation::System {
+        cache.location = match std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+            Some(home) => nsh_engine::CacheLocation::Dir(
+                std::path::PathBuf::from(home).join("Library/Caches/nsh"),
+            ),
+            None => nsh_engine::CacheLocation::Off,
+        };
+    }
+    cache
 }
 
 /// One running nsh app hosted in a `UIView`.
@@ -546,6 +721,29 @@ impl Surface {
         *self.view.ivars().on_error.get(self.view.mtm()).borrow_mut() = Some(Box::new(handler));
     }
 
+    /// Keeps the model `nsh test --target ios` steps see of the app
+    /// ([`nsh_testing::agent::Model`]): every batch and error goes to it
+    /// from now on.
+    #[cfg(feature = "dev")]
+    pub(crate) fn set_test_model(&self, model: Option<Arc<nsh_testing::agent::Model>>) {
+        *self
+            .view
+            .ivars()
+            .test_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = model;
+    }
+
+    /// `f` with the running app's mounter (`None` before the app starts).
+    #[cfg(feature = "dev")]
+    pub(crate) fn with_mounter<R>(&self, f: impl FnOnce(&Mounter) -> R) -> Option<R> {
+        let running = self.view.ivars().running.borrow();
+        let shared = running.as_ref()?.mounter.clone();
+        drop(running);
+        let mounter = shared.get(self.view.mtm()).borrow();
+        mounter.as_ref().map(f)
+    }
+
     /// Applies a development update to the running app in place. Returns
     /// false when no app runs yet. If the update cannot be applied, the
     /// handler set with [`Surface::set_hot_failed_handler`] runs.
@@ -578,6 +776,17 @@ impl Surface {
     pub fn set_host_environment(&self, host: nsh_engine::HostEnvironment) {
         self.view.ivars().host.set(host);
         self.view.publish_environment();
+    }
+
+    /// The embedding app's theme overrides (`nsh_base::theme_overrides`),
+    /// which win over the app's tokens of the same names (`None`: the
+    /// app's own again): sent to the running app at once, and to every app
+    /// started later before its first frame.
+    pub fn set_host_tokens(&self, tokens: Option<nsh_engine::Tokens>) {
+        *self.view.ivars().host_tokens.borrow_mut() = tokens.clone();
+        if let Some(running) = &*self.view.ivars().running.borrow() {
+            running.engine.control().set_tokens(tokens);
+        }
     }
 
     /// Replaces the running app with `app` (state is reset).

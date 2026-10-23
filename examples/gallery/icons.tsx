@@ -1,4 +1,4 @@
-import { Canvas, type CanvasRenderingContext2D } from "nsh/canvas";
+import { Canvas, type CanvasRenderingContext2D } from "nsh";
 
 /** Line glyphs drawn in a 20 × 20 box with the tint as stroke. */
 export type IconName =
@@ -9,6 +9,7 @@ export type IconName =
   | "form"
   | "mobile"
   | "components"
+  | "controls"
   | "gestures"
   | "physics"
   | "animation"
@@ -33,7 +34,10 @@ export type IconName =
   | "search"
   | "star"
   | "bell"
-  | "spark";
+  | "spark"
+  | "sidebar"
+  | "sun"
+  | "moon";
 
 type Draw = (cx: CanvasRenderingContext2D) => void;
 
@@ -92,6 +96,14 @@ const glyphs: Record<IconName, Draw> = {
     rect(c, 11, 3, 6, 6, 1.6);
     rect(c, 3, 11, 6, 6, 1.6);
     circle(c, 14, 14, 3);
+  },
+  controls: (c) => {
+    // A switch over a checked box.
+    rect(c, 3, 3.5, 14, 6, 3);
+    circle(c, 14, 6.5, 1.6, true);
+    rect(c, 3, 11.5, 5, 5, 1.4);
+    line(c, [4.3, 14, 5.3, 15, 6.9, 13]);
+    line(c, [10.5, 14, 17, 14]);
   },
   gestures: (c) => {
     line(c, [8, 17, 8, 7.5, 10, 6, 11, 7.5, 11, 11]);
@@ -218,6 +230,27 @@ const glyphs: Record<IconName, Draw> = {
   },
   spark: (c) => {
     line(c, [10, 3, 11.5, 8.5, 17, 10, 11.5, 11.5, 10, 17, 8.5, 11.5, 3, 10, 8.5, 8.5, 10, 3]);
+  },
+  sidebar: (c) => {
+    rect(c, 3, 4, 14, 12, 3);
+    line(c, [8, 4, 8, 16]);
+  },
+  sun: (c) => {
+    c.beginPath();
+    c.arc(10, 10, 3.4, 0, Math.PI * 2);
+    c.stroke();
+    for (let i = 0; i < 8; i++) {
+      const a = (i * Math.PI) / 4;
+      line(c, [10 + Math.cos(a) * 6, 10 + Math.sin(a) * 6, 10 + Math.cos(a) * 7.8, 10 + Math.sin(a) * 7.8]);
+    }
+  },
+  moon: (c) => {
+    // A disc less the one up and to its right: the arcs meet where the circles cross.
+    c.beginPath();
+    c.arc(10, 10, 6.5, 0.134, Math.PI * 2 - 1.704);
+    c.arc(13.2, 6.8, 5.2, Math.PI * 2 - 2.468, 0.898, true);
+    c.closePath();
+    c.stroke();
   },
 };
 

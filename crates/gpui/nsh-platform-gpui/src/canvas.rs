@@ -70,9 +70,9 @@ use std::{
 };
 
 use gpui::{Font, FontStyle, Hsla, RenderImage, TextRun, WindowTextSystem, px};
-use nsh_core::animation::AnimationValue;
 use nsh_core::{
     Color,
+    animation::AnimationValue,
     canvas::{
         CanvasFont, CanvasGradient, CanvasOp, CanvasTextAlign, CanvasTextBaseline, Composite,
         Damage, DamageScan, Drawing, FillRule, GradientShape, LineCap, LineJoin, Num, Paint,
@@ -111,7 +111,7 @@ const MAX_SIGMA: f64 = 256.0;
 #[derive(Default)]
 pub(crate) struct CanvasState {
     /// The drawing.
-    drawing: Option<Arc<Drawing>>,
+    pub(crate) drawing: Option<Arc<Drawing>>,
     /// Animated value slots (`AnimationProp::CanvasArg`).
     args: Vec<Option<AnimationValue>>,
     /// The images the drawing names, by URI (premultiplied pixels): `None`
@@ -339,8 +339,8 @@ fn load_image(
     uri: &str,
     done: impl FnOnce(Result<sk::Pixmap, String>) + 'static,
 ) {
-    crate::image::load(surface, uri, move |result| {
-        done(result.and_then(|(texture, _)| {
+    crate::image::load_bitmap(surface, uri, move |result| {
+        done(result.and_then(|texture| {
             let image = texture.image();
             let size = image.size(0);
             let bytes = image.as_bytes(0).ok_or("an image without pixels")?;
@@ -3066,7 +3066,7 @@ mod tests {
         let (region, _) = region(&key, (0.0, 0.0), [0.0, 0.0, w * scale, h * scale]).unwrap();
         let drawing = Drawing {
             ops,
-            slots: Vec::new(),
+            ..Drawing::default()
         };
         record(
             &drawing,
@@ -3126,7 +3126,7 @@ mod tests {
         ];
         let drawing = Drawing {
             ops,
-            slots: Vec::new(),
+            ..Drawing::default()
         };
         let system = Arc::new(gpui::TextSystem::new(Arc::new(gpui::NoopTextSystem::new())));
         let text = WindowTextSystem::new(system.clone());
@@ -3197,7 +3197,7 @@ mod tests {
         ];
         let drawing = Drawing {
             ops,
-            slots: Vec::new(),
+            ..Drawing::default()
         };
         let system = Arc::new(gpui::TextSystem::new(Arc::new(gpui::NoopTextSystem::new())));
         let text = WindowTextSystem::new(system.clone());

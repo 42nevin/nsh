@@ -4,7 +4,7 @@ description: "Eleven Node-shaped standard modules: pinned LLRT utilities and cap
 order: 14.5
 ---
 
-Native Shell provides eleven standard modules, imported by their bare names: Node-shaped APIs compatible with gpui-shell's, running in the app's VM on NSH's native runtime, with their capabilities checked in Rust. Their TypeScript declarations in `.nsh/types` are generated from the same specs as the modules, so what the types show is what the runtime exports.
+Native Shell provides eleven standard modules for TSX, imported by their bare names (Rust code uses Rust's own libraries: [From Rust](#from-rust)): Node-shaped APIs compatible with gpui-shell's, running in the app's VM on NSH's native runtime, with their capabilities checked in Rust. Their TypeScript declarations in `.nsh/types` are generated from the same specs as the modules, so what the types show is what the runtime exports.
 
 | Module | Exports |
 |---|---|
@@ -20,6 +20,24 @@ Native Shell provides eleven standard modules, imported by their bare names: Nod
 | `net` | `connect`, `Socket`, default |
 | `websocket` | `WebSocket.connect(url, options?)` resolving a `WebSocketConnection` (`read`, `write`, `close`), `WebSocketConnection`; the global `WebSocket` constructor on native hosts |
 
+## From Rust
+
+Rust code does the same work with Rust's standard library and crates.io, in the app's own native code: blocking calls run on the runtime's threads with `blocking(…)` and async ones with `background(…)` (`nsh_core::ui::prelude`), and their results come back to the component in a task. The `capabilities` of `nsh.json` govern the app's TSX and NSH's services (`fetch`, the clipboard); the app's own Rust code runs with the permissions of the app's process. In browser apps, Rust code reaches the network with `fetch` and keeps data with `nsh_core::storage::Storage`.
+
+| Module | Rust |
+|---|---|
+| `buffer` | `Vec<u8>`, `&[u8]`, the `base64` crate |
+| `crypto` | crates such as `sha2`, `hmac`, `rand` and `uuid` |
+| `path` | `std::path` |
+| `url` | the `url` crate |
+| `zlib` | crates such as `flate2`, `brotli` and `zstd` |
+| `os` | `std::env::consts`, `os()` |
+| `console` | the `log` crate |
+| `fs/promises` | `std::fs` in `blocking(…)`; `Storage` for key-value data |
+| `process` | `std::process::Command` in `blocking(…)` |
+| `net` | `std::net::TcpStream` in `blocking(…)`, or `tokio::net` in `background(…)` |
+| `websocket` | a crate such as `tokio-tungstenite` in `background(…)` |
+
 ## Imports and generated types
 
 Each module is imported by exactly the name in the table: `import { join } from "path"`, `import fs from "fs/promises"`. The bundler keeps these imports, and the runtime serves them natively; the catalog is these eleven names. `buffer`, `crypto`, `path`, `url` and `zlib` are LLRT's implementations, pinned to `d9fd873e793c6551c5d92b2e31480f3279e3cd8d`, with declarations projected from that revision onto the exports the runtime has. The others are NSH's own. NSH keeps the identity of its URL, Blob, stream and event classes.
@@ -34,12 +52,13 @@ The modules follow Node's names and shapes for the subset they export, and gpui-
 - `Stats` and `Dirent` have their fields (`size`, `mtimeMs`, `name`, ...) as own properties, as Node's do, and `isFile()`, `isDirectory()` and `isSymbolicLink()` on their prototype.
 - A `ChildProcess` listener receives the event's payload: the output text, or the exit's `{ code, signal }` (with `error` when the runtime ended the child). `on` returns the child.
 - A child's environment is a small set from the host plus the names the app is granted, and it runs in the app's data directory or a `cwd` within an `fs.write` root ([Processes](#processes)).
+- `process.platform`, `process.arch`, `os.platform()` and `os.arch()` give Rust's `std::env::consts` names, as gpui-shell's do: `"macos"`, `"windows"`, `"linux"`, `"ios"`, `"android"`; `"aarch64"`, `"x86_64"` ([OS metadata](#os-metadata-and-logging)).
 - `process.dataDir` is `null` when the host has no data directory; `process.exit` asks the host to close the app surface.
 - Limits are part of each API: sizes, counts and timeouts are listed with each module below.
 
 ## OS metadata and logging
 
-`os.platform(): string` and `os.arch(): string` report the actual native host OS and architecture; `os.EOL: string` is its line separator. `os.homedir(): string` returns a configured absolute host home path and throws when none is configured. Directory paths are metadata: file operations still require `fs.read` / `fs.write` grants.
+`os.platform(): string` and `os.arch(): string` report the actual native host OS and architecture, and `process.platform` and `process.arch` hold the same values. They are the names of Rust's `std::env::consts::OS` and `ARCH`, as gpui-shell's are: `"macos"`, `"windows"`, `"linux"`, `"ios"`, `"android"` for the OS, `"aarch64"`, `"x86_64"` for the architecture, so apps compare against them directly (`process.platform === "macos"`). `os.EOL: string` is the host's line separator. `os.homedir(): string` returns a configured absolute host home path and throws when none is configured. Directory paths are metadata: file operations still require `fs.read` / `fs.write` grants.
 
 Browser apps read an empty `process.env` object and receive an error from `os.homedir()`, since home paths and environment variables belong to native hosts.
 
@@ -84,7 +103,33 @@ Browser storage is scoped to the page's origin and the app's own namespace, with
 
 Commands match `process.execute` exactly: `git` and `/usr/bin/git` are separate grants. Bare commands resolve through the absolute directories of the host's `PATH`; on Windows a bare command also finds `<name>.com` and `<name>.exe` there. A batch file (`.cmd`, `.bat`) runs through `cmd.exe`: grant its absolute path (`C:\Windows\System32\cmd.exe`) and pass `/d`, `/c` and the script as arguments. A child's environment is `PATH`, `HOME`, `USERPROFILE`, `SystemRoot`, `TEMP`, `TMP`, `TMPDIR`, `LANG` and `LC_*` from the host, plus the names `process.env` grants (matched exactly, ignoring case only on Windows, whose environment does). A child runs in the app's data directory (created when missing), or in `cwd`, an existing directory within an `fs.write` root, since the child may write where it runs. An embedding host can narrow the grants.
 
-```ts
+```rust tabs
+use std::{
+    io::{BufRead, BufReader},
+    process::{Command, Stdio},
+};
+
+spawn(async move {
+    // `run`: the whole output once the command exits.
+    if let Ok(Ok(output)) = blocking(|| Command::new("git").args(["status", "--short"]).output()).await {
+        log::info!("{} {}", output.status, String::from_utf8_lossy(&output.stdout));
+    }
+    // `spawn` with `lines: true`: each line as it comes.
+    let _ = blocking(|| -> std::io::Result<()> {
+        let mut child = Command::new("git").args(["log", "--oneline"]).stdout(Stdio::piped()).spawn()?;
+        if let Some(stdout) = child.stdout.take() {
+            for line in BufReader::new(stdout).lines() {
+                log::info!("{}", line?);
+            }
+        }
+        log::info!("done {}", child.wait()?);
+        Ok(())
+    })
+    .await;
+});
+```
+
+```tsx tabs
 import process from "process";
 
 const { code, stdout } = await process.run("git", ["status", "--short"]);
@@ -138,7 +183,24 @@ This `nsh.json` fragment permits the GET handshake for this `wss` URL, keeping i
 }
 ```
 
-```ts
+```rust tabs
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+spawn(async move {
+    let _ = background(async {
+        let (mut socket, _) = connect_async("wss://chat.example.com/socket").await?;
+        socket.send(Message::text("hello")).await?;
+        while let Some(message) = socket.next().await {
+            log::info!("{}", message?);
+        }
+        Ok::<_, tokio_tungstenite::tungstenite::Error>(())
+    })
+    .await;
+});
+```
+
+```tsx tabs
 const socket = new WebSocket("wss://chat.example.com/socket");
 socket.addEventListener("open", () => socket.send("hello"));
 socket.addEventListener("message", (event) => console.log(event.data));
@@ -156,7 +218,28 @@ TCP uses a socket grant: the exact host and port the app connects to.
 }
 ```
 
-```ts
+```rust tabs
+use std::{
+    io::{Read, Write},
+    net::TcpStream,
+};
+
+spawn(async move {
+    let reply = blocking(|| -> std::io::Result<String> {
+        let mut socket = TcpStream::connect(("tcp.example.com", 9000))?;
+        socket.write_all(b"hello\n")?;
+        let mut bytes = [0; 1024];
+        let n = socket.read(&mut bytes)?;
+        Ok(String::from_utf8_lossy(&bytes[..n]).into_owned())
+    })
+    .await;
+    if let Ok(Ok(reply)) = reply {
+        log::info!("{reply}");
+    }
+});
+```
+
+```tsx tabs
 import { connect } from "net";
 
 const socket = await connect("tcp.example.com", 9000);

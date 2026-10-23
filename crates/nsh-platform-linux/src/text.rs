@@ -122,9 +122,14 @@ pub(crate) fn font_description(
         None => desc.set_family(ui_family),
     }
     desc.set_weight(weight(style.font_weight));
-    if style.italic {
-        desc.set_style(pango::Style::Italic);
-    }
+    // Always set: a run's font attribute leaves unset fields to the
+    // layout's base font, which is the first run's (an italic comment
+    // first would make the whole text italic).
+    desc.set_style(if style.italic {
+        pango::Style::Italic
+    } else {
+        pango::Style::Normal
+    });
     desc.set_absolute_size(f64::from(style.font_size.0) * f64::from(pango::SCALE));
     desc
 }
@@ -296,8 +301,9 @@ pub(crate) struct Prepared {
     layout: pango::Layout,
     /// UTF-16 offset of each byte offset of the text.
     utf16: Box<[u32]>,
-    /// Byte offsets of the attachments' placeholders, in order, with the
-    /// attachment's height.
+    /// Byte offsets of the attachments' placeholders, in order, with how
+    /// far the attachment's top is above the baseline
+    /// (`TextAttachment::ascent`).
     attachments: Vec<(u32, f32)>,
     max_lines: u32,
     ellipsize: pango::EllipsizeMode,
@@ -430,6 +436,30 @@ fn context(font_map: &pango::FontMap, hint: pangocairo::cairo::HintStyle) -> pan
 impl PangoTextEngine {
     /// Ascent and descent of the font `desc` names (its primary face,
     /// not fallbacks), in Pango units; cached.
+    /// The metrics of the font around attachment `a` of `text` (its
+    /// placeholder's), which its `verticalAlign` places it against.
+    fn attachment_font(
+        &self,
+        context: &pango::Context,
+        text: &AttributedText,
+        a: &nsh_core::TextAttachment,
+    ) -> nsh_core::FontExtent {
+        let style = text
+            .span_at(a.index)
+            .map_or_else(Default::default, |s| s.style);
+        let desc = font_description(&style, &self.ui_family);
+        let (ascent, descent) = self.natural_metrics(context, &desc);
+        let size = style.font_size.0;
+        let x = context
+            .load_font(&desc)
+            .map_or(size * X_HEIGHT, |f| cap_and_x_height(&f, size).1);
+        nsh_core::FontExtent::new(
+            Points(from_pango(ascent)),
+            Points(from_pango(descent)),
+            Points(x),
+        )
+    }
+
     fn natural_metrics(
         &self,
         context: &pango::Context,
@@ -570,6 +600,14 @@ impl TextEngine for PangoTextEngine {
     type Prepared = Prepared;
 
     fn prepare(&self, text: &AttributedText) -> Prepared {
+        self.prepare_aligned(text, &nsh_core::AttachmentAlignments::default())
+    }
+
+    fn prepare_aligned(
+        &self,
+        text: &AttributedText,
+        alignments: &nsh_core::AttachmentAlignments,
+    ) -> Prepared {
         let s = text.text.as_str();
         let rtl = match text.writing_direction {
             Some(rtl) => rtl,
@@ -671,18 +709,33 @@ impl TextEngine for PangoTextEngine {
             let start = utf16_to_byte(s, at, a.index);
             at = (start, a.index);
             let end = start + s[start..].chars().next().map_or(0, char::len_utf8);
-            // All above the baseline, as the other platforms place them.
-            let rect = pango::Rectangle::new(
+            // Placed by its `verticalAlign` in its placeholder's font, as
+            // the other platforms place them: the ink is the attachment,
+            // the logical rectangle what its line reserves.
+            let font = if alignments.get(a.index) == nsh_core::VerticalAlign::Baseline {
+                nsh_core::FontExtent::default()
+            } else {
+                self.attachment_font(context, text, a)
+            };
+            let top = a.ascent(font, alignments.get(a.index));
+            let (up, down) = a.extent(font, alignments.get(a.index));
+            let ink = pango::Rectangle::new(
                 0,
-                -to_pango(a.height.0),
+                -to_pango(top.0),
                 to_pango(a.width.0),
                 to_pango(a.height.0),
             );
-            let mut shape = pango::AttrShape::new(&rect, &rect);
+            let logical = pango::Rectangle::new(
+                0,
+                -to_pango(up.0),
+                to_pango(a.width.0),
+                to_pango((up + down).0),
+            );
+            let mut shape = pango::AttrShape::new(&ink, &logical);
             shape.set_start_index(start as u32);
             shape.set_end_index(end as u32);
             attrs.insert(shape);
-            attachments.push((start as u32, a.height.0));
+            attachments.push((start as u32, top.0));
         }
         layout.set_attributes(Some(&attrs));
         natural_line_heights(&layout, &attrs, s, &natural, &placeholders);
@@ -1043,7 +1096,7 @@ pub(crate) struct DrawnText {
     /// Where the layout goes in the view.
     pub(crate) content: Bounds<Points>,
     /// The engine's layout of it.
-    layout: TextLayout,
+    pub(crate) layout: TextLayout,
     /// The render node, built on first draw.
     node: OnceCell<Option<gsk::RenderNode>>,
     /// The selection of `selectable` text, kept across new content.
@@ -1106,7 +1159,13 @@ pub(crate) fn draw(snapshot: &gtk::Snapshot, state: &ViewState) {
             snapshot.pop();
         });
     }
-    if let Some(range) = drawn.selection.as_ref().and_then(|s| s.range.get())
+    // A selectable text's own selection, or its part of its area's.
+    let range = drawn
+        .selection
+        .as_ref()
+        .and_then(|s| s.range.get())
+        .or(state.area_selection);
+    if let Some(range) = range
         && let Some(layout) = drawn.layout.downcast::<LinuxLayout>()
     {
         // iOS tints the selection with the view's tint at about 30%.
@@ -1335,6 +1394,21 @@ fn decorate(
     }
 }
 
+/// The first rectangle (view coordinates: x, y, width, height) the
+/// characters `start..end` of the text view with `state` cover (the test
+/// agent's spans).
+#[cfg(feature = "dev")]
+pub(crate) fn range_rect(state: &ViewState, start: u32, end: u32) -> Option<(f32, f32, f32, f32)> {
+    let drawn = state.text.as_ref()?;
+    let layout = drawn.layout.downcast::<LinuxLayout>()?;
+    let (cx, cy) = (drawn.content.origin.x.0, drawn.content.origin.y.0);
+    let mut first = None;
+    layout.selection_rects(&drawn.text, (start, end), |x, y, w, h| {
+        first.get_or_insert((cx + x, cy + y, w, h));
+    });
+    first
+}
+
 /// The UTF-16 offset of the character at `(x, y)` (view coordinates), for
 /// presses on nested text links.
 pub(crate) fn char_at(state: &ViewState, x: f32, y: f32) -> Option<u32> {
@@ -1363,9 +1437,9 @@ pub(crate) fn char_at(state: &ViewState, x: f32, y: f32) -> Option<u32> {
 /// How far (points) the mouse moves on selectable text before a drag
 /// selects: past input's press slop where the press would fire (a link, an
 /// `onPress`), so a click never does both.
-const SELECT_SLOP: f32 = 3.0;
+pub(crate) const SELECT_SLOP: f32 = 3.0;
 /// The same over a press target.
-const SELECT_SLOP_PRESS: f32 = 10.0;
+pub(crate) const SELECT_SLOP_PRESS: f32 = 10.0;
 
 /// What a drag extends the selection by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1593,7 +1667,9 @@ fn select(view: &NshView, range: Option<(u32, u32)>) {
 
 /// A press of the primary button (`n`: the click count).
 fn pressed(view: &NshView, n: i32, x: f32, y: f32, modifiers: gtk::gdk::ModifierType) {
-    let Some(s) = view_selection(view) else {
+    // In a selection area the area selects (`selection_area.rs`).
+    let Some(s) = view_selection(view).filter(|_| crate::selection_area::area_of(view).is_none())
+    else {
         return;
     };
     let (caret, char_index, text, over_press) = {
@@ -1650,7 +1726,8 @@ fn pressed(view: &NshView, n: i32, x: f32, y: f32, modifiers: gtk::gdk::Modifier
 
 /// The pressed mouse moved by `(dx, dy)` to `(x, y)` (view coordinates).
 fn dragged(view: &NshView, dx: f32, dy: f32, x: f32, y: f32) {
-    let Some(s) = view_selection(view) else {
+    let Some(s) = view_selection(view).filter(|_| crate::selection_area::area_of(view).is_none())
+    else {
         return;
     };
     if !s.dragging.get() {
@@ -1799,7 +1876,7 @@ impl LinuxLayout {
     /// The caret position (UTF-16 offset) nearest `(x, y)` in content
     /// coordinates: on the line at that height (the first above the text,
     /// the last below it), at the glyph edge nearest x.
-    fn caret_at(&self, x: f32, y: f32) -> u32 {
+    pub(crate) fn caret_at(&self, x: f32, y: f32) -> u32 {
         let Some(line) = self
             .lines
             .iter()
@@ -1974,6 +2051,40 @@ mod tests {
 
     /// What is measured at a width lays out in as many lines at the
     /// measured size (the core sizes text views from `measure`).
+    #[test]
+    fn attachments_sit_by_vertical_align() {
+        let engine = PangoTextEngine::new("sans-serif".into());
+        let style = ResolvedTextStyle::default();
+        for height in [4.0, 30.0] {
+            for align in [
+                nsh_core::VerticalAlign::Baseline,
+                nsh_core::VerticalAlign::TextTop,
+                nsh_core::VerticalAlign::TextBottom,
+                nsh_core::VerticalAlign::Middle,
+            ] {
+                let mut text = text(&[("Ax", style)]);
+                let mut alignments = nsh_core::AttachmentAlignments::default();
+                alignments.push(
+                    &mut text,
+                    nsh_core::Size::new(Points(10.0), Points(height)),
+                    align,
+                    style,
+                );
+                let a = text.attachments[0];
+                let font = engine.attachment_font(&engine.ltr, &text, &a);
+                let prepared = engine.prepare_aligned(&text, &alignments);
+                let layout = engine.layout(&prepared, engine.measure(&prepared, None));
+                let line = engine.lines(&layout).remove(0);
+                let top = engine.attachments(&layout)[0].expect("shown").y;
+                let expected = line.y + line.ascender - a.ascent(font, align);
+                assert!(
+                    (top - expected).0.abs() < 0.01,
+                    "{align:?} {height}: {top:?} {expected:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn layout_matches_measure() {
         let engine = PangoTextEngine::new("sans-serif".into());

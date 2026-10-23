@@ -18,8 +18,8 @@ use objc2::{
 use objc2_core_foundation::CGPoint;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSSet};
 use objc2_ui_kit::{
-    UIControl, UIEvent, UIGestureRecognizer, UIGestureRecognizerState, UIScrollView, UITouch,
-    UIView,
+    UIControl, UIEvent, UIGestureRecognizer, UIGestureRecognizerState, UIScrollView,
+    UITapGestureRecognizer, UITouch, UIView, UIWindow,
 };
 
 use crate::{target::EventTarget, text_view::TextView};
@@ -47,6 +47,8 @@ pub(crate) struct PressIvars {
     long_press_delay: Cell<f64>,
     /// The view itself takes presses (not only its text's pressable spans).
     own: Cell<bool>,
+    /// Has press handlers, rather than only tracking the pressed style.
+    handles_press: Cell<bool>,
     /// The pressable text span the current touch is on: its presses go
     /// there.
     link: Cell<Option<TextLink>>,
@@ -124,7 +126,13 @@ define_class!(
                 // A quick tap inside a scroll view: report the press in now.
                 self.press_in();
             }
-            self.set_state(UIGestureRecognizerState::Ended);
+            // A style observer reports the pressed state without competing
+            // with an ancestor that handles the click.
+            self.set_state(if self.ivars().handles_press.get() || self.ivars().link.get().is_some() {
+                UIGestureRecognizerState::Ended
+            } else {
+                UIGestureRecognizerState::Failed
+            });
         }
 
         #[unsafe(method(touchesCancelled:withEvent:))]
@@ -145,8 +153,13 @@ define_class!(
         }
 
         #[unsafe(method(canBePreventedByGestureRecognizer:))]
-        fn can_be_prevented(&self, _other: &UIGestureRecognizer) -> bool {
-            true
+        fn can_be_prevented(&self, other: &UIGestureRecognizer) -> bool {
+            // Taps UIKit attaches to the window skip `UIControl`s, and a
+            // press stands in for one: on iOS 26+ the window's top-edge tap
+            // interaction (`_UIDoubleTapInteraction`, top 64 pt, cancels
+            // touches, never simultaneous) would otherwise swallow every
+            // press near the top, such as a navigation bar's back button.
+            !is_window_tap(other)
         }
 
         #[unsafe(method(canPreventGestureRecognizer:))]
@@ -175,6 +188,7 @@ impl PressRecognizer {
             long_press: Cell::new(false),
             long_press_delay: Cell::new(LONG_PRESS),
             own: Cell::new(false),
+            handles_press: Cell::new(false),
             link: Cell::new(None),
         });
         // SAFETY: the designated initializer; `handlePress:` is implemented by
@@ -200,8 +214,9 @@ impl PressRecognizer {
     }
 
     /// Whether the view itself takes presses.
-    pub(crate) fn set_own(&self, on: bool) {
+    pub(crate) fn set_own(&self, on: bool, handles_press: bool) {
         self.ivars().own.set(on);
+        self.ivars().handles_press.set(handles_press);
     }
 
     /// The pressable text span the current press is on.
@@ -279,9 +294,15 @@ impl PressRecognizer {
                 return true;
             }
             if let Some(recognizers) = v.gestureRecognizers()
-                && recognizers
-                    .iter()
-                    .any(|r| r.isEnabled() && r.isKindOfClass(PressRecognizer::class()))
+                && recognizers.iter().any(|r| {
+                    r.isEnabled()
+                        && r.downcast_ref::<PressRecognizer>().is_some_and(|r| {
+                            r.ivars().handles_press.get()
+                                || v.downcast_ref::<TextView>().is_some_and(|t| {
+                                    t.link_at(touch.locationInView(Some(&v))).is_some()
+                                })
+                        })
+                })
             {
                 return true;
             }
@@ -289,6 +310,16 @@ impl PressRecognizer {
         }
         false
     }
+}
+
+/// A tap recognizer UIKit attaches to a window (the top-edge tap
+/// interaction, keyboard dismissal): it ignores controls, so it must not
+/// prevent a press either. Edge-gesture gates are not taps and still do.
+fn is_window_tap(recognizer: &UIGestureRecognizer) -> bool {
+    recognizer.isKindOfClass(UITapGestureRecognizer::class())
+        && recognizer
+            .view()
+            .is_some_and(|view| view.isKindOfClass(UIWindow::class()))
 }
 
 fn inside_scroll_view(view: &UIView) -> bool {

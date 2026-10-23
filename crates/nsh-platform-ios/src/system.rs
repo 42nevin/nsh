@@ -9,13 +9,13 @@ use nsh_core::{
     platform::{Appearance, clipboard},
 };
 use nsh_engine::EngineControl;
-use objc2::{MainThreadOnly, rc::Retained};
+use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained, runtime::Bool};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_foundation::{NSData, NSString};
+use objc2_foundation::{NSData, NSDictionary, NSString, NSURL};
 use objc2_ui_kit::{
-    UIAlertAction, UIAlertActionStyle, UIAlertController, UIAlertControllerStyle, UIDevice,
-    UIPopoverArrowDirection, UIStatusBarAnimation, UIStatusBarStyle, UIUserInterfaceIdiom,
-    UIUserInterfaceStyle, UIView, UIViewController,
+    UIAlertAction, UIAlertActionStyle, UIAlertController, UIAlertControllerStyle, UIApplication,
+    UIDevice, UIPopoverArrowDirection, UIStatusBarAnimation, UIStatusBarStyle,
+    UIUserInterfaceIdiom, UIUserInterfaceStyle, UIView, UIViewController,
 };
 
 thread_local! {
@@ -107,7 +107,7 @@ pub(crate) fn set_status_bar(config: StatusBarConfig, view: &UIView) {
 }
 
 /// The controller to present over: the top one of `view`'s window.
-fn top_controller(view: &UIView) -> Option<Retained<UIViewController>> {
+pub(crate) fn top_controller(view: &UIView) -> Option<Retained<UIViewController>> {
     let mut top = view.window()?.rootViewController()?;
     while let Some(next) = top.presentedViewController() {
         if next.isBeingDismissed() {
@@ -218,7 +218,83 @@ pub(crate) fn show_dialog(dialog: &Dialog, view: &UIView, control: &EngineContro
     top.presentViewController_animated_completion(&alert, true, None);
 }
 
-/// `Clipboard.setString`: puts `text` on the general pasteboard.
+/// Where a user taps to answer the alert shown over `window`: the middle
+/// of its button titled `button` (window points), or `None`'s: an action
+/// sheet's popover closes with a tap outside it.
+#[cfg(feature = "dev")]
+pub(crate) fn dialog_point(
+    window: &objc2_ui_kit::UIWindow,
+    button: Option<&str>,
+) -> Result<(f64, f64), String> {
+    let mut top = window.rootViewController().ok_or("no dialog is shown")?;
+    while let Some(next) = top.presentedViewController() {
+        top = next;
+    }
+    let alert = top
+        .downcast::<UIAlertController>()
+        .map_err(|_| "no dialog is shown")?;
+    let Some(text) = button else {
+        if alert.popoverPresentationController().is_some() {
+            return Ok((2.0, 2.0));
+        }
+        return Err("the dialog can only be answered with a button".into());
+    };
+    let view = alert.view().ok_or("the dialog shows nothing")?;
+    let label =
+        find_label(&view, text).ok_or_else(|| format!("the dialog has no button {text:?}"))?;
+    let r = label.convertRect_toView(label.bounds(), Some(window));
+    Ok((
+        r.origin.x + r.size.width / 2.0,
+        r.origin.y + r.size.height / 2.0,
+    ))
+}
+
+/// The label showing `text` in `view`'s subtree.
+#[cfg(feature = "dev")]
+fn find_label(view: &UIView, text: &str) -> Option<Retained<objc2_ui_kit::UILabel>> {
+    if let Some(label) = view.downcast_ref::<objc2_ui_kit::UILabel>()
+        && label.text().is_some_and(|t| t.to_string() == text)
+    {
+        return Some(objc2::Message::retain(label));
+    }
+    view.subviews().iter().find_map(|v| find_label(&v, text))
+}
+
+/// `openUrl`: opens `url` with `UIApplication.open` (the app's own
+/// application, the embedding app's when NSH is embedded) and reports
+/// whether the system opened it ([`EventKind::OpenUrl`] `id`). A scheme no
+/// app handles reports `false`.
+pub(crate) fn open_url(id: u32, url: &str, control: &EngineControl) {
+    let control = control.clone();
+    let answer = move |opened: bool| {
+        control.dispatch_event(
+            nsh_core::ROOT_ID,
+            EventKind::OpenUrl,
+            EventPayload::Map(vec![
+                ("id", PayloadValue::Number(id as f64)),
+                ("opened", PayloadValue::Bool(opened)),
+            ]),
+        );
+    };
+    let (Some(mtm), Some(url)) = (
+        MainThreadMarker::new(),
+        NSURL::URLWithString(&NSString::from_str(url)),
+    ) else {
+        return answer(false);
+    };
+    let completion = RcBlock::new(move |opened: Bool| answer(opened.as_bool()));
+    // SAFETY: an empty dictionary is valid options; UIKit calls the
+    // completion on the main thread.
+    unsafe {
+        UIApplication::sharedApplication(mtm).openURL_options_completionHandler(
+            &url,
+            &NSDictionary::new(),
+            Some(&completion),
+        )
+    };
+}
+
+/// `Clipboard.writeText`: puts `text` on the general pasteboard.
 pub(crate) fn set_clipboard(text: &str) {
     // SAFETY: a plain setter of the general pasteboard.
     unsafe {
@@ -226,7 +302,7 @@ pub(crate) fn set_clipboard(text: &str) {
     };
 }
 
-/// `Clipboard.getString` / `hasString`: whether the general pasteboard
+/// `Clipboard.readText` / `hasText`: whether the general pasteboard
 /// holds text and, unless `has_only`, the text. `hasStrings` does not read
 /// it, so it shows no paste notice.
 pub(crate) fn read_clipboard(has_only: bool) -> (bool, Option<String>) {
@@ -248,18 +324,18 @@ const IMAGE_TYPES: [(&str, &str); 3] = [
     ("image/gif", "com.compuserve.gif"),
 ];
 
-/// `Clipboard.setImage`: the image of a `data:` URI on the general
+/// `Clipboard.writeImage`: the image of a `data:` URI on the general
 /// pasteboard, under its own type.
 pub(crate) fn set_clipboard_image(uri: &str) {
     let Some((mime, bytes)) = clipboard::decode_data_uri(uri) else {
-        log::warn!("Clipboard.setImage: not a base64 data: URI");
+        log::warn!("Clipboard.writeImage: not a base64 data: URI");
         return;
     };
     let kind = match IMAGE_TYPES.iter().find(|(m, _)| *m == mime) {
         Some((_, kind)) => *kind,
         None if mime.starts_with("image/") => "public.image",
         None => {
-            log::warn!("Clipboard.setImage: unsupported image type {mime}");
+            log::warn!("Clipboard.writeImage: unsupported image type {mime}");
             return;
         }
     };
@@ -267,7 +343,7 @@ pub(crate) fn set_clipboard_image(uri: &str) {
     board.setData_forPasteboardType(&NSData::with_bytes(&bytes), &NSString::from_str(kind));
 }
 
-/// `Clipboard.getImage` / `hasImage`: the answer to read `id`. `hasImages`
+/// `Clipboard.readImage` / `hasImage`: the answer to read `id`. `hasImages`
 /// does not read the pasteboard, so it shows no paste notice.
 pub(crate) fn read_clipboard_image(id: u32, has_only: bool) -> EventPayload {
     let board = objc2_ui_kit::UIPasteboard::generalPasteboard();
@@ -285,7 +361,50 @@ pub(crate) fn read_clipboard_image(id: u32, has_only: bool) -> EventPayload {
     clipboard::image_answer(id, true, clipboard::Image::sniff(&bytes))
 }
 
-/// `Clipboard.getFiles`: the `file:` URLs on the general pasteboard
+/// What `board` holds, read as the user pastes into an input (`onPaste`):
+/// its text, its images (as they are in [`IMAGE_TYPES`], else PNG) and its
+/// local files' `file:` URLs (Mac Catalyst).
+pub(crate) fn pasted(board: &objc2_ui_kit::UIPasteboard) -> nsh_core::PasteEvent {
+    // SAFETY: plain getters of the pasteboard, read on the user's paste.
+    unsafe {
+        let mut paste = nsh_core::PasteEvent::new(
+            board
+                .hasStrings()
+                .then(|| board.string())
+                .flatten()
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+        );
+        if board.hasImages() {
+            let first = IMAGE_TYPES
+                .iter()
+                .find_map(|(_, kind)| board.dataForPasteboardType(&NSString::from_str(kind)));
+            match first {
+                Some(data) if board.numberOfItems() <= 1 => {
+                    paste.files.push(nsh_core::PastedFile::image(data.to_vec()));
+                }
+                _ => {
+                    for image in board.images().map(|i| i.to_vec()).unwrap_or_default() {
+                        if let Some(png) = image.png_representation() {
+                            paste.files.push(nsh_core::PastedFile::image(png.to_vec()));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(urls) = board.hasURLs().then(|| board.URLs()).flatten() {
+            paste.uris = urls
+                .iter()
+                .filter(|url| url.isFileURL())
+                .filter_map(|url| url.absoluteString())
+                .map(|s| s.to_string())
+                .collect();
+        }
+        paste
+    }
+}
+
+/// `Clipboard.readFiles`: the `file:` URLs on the general pasteboard
 /// (files copied in the Finder, on Mac Catalyst).
 pub(crate) fn read_clipboard_files(id: u32) -> EventPayload {
     let board = objc2_ui_kit::UIPasteboard::generalPasteboard();
@@ -303,7 +422,7 @@ pub(crate) fn read_clipboard_files(id: u32) -> EventPayload {
     clipboard::files_answer(id, &files)
 }
 
-/// `AccessibilityInfo.announceForAccessibility`: VoiceOver reads `text`.
+/// `announce`: VoiceOver reads `text`.
 pub(crate) fn announce(text: &str) {
     let text = NSString::from_str(text);
     // SAFETY: announcements take the message as an NSString.
@@ -315,7 +434,7 @@ pub(crate) fn announce(text: &str) {
     };
 }
 
-/// `AccessibilityInfo.setAccessibilityFocus`: VoiceOver moves to `view`.
+/// `setAccessibilityFocus`: VoiceOver moves to `view`.
 pub(crate) fn accessibility_focus(view: &UIView) {
     // SAFETY: layout changes take the element to focus.
     unsafe {

@@ -110,14 +110,23 @@ pub(crate) struct Surface {
     /// The embedding app's locale and text size, standing in for the
     /// system's ([`crate::AppView::set_locale`], `set_font_scale`).
     pub(crate) host_environment: Cell<nsh_core::platform::HostEnvironment>,
+    /// The embedding app's theme overrides
+    /// ([`crate::AppView::set_theme_overrides`]): sent to every engine the
+    /// surface starts, before its first frame.
+    pub(crate) host_tokens: RefCell<Option<nsh_engine::Tokens>>,
     /// JS asked for a display frame.
     js_frame: Cell<bool>,
     /// The tick callback runs.
     ticking: Cell<bool>,
     on_error: RefCell<Option<ErrorHandler>>,
     on_hot_update_failed: RefCell<Option<Box<dyn Fn()>>>,
+    /// The model of a test session's app (`nsh test --target linux`).
+    #[cfg(feature = "dev")]
+    test_model: RefCell<Option<Arc<nsh_testing::agent::Model>>>,
     /// Where `asset:/` image URIs resolve ([`crate::image::set_asset_base`]).
     pub(crate) asset_base: RefCell<Option<crate::image::AssetBase>>,
+    /// The disk cache of downloaded images ([`crate::image::set_disk_cache`]).
+    pub(crate) image_cache: RefCell<Option<nsh_core::image::DiskCache>>,
     /// What the running app may reach (checked for image redirects).
     pub(crate) access: RefCell<Arc<nsh_core::access::Access>>,
     /// Videos, web views and registered native components.
@@ -126,6 +135,9 @@ pub(crate) struct Surface {
     pub(crate) keymap: crate::keymap::KeymapState,
     /// The window's chrome: title bar, menus ([`crate::chrome`]).
     pub(crate) chrome: crate::chrome::Chrome,
+    /// Selections across the texts of selection areas
+    /// ([`crate::selection_area`]).
+    pub(crate) selection: crate::selection_area::State,
 }
 
 impl Surface {
@@ -150,15 +162,20 @@ impl Surface {
             environment: Cell::new(environment),
             appearance: Cell::default(),
             host_environment: Cell::default(),
+            host_tokens: RefCell::new(None),
             js_frame: Cell::new(false),
             ticking: Cell::new(false),
             on_error: RefCell::new(None),
             on_hot_update_failed: RefCell::new(None),
+            #[cfg(feature = "dev")]
+            test_model: RefCell::default(),
             asset_base: RefCell::new(None),
+            image_cache: RefCell::new(None),
             access: RefCell::new(Arc::default()),
             native: Default::default(),
             keymap: Default::default(),
             chrome: Default::default(),
+            selection: Default::default(),
         });
         SURFACES.with(|s| s.borrow_mut().insert(key, Rc::downgrade(&surface)));
         let weak = Rc::downgrade(&surface);
@@ -172,6 +189,37 @@ impl Surface {
         surface
     }
 
+    /// Its key ([`Surface::by_key`]).
+    #[cfg(feature = "dev")]
+    pub(crate) fn key(&self) -> u64 {
+        self.key
+    }
+
+    /// The surface `key` names, while it exists.
+    #[cfg(feature = "dev")]
+    pub(crate) fn by_key(key: u64) -> Option<Rc<Surface>> {
+        SURFACES.with(|s| s.borrow().get(&key).and_then(Weak::upgrade))
+    }
+
+    /// Whether a native animation runs: the graph's, or a navigation
+    /// transition.
+    #[cfg(feature = "dev")]
+    pub(crate) fn animating(&self) -> bool {
+        self.anim.borrow().animating()
+            || self
+                .nav
+                .try_borrow()
+                .map_or(true, |nav| nav.transitioning())
+    }
+
+    /// Keeps the model `nsh test --target` steps see of the app
+    /// ([`nsh_testing::agent::Model`]): every batch applied and every error
+    /// go to it from now on.
+    #[cfg(feature = "dev")]
+    pub(crate) fn set_test_model(&self, model: Option<Arc<nsh_testing::agent::Model>>) {
+        *self.test_model.borrow_mut() = model;
+    }
+
     /// Starts `config`'s app, replacing what ran.
     pub(crate) fn start(self: &Rc<Self>, mut config: EngineConfig) {
         self.stop();
@@ -182,6 +230,11 @@ impl Surface {
         let env = self.environment.get();
         config.viewport = Size::new(env.window.width, env.window.height);
         config.environment = env;
+        // A test session's app: the test's storage, network and trace.
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self.test_model.borrow() {
+            model.set_up_engine(&mut config);
+        }
         let (tx, rx) = crossbeam_channel::unbounded();
         let pending = Arc::new(AtomicBool::new(false));
         let sink = Sink {
@@ -192,8 +245,22 @@ impl Surface {
         *self.rx.borrow_mut() = Some(rx);
         *self.pending.borrow_mut() = pending;
         let family = crate::text::ui_family();
-        match Engine::start(config, move || PangoTextEngine::new(family), sink) {
+        // The embedding app's theme overrides are in the first frame.
+        let tokens = self.host_tokens.borrow().clone();
+        let setup = |control: &EngineControl| {
+            if tokens.is_some() {
+                control.set_tokens(tokens);
+            }
+        };
+        match Engine::start_with(config, move || PangoTextEngine::new(family), sink, setup) {
             Ok(engine) => {
+                // The app's downloaded images go through its disk cache.
+                crate::image::set_disk_cache(self, engine.image_cache());
+                // The test moves its clock through the engine.
+                #[cfg(feature = "dev")]
+                if let Some(model) = &*self.test_model.borrow() {
+                    model.engine_started(engine.control());
+                }
                 *self.control.borrow_mut() = Some(engine.control());
                 *self.engine.borrow_mut() = Some(engine);
             }
@@ -213,6 +280,7 @@ impl Surface {
         *self.anim.borrow_mut() = UiAnimation::default();
         self.nav.borrow_mut().reset();
         crate::input::reset(self);
+        crate::selection_area::reset(self);
         crate::keymap::clear(self);
         self.js_frame.set(false);
     }
@@ -287,6 +355,10 @@ impl Surface {
                 }
                 Message::Error(message) => {
                     log::error!("{message}");
+                    #[cfg(feature = "dev")]
+                    if let Some(model) = &*self.test_model.borrow() {
+                        model.error(message.clone());
+                    }
                     if let Some(f) = &*self.on_error.borrow() {
                         f(&message);
                     }
@@ -317,6 +389,10 @@ impl Surface {
             }
         }
         self.mounter.borrow_mut().end_batch(self);
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self.test_model.borrow() {
+            model.apply(batch);
+        }
     }
 
     /// Writes the animated values to the views and reports finished
@@ -327,6 +403,7 @@ impl Surface {
             anim.write(&self.mounter.borrow());
             std::mem::take(&mut anim.finished)
         };
+        crate::scroll::pin_animated_sticky(self);
         if !finished.is_empty() {
             self.control(|c| c.animations_finished(finished));
         }

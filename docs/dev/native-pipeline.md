@@ -32,16 +32,17 @@ bundle (`plugin.rs`, an unknown `nsh/…` is an error), `nsh-js` serves them (`m
 loader). Where each one is implemented and declared: `js-modules.md`.
 
 - `nsh`: `signal` (`count()`, `count.set(v)`, `count.update(f)`), `computed`, `effect`, `batch`, `untracked`, `cleanup`,
-  `context` (`Theme()`, `<Theme.Provider value>`), `split(props, keys)` (`[picked, rest]`, keeping getters), `mount`;
-  the primitives `View`, `Text`, `Scroll`, `Input`.
+  `context` (`Theme()`, `<Theme.Provider value>`), `split(props, keys)` (`[picked, rest]`, keeping getters), `mount`,
+  `ErrorBoundary` (Rust's `catch_error`);
+  the primitives `View`, `Text`, `Scroll`, `Input`, `Overlay`.
 - `nsh:rt` (only compiled code imports it): `element`, `text`, `append`, `insert`, `prop`, `bindProp`, `spread`,
   `component`, `cond`, `each`, `merge`, `list`, `setup`, `font`, `metaUrl`. The bundle shares one `import.meta`, so
   the compiler turns each module's `import.meta.url` into `metaUrl("<its path in the app>")` (a module that mentions
   `import.meta` goes through the compiler even without JSX), which `dom.rs` resolves against the app's directory
   (`${pluginDir}` as a `file:` URL), else the page's URL (`HostOptions::base_url`), else `asset:/`. `import.meta`
   itself is left as it is.
-- `nsh/device` (`windowSize`, `colorScheme`, `fontScale`, `locale`, `Platform`, `PixelRatio`, `I18nManager`) and
-  `nsh/accessibility` (`reduceMotion`, `screenReaderEnabled`, `AccessibilityInfo`): the environment (`env.rs`), one
+- `nsh/device` (`windowSize`, `colorScheme`, `fontScale`, `pixelRatio`, `locale`, `platform`) and
+  `nsh/accessibility` (`reduceMotion`, `screenReaderEnabled`, `announce`, `setAccessibilityFocus`): the environment (`env.rs`), one
   signal per part written when the platform reports a change, read through read-only accessors.
 - `nsh/list`, `nsh/gesture`, `nsh/animated`, `nsh/canvas`, `nsh/webview`, `nsh/video`, `nsh/native`, `nsh/ios`,
   `nsh/image` (`Image`: the image element's component with its registry's functions on it) and the hand-written part
@@ -72,10 +73,12 @@ One Oxc pass removes TypeScript and lowers JSX (`plugin.rs` `compile_native`):
 - **Tags** are PascalCase and name bindings by normal scoping: every tag is imported or local, except `<If when else>`
   and `<Each of key>`, globals (`dom.rs` `install_globals`) a binding of the same name shadows. A tag naming one of
   `jsx::PRIMITIVES` imported from its module (alias-aware: `import { View as V } from "nsh"`) compiles to what it is,
-  with no component call: `View`, `Text`, `Scroll`, `Input` (`nsh`), `Image` (`nsh/image`), `WebView`, `Video` to
+  with no component call: `View`, `Text`, `Scroll`, `Input`, `Overlay`, `Image`, `WebView`, `Video` (`nsh`) to
   their host elements made in place, `List` to `nsh:rt`'s `list`, `If` / `Each` to `cond` / `each`; `Canvas`,
   `Dialog` (`nsh/base`) and `InputAccessoryView` are native components that do more than make their element (the
-  drawing, `open`, the popup and backdrop parts and the insets, iOS only) and are called. The exports are callable components too (`dom.rs`
+  drawing, `open`, the popup and backdrop parts and the insets, iOS only) and are called. Imported from the modules
+  they were first exported from (`nsh/image`, `nsh/list`, `nsh/canvas`, `nsh/webview`, `nsh/video`, deprecated), they
+  compile alike; hints name `nsh`. The exports are callable components too (`dom.rs`
   `host_component`; `If` and `Each` are real globals), so `const C = cond ? View : Text; <C />` works through the
   component path. Lowercase tags are errors with the import to write (`<view>`: write `<View>` and `import { View }
   from "nsh"`; for another, the closest binding, primitive or registry component). Why: TypeScript checks a lowercase
@@ -138,6 +141,17 @@ One Oxc pass removes TypeScript and lowers JSX (`plugin.rs` `compile_native`):
   branch per change of truthiness. An `<If>` whose child is a function written in place compiles to
   `((w) => cond(w, () => (fn)(w), …))(() => when)`: the function gets an accessor of `when`'s value (Solid's `<Show>`),
   read through the same thunk the condition is.
+- Errors: a computation that throws keeps the exception as the round's error, thrown out of the native that ended the
+  round (the first wins), unless an `ErrorBoundary` is above the owner it ran under. A boundary (`error_boundary`) is
+  a memo showing its children or its fallback by a signal (`[error]` while failed); the children render in a memo of
+  their own under it, whose context names that signal under a key of the graph's (`reactive::boundary_key`), so a
+  failure under it (`Js::call`: the computation is still the current owner) finds the boundary as `useContext` would.
+  Caught exceptions wait in `JsData.caught` (the first per boundary wins) until no computation runs (`finish` with
+  `running` at 0): setting the signal then runs the boundary again, which disposes the children's memo (what failed)
+  and calls `fallback(error, reset)` under the outer memo, so what fails in the fallback goes to the boundary above.
+  Listeners match Rust's: each node keeps the owner it was made under (`NodeData.owner`), and a handler's exception
+  (`Host::dispatch_event`, `touch.rs`) goes to that owner's boundary (`dom::catch_listener_failure`). Without a
+  boundary nothing changes: no lookup runs but the context walk of a failing computation.
 - Platform-only props (`ios={{…}}`, `android={{…}}`, `desktop={{…}}`): only the current platform's object is sent, each
   key as a prop of its own (`platform_props`).
 - The reactive graph and the renderer share one per-context state (`state.rs`); natives reach each part by shared or
@@ -145,7 +159,7 @@ One Oxc pass removes TypeScript and lowers JSX (`plugin.rs` `compile_native`):
 
 ## Lists and node methods
 
-- `List` (`nsh/list`) is the renderer's (`list.rs`; its tags compile to a component call of `nsh:rt`'s `list`, the
+- `List` (`nsh`) is the renderer's (`list.rs`; its tags compile to a component call of `nsh:rt`'s `list`, the
   same function). The core asks for rows (`Host::bind_list`), bound natively (`list::bind`); a recycled cell gets a
   new index and its item accessor follows; header, footer, empty and separator cells, viewability tokens (with
   `minimumViewTime`), `initialScrollIndex`. Rust components with rows (an `Items` prop) get a list of the app's data as

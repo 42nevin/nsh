@@ -32,7 +32,7 @@ use crate::{
 };
 
 /// How text is measured on one line, in a canvas font.
-pub(crate) type MeasureFn = Rc<dyn Fn(&CanvasFont, &str) -> f32>;
+pub(crate) type MeasureFn = Rc<dyn Fn(&CanvasFont, &str) -> crate::canvas::TextMetrics>;
 
 /// What the core gives components that run once.
 #[derive(Default)]
@@ -68,7 +68,6 @@ struct EnvSignals {
     font_scale: Memo<f32>,
     reduce_motion: Memo<bool>,
     screen_reader: Memo<bool>,
-    rtl: Memo<bool>,
     pixel_ratio: Memo<f32>,
     locale: Memo<Locale>,
 }
@@ -93,7 +92,6 @@ impl EnvSignals {
                 font_scale: part!(font_scale),
                 reduce_motion: part!(reduce_motion),
                 screen_reader: part!(screen_reader),
-                rtl: part!(rtl),
                 pixel_ratio: part!(pixel_ratio),
                 locale: part!(locale),
             }
@@ -234,18 +232,13 @@ pub fn screen_reader() -> bool {
     env(|e| e.screen_reader)
 }
 
-/// The layout runs right to left (TS: `I18nManager.isRTL`).
-pub fn rtl() -> bool {
-    env(|e| e.rtl)
-}
-
-/// Device pixels per point (TS: `PixelRatio.get()`).
+/// Device pixels per point (TS: `pixelRatio()`).
 pub fn pixel_ratio() -> f32 {
     env(|e| e.pixel_ratio)
 }
 
 /// `points` rounded to whole device pixels (TS:
-/// `PixelRatio.roundToNearestPixel`).
+/// `Math.round(x * pixelRatio()) / pixelRatio()`).
 pub fn round_to_nearest_pixel(points: Points) -> Points {
     let ratio = pixel_ratio().max(f32::MIN_POSITIVE);
     Points((points.0 * ratio).round() / ratio)
@@ -256,7 +249,7 @@ pub fn locale() -> Locale {
     env(|e| e.locale)
 }
 
-/// The operating system (TS: `Platform.OS`); it does not change.
+/// The operating system (TS: `platform.os`); it does not change.
 pub fn os() -> Os {
     with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
@@ -264,14 +257,14 @@ pub fn os() -> Os {
 }
 
 /// The OS version: major and minor on iOS, the API level and 0 on Android
-/// (TS: `Platform.Version`).
+/// (TS: `platform.version`).
 pub fn os_version() -> (u16, u16) {
     with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
         .with_untracked(|e| e.os_version)
 }
 
-/// The kind of device (TS: `Platform.isPad`, `isTV`, `isMacCatalyst`).
+/// The kind of device (TS: `platform.idiom`, `platform.catalyst`).
 pub fn idiom() -> Idiom {
     with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
@@ -279,7 +272,7 @@ pub fn idiom() -> Idiom {
 }
 
 /// Whether desktop behavior applies: a desktop OS, or a browser in the
-/// desktop idiom (TS: `Platform.isDesktop`); it does not change.
+/// desktop idiom (TS: `platform.idiom` `"desktop"`); it does not change.
 pub fn is_desktop() -> bool {
     with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
@@ -298,9 +291,17 @@ pub fn tokens() -> Arc<Tokens> {
 /// invalid one measures in `10px sans-serif`), by the platform's text engine
 /// (TS: a canvas's `measureText(text).width`).
 pub fn measure_text(font: &str, text: &str) -> Points {
+    text_metrics(font, text).width
+}
+
+/// How `text` sits on one line in `font` (the CSS `font` shorthand; an
+/// invalid one measures in `10px sans-serif`), by the platform's text
+/// engine: its width and the font's ascent, descent and line height, to
+/// place text a canvas draws (a cell's baseline, a caret over it).
+pub fn text_metrics(font: &str, text: &str) -> crate::canvas::TextMetrics {
     let font = CanvasFont::parse(font).unwrap_or_default();
     let measure = with_data(|d| d.ambient.measure.clone()).expect("the core sets the text engine");
-    Points(measure(&font, text))
+    measure(&font, text)
 }
 
 /// The surface's `G`: one signal per type, made with `Default` the first
@@ -337,6 +338,7 @@ pub(crate) fn insets_of(host: NodeId) -> EdgeInsets {
 
 /// Shows `dialog` (an alert, or with `sheet` an action sheet); await the
 /// answer in a task.
+#[deprecated(note = "use nsh_base::alert_dialog, as TSX's `AlertDialog.show` of `nsh/base`")]
 pub fn dialog(dialog: Dialog) -> DialogAnswer {
     let (answer, slot) = DialogAnswer::new();
     act(Action::Dialog(dialog, slot));
@@ -358,7 +360,7 @@ pub fn animate_layout(animation: LayoutAnimation) {
 }
 
 /// The screen reader reads `message` (TS:
-/// `AccessibilityInfo.announceForAccessibility`).
+/// `announce`).
 pub fn announce_for_accessibility(message: impl Into<String>) {
     act(super::services::announce(message.into()));
 }
@@ -375,20 +377,34 @@ pub(crate) fn with_storage<R>(f: impl FnOnce(&crate::storage::Store) -> R) -> R 
     f(&storage)
 }
 
-/// Puts `text` on the system clipboard (TS: `Clipboard.setString`).
+/// Opens `url` outside the app (TS: `openUrl` of `nsh/device`): a web page
+/// in the browser, a `mailto:` or `tel:` link in its app, any scheme
+/// another app registered. The embedding app may take it first (its host
+/// channel's URL handler, which routes it through the host's router).
+/// Resolves to whether it opened: `false` for a URL
+/// [`crate::open_url::check_url`] refuses, when the app's `openUrl`
+/// capability is not granted, or when no app handles it. Await it in a
+/// task, or drop it when the answer does not matter.
+pub fn open_url(url: impl Into<String>) -> Answer<bool> {
+    let (answer, action) = super::services::open_url(url.into());
+    act(action);
+    answer
+}
+
+/// Puts `text` on the system clipboard (TS: `Clipboard.writeText`).
 pub fn set_clipboard(text: impl Into<String>) {
     act(super::services::set_clipboard(text.into()));
 }
 
 /// The text on the system clipboard, `""` when it holds none (TS:
-/// `Clipboard.getString`), to await in a task.
+/// `Clipboard.readText`), to await in a task.
 pub fn clipboard_string() -> Answer<String> {
     let (answer, action) = super::services::clipboard_string();
     act(action);
     answer
 }
 
-/// Whether the system clipboard holds text (TS: `Clipboard.hasString`).
+/// Whether the system clipboard holds text (TS: `Clipboard.hasText`).
 pub fn clipboard_has_string() -> Answer<bool> {
     let (answer, action) = super::services::clipboard_has_string();
     act(action);
@@ -396,13 +412,13 @@ pub fn clipboard_has_string() -> Answer<bool> {
 }
 
 /// Puts the image of a `data:` URI (as [`clipboard_image`] gives) on the
-/// system clipboard (TS: `Clipboard.setImage`).
+/// system clipboard (TS: `Clipboard.writeImage`).
 pub fn set_clipboard_image(uri: impl Into<String>) {
     act(super::services::set_clipboard_image(uri.into()));
 }
 
 /// The image on the system clipboard, `None` when it holds none (TS:
-/// `Clipboard.getImage`), to await in a task.
+/// `Clipboard.readImage`), to await in a task.
 pub fn clipboard_image() -> Answer<Option<ClipboardImage>> {
     let (answer, action) = super::services::clipboard_image();
     act(action);
@@ -418,11 +434,36 @@ pub fn clipboard_has_image() -> Answer<bool> {
 }
 
 /// The `file:` URLs of the local files on the system clipboard (files
-/// copied in a file manager; TS: `Clipboard.getFiles`), to await in a task.
+/// copied in a file manager; TS: `Clipboard.readFiles`), to await in a task.
 pub fn clipboard_files() -> Answer<Vec<String>> {
     let (answer, action) = super::services::clipboard_files();
     act(action);
     answer
+}
+
+/// Shows the system's picker for images and gives the ones the user picked,
+/// prepared as `request` says, none when cancelled (TS:
+/// `Picker.pickImages`), to await in a task.
+pub fn pick_images(request: crate::picker::PickRequest) -> Answer<Vec<crate::picker::PickedFile>> {
+    let (answer, action) = super::services::pick_images(request);
+    act(action);
+    answer
+}
+
+/// The value function `name` of the embedding app returns for `args`
+/// (TS: `host.call`), to await in a task.
+pub(crate) fn host_call(
+    name: String,
+    args: crate::JsonValue,
+) -> Answer<Result<crate::JsonValue, String>> {
+    let (answer, action) = super::services::host_call(name, args);
+    act(action);
+    answer
+}
+
+/// Forgets the host calls whose answers were dropped (they timed out).
+pub(crate) fn forget_host_calls() {
+    act(Action::ForgetHostCalls);
 }
 
 /// Shows `message` at the bottom of the screen (Android's toasts, TS:
@@ -431,16 +472,16 @@ pub fn toast(message: impl Into<String>, duration: super::ToastDuration) {
     act(super::services::toast(message.into(), duration));
 }
 
-/// The size in pixels of the image at `uri` (TS: `Image.getSize`).
-pub fn image_size(uri: impl Into<String>) -> Answer<Result<ImageSize, String>> {
-    let (answer, action) = super::services::image_size(uri.into());
+/// The size in pixels of the image at `src` (TS: `Image.getSize`).
+pub fn image_size(src: impl Into<String>) -> Answer<Result<ImageSize, String>> {
+    let (answer, action) = super::services::image_size(src.into());
     act(action);
     answer
 }
 
-/// Loads the image at `uri` ahead of showing it (TS: `Image.prefetch`).
-pub fn prefetch_image(uri: impl Into<String>) -> super::Prefetch {
-    let (answer, action) = super::services::prefetch(uri.into());
+/// Loads the image at `src` ahead of showing it (TS: `Image.prefetch`).
+pub fn prefetch_image(src: impl Into<String>) -> super::Prefetch {
+    let (answer, action) = super::services::prefetch(src.into());
     act(action);
     answer
 }
@@ -461,18 +502,6 @@ pub fn fetch(request: impl Into<crate::platform::HttpRequest>) -> super::Fetch {
 /// `setColorScheme`).
 pub fn set_color_scheme(appearance: Appearance) {
     act(Action::Appearance(appearance));
-}
-
-/// Lays the surface out right to left whatever the user's language (TS:
-/// `I18nManager.forceRTL`).
-pub fn force_rtl(force: bool) {
-    act(Action::Direction(super::services::Direction::Force(force)));
-}
-
-/// Whether a right-to-left language lays the surface out right to left
-/// (TS: `I18nManager.allowRTL`).
-pub fn allow_rtl(allow: bool) {
-    act(Action::Direction(super::services::Direction::Allow(allow)));
 }
 
 // --- Tasks and timers --------------------------------------------------------
@@ -677,6 +706,13 @@ pub fn animated_value(value: f32) -> super::AnimatedValue {
     super::AnimatedValue::new(&executor(), value)
 }
 
+/// Animated values for a view's opacity and transform, and motions to
+/// play on them (TS: `createMotion`): bind it with
+/// [`super::Styled::bind_motion`]. A `Copy` handle the current owner keeps.
+pub fn motion() -> super::Motion {
+    super::Motion::new(&executor())
+}
+
 /// A handle for an element (TS: `ref`): put it on the element with
 /// [`super::Element::element_ref`], call its commands from handlers and
 /// tasks. A `Copy` handle the current owner keeps, as a signal is.
@@ -774,7 +810,7 @@ pub fn key_label(keystroke: &str) -> String {
 }
 
 /// Listens to the Android back button while the current owner lives (TS:
-/// `BackHandler.addEventListener("hardwareBackPress", f)`): when no modal is
+/// `BackHandler.onBackPress(f)`): when no modal is
 /// shown, `f` runs before the stack pops, newest listener first, and returns
 /// true when it handled the press. While one listens, a back gesture does
 /// not preview the pop.

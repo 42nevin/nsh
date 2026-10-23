@@ -45,7 +45,7 @@ The rest of the Rust UI API (`nsh_core::ui`) follows GPUI's element APIs:
   `ResponderEvent::location` / `page`, `PanGesture`'s `position`, `origin` and `delta`, `ElementRef::scroll_to`,
   `zoom_to`'s center, `Scrollable::content_offset`); **sizes** are `Size<Points>` (`ScrollEvent`'s `size` and
   `content_size`, `ImageAsset::size`); single lengths are `Points` (`ListLayout`'s paddings, gaps and estimates,
-  `Scrollable::snap_interval` / `snap_offsets`, `Theme`'s `radius`, `radius_lg` and `font_size`, `keyboard_height()`,
+  `Scrollable::snap_interval` / `snap_offsets`, `Theme::radius`, `keyboard_height()`,
   `measure_text`, `round_to_nearest_pixel`, `set_title_bar`'s height).
 - **Styles** (`nsh_core::style`, what a node's style resolves to and the platforms draw): lengths are `Points`
   (`ViewStyle`'s `border_radius` and `elevation`, `Shadow` and `TextShadow` offsets and radii, `TextStyle`'s font size,
@@ -62,7 +62,9 @@ The rest of the Rust UI API (`nsh_core::ui`) follows GPUI's element APIs:
   `Size<DevicePixels>`: `ImageSize` (`Image.getSize`), `ClipboardImage` and `VideoInfo` are `DevicePixels`. An
   `ImageAsset`'s size is the size it lays out at, the file's pixels over the `@2x` / `@3x` of its name, so it is
   `Size<Points>`. `ImageSize` and `ClipboardImage` keep flat `width` / `height` fields (each has `size()`) because they
-  are JS objects too, `{ width, height }`.
+  are JS objects too, `{ width, height }`. An SVG has no pixels of its own: what `onLoad` and `Image.getSize` report
+  for it is its intrinsic size in whole points carried in the same `Size<DevicePixels>` (`svg::reported_size`), while
+  it lays out at `svg::size`'s unrounded `Size<Points>`.
 
 ### Deviations from GPUI, and why
 

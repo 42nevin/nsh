@@ -99,6 +99,13 @@ pub(crate) type Item = (&'static str, Export, Ts);
 pub(crate) struct NativeModule {
     pub(crate) name: &'static str,
     pub(crate) exports: &'static [Item],
+    /// The modules whose exports this one serves too, the same values (one
+    /// per VM): `nsh` serves the primitives `nsh/image`, `nsh/list`, ...
+    /// exported first.
+    pub(crate) also: &'static [&'static str],
+    /// The module apps import this one's exports from now (`nsh`): they
+    /// stay, declared `@deprecated`.
+    pub(crate) moved_to: Option<&'static str>,
     /// The module's own TypeScript types (interfaces, type aliases), next to
     /// the declarations of its exports.
     pub(crate) types: &'static str,
@@ -106,6 +113,7 @@ pub(crate) struct NativeModule {
 
 /// `nsh`: the API apps write against.
 const NSH: &[Item] = &[
+    crate::env::TOKEN_EXPORT,
     (
         "signal",
         Export::Function(reactive::signal, 2),
@@ -197,6 +205,16 @@ const NSH: &[Item] = &[
         ),
     ),
     (
+        "ErrorBoundary",
+        Export::Function(dom::error_boundary, 1),
+        Ts::function(
+            "Its children, or `fallback` once something under them threw (a component's body, a\nbinding, an effect, a listener): what failed goes, and `fallback(error, reset)` shows the\nthrown value; `reset()` renders the children again. A fallback that takes no arguments\nis shown as is. What throws in the fallback goes to the boundary above.",
+            &[
+                "(props: { fallback: JSX.Element | ((error: unknown, reset: () => void) => JSX.Element); children?: JSX.Element }): JSX.Element",
+            ],
+        ),
+    ),
+    (
         "View",
         Export::Value(|cx| dom::host_component(cx, "view", true)),
         Ts::function(
@@ -216,7 +234,7 @@ const NSH: &[Item] = &[
         "Scroll",
         Export::Value(|cx| dom::host_component(cx, "scroll", true)),
         Ts::function(
-            "A native scroll view (UIScrollView / ScrollView), zoomable; for long\nlists, `List` (`nsh/list`).",
+            "A native scroll view (UIScrollView / ScrollView), zoomable; for long\nlists, `List`.",
             &["(props: ScrollProps): YNode"],
         ),
     ),
@@ -226,6 +244,14 @@ const NSH: &[Item] = &[
         Ts::function(
             "A native text input (UITextField / UITextView, EditText); `ref` has\n`focus()`, `blur()` and `setSelection(start, end)`.",
             &["(props: InputProps): YNode"],
+        ),
+    ),
+    (
+        "Overlay",
+        Export::Value(|cx| dom::host_component(cx, "overlay", true)),
+        Ts::function(
+            "Its children on top of the root view it is in (the surface, or the dialog\naround it), outside its parent's layout and clipping, while it stays its\nparent's child for everything else (context, events, lifetime): popovers,\nmenus, tooltips. Without `anchor` it is a `position: fixed` box of that\nroot view; with one it goes on the `placement` side of the anchor, on the\nother when only that one has room, kept inside the safe area, and follows\nthe anchor as it moves. `onPressOutside` and `onCancel` (Escape, Android\nback) report what closes it; closing is the app's.",
+            &["(props: OverlayProps): YNode"],
         ),
     ),
 ];
@@ -294,87 +320,143 @@ export interface Context<T> extends Accessor<T> {
 
 /** A component: a function of its props rendering elements. */
 export type Component<P = {}> = (props: P) => JSX.Element;
+
+/**
+ * The design tokens of the app's theme by name, and what `token()` gives
+ * for each: a color or a font family as a string, a number. nsh declares
+ * the app's (`.nsh/types/nsh/tokens.d.ts`, from `nsh.json` `"theme"`).
+ */
+export interface Tokens {}
 "#;
+
+/// The modules that exported primitives before `nsh` did: `nsh` serves
+/// their exports, and they keep serving them (deprecated).
+const PRIMITIVE_MODULES: &[&str] = &[
+    "nsh/image",
+    "nsh/list",
+    "nsh/canvas",
+    "nsh/webview",
+    "nsh/video",
+];
 
 pub(crate) const MODULES: &[NativeModule] = &[
     NativeModule {
         name: "nsh",
         exports: NSH,
+        also: PRIMITIVE_MODULES,
+        moved_to: None,
         types: decl!(NSH_TYPES),
     },
     NativeModule {
         name: "nsh:rt",
         exports: dom::RT_EXPORTS,
+        also: &[],
+        moved_to: None,
         types: "",
     },
     NativeModule {
         name: "nsh/device",
         exports: env::DEVICE_EXPORTS,
+        also: &[],
+        moved_to: None,
         types: decl!(env::DEVICE_TYPES),
     },
     NativeModule {
         name: "nsh/accessibility",
         exports: env::ACCESSIBILITY_EXPORTS,
-        types: decl!(env::ACCESSIBILITY_TYPES),
+        also: &[],
+        moved_to: None,
+        types: "",
     },
     NativeModule {
         name: "nsh/android",
         exports: platform_modules::ANDROID_EXPORTS,
+        also: &[],
+        moved_to: None,
         types: decl!(platform_modules::ANDROID_TYPES),
     },
     NativeModule {
         name: "nsh/ios",
         exports: platform_modules::IOS_EXPORTS,
+        also: &[],
+        moved_to: None,
         types: decl!(platform_modules::IOS_TYPES),
     },
     NativeModule {
         name: "nsh/desktop",
         exports: desktop::EXPORTS,
+        also: &[],
+        moved_to: None,
         types: decl!(desktop::TYPES),
     },
     NativeModule {
         name: "nsh/webview",
         exports: platform_modules::WEBVIEW_EXPORTS,
+        also: &[],
+        moved_to: Some("nsh"),
         types: decl!(platform_modules::WEBVIEW_TYPES),
     },
     NativeModule {
         name: "nsh/video",
         exports: platform_modules::VIDEO_EXPORTS,
+        also: &[],
+        moved_to: Some("nsh"),
         types: decl!(platform_modules::VIDEO_TYPES),
     },
     NativeModule {
         name: "nsh/native",
         exports: platform_modules::NATIVE_EXPORTS,
+        also: &[],
+        moved_to: None,
         types: decl!(platform_modules::NATIVE_TYPES),
     },
     NativeModule {
         name: "nsh/gesture",
         exports: touch::GESTURE_EXPORTS,
+        also: &[],
+        moved_to: None,
         types: decl!(touch::GESTURE_TYPES),
     },
     NativeModule {
         name: "nsh/animated",
         exports: animated::EXPORTS,
+        also: &[],
+        moved_to: None,
         types: decl!(animated::TYPES),
     },
     NativeModule {
         name: "nsh/canvas",
         exports: canvas::EXPORTS,
+        also: &[],
+        moved_to: Some("nsh"),
         types: decl!(canvas::TYPES),
     },
     NativeModule {
         name: "nsh/list",
         exports: list::EXPORTS,
+        also: &[],
+        moved_to: Some("nsh"),
         types: decl!(list::TYPES),
     },
     NativeModule {
         name: "nsh/image",
         exports: IMAGE_EXPORTS,
+        also: &[],
+        moved_to: Some("nsh"),
         types: "",
+    },
+    NativeModule {
+        name: "nsh/host",
+        exports: platform_modules::HOST_EXPORTS,
+        also: &[],
+        moved_to: None,
+        types: decl!(crate::host_channel::TYPES),
     },
     NativeModule {
         name: "nsh/keymap",
         exports: keymap::EXPORTS,
+        also: &[],
+        moved_to: None,
         types: decl!(keymap::TYPES),
     },
 ];
@@ -389,7 +471,7 @@ const IMAGE_EXPORTS: &[Item] = &[(
         image
     }),
     Ts::value(
-        "An image (a URL or `import logo from \"./logo.png\"`), decoded and cached\nnatively; `Image.getSize(uri)` and `Image.prefetch(uri)` ask about one\nwithout showing it.",
+        "An image (a URL or `import logo from \"./logo.png\"`), decoded and cached\nnatively; `Image.getSize(src)` and `Image.prefetch(src)` ask about one\nwithout showing it.",
         "((props: ImageProps) => YNode) & ImageModule",
     ),
 )];
@@ -397,6 +479,10 @@ const IMAGE_EXPORTS: &[Item] = &[(
 /// One export of a module, as it is made.
 enum Made {
     Own(Export),
+    /// An export of nsh's module `.0` that another serves too (`nsh`'s
+    /// `Image` is `nsh/image`'s): one value per VM, whichever module is
+    /// imported first making it.
+    Shared(&'static str, Export),
     /// A Rust component, with the functions of a module of the same name.
     Component(Arc<ComponentSpec>, Option<Arc<ModuleSpec>>),
     /// A module object.
@@ -430,6 +516,9 @@ pub(crate) struct ModuleTable {
     /// one per VM, so a module's default export, its flat exports and a
     /// global made from it (`process`) are the same values.
     objects: RefCell<HashMap<(String, &'static str), crate::web::js::V>>,
+    /// The values of [`Made::Shared`] exports made so far, by (module,
+    /// export).
+    shared: RefCell<HashMap<(&'static str, String), crate::web::js::V>>,
 }
 
 /// The code of a chunk.
@@ -460,13 +549,20 @@ impl ModuleTable {
     pub(crate) fn new(ui_sets: &[Registry]) -> ModuleTable {
         let mut registries: Vec<Registry> = nsh_core::runtime::registries().to_vec();
         let host = registries.len();
-        registries.extend(ui_sets.iter().filter(|r| r.specifier().is_some()).cloned());
+        registries.extend(
+            ui_sets
+                .iter()
+                .flat_map(Registry::sets)
+                .filter(|r| r.specifier().is_some())
+                .cloned(),
+        );
         ModuleTable {
             registries,
             host,
             declared: Vec::new(),
             chunks: RefCell::default(),
             objects: RefCell::default(),
+            shared: RefCell::default(),
         }
     }
 
@@ -474,6 +570,8 @@ impl ModuleTable {
     pub(crate) fn free_objects(&self) {
         let objects = std::mem::take(&mut *self.objects.borrow_mut());
         drop(objects);
+        let shared = std::mem::take(&mut *self.shared.borrow_mut());
+        drop(shared);
     }
 
     /// The values `nsh-js` makes for the registries of module `name`.
@@ -553,6 +651,27 @@ impl ModuleTable {
         object
     }
 
+    /// The value of export `export` of nsh's module `module` that another
+    /// module serves too (owned), made once per VM.
+    fn shared(&self, cx: *mut JsContext, module: &'static str, export: &str, e: Export) -> JsValue {
+        let key = (module, export.to_owned());
+        if let Some(value) = self.shared.borrow().get(&key) {
+            // SAFETY: a live value the table holds.
+            return unsafe { qjs::JS_DupValue(cx, value.raw()) };
+        }
+        let value = make_own(cx, export, e);
+        // SAFETY: inline tag check.
+        if unsafe { qjs::JS_IsException(value) } {
+            return value;
+        }
+        // SAFETY: the table keeps one reference, the caller gets another.
+        let kept = unsafe { qjs::JS_DupValue(cx, value) };
+        self.shared
+            .borrow_mut()
+            .insert(key, crate::web::js::V::own(cx, kept));
+        value
+    }
+
     /// The table the bytecode compiler links against: nsh's own modules,
     /// the runtime's registries and `ui_sets` by their exports' names.
     pub(crate) fn compiling(ui_sets: &[SetDescription]) -> ModuleTable {
@@ -565,6 +684,7 @@ impl ModuleTable {
             declared: ui_sets.to_vec(),
             chunks: RefCell::default(),
             objects: RefCell::default(),
+            shared: RefCell::default(),
         }
     }
 
@@ -595,11 +715,27 @@ impl ModuleTable {
         }
         if let Some(m) = MODULES.iter().find(|m| m.name == name) {
             found = true;
-            out.extend(
-                m.exports
-                    .iter()
-                    .map(|&(n, e, _)| (n.to_owned(), Made::Own(e))),
-            );
+            let shared = m.moved_to.is_some();
+            out.extend(m.exports.iter().map(|&(n, e, _)| {
+                let made = if shared {
+                    Made::Shared(m.name, e)
+                } else {
+                    Made::Own(e)
+                };
+                (n.to_owned(), made)
+            }));
+            for other in m
+                .also
+                .iter()
+                .filter_map(|a| MODULES.iter().find(|o| o.name == *a))
+            {
+                out.extend(
+                    other
+                        .exports
+                        .iter()
+                        .map(|&(n, e, _)| (n.to_owned(), Made::Shared(other.name, e))),
+                );
+            }
         }
         for registry in self
             .registries
@@ -610,7 +746,7 @@ impl ModuleTable {
             registry_exports(registry, &mut out);
         }
         // nsh's own export wins over a registry's of the same name (it
-        // builds on it: `AccessibilityInfo`).
+        // builds on it: `BackHandler`).
         let mut seen = std::collections::HashSet::new();
         out.retain(|(name, _)| seen.insert(name.clone()));
         found.then_some(out)
@@ -706,7 +842,7 @@ pub(crate) struct Resolver;
 impl rquickjs::loader::Resolver for Resolver {
     fn resolve<'js>(
         &mut self,
-        _cx: &Ctx<'js>,
+        _ctx: &Ctx<'js>,
         base: &str,
         name: &str,
         _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
@@ -963,11 +1099,8 @@ fn make(
         }
     };
     match made {
-        Made::Own(Export::Function(f, length)) => {
-            let cname = CString::new(export).unwrap_or_default();
-            reactive::new_function(cx, &cname, f, length)
-        }
-        Made::Own(Export::Value(make)) => make(cx),
+        Made::Own(e) => make_own(cx, export, e),
+        Made::Shared(module, e) => table.shared(cx, module, export, e),
         Made::Component(spec, module) => components::component(cx, spec, module),
         Made::Module(spec) | Made::Default(spec) => table.object(cx, name, &spec),
         Made::Function(spec, f, members) if !spec.default => {
@@ -987,6 +1120,17 @@ fn make(
             Some(spec) => member(spec, value),
             None => env::reexport(cx, value),
         },
+    }
+}
+
+/// The value of nsh's own export `export` (owned).
+fn make_own(cx: *mut JsContext, export: &str, e: Export) -> JsValue {
+    match e {
+        Export::Function(f, length) => {
+            let cname = CString::new(export).unwrap_or_default();
+            reactive::new_function(cx, &cname, f, length)
+        }
+        Export::Value(make) => make(cx),
     }
 }
 
@@ -1024,6 +1168,44 @@ mod tests {
     fn nshs_own_modules_are_the_ones_the_bundler_knows() {
         let names: Vec<&str> = super::MODULES.iter().map(|m| m.name).collect();
         assert_eq!(names, nsh_core::js::NATIVE_MODULES);
+    }
+
+    /// `nsh` exports the primitives the modules before it exported, the
+    /// same values, whichever module is imported first; those modules
+    /// keep exporting them.
+    #[test]
+    fn nsh_and_the_older_modules_export_the_same_primitives() {
+        let source = r#"
+            import * as old from "nsh/canvas";
+            import { Image as OldImage } from "nsh/image";
+            import * as nsh from "nsh";
+            import { List as OldList } from "nsh/list";
+            import { WebView as OldWebView } from "nsh/webview";
+            import { Video as OldVideo } from "nsh/video";
+            const same = [
+                [nsh.Canvas, old.Canvas],
+                [nsh.Path2D, old.Path2D],
+                [nsh.CanvasGradient, old.CanvasGradient],
+                [nsh.CanvasRenderingContext2D, old.CanvasRenderingContext2D],
+                [nsh.Image, OldImage],
+                [nsh.List, OldList],
+                [nsh.WebView, OldWebView],
+                [nsh.Video, OldVideo],
+            ];
+            for (const [a, b] of same) {
+                if (typeof a !== "function" || a !== b) throw Error(`not the same: ${a && a.name}`);
+            }
+            if (typeof nsh.Image.getSize !== "function" || typeof nsh.Image.prefetch !== "function") {
+                throw Error("Image carries its functions");
+            }
+            if (!(new nsh.Path2D("M0 0 L1 1") instanceof old.Path2D)) throw Error("one Path2D");
+        "#;
+        crate::Host::new().unwrap().eval_source(source).unwrap();
+        let bytecode = crate::compile_bytecode(source, false).unwrap();
+        crate::Host::new()
+            .unwrap()
+            .eval_bytecode(&bytecode)
+            .unwrap();
     }
 
     /// The bytecode compiler, which knows a UI set by its description,

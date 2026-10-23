@@ -11,14 +11,13 @@
 //!   `NativeShellDev.xcframework`) into `dist/nsh/embed/ios`.
 //! - `web`: the WebAssembly runtime, its player and the website's demos
 //!   (`website/public/play` by default).
-//! - `api`: records the API apps use in `api/runtime.txt` and `api/types`
-//!   and shrinks `api/uncovered.txt`; `--keep <app>...` instead adds apps built by
-//!   this checkout (examples by name, other apps or `api/cases/<domain>`
-//!   by path) to the fixtures in `api/apps`, those whose build changed
+//! - `compat`: holds this checkout to what NSH's releases froze, kept in
+//!   the `nsh-compat` repository, and runs the apps of `tests/compat/`;
+//!   `compat record <version>` records a release there
 //!   (docs/dev/compatibility.md).
 
 mod android;
-mod api;
+mod compat;
 mod dist;
 mod ios;
 mod run;
@@ -65,7 +64,7 @@ enum Task {
         /// Include development support (dev server, error overlay).
         #[arg(long)]
         dev: bool,
-        /// ABIs to build (default: arm64-v8a and x86_64).
+        /// ABIs to build (default: arm64-v8a, armeabi-v7a and x86_64).
         #[arg(long)]
         abi: Vec<String>,
     },
@@ -74,24 +73,26 @@ enum Task {
     /// Build the distribution in `dist/nsh`.
     Dist,
     /// Build only the iOS embedding XCFrameworks.
-    IosEmbed,
+    IosEmbed(ios::Options),
     /// Build the WebAssembly runtime and the website's demos.
     Web {
         /// Output directory.
         #[arg(long, default_value = "website/public/play")]
         out: std::path::PathBuf,
     },
-    /// Record the API apps use in `api/runtime.txt` and `api/types`.
-    Api {
-        /// Instead of recording, keep these apps, as this checkout builds
-        /// them, in `api/apps/<app>-<version>` when the build differs from
-        /// the app's newest fixture (the JSX compiler's output changed, or a
-        /// new API's case); write their scripts, then record. A kept fixture
-        /// is never rewritten. An app is an example's name or the path of an
-        /// app's directory or entry module (`api/cases/<domain>`).
-        #[arg(long, value_name = "APP", num_args = 1..)]
-        keep: Vec<String>,
+    /// Hold this checkout to what NSH's releases froze (the `nsh-compat`
+    /// repository), and run the apps of `tests/compat/`.
+    Compat {
+        #[command(subcommand)]
+        record: Option<CompatTask>,
     },
+}
+
+#[derive(Subcommand)]
+enum CompatTask {
+    /// Record this checkout as release `version` in `nsh-compat`, to commit
+    /// there.
+    Record { version: String },
 }
 
 fn main() -> std::process::ExitCode {
@@ -147,8 +148,11 @@ fn task(task: Task) -> anyhow::Result<()> {
         }
         Task::ClippyAndroid => android::clippy(),
         Task::Dist => dist::dist(),
-        Task::IosEmbed => ios::build().map(|out| term::note(out.display())),
+        Task::IosEmbed(options) => ios::build(options).map(|out| term::note(out.display())),
         Task::Web { out } => web::build(&out),
-        Task::Api { keep } => api::api(&keep),
+        Task::Compat { record } => compat::compat(match &record {
+            Some(CompatTask::Record { version }) => Some(version),
+            None => None,
+        }),
     }
 }

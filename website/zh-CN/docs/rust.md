@@ -7,17 +7,17 @@ group: start
 
 # 用 Rust 开发
 
-Native Shell 应用可以用 TSX 编写，也可以用 Rust，或者两者结合。三种方式运行在同一个引擎上：响应式图、渲染器、Taffy
+Native Shell 应用可以用 Rust 编写，也可以用 TSX，或者两者结合。三种方式运行在同一个引擎上：响应式图、渲染器、Taffy
 布局以及原生模块（导航、对话框、键盘、状态栏）始终是 Rust，各平台都用自己的原生 UI 渲染。不同的是你自己的代码用什么语言，以及应用是否带着
 JavaScript 虚拟机。
 
-| | TSX | Rust | Rust + TSX |
+| | Rust | TSX | Rust + TSX |
 |---|---|---|---|
-| 你的 UI、状态和事件处理 | TSX，运行在 QuickJS 上 | Rust | Rust 组件和模块，TSX 页面使用它们 |
-| 应用运行的内容 | QuickJS 和引擎 | 只有引擎和你的 crate，所有平台和浏览器都一样 | QuickJS 和引擎，加上你的 crate |
-| 适合 | 运行时下发的应用和模块、快速迭代 | 业务复杂度高的中大型应用 | Rust 核心加上经常变化的部分 |
-| 修改代码 | 热更新 | 重新构建并重启 | TSX 热更新，Rust 重新构建并重启 |
-| 创建 | `nsh init my-app --template ts` | `nsh init my-app --template rust` | `nsh init my-app --template mixed` |
+| 你的 UI、状态和事件处理 | Rust | TSX，运行在 QuickJS 上 | Rust 组件和模块，TSX 页面使用它们 |
+| 应用运行的内容 | 只有引擎和你的 crate，所有平台和浏览器都一样 | QuickJS 和引擎 | QuickJS 和引擎，加上你的 crate |
+| 适合 | 业务复杂度高的中大型应用 | 运行时下发的应用和模块、快速迭代 | Rust 核心加上经常变化的部分 |
+| 修改代码 | 重新构建并重启 | 热更新 | TSX 热更新，Rust 重新构建并重启 |
+| 创建 | `nsh init my-app --template rust` | `nsh init my-app --template ts` | `nsh init my-app --template mixed` |
 
 ## 如何选择
 
@@ -26,7 +26,9 @@ crates.io 生态，你自己的代码（不只是 NSH 的代码）也是原生�
 Rust 和原生代码：在 iOS、Android、macOS、Windows、Linux、GPUI 和 Web 上，应用里既不带也不运行 JavaScript 虚拟机。
 组件是只运行一次的函数，把信号绑定到显示的内容上，和 TSX 一样（[响应式](./reactivity.md)），样式用类型化的方法而不是 class 字符串。
 
-**Rust + TSX** 保留这个核心，在值得的地方加上 TSX：页面、设置、引导、实验性功能，任何需要热更新快速迭代、或作为[签名包](./signed-packages.md)
+**TSX** 适合应用发布之后才到达的界面：原生应用在运行时加载的模块，由模型生成或由其他团队编写，以[签名包](./signed-packages.md)下发，运行在宿主配置的沙箱里，开发时支持热更新。
+
+**Rust + TSX** 保留 Rust 核心，在值得的地方加上 TSX：页面、设置、引导、实验性功能，任何需要热更新快速迭代、或作为[签名包](./signed-packages.md)
 在运行时下发的部分。TSX 像导入其他 NSH 模块一样导入你的 Rust 组件和模块，两部分通过类型化的接口衔接。TSX 运行在 QuickJS
 上，这时应用会带上 QuickJS。
 
@@ -42,7 +44,7 @@ nsh package --target web       # 或 ios、ios-simulator、android、macos、lin
 `src/lib.rs` 包含整个应用：组件、状态、事件处理和任务。
 
 ```rust
-use nsh_base::theme;
+use nsh_base::{button, theme};
 use nsh_core::ui::prelude::*;
 
 /// TSX 通过 `app/native` 可以使用的组件。
@@ -69,21 +71,22 @@ pub fn App() -> impl IntoElement {
         .child(text(move || format!("Count: {}", count.get())))
         .child(text(quote))
         .child(
-            // 按钮就是一个响应按压的视图，用主题的颜色绘制。
-            view()
+            // nsh_base 的无样式按钮，用主题的颜色绘制。
+            button()
                 .px(px(20.0))
                 .py(px(12.0))
-                .rounded(move || theme().radius())
-                .bg(move || theme().primary())
-                .active(|s| s.bg(move || theme().primary_active()))
-                .role(AccessibilityRole::Button)
-                .on_press(move |_: &()| count.update(|c| *c += 1))
-                .child(text("Tap").text_color(move || theme().primary_foreground())),
+                .rounded(move || theme().radius)
+                .bg(move || theme().primary)
+                .active(|s| s.bg(move || theme().primary.opacity(0.9)))
+                .on_press(move || count.update(|c| *c += 1))
+                .child(text("Tap").text_color(move || theme().primary_foreground)),
         )
 }
 ```
 
-监听器是接收事件的闭包（`move |text: &str| ..`），没有数据的事件也可以写成 `move || ..`；`.child(..)`
+元素和组件用同样的方式创建：一个函数创建它（`view()`、`text(..)`、`nsh_base` 的 `button()`、你的 `#[component] fn Chart`
+生成的 `chart()`），它的方法设置 props（每个 prop 一个设置方法，接受值、signal 或闭包）和监听器（每个事件一个方法）。
+监听器是接收事件的闭包（`move |text: &str| ..`），没有数据的事件写成 `move || ..`；`.child(..)`
 接受一个元素，或元素的 `Option`、`Vec`、数组、迭代器（`.child(rows.iter().map(|r| row(r)))`）。
 
 `nsh.json` 指定根组件，`nsh` 负责挂载它：
@@ -112,6 +115,10 @@ pub fn App() -> impl IntoElement {
 CLI 自己完成；再加上你运行或打包的每个目标的运行器。新 Rust 应用的第一次构建只编译你的 crate 和 NSH 的核心，大约 60 个
 crate。`nsh test` 在同样构建的、包含你的 crate 的运行器中以无界面方式运行应用的测试。
 
+在 Linux 上，由应用 crate 选择可选的平台功能。使用网页视图时，在 `nsh-platform-linux` 依赖上启用
+`webview` feature；这会链接 WebKitGTK 6.0，构建和运行时都需要安装该系统库。生成的运行器通过 Cargo
+的 feature 合并继承应用的选择。
+
 `nsh run` 期间，修改 crate 的 Rust 代码会重新构建运行器并重启应用；在浏览器中，已打开的页面会自动加载新的运行时。
 `cargo run` 在桌面后端上直接启动同一个根组件（`src/main.rs`）；嵌入 NSH 的原生应用在 macOS、Windows、Linux、GPUI 和
 iOS 的 `AppView` 上用 `AppSource::Rust` 挂载 Rust 根组件。
@@ -135,16 +142,15 @@ use nsh_core::{
     ui::{desktop::{close_window, set_title_bar, title_bar}, prelude::*},
 };
 
-#[component]
-fn TitleBar() -> impl IntoElement {
-    set_title_bar(TitleBarStyle::Hidden, Some(42.0));
+fn window_bar() -> impl IntoElement {
+    set_title_bar(TitleBarStyle::Hidden, Some(px(42.0)));
     view()
         .h(px(42.0))
         .flex_row()
         .items_center()
         .window_drag(true)
-        .pl(move || px(title_bar().left + 12.0))
-        .pr(move || px(title_bar().right + 12.0))
+        .pl(move || title_bar().left + px(12.0))
+        .pr(move || title_bar().right + px(12.0))
         .child(text("My app").flex_1())
         .child(text("Close").window_drag(false).on_press(close_window))
 }
@@ -163,6 +169,33 @@ crate 的 `#[native_module("app/native")]` 函数声明 TSX 可以导入的内�
 TSX：
 
 ```rust
+/// 价格图表。
+#[derive(Clone, PartialEq, Props)]
+pub struct ChartProps {
+    /// 要绘制的代码。
+    pub symbol: Prop<SharedString>,
+    /// 显示的时间范围。
+    #[prop(default = SharedString::from("1D"))]
+    pub range: Prop<SharedString>,
+}
+
+#[derive(Event)]
+pub enum ChartEvent {
+    /// 选中了一个价格。
+    #[args(price)]
+    Select(f64),
+}
+
+/// 价格图表；按下时选中最新价格。
+#[component]
+pub fn Chart(props: ChartProps, cx: Scope<ChartEvent>) -> impl IntoElement {
+    view()
+        .h(px(160.0))
+        .bg(move || theme().muted)
+        .on_press(move || cx.emit(ChartEvent::Select(101.5)))
+        .child(text(move || format!("{} · {}", props.symbol.get(), props.range.get())))
+}
+
 /// A ledger kept in Rust.
 #[class]
 pub struct Ledger {
@@ -217,7 +250,7 @@ const ledger = new Ledger();   // 状态保存在 Rust 中
 function Overview() {
   const balance = signal(ledger.add(Portfolio.total()));   // Rust，立即调用
   return (
-    <View className="p-4 gap-2">
+    <View class="gap-2 p-4">
       <Text>Balance: {balance()}</Text>
       <Chart symbol="NSH" range="1M" onSelect={(e) => balance.set(ledger.add(e.price))} />
       <View onPress={() => ledger.upload("https://example.com/ledger")} role="button" class="rounded-lg bg-blue-600 px-4 py-2 active:bg-blue-700">
@@ -252,7 +285,7 @@ pub fn copy(text: String, cx: &mut ModuleCx) -> u32 {
 }
 ```
 
-props 是组件 `Props` 结构体的字段，事件是 `Event` 枚举的变体（`onSelect`），都用驼峰命名。Rust 组件自己的内容、事件和状态留在
+props 是组件 `Props` 结构体的字段，事件是 `Event` 枚举的变体（`onSelect`），都用驼峰命名。Rust 代码用组件的构造函数放置同一个组件，每个 prop 一个设置方法，每个事件一个监听方法：`chart().symbol("NSH").range("1M").on_select(move |price: &f64| last.set(*price))`。Rust 组件自己的内容、事件和状态留在
 Rust 中；TSX 传入 props、接收事件。类型不对的 prop（`u32` 类型的 prop 传 `level={1.5}`）和内置元素上一样给出警告：这个 prop 保持原值，组件的其余部分照常渲染。
 
 函数和成员按 Rust 签名运行。不是 `async` 的在 TSX 调用中直接运行并返回值（`Portfolio.total()` 是数字，`ledger.balance` 是属性）：
@@ -278,27 +311,57 @@ Rust 用 `post` 调用的回调、`dispose()` 和 `using`），每个都有简�
 （或 `ios`、`android` 等）运行它的根组件，`nsh test examples/gallery-rs` 以无界面方式运行它的测试，`cargo run -p gallery-native`
 在桌面后端上启动它。
 
-## 测试
+### 渲染函数与应用的类
 
-对于带 Rust crate 的应用，`nsh test` 同样运行它的 TypeScript 测试（[测试](./testing-and-trace.md)）：在用你的 crate 构建的
-无界面运行器中。在 Rust 应用中，`open(".")` 启动它的根组件：
+组件用渲染函数为它拥有的值（它的一行数据、文档中的一个代码块）绘制应用的内容：一个 `Option<Renderer<T>>` 属性，在 TypeScript 中是 `(value: T) => JSX.Element`。组件在内容所在的位置调用 `render(key, value)`，得到一个视图，像其他视图一样设定样式并放置（在 `text(..)` 中是一个行内视图）。只要值不变，内容按 key 保留；值改变时重新渲染。Rust 父组件把闭包传给该属性的设置方法（`quote().render_badge(|symbol| ..)`），由它生成 `Renderer`。
 
-```tsx
-// App.test.tsx, next to nsh.json
-import { expect, open, test } from "nsh/test";
+组件中的样式是类型化的；应用的 Tailwind 类通过一个类名属性和该部件元素上的 `.app_class(..)` 作用于组件的某个部件。它们在元素自身的样式之后应用，并使用应用的主题、`dark:` 和各种状态，就像元素上的 `class` 一样。
 
-test("a tap counts", async () => {
-  const app = await open(".");
-  await app.press("Tap");
-  expect(app.texts()).toContain("Count: 1");
-});
+```rust
+/// A quote: its symbol, then content of the app's.
+#[derive(Clone, Copy, PartialEq, Props)]
+pub struct QuoteProps {
+    /// The symbol.
+    pub symbol: Prop<SharedString>,
+    /// Tailwind classes of the symbol's text.
+    pub symbol_class: Prop<Option<SharedString>>,
+    /// Content of the app's after the symbol (a change, a badge).
+    pub render_badge: Prop<Option<Renderer<SharedString>>>,
+}
+
+/// A quote of a symbol.
+#[component]
+pub fn Quote(props: QuoteProps) -> impl IntoElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(text(props.symbol).app_class(props.symbol_class))
+        .child(dynamic(move || {
+            props.render_badge.get().map(|r| r.render("badge", props.symbol.get()).flex_1())
+        }))
+}
 ```
 
-测试也可以在 `cargo test` 中用同一个驱动无界面地运行应用：运行在真实的引擎上，没有窗口，以 60 Hz 提供显示帧，所以定时器、
-任务和动画都像在屏幕上一样运行。`nsh_testing::Headless`（nsh-testing 的默认特性，不含 QuickJS）启动应用，维护一份它所显示
-视图的模型（`app.screen()`：它们的文本、应用发送的命令），并执行 `nsh test` 的那些步骤（`press`、`type_text`、`submit`、
-`scroll`、`wait_for`），视图用同样的选择器指定（文本、无障碍标签或 test id；`text:`、`label:`、`id:`）；步骤无法执行时
-返回带有屏幕文字的错误。Rust 应用运行它的根组件；`EngineConfig::new` 是一个手机尺寸、其余都未设置的引擎：
+```tsx
+<Quote
+  symbol="NSH"
+  symbolClass="text-lg font-semibold"
+  renderBadge={(symbol) => <Text class="text-green-600">{`${symbol} ▲ 2.4%`}</Text>}
+/>
+```
+
+`nsh/base` 中的 `TextView` 就是这样构建的：它的 `renderCodeBlock`、`renderMath` 等是渲染函数，它的 `classes` 是应用按部件给出的类（[TextView](../elements/text-view.md)）。
+
+## 测试
+
+Rust 应用的测试以无界面方式运行它，可以在 `cargo test` 中，也可以在 `nsh test` 中，使用同一个驱动：运行在真实的引擎上，没有窗口，以
+60 Hz 提供显示帧，所以定时器、任务和动画都像在屏幕上一样运行。驱动启动应用，维护一份它所显示视图的模型，并在用选择器指定的视图上执行步骤（`press`、`type_text`、`submit`、`scroll`、`wait_for`），选择器可以是文本、无障碍标签或
+test id（`text:`、`label:`、`id:`）；步骤无法执行时，会带着屏幕上的文字失败。
+
+在 `cargo test` 中，`nsh_testing::Headless`（nsh-testing 的默认特性，不含 QuickJS）运行根组件（`app.screen()`：屏幕上的文字、应用发送的命令）；`EngineConfig::new`
+是一个手机尺寸、其余都未设置的引擎。`nsh test` 在用你的 crate 构建的无界面运行器中运行 TypeScript 测试（[测试](./testing-and-trace.md)），其中
+`open(".")` 启动 Rust 应用的根组件：
 
 ```toml
 [dev-dependencies]
@@ -306,8 +369,9 @@ nsh-engine = "0.1"
 nsh-testing = "0.1"
 ```
 
-```rust
-use nsh_engine::EngineConfig;
+```rust tabs
+// tests/app.rs：cargo test
+use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 
 #[test]
@@ -317,6 +381,17 @@ fn a_tap_counts() {
     app.press("Tap").unwrap();
     app.wait_for("Count: 1").unwrap();
 }
+```
+
+```tsx tabs
+// App.test.tsx，与 nsh.json 放在一起：nsh test
+import { expect, open, test } from "nsh/test";
+
+test("a tap counts", async () => {
+  const app = await open(".");
+  await app.press("Tap");
+  expect(app.texts()).toContain("Count: 1");
+});
 ```
 
 TSX 入口用 `nsh-testing` 的特性 `bundle` 按 `nsh run` 的方式构建，使用它的宿主提供的 UI 集合：NSH 的，以及每个 crate 由
@@ -338,16 +413,17 @@ fn the_module_formats_money() {
 ```
 
 `nsh_testing::compile_tsx` 只构建一次入口供多个测试使用，`nsh_testing::start` 把批次交给自己维护屏幕模型的测试。
-`examples/rust-exports` 用这种方式测试它的 TSX 入口，`examples/gallery-rs` 测试它的 Rust 根组件。
+`examples/rust-exports` 用这种方式测试它的 TSX 入口；`examples/gallery-rs` 用 TypeScript 测试它的 Rust 根组件，
+大致每个 demo 一个测试文件。
 
 ## 主题
 
-应用的外观由应用自己决定：NSH 提供基础元素和 `nsh_base` 中无样式的基础组件，你的 crate 是其上带样式的一层，即应用自己的组件库（[三层结构](./architecture.md#three-layers)）。Rust 组件的颜色、圆角和基础字号取自主题，即
+应用的外观由应用自己决定：NSH 提供基础元素和 `nsh_base` 中无样式的基础组件，你的 crate 是其上带样式的一层，即应用自己的组件库（[三层结构](./architecture.md#three-layers)）。Rust 组件的颜色、圆角和字体取自主题，即
 `nsh_base` 的 `theme()`，所以一个文件就能改变应用中所有组件的样式。每种颜色都有浅色和深色两个值；系统切换外观时，
-`.bg(move || theme().primary())` 这样的绑定会原生地改变颜色，不需要重新渲染。
+`.bg(move || theme().primary)` 这样的绑定会原生地改变颜色，不需要重新渲染。
 
-默认主题是 gpui-kit 的默认主题：中性的黑白配色，采用移动端的圆角。要使用自己的主题，在 `nsh.json` 中把 `"theme"` 设为主题文件的路径
-（相对于 `nsh.json`），或者直接写入主题内容：
+主题采用 [shadcn/ui](https://ui.shadcn.com/docs/theming) 的设计令牌，默认主题是 shadcn 的 `neutral` 主题：黑白配色，圆角 10 点。
+要使用自己的主题，在 `nsh.json` 中把 `"theme"` 设为主题文件的路径（相对于 `nsh.json`），或者直接写入主题内容：
 
 ```json
 {
@@ -357,61 +433,60 @@ fn the_module_formats_money() {
 }
 ```
 
-格式是 gpui-kit 的主题文件格式。`themes` 中的每一项设置一种外观的值（`mode`：`"light"` 或 `"dark"`；没有 `mode` 的项是浅色）：
+主题文件就是 shadcn 的 `cssVars`，即 shadcn 主题和 registry 条目的格式，所以从 [shadcn 的主题](https://ui.shadcn.com/themes)或
+[tweakcn](https://tweakcn.com) 导出的主题可以原样使用。`light` 设置浅色外观的值，`dark` 设置深色外观的值，`theme` 设置两者共用的值：
 
 ```json
 {
-  "themes": [
-    {
-      "mode": "light",
-      "radius": 8,
-      "radius.lg": 14,
-      "font.size": 16,
-      "colors": {
-        "primary.background": "#7c3aed",
-        "primary.foreground": "white",
-        "border": "neutral-200"
-      }
+  "cssVars": {
+    "theme": {
+      "radius": "0.5rem",
+      "font-sans": "Inter, sans-serif"
     },
-    {
-      "mode": "dark",
-      "colors": {
-        "primary.background": "#a78bfa",
-        "primary.foreground": "neutral-950"
-      }
+    "light": {
+      "primary": "oklch(0.541 0.281 293.009)",
+      "primary-foreground": "oklch(0.969 0.016 293.756)",
+      "ring": "var(--primary)",
+      "up": "#16a34a"
+    },
+    "dark": {
+      "primary": "oklch(0.702 0.183 293.541)",
+      "primary-foreground": "oklch(0.283 0.141 291.089)",
+      "up": "#4ade80"
     }
-  ]
+  }
 }
 ```
 
-- 你的主题叠加在默认主题之上，只需列出要修改的部分。
-- 颜色可以是 CSS 颜色（`#7c3aed`、`rgb(…)`、`white`），也可以是 Tailwind 默认调色板中的名称（`neutral-900`、`red-500`）。
-  `nsh.json` 中 `tailwind` 键的颜色用于 `class` 字符串。
-- `radius`（`theme().radius()`）是控件的圆角，`radius.lg`（`theme().radius_lg()`）是卡片、底部面板等大面积表面的圆角，
-  `font.size`（`theme().font_size()`）是基础字号，单位都是点。
-- 省略的按下颜色（`primary.active.background`、`secondary.active.background`、`danger.active.background` 等）由基础颜色推导：
-  浅色模式下暗 12%，深色模式下亮 12%。
-- gpui-kit 桌面组件的键（侧边栏、标题栏等）会被接受并搁置，所以 gpui-kit 的主题文件可以原样使用。
-- 打包器在构建时检查主题：文件缺失、JSON 无效、未知的 `mode` 或不是颜色的值都会让构建失败，并报告 `nsh.json: theme: …` 错误。
+- 你的主题叠加在默认主题之上，只需列出要修改的部分。`light` 设置而 `dark` 省略的值在两种外观中都使用。
+- 值按 CSS 的写法书写。颜色可以是任意 CSS 颜色（`#7c3aed`、`rgb(…)`、`hsl(…)`、`oklch(…)`、`white`）、
+  `color-mix(in oklab, var(--primary) 80%, white)`，或同一外观的另一个令牌 `var(--primary)`（可带后备值：`var(--brand, #7c3aed)`）。
+  长度使用 `rem`（16 点）或 `px`（点）。字体是字体族列表：使用其中第一个非通用的字体族，第一个是通用字体族（`system-ui`、`sans-serif`）时使用系统字体。
+- **应用自己的令牌。** 其他任何名称都是应用的令牌，就像 Tailwind `@theme` 中的变量：上例的 `"up"` 在 Rust 中是 `theme().color("up")`，
+  在类名中是 `bg-up` / `text-up/70`，在 TSX 中是 `token("up")`（[主题 token](./tailwind.md#主题-token)）。数值如 `"radius-card": "14px"`
+  是 `theme().number("radius-card")` 和 `rounded-(--radius-card)`。
+- 打包器在构建时检查主题：文件缺失、JSON 无效或不是 `cssVars` 格式的主题都会让构建失败，并报告 `nsh.json: theme: …` 错误。
 
-主题的键及其默认的浅色和深色值：
+令牌及其默认的浅色和深色值（shadcn 的 `neutral`）：
 
-| 键 | 浅色 | 深色 | 用途 |
-|---|---|---|---|
-| `background` | `white` | `neutral-950` | 页面、列表和输入框的背景 |
-| `foreground` | `neutral-950` | `neutral-50` | `background` 上的文字 |
-| `border` | `neutral-200` | `neutral-800` | 分隔线和边框 |
-| `primary.background` / `.active.background` / `.foreground` | `neutral-900` / `neutral-950` / `neutral-50` | `neutral-50` / `neutral-200` / `neutral-900` | 主要操作（主按钮）、按下时，以及其上的文字；选中项和勾选标记 |
-| `secondary.background` / `.active.background` / `.foreground` | `neutral-200` / `neutral-300` / `neutral-900` | `neutral-800` / `#212121` / `neutral-50` | 次要操作、按下时，以及其上的文字 |
-| `danger.background` / `.active.background` / `.foreground` | `red-500` / `red-600` / `neutral-50` | `red-400` / `red-500` / `red-600` | 破坏性操作、按下时，以及其上的文字 |
-| `accent.background` | `neutral-100` | `neutral-800` | 高亮项，例如按下时的普通按钮 |
-| `muted.background` | `neutral-100` | `neutral-800` | 低调的表面：内嵌列表的页面、拖动条、清除按钮 |
-| `muted.foreground` | `neutral-500` | `neutral-400` | 次要文字：说明、标签、占位符 |
-| `group_box.background` / `.foreground` | `#f5f5f5` / `#171717` | `neutral-950` / `neutral-50` | 卡片等分组表面，以及其上的文字 |
-| `input.border` | `neutral-200` | `#2f2f2f` | 输入框的边框 |
-| `ring` | `neutral-400` | `neutral-500` | 获得焦点的输入框的边框 |
-| `list.active.background` | `#bfdbfe33` | `#1e40af33` | 按下时的列表行 |
-| `overlay` | `#0000000d` | `#00000033` | 底部面板和对话框后面的遮罩 |
+| 令牌 | `theme()` | 浅色 | 深色 | 用途 |
+|---|---|---|---|---|
+| `background` / `foreground` | `background` / `foreground` | `oklch(1 0 0)` / `oklch(0.145 0 0)` | `oklch(0.145 0 0)` / `oklch(0.985 0 0)` | 应用的背景，以及其上的文字 |
+| `card` / `card-foreground` | `card` / `card_foreground` | `oklch(1 0 0)` / `oklch(0.145 0 0)` | `oklch(0.205 0 0)` / `oklch(0.985 0 0)` | 卡片等分组表面，以及其上的文字 |
+| `popover` / `popover-foreground` | `popover` / `popover_foreground` | `oklch(1 0 0)` / `oklch(0.145 0 0)` | `oklch(0.205 0 0)` / `oklch(0.985 0 0)` | 弹出框、菜单和提示，以及其上的文字 |
+| `primary` / `primary-foreground` | `primary` / `primary_foreground` | `oklch(0.205 0 0)` / `oklch(0.985 0 0)` | `oklch(0.922 0 0)` / `oklch(0.205 0 0)` | 主要操作（主按钮），以及其上的文字 |
+| `secondary` / `secondary-foreground` | `secondary` / `secondary_foreground` | `oklch(0.97 0 0)` / `oklch(0.205 0 0)` | `oklch(0.269 0 0)` / `oklch(0.985 0 0)` | 次要操作，以及其上的文字 |
+| `muted` / `muted-foreground` | `muted` / `muted_foreground` | `oklch(0.97 0 0)` / `oklch(0.556 0 0)` | `oklch(0.269 0 0)` / `oklch(0.708 0 0)` | 低调的表面；次要文字：说明、标签、占位符 |
+| `accent` / `accent-foreground` | `accent` / `accent_foreground` | `oklch(0.97 0 0)` / `oklch(0.205 0 0)` | `oklch(0.269 0 0)` / `oklch(0.985 0 0)` | 悬停或高亮的项，例如菜单项、列表行，以及其文字 |
+| `destructive` | `destructive` | `oklch(0.577 0.245 27.325)` | `oklch(0.704 0.191 22.216)` | 破坏性操作和错误 |
+| `border` | `border` | `oklch(0.922 0 0)` | `oklch(1 0 0 / 10%)` | 分隔线和边框 |
+| `input` | `input` | `oklch(0.922 0 0)` | `oklch(1 0 0 / 15%)` | 输入框的边框 |
+| `ring` | `ring` | `oklch(0.708 0 0)` | `oklch(0.556 0 0)` | 焦点环 |
+| `chart-1` … `chart-5` | `chart_1` … `chart_5` | `oklch(0.87 0 0)` … `oklch(0.269 0 0)` | 同浅色 | 图表的各个系列 |
+| `sidebar`、`sidebar-foreground`、`sidebar-primary`、`sidebar-primary-foreground`、`sidebar-accent`、`sidebar-accent-foreground`、`sidebar-border`、`sidebar-ring` | `sidebar`、`sidebar_foreground` 等 | `sidebar` `oklch(0.985 0 0)`，`sidebar-primary` `oklch(0.205 0 0)` | `sidebar` `oklch(0.205 0 0)`，`sidebar-primary` `oklch(0.488 0.243 264.376)` | 侧边栏的表面、主要操作、高亮项、边框和焦点环 |
+| `radius` | `radius` | `0.625rem`（10 点） | | 圆角 |
+| `font-sans` | `font_sans` | 系统字体 | | 应用的字体：没有设置自己字体族的文字都使用它 |
+| `font-mono` | `font_mono` | 系统等宽字体 | | 等宽字体：`font-mono`、`TextView` 中的代码 |
 
 ## 多个 crate
 
@@ -435,6 +510,11 @@ import { Store } from "app/storage";       // native/storage：#[native_module("
 crate 会导出给 TSX。列出的每个 crate 都有自己的包名和导入名称；重复时 `nsh` 会报告共用它的两个路径。Rust 应用的
 `"root"` 是列出的第一个 crate 中的组件。`nsh run` 和 `nsh dev` 期间，修改其中任何一个 crate，或它们通过路径依赖的
 crate，都会重新构建并重启应用。
+
+## 在 Web 上使用浏览器 API
+
+在 Web 上，crate 可以通过 wasm-bindgen 和 `web-sys` 调用浏览器的 API（WebSocket、`IndexedDB` 等）；`nsh`
+会随运行时一起构建它们所需的胶水代码。见 [Web](./web.md#在-rust-中使用浏览器-api)。
 
 ## 另请参阅
 

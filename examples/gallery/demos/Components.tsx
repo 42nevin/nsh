@@ -1,9 +1,9 @@
 import { Input, type InputProps, type JSX, signal, Text, View, type YNode } from "nsh";
-import { AccessibilityInfo, reduceMotion, screenReaderEnabled } from "nsh/accessibility";
+import { announce, reduceMotion, screenReaderEnabled, setAccessibilityFocus } from "nsh/accessibility";
 import { LayoutAnimation } from "nsh/animated";
-import { PixelRatio, Platform } from "nsh/device";
+import { locale, pixelRatio, platform } from "nsh/device";
 import { InputAccessoryView } from "nsh/ios";
-import { Dialog, KeyboardAvoidingView, NavPage, SafeAreaView } from "nsh/base";
+import { Dialog, KeyboardAvoidingView, NavPage, SafeAreaView, safeArea, Sheet } from "nsh/base";
 import { Icon, type IconName } from "../icons";
 import { nav } from "../nav";
 import { TitleBar } from "../TitleBar";
@@ -34,7 +34,8 @@ import {
   toneTint,
 } from "../ui";
 
-const hairline = 1 / PixelRatio.get();
+// One device pixel, in points (reading it in a binding follows the screen).
+const hairline = () => 1 / pixelRatio();
 
 /** A dark input, 48 pt tall. */
 function Field(props: InputProps) {
@@ -51,11 +52,11 @@ function Field(props: InputProps) {
         paddingHorizontal: 14,
         fontSize: 15,
         color: colors.text,
-        backgroundColor: colors.inset,
+        backgroundColor: colors.field,
         borderWidth: 1,
-        borderColor: focused() ? colors.accent : colors.border,
+        borderColor: focused() ? colors.accent : colors.fieldBorder,
         borderRadius: radius.control,
-        ...finish.inset,
+        ...finish.field,
       }}
     />
   );
@@ -145,23 +146,30 @@ function PressableSheet() {
         <Text style={{ fontSize: 15, fontWeight: "600", color: colors.onAccent }}>Open a sheet</Text>
       </View>
       <Caption label="Scales and darkens while pressed" note="active:scale-[0.97]" />
-      <Dialog open={sheet()} presentation="pageSheet" animation="slide" onOpenChange={(open) => sheet.set(open)}>
-        <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
-          <View style={{ flex: 1, padding: 16, gap: 16 }}>
-            <View style={{ gap: 8, paddingHorizontal: 4, paddingTop: 8 }}>
-              <View style={{ flexDirection: "row" }}>
-                <Badge label="pageSheet" tone="accent" />
-              </View>
-              <Text style={{ fontSize: 28, fontWeight: "700", letterSpacing: -0.5, color: colors.text }}>A sheet</Text>
-              <Text style={{ fontSize: 15, lineHeight: 21, color: colors.muted }}>
-                {hint("Swipe down (iOS) or press back (Android) to close.", "Press Escape or click outside the card to close.")}
-              </Text>
-            </View>
-            <View style={{ flex: 1 }} />
-            <Button label="Close" onPress={() => sheet.set(false)} />
+      <Sheet
+        open={sheet()}
+        onOpenChange={(open) => sheet.set(open)}
+        backdropStyle={{ backgroundColor: "rgba(0,0,0,0.5)" }}
+        popupStyle={{
+          gap: 16,
+          padding: 20,
+          paddingBottom: safeArea().bottom + 20,
+          borderTopLeftRadius: 24,
+          borderTopRightRadius: 24,
+          backgroundColor: colors.background,
+        }}
+      >
+        <View style={{ gap: 8 }}>
+          <View style={{ flexDirection: "row" }}>
+            <Badge label="Sheet" tone="accent" />
           </View>
-        </SafeAreaView>
-      </Dialog>
+          <Text style={{ fontSize: 28, fontWeight: "700", letterSpacing: -0.5, color: colors.text }}>A sheet</Text>
+          <Text style={{ fontSize: 15, lineHeight: 21, color: colors.muted }}>
+            {hint("Tap outside it or press back (Android) to close.", "Press Escape or click outside it to close.")}
+          </Text>
+        </View>
+        <Button label="Close" onPress={() => sheet.set(false)} />
+      </Sheet>
     </Card>
   );
 }
@@ -230,7 +238,7 @@ function Accessory() {
         ios={{ inputAccessoryViewID: "counter" }}
       />
       <Caption
-        label={Platform.isDesktop ? "Desktops have no input accessories" : Platform.OS === "android" ? "Android has no input accessories" : "The bar counts what you type"} note='inputAccessoryViewID="counter"' />
+        label={platform.idiom === "desktop" ? "Desktops have no input accessories" : platform.os === "android" ? "Android has no input accessories" : "The bar counts what you type"} note='inputAccessoryViewID="counter"' />
       <InputAccessoryView nativeID="counter" style={{ backgroundColor: colors.surface }}>
         <View
           style={{
@@ -239,7 +247,7 @@ function Accessory() {
             gap: 8,
             paddingHorizontal: 16,
             paddingVertical: 8,
-            borderTopWidth: hairline,
+            borderTopWidth: hairline(),
             borderTopColor: colors.border,
           }}
         >
@@ -303,6 +311,7 @@ function ModalOptions() {
         android={{ statusBarTranslucent: translucent() }}
         ios={{ supportedOrientations: ["portrait", "landscape"] }}
         onOpenChange={(open) => visible.set(open)}
+        style={{ flex: 1 }}
       >
         <View style={{ flex: 1, backgroundColor: isDark() ? "#16200d" : "#eef5dc" }}>
           <TitleBar />
@@ -325,19 +334,20 @@ function ModalOptions() {
 
 function PlatformInfo() {
   const rows = (): [string, string][] => [
-    ["Platform.OS", Platform.OS],
-    ["Platform.Version", String(Platform.Version)],
-    ["isPad / isTV / isMacCatalyst", `${Platform.isPad} / ${Platform.isTV} / ${Platform.isMacCatalyst}`],
-    ["Platform.select", Platform.select({ ios: "ios branch", android: "android branch" }) ?? ""],
-    ["PixelRatio.get()", String(PixelRatio.get())],
-    ["roundToNearestPixel(10.3)", String(PixelRatio.roundToNearestPixel(10.3))],
+    ["platform.os", platform.os],
+    ["platform.version", platform.version],
+    ["platform.idiom / catalyst", `${platform.idiom} / ${platform.catalyst}`],
+    ["platform.select", platform.select({ ios: "ios branch", android: "android branch" }) ?? ""],
+    ["pixelRatio()", String(pixelRatio())],
+    ["10.3 on whole pixels", String(Math.round(10.3 * pixelRatio()) / pixelRatio())],
     ["screenReaderEnabled()", String(screenReaderEnabled())],
     ["reduceMotion()", String(reduceMotion())],
+    ["locale()", locale()],
   ];
   const announced = signal(0);
   let target: YNode | undefined;
   return (
-    <Card icon="spark" title="Platform" subtitle="Platform, PixelRatio, AccessibilityInfo" right={<Badge label={Platform.OS} tone="accent" />}>
+    <Card icon="spark" title="Platform" subtitle="platform, pixelRatio, announce" right={<Badge label={platform.os} tone="accent" />}>
       <View>
         <Each of={rows()}>
           {(row, i) => (
@@ -352,17 +362,17 @@ function PlatformInfo() {
           )}
         </Each>
       </View>
-      <View style={{ height: hairline, backgroundColor: colors.accent }} />
-      <Caption label="The line above is one device pixel tall" note={`${hairline.toFixed(3)} pt`} />
+      <View style={{ height: hairline(), backgroundColor: colors.accent }} />
+      <Caption label="The line above is one device pixel tall" note={`${hairline().toFixed(3)} pt`} />
       <View style={{ flexDirection: "row", gap: 8 }}>
         <Cell><Button
           label="Announce"
           onPress={() => {
             announced.set(announced() + 1);
-            AccessibilityInfo.announceForAccessibility(`Announcement ${announced()}`);
+            announce(`Announcement ${announced()}`);
           }}
         /></Cell>
-        <Cell><Button label="Focus the note" variant="secondary" onPress={() => target && AccessibilityInfo.setAccessibilityFocus(target)} /></Cell>
+        <Cell><Button label="Focus the note" variant="secondary" onPress={() => target && setAccessibilityFocus(target)} /></Cell>
       </View>
       <Text ref={(node) => (target = node)} style={{ fontSize: 13, lineHeight: 18, color: colors.faint }}>
         With VoiceOver or TalkBack on, the buttons above speak and move the reader here.

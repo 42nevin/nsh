@@ -1,15 +1,15 @@
 ---
-title: nsh/list
+title: List
 description: List：基于原生滚动视图、虚拟化并复用单元格的列表，以及它的全部属性、事件和 ref 方法。
-order: 4
+order: 2.1
 ---
 
-# nsh/list
+# List
 
-`nsh/list` 导出 `List`：一个基于原生滚动视图的虚拟化列表。只有视口附近的行才真正存在，滚动时单元格会被复用。哪些行存在、它们的位置、多列布局、吸顶标题和可见性都在原生侧计算，因此滚动一个上万条目的列表时，除了单元格被复用时变化的行绑定之外，不会运行任何 JS。
+`nsh` 导出 `List`：一个基于原生滚动视图的虚拟化列表。只有视口附近的行才真正存在，滚动时单元格会被复用。哪些行存在、它们的位置、多列布局、吸顶标题和可见性都在原生侧计算，因此滚动一个上万条目的列表时，除了单元格被复用时变化的行绑定之外，不会运行任何 JS。
 
 ```ts
-import { List, type ListProps, type ViewToken, type ViewabilityConfig } from "nsh/list";
+import { List, type ListProps, type ViewToken, type ViewabilityConfig } from "nsh";
 ```
 
 教程见[列表](../docs/lists.md)，元素的属性见 [`<List>`](../elements/list.md)。
@@ -21,8 +21,7 @@ function List<T>(props: ListProps<T>): YNode;
 ```
 
 ```tsx
-import { mount, Text, View } from "nsh";
-import { List } from "nsh/list";
+import { List, mount, Text, View } from "nsh";
 
 const contacts = Array.from({ length: 1000 }, (_, i) => ({ id: String(i), name: `Contact ${i}` }));
 
@@ -81,11 +80,13 @@ mount(App);
 
 | 属性 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `onEndReached` | `() => void` | | 距离末端不超过 `onEndReachedThreshold` 个视口时调用：用于加载更多。 |
-| `onEndReachedThreshold` | `number` | `1` | 距离末端多近（以视口长度计）时触发 `onEndReached`。 |
+| `onLoadMore` | `() => void` | | 距离末端不超过 `loadMoreThreshold` 个视口时调用：用于加载更多。 |
+| `loadMoreThreshold` | `number` | `1` | 距离末端多近（以视口长度计）时触发 `onLoadMore`。 |
+| `onLoadMoreAtStart` | `() => void` | | 用户或滚动命令移动列表后，距离开头不超过 `loadMoreAtStartThreshold` 个视口时调用：加载第一项之前的内容。 |
+| `loadMoreAtStartThreshold` | `number` | `1` | 距离开头多近（以视口长度计）时触发 `onLoadMoreAtStart`。 |
 | `refreshing` | `boolean` | | 显示下拉刷新的加载指示器。 |
 | `onRefresh` | `() => void` | | 启用下拉刷新；加载期间设置 `refreshing`。 |
-| `onViewableItemsChanged` | `(info: { viewableItems: ViewToken<T>[]; changed: ViewToken<T>[] }) => void` | | 变为可见或不再可见的条目。 |
+| `onViewableItemsChange` | `(info: { viewableItems: ViewToken<T>[]; changed: ViewToken<T>[] }) => void` | | 变为可见或不再可见的条目。 |
 | `viewabilityConfig` | `ViewabilityConfig` | | 条目何时算作可见。 |
 
 ```ts
@@ -110,8 +111,8 @@ interface ViewabilityConfig {
 
 | 属性 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `showsIndicator` | `boolean` | `true` | 显示滚动条。 |
-| `scrollEnabled` | `boolean` | `true` | 用户可以滚动。 |
+| `scrollbar` | `boolean` | `true` | 显示滚动条。 |
+| `scrollable` | `boolean` | `true` | 用户可以滚动。 |
 | `bounces` | `boolean` | `true` | 允许越过边缘回弹。 |
 | `pagingEnabled` | `boolean` | `false` | 按视口长度的整数倍停靠。 |
 | `snapToInterval` | `number` | `0` | 按该长度的整数倍停靠（0：关闭）。 |
@@ -119,7 +120,7 @@ interface ViewabilityConfig {
 | `snapToAlignment` | `"start" \| "center" \| "end"` | `"start"` | 使用 `snapToInterval` 时条目的哪个位置与视口对齐。 |
 | `disableIntervalMomentum` | `boolean` | `false` | 一次快速滑动最多移动一个停靠点。 |
 | `decelerationRate` | `"normal" \| "fast" \| number` | 平台默认 | 快速滑动的减速快慢（`0.998` / `0.99`，或每毫秒保留的速度比例）。 |
-| `contentInset` | `{ top?, right?, bottom?, left? }` | | 内容四周的留白。 |
+| `contentInset` | `Partial<Edges>` | | 内容四周的留白。 |
 | `contentOffset` | `{ x?, y? }` | | 初始滚动位置。 |
 | `keyboardShouldPersistTaps` | `"never" \| "always" \| "handled" \| boolean` | `"never"` | 点击是否收起键盘（`"never"`：这次点击只用来收起键盘）。 |
 | `keyboardDismissMode` | `"none" \| "on-drag" \| "interactive"` | `"none"` | 拖动时是否收起键盘。 |
@@ -130,11 +131,11 @@ interface ViewabilityConfig {
 
 | 事件 | 数据 | 时机 |
 |---|---|---|
-| `onScroll` | `ScrollEvent`：`{ x, y, contentWidth, contentHeight, width, height, zoomScale }` | 滚动过程中。 |
-| `onScrollBeginDrag` | `{ x, y }` | 开始拖动。 |
-| `onScrollEndDrag` | `{ x, y }` | 手指抬起。 |
-| `onMomentumScrollBegin` | `{ x, y }` | 拖动后开始惯性滑动。 |
-| `onMomentumScrollEnd` | `{ x, y }` | 惯性滑动结束（被新的拖动打断时也会触发）。 |
+| `onScroll` | `ScrollEvent`：`{ offset, contentSize, size, zoomScale }` | 滚动过程中。 |
+| `onScrollDragStart` | `{ x, y }` | 开始拖动。 |
+| `onScrollDragEnd` | `{ x, y }` | 手指抬起。 |
+| `onMomentumStart` | `{ x, y }` | 拖动后开始惯性滑动。 |
+| `onMomentumEnd` | `{ x, y }` | 惯性滑动结束（被新的拖动打断时也会触发）。 |
 | `onScrollEnd` | `{ x, y }` | 滚动停止。 |
 
 列表也接受所有元素通用的属性（[通用属性](../elements/index.md)）。
@@ -151,8 +152,7 @@ interface ViewabilityConfig {
 | `scrollTo({ x?, y?, animated? })` | 滚动到某个偏移。 |
 
 ```tsx
-import { Text, View, type YNode } from "nsh";
-import { List } from "nsh/list";
+import { List, Text, View, type YNode } from "nsh";
 
 let list!: YNode;
 
@@ -177,8 +177,8 @@ let list!: YNode;
   style={{ flex: 1 }}
   contentStyle={{ padding: 12, gap: 6 }}
   keyboardDismissMode="interactive"
-  onEndReached={loadOlder}
-  onEndReachedThreshold={0.5}
+  onLoadMore={loadOlder}
+  loadMoreThreshold={0.5}
 >
   {(m) => (
     <View style={{ alignSelf: m().mine ? "flex-end" : "flex-start", maxWidth: "75%", padding: 10, borderRadius: 14, backgroundColor: m().mine ? "#6366f1" : "#e2e8f0" }}>
@@ -208,8 +208,8 @@ const refresh = async () => {
 ```ts
 type ListItemsProps<T> = Pick<ListProps<T>,
   "each" | "children" | "keyExtractor" | "stickyHeaderIndices" | "initialScrollIndex"
-  | "onViewableItemsChanged" | "viewabilityConfig" | "refreshing" | "onRefresh"
-  | "onEndReached" | "onEndReachedThreshold"
+  | "onViewableItemsChange" | "viewabilityConfig" | "refreshing" | "onRefresh"
+  | "onLoadMore" | "loadMoreThreshold"
   | "header" | "footer" | "empty">;
 ```
 

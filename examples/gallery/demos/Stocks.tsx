@@ -1,6 +1,5 @@
-import { cleanup, computed, effect, Scroll, signal, Text, untracked, View } from "nsh";
+import { Canvas, cleanup, computed, effect, Scroll, signal, Text, untracked, View } from "nsh";
 import { createAnimatedValue, Easing, LayoutAnimation } from "nsh/animated";
-import { Canvas } from "nsh/canvas";
 import { Icon } from "../icons";
 import { nav } from "../nav";
 import { colors, desktop, finish, motion, paneWidth, Press, Segmented } from "../ui";
@@ -285,7 +284,7 @@ function StockRow(props: { market: Market; stock: Stock; first: boolean; onPress
       role="button"
       accessibilityLabel={props.stock.name}
       accessibilityState={props.wide ? { selected: !!props.active } : undefined}
-      class={props.wide ? (props.active ? "bg-paper-border dark:bg-graphite-raised" : "hover:bg-paper-card dark:hover:bg-graphite-card") : undefined}
+      class={props.wide ? (props.active ? "bg-accent" : "hover:bg-card") : undefined}
       style={{ height: 64, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, cursor: props.wide ? "pointer" : undefined }}
     >
       <If when={props.active}>

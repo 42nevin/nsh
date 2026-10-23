@@ -7,7 +7,7 @@ use super::element::Listener;
 use crate::{
     Bounds, ContextMenuEvent, EventPayload, HoverEvent, JsonValue, PayloadValue, Point, Points,
     Size, TouchEvent,
-    geometry::{DevicePixels, Radians, point, px},
+    geometry::{DevicePixels, Radians},
 };
 
 /// Local files or directories dropped on an element (`on_file_drop`).
@@ -79,6 +79,33 @@ pub struct Selection {
     pub end: u32,
 }
 
+/// Where an input's caret is (`on_caret_move`): what opens at it (an `@`
+/// mention's suggestions) is placed with it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[non_exhaustive]
+pub struct CaretEvent {
+    /// The caret in the input's coordinates (its border box), its own
+    /// scrolling applied: as wide as the platform draws it, as tall as its
+    /// line. Empty when the platform could not place it.
+    pub bounds: Bounds<Points>,
+    /// The caret in its root view's coordinates (the surface, or the dialog
+    /// around the input), as of the event:
+    /// [`crate::overlay::OverlayAnchor::Bounds`] places an overlay against it.
+    pub page_bounds: Bounds<Points>,
+}
+
+/// An input method's composition in an input (`on_composition_change`):
+/// the text being composed (pinyin before a character is chosen, kana
+/// before conversion), not yet the input's text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Composition {
+    /// A composition is in progress.
+    pub composing: bool,
+    /// The text being composed, empty once the composition ends.
+    pub text: String,
+}
+
 /// Where a web view is (`on_navigation_state_change`, `on_load`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WebNavigation {
@@ -132,6 +159,17 @@ pub struct NativeEvent {
     pub data: JsonValue,
 }
 
+/// Where the core placed an overlay (`Overlay::on_position`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct OverlayPosition {
+    /// The side of the anchor it went on.
+    pub placement: crate::overlay::Placement,
+    /// Its frame in the root view.
+    pub bounds: Bounds<Points>,
+    /// The room on that side, inside the safe area less the margin.
+    pub available: Size<Points>,
+}
+
 /// A field of a map payload.
 fn field<'a>(payload: &'a EventPayload, key: &str) -> Option<&'a PayloadValue> {
     match payload {
@@ -158,6 +196,27 @@ fn string<'a>(payload: &'a EventPayload, key: &str) -> Option<&'a str> {
     }
 }
 
+fn point_field(payload: &EventPayload, key: &str) -> Point<Points> {
+    match field(payload, key) {
+        Some(PayloadValue::Point(p)) => *p,
+        _ => Point::default(),
+    }
+}
+
+fn size_field(payload: &EventPayload, key: &str) -> Size<Points> {
+    match field(payload, key) {
+        Some(PayloadValue::Size(s)) => *s,
+        _ => Size::default(),
+    }
+}
+
+fn bounds_field(payload: &EventPayload, key: &str) -> Bounds<Points> {
+    match field(payload, key) {
+        Some(PayloadValue::Bounds(b)) => *b,
+        _ => Bounds::default(),
+    }
+}
+
 /// How a typed event comes out of a payload (`None`: not this event's).
 pub(crate) type Decode<T> = for<'a> fn(&'a EventPayload) -> Option<Cow<'a, T>>;
 
@@ -177,6 +236,26 @@ pub(crate) fn typed<T: ?Sized + ToOwned + 'static>(
 /// Events without data.
 pub(crate) fn unit(_: &EventPayload) -> Option<Cow<'_, ()>> {
     Some(Cow::Owned(()))
+}
+
+pub(crate) fn overlay_position(p: &EventPayload) -> Option<Cow<'_, OverlayPosition>> {
+    use crate::overlay::Placement;
+    let placement = match string(p, "placement")? {
+        "top" => Placement::Top,
+        "left" => Placement::Left,
+        "right" => Placement::Right,
+        _ => Placement::Bottom,
+    };
+    Some(Cow::Owned(OverlayPosition {
+        placement,
+        bounds: bounds_field(p, "bounds"),
+        available: size_field(p, "available"),
+    }))
+}
+
+/// Where a press went down, in the root view (`Overlay::on_press_outside`).
+pub(crate) fn page_point(p: &EventPayload) -> Option<Cow<'_, Point<Points>>> {
+    Some(Cow::Owned(point_field(p, "pagePosition")))
 }
 
 pub(crate) fn layout(p: &EventPayload) -> Option<Cow<'_, Bounds<Points>>> {
@@ -219,6 +298,27 @@ pub(crate) fn selection(p: &EventPayload) -> Option<Cow<'_, Selection>> {
     }))
 }
 
+pub(crate) fn paste(p: &EventPayload) -> Option<Cow<'_, crate::PasteEvent>> {
+    match p {
+        EventPayload::Paste(paste) => Some(Cow::Borrowed(paste)),
+        _ => None,
+    }
+}
+
+pub(crate) fn caret(p: &EventPayload) -> Option<Cow<'_, CaretEvent>> {
+    Some(Cow::Owned(CaretEvent {
+        bounds: bounds_field(p, "bounds"),
+        page_bounds: bounds_field(p, "pageBounds"),
+    }))
+}
+
+pub(crate) fn composition(p: &EventPayload) -> Option<Cow<'_, Composition>> {
+    Some(Cow::Owned(Composition {
+        composing: flag(p, "composing"),
+        text: string(p, "text").unwrap_or_default().to_owned(),
+    }))
+}
+
 pub(crate) fn size(p: &EventPayload) -> Option<Cow<'_, Size<Points>>> {
     match *p {
         EventPayload::Image(size) => Some(Cow::Owned(crate::geometry::size_pt(
@@ -239,12 +339,9 @@ pub(crate) fn scroll(p: &EventPayload) -> Option<Cow<'_, ScrollEvent>> {
             ..ScrollEvent::default()
         },
         _ => ScrollEvent {
-            offset: point(px(number(p, "x")), px(number(p, "y"))),
-            content_size: Size::new(
-                px(number(p, "contentWidth")),
-                px(number(p, "contentHeight")),
-            ),
-            size: Size::new(px(number(p, "width")), px(number(p, "height"))),
+            offset: point_field(p, "offset"),
+            content_size: size_field(p, "contentSize"),
+            size: size_field(p, "size"),
             zoom_scale: match field(p, "zoomScale") {
                 Some(PayloadValue::Number(n)) => *n as f32,
                 _ => 1.0,
@@ -256,7 +353,7 @@ pub(crate) fn scroll(p: &EventPayload) -> Option<Cow<'_, ScrollEvent>> {
 pub(crate) fn offset(p: &EventPayload) -> Option<Cow<'_, Point<Points>>> {
     Some(Cow::Owned(match *p {
         EventPayload::Scroll(offset) => offset,
-        _ => point(px(number(p, "x")), px(number(p, "y"))),
+        _ => point_field(p, "offset"),
     }))
 }
 
@@ -384,6 +481,26 @@ mod tests {
                 .unwrap()
                 .uris,
             uris
+        );
+    }
+
+    #[test]
+    fn composition_reads_its_state_and_text() {
+        use crate::{EventPayload, PayloadValue};
+        let composing = EventPayload::Map(vec![
+            ("composing", PayloadValue::Bool(true)),
+            ("text", PayloadValue::Str("teng".into())),
+        ]);
+        let c = super::composition(&composing).unwrap();
+        assert!(c.composing);
+        assert_eq!(c.text, "teng");
+        let ended = EventPayload::Map(vec![
+            ("composing", PayloadValue::Bool(false)),
+            ("text", PayloadValue::Str(String::new())),
+        ]);
+        assert_eq!(
+            super::composition(&ended).unwrap().into_owned(),
+            super::Composition::default()
         );
     }
 }

@@ -65,7 +65,10 @@ Input                        native gestures -> EngineControl::dispatch_event ->
   through `nsh_core::time::now()`, `Intl` and `Date` through `unix_ms()`. The system's clock is the default. A manual
   one (`Clock::manual`) moves only when told: the loop no longer wakes for timers, and `EngineControl::advance_clock`
   steps it to each time something comes due on the way (timers, task timers, the clock's alarms such as a held-back
-  response), running it before going on, as Playwright's `clock.runFor` and Jest's fake timers do. QuickJS reads the
+  response), running it before going on, as Playwright's `clock.runFor` and Jest's fake timers do. A manual clock
+  that moves with frames (`Clock::with_frames`: a test's app on a real platform, `nsh test --target`) also moves to a
+  frame after the last (`time::FRAME`) with each display frame, and runs the frames the app waits for on the way
+  while it is moved. QuickJS reads the
   system's time in C for `Date` and `performance`, so on a manual clock `nsh-js` replaces them (`clock.rs`: a native
   `Date` constructor that hands the intrinsic the clock's time and shares its prototype, and a `performance` of the
   same shape). The idle collection keeps the system's time.
@@ -84,8 +87,9 @@ NSH is layered as GPUI Kit is (an architecture rule, `AGENTS.md`):
 | `nsh-base` | `gpui-base` | Unstyled base components: behavior, state, focus, keyboard, accessibility; the look is the app's | `nsh/base` |
 | an app's own UI set, or a community crate | `gpui-component` | A styled component library | the crate's specifier (`app/native`) |
 
-`nsh-base` has `gpui-base`'s scope: navigation, safe areas, system dialogs, the keyboard and the status bar today;
-controls (buttons, toggles, sliders, selects, popovers, sheets, ...) join as their behavior is written. Its
+`nsh-base` has `gpui-base`'s scope: navigation, popups (popovers, menus, tooltips, sheets, on the core's overlays),
+safe areas, system dialogs, the keyboard and the status bar today; controls (toggles, sliders, selects, ...) join as
+their behavior is written. Its
 components take the app's styles and children, expose their parts and report changes of state the app owns
 (`components.md`). The styled layer is never part of NSH: apps build their own on `nsh/base` and the primitives, or
 use one a third party publishes as a crate.

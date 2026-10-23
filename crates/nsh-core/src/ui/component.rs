@@ -35,8 +35,8 @@ use super::{
 ///     view()
 ///         .px_4()
 ///         .py_3()
-///         .bg(move || theme().primary()) // nsh-base's theme
-///         .on_press(move |_: &()| cx.emit(ButtonEvent::Press))
+///         .bg(move || theme().primary) // nsh-base's theme
+///         .on_press(move || cx.emit(ButtonEvent::Press))
 ///         .child(text(props.title))
 /// }
 /// ```
@@ -60,7 +60,10 @@ pub trait Component: 'static {
     /// makes (signals, effects, timers) goes with the component.
     fn view(props: Self::Props, cx: super::Scope<Self::Event>) -> impl IntoElement;
 
-    /// This component inside another one's view.
+    /// This component inside another one's view, given all its props.
+    /// A `#[component]` has a constructor of its own, which Rust views use
+    /// (`button().disabled(..)`); this stays for components implemented
+    /// by hand and for code generic over components.
     fn element(props: Self::Props) -> ComponentElement<Self>
     where
         Self: Sized,
@@ -207,6 +210,10 @@ pub enum PropKind {
     /// A value: decoded in the JS call ([`PropSpec::decode`]), set by the
     /// core.
     Value,
+    /// A render function (`Option<Renderer<T>>`): decoded in the JS call
+    /// as a value is (a function, or none), its content rendered by JS
+    /// when the core asks for it ([`super::JsEvent::Render`]).
+    Renderer,
     /// A named slot: JSX in a holder node.
     Slot,
     /// The JSX children.
@@ -250,6 +257,10 @@ pub struct EventSpec {
     pub data: String,
     /// Documentation.
     pub doc: &'static str,
+    /// The handler takes several arguments (`#[args(open, reason)]` on a
+    /// variant of as many fields): `data` is their list (`open: boolean,
+    /// reason: …`), the data a JS array of them.
+    pub spread: bool,
 }
 
 /// A component's props. Derive it: `#[derive(Props)]`.
@@ -262,6 +273,12 @@ pub trait Props: Clone + PartialEq + 'static {
     /// (`#[prop(lazy)]`).
     #[doc(hidden)]
     const LAZY_CHILDREN: bool = false;
+
+    /// TS declares the props generic over `T`, the type of the rows a prop
+    /// takes (`#[props(generic)]`; a prop's type names it, as
+    /// [`super::Rows`] does).
+    #[doc(hidden)]
+    const GENERIC: bool = false;
 
     /// The props (their named types declared in `types`).
     fn spec(types: &mut TsTypes) -> Vec<PropSpec>;
@@ -320,7 +337,12 @@ impl Props for () {
     }
 }
 
-/// A component's events. Derive it: `#[derive(Event)]`.
+/// A component's events. Derive it: `#[derive(Event)]`. The element of a
+/// `#[component]` emitting them gets a listener method per event, named
+/// as its TSX handler in snake case (`onPress` is `.on_press(..)`): a
+/// unit variant's takes `move || ..`, a one-field variant's the value
+/// (`move |index: &u32| ..`), a named-field variant's the event itself
+/// ([`ComponentBuilder`](super::ComponentBuilder)).
 pub trait Event: 'static {
     /// The events (their named types declared in `types`).
     fn spec(types: &mut TsTypes) -> Vec<EventSpec>;
@@ -330,6 +352,12 @@ pub trait Event: 'static {
 
     /// Its data as a JS value of `host` (converted when JS hears it).
     fn data_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError>;
+
+    /// The handler takes the items of the data (an array) as its
+    /// arguments ([`EventSpec::spread`]).
+    fn spread(&self) -> bool {
+        false
+    }
 }
 
 /// The events of a component that has none.
@@ -373,6 +401,9 @@ pub struct ComponentSpec {
     /// (`#[prop(lazy)]` on its `Children`): the core tells it with a
     /// `$children` event on the host.
     pub lazy_children: bool,
+    /// Its props are generic over `T`, the type of the rows one takes
+    /// (`#[props(generic)]`), as a component with [`super::Items`] is.
+    pub generic: bool,
 }
 
 impl ComponentSpec {
@@ -391,6 +422,7 @@ impl ComponentSpec {
             methods,
             types,
             lazy_children: C::Props::LAZY_CHILDREN,
+            generic: C::Props::GENERIC,
         }
     }
 
@@ -399,6 +431,14 @@ impl ComponentSpec {
         self.props
             .iter()
             .filter(|p| p.kind == PropKind::Slot)
+            .map(|p| p.name)
+    }
+
+    /// Its render functions ([`PropKind::Renderer`]).
+    pub fn renderers(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.props
+            .iter()
+            .filter(|p| p.kind == PropKind::Renderer)
             .map(|p| p.name)
     }
 
@@ -625,6 +665,9 @@ pub struct Registry {
     assets: Arc<Vec<&'static [super::AssetFile]>>,
     /// Makes the design tokens of a theme ([`Registry::tokens_from`]).
     tokens: Option<super::TokenSource>,
+    /// The UI sets served under paths of this one's specifier
+    /// ([`Registry::submodule`]).
+    submodules: Arc<Vec<Registry>>,
 }
 
 impl fmt::Debug for Registry {
@@ -811,7 +854,7 @@ impl Registry {
     #[track_caller]
     pub fn merged(sets: &[Registry]) -> Self {
         let mut out = Self::default();
-        for set in sets {
+        for set in sets.iter().flat_map(Registry::sets) {
             out.tokens = out.tokens.or(set.tokens);
             let types = Arc::make_mut(&mut out.types);
             for (name, ty) in set.types.iter() {
@@ -843,6 +886,45 @@ impl Registry {
     /// ([`Registry::reexport`]).
     pub fn reexports(&self) -> (&[&'static str], &[&'static str]) {
         (&self.reexports.0, &self.reexports.1)
+    }
+
+    /// Serves UI set `set` wherever this one is served, as a module of
+    /// its own under a path of this set's specifier (`nsh/base/plot` of
+    /// `nsh/base`, as `gpui-base`'s `plot` is a module of the crate): a
+    /// family of components whose names (`Line`, `Grid`) only make sense
+    /// together, apart from the set's other exports. Hosts, the toolchain
+    /// and the declarations take the set's submodules with it
+    /// ([`Registry::sets`]), so a list of UI sets names only the set.
+    ///
+    /// # Panics
+    ///
+    /// When `set`'s specifier is not a path under this set's.
+    #[track_caller]
+    pub fn submodule(&mut self, set: Registry) -> &mut Self {
+        let under = match (self.ui_set, set.ui_set) {
+            (Some(parent), Some(child)) => child
+                .strip_prefix(parent)
+                .is_some_and(|rest| rest.len() > 1 && rest.starts_with('/')),
+            _ => false,
+        };
+        assert!(
+            under,
+            "a submodule is a UI set under a path of its set's specifier: {:?} under {:?}",
+            set.ui_set, self.ui_set
+        );
+        Arc::make_mut(&mut self.submodules).push(set);
+        self
+    }
+
+    /// This set and its submodules ([`Registry::submodule`]), each one
+    /// module apps import: what a host serves and the toolchain declares
+    /// for it.
+    pub fn sets(&self) -> Vec<&Registry> {
+        let mut out = vec![self];
+        for sub in self.submodules.iter() {
+            out.extend(sub.sets());
+        }
+        out
     }
 
     /// Exports `values` `nsh-js` makes for the set (`NavStack`, `NavPage`),
@@ -1135,6 +1217,7 @@ pub fn declarations(registry: &Registry, omit: &[&str]) -> String {
         // A component with rows is generic over their type, like `List`.
         let (generic, extends) = match spec.items() {
             Some(_) => ("<T>", ", ListItemsProps<T>"),
+            None if spec.generic => ("<T>", ""),
             None => ("", ""),
         };
         // A component with methods: its ref is an object of them.
@@ -1185,6 +1268,8 @@ pub fn declarations(registry: &Registry, omit: &[&str]) -> String {
             let handler = handler_name(e.name);
             let arg = if e.data == "void" {
                 String::new()
+            } else if e.spread {
+                e.data.clone()
             } else {
                 format!("{}: {}", e.arg, e.data)
             };
@@ -1751,6 +1836,24 @@ mod tests {
     )]
     fn a_component_is_registered_once() {
         Registry::new().register::<Stepper>().register::<Stepper>();
+    }
+
+    /// A set's submodules come with it, under paths of its specifier, and
+    /// their components join the core's.
+    #[test]
+    fn a_sets_submodules_come_with_it() {
+        let mut sub = Registry::ui_set("test/set/sub");
+        sub.register::<Stepper>();
+        let mut set = Registry::ui_set("test/set");
+        set.submodule(sub);
+        let specifiers: Vec<_> = set.sets().iter().map(|s| s.specifier()).collect();
+        assert_eq!(specifiers, [Some("test/set"), Some("test/set/sub")]);
+        assert_eq!(Registry::merged(&[set]).specs().len(), 1);
+        // Only a path under the set's own specifier.
+        let elsewhere = std::panic::catch_unwind(|| {
+            Registry::ui_set("test/set").submodule(Registry::ui_set("test/settings"));
+        });
+        assert!(elsewhere.is_err());
     }
 
     #[test]

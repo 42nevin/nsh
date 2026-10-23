@@ -15,6 +15,7 @@ use nsh_core::{
     Command, EventKind, Op, ROOT_ID,
     desktop::{DesktopCommand, MenuAction, MenuItem, MenuRole, Shortcut},
     geometry::{Points, point},
+    keymap::When,
     platform::Os,
 };
 use rquickjs::qjs;
@@ -210,7 +211,7 @@ impl Decoder {
             return Ok(Some(MenuItem::Separator));
         }
         let label = string(cx, v, c"label");
-        let enabled = flag(cx, v, c"enabled").unwrap_or(true);
+        let enabled = !flag(cx, v, c"disabled").unwrap_or(false);
         let submenu = get(cx, v, c"submenu");
         if !nullish(submenu) {
             let items = self.items(submenu);
@@ -234,6 +235,16 @@ impl Decoder {
             Some(text) => Some(Shortcut::parse(&text, self.mac).map_err(|e| e.to_string())?),
             None => role.and_then(|r| r.shortcut(self.mac)),
         };
+        let when = match string(cx, v, c"when").as_deref() {
+            None | Some("always") => When::Always,
+            Some("auto") => When::Auto,
+            Some("notEditing") => When::NotEditing,
+            Some(other) => {
+                return Err(format!(
+                    "when must be \"always\", \"auto\" or \"notEditing\", not {other:?}"
+                ));
+            }
+        };
         let on_select = get(cx, v, c"onSelect");
         // SAFETY: an inline check.
         let id = if unsafe { qjs::JS_IsFunction(cx, on_select) } {
@@ -253,6 +264,7 @@ impl Decoder {
             enabled,
             checked: flag(cx, v, c"checked"),
             role,
+            when,
         })))
     }
 
@@ -533,8 +545,15 @@ export type MenuItem =
        * `home`, `end`, `pageup`, `pagedown`, `f1`–`f24`: the keystrokes of
        * `nsh/keymap`. A role has its platform's by default. */
       shortcut?: string;
-      /** It can be chosen (default true). */
-      enabled?: boolean;
+      /** When its shortcut chooses it while a text field has the keyboard
+       * focus: `"always"` (the default), `"auto"` (unless the field uses
+       * the keystroke itself: keys that type, move the caret or delete,
+       * and the editing shortcuts, as `nsh/keymap`'s bindings) or
+       * `"notEditing"` (never). A key the item leaves goes to the field.
+       * On the GPUI backend. */
+      when?: "always" | "auto" | "notEditing";
+      /** It cannot be chosen: shown dimmed (default false). */
+      disabled?: boolean;
       /** A check mark: set (true or false) for a checkable item. */
       checked?: boolean;
       /** Called when it is chosen (by a click or its shortcut). */
@@ -554,10 +573,11 @@ export interface MenuModule {
    * signals it reads); `null` restores the platform's default menu. */
   setApplicationMenu(items: readonly (MenuItem | null | undefined | false)[] | null): void;
   /** Shows a context menu with its top left corner at `at` (the window's
-   * coordinates, points), else at the pointer. The promise resolves once
+   * coordinates, points: `Menu.popup(items, e.pagePosition)` in an
+   * `onContextMenu`), else at the pointer. The promise resolves once
    * the menu closes, chosen or dismissed: a button that opened it can look
    * pressed until then. */
-  popup(items: readonly (MenuItem | null | undefined | false)[], at?: { x: number; y: number }): Promise<void>;
+  popup(items: readonly (MenuItem | null | undefined | false)[], at?: Point): Promise<void>;
 }
 "#;
 

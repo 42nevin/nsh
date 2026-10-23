@@ -41,7 +41,7 @@
 //! the default theme's), as the root view has none of its own.
 //!
 //! The status bar has no desktop equivalent. The clipboard is Win32's
-//! (`CF_UNICODETEXT`); reads are synchronous, so `Clipboard.getString` is
+//! (`CF_UNICODETEXT`); reads are synchronous, so `Clipboard.readText` is
 //! answered at once.
 
 use std::{
@@ -81,10 +81,10 @@ use windows::{
             SystemInformation::OSVERSIONINFOW,
         },
         UI::{
-            Shell::SetCurrentProcessExplicitAppUserModelID,
+            Shell::{SetCurrentProcessExplicitAppUserModelID, ShellExecuteW},
             WindowsAndMessaging::{
                 GA_ROOT, GetAncestor, PostMessageW, SPI_GETCLIENTAREAANIMATION,
-                SPI_GETSCREENREADER, SYSTEM_PARAMETERS_INFO_ACTION,
+                SPI_GETSCREENREADER, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_ACTION,
                 SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW, WM_CLOSE,
             },
         },
@@ -118,7 +118,7 @@ const VK_RIGHT: u16 = 0x27;
 const VK_DOWN: u16 = 0x28;
 
 thread_local! {
-    /// The system appearance a script switched to (`dark` / `light`).
+    /// The system appearance a test switched to (`nsh test --target`).
     static SIMULATED: Cell<Option<bool>> = const { Cell::new(None) };
     /// The dialogs and toasts of this thread's surfaces.
     static OVERLAYS: RefCell<Vec<Overlay>> = const { RefCell::new(Vec::new()) };
@@ -142,7 +142,9 @@ struct Settings {
     locale: Locale,
 }
 
-/// Makes the system look dark (or light) from now on (`--script`).
+/// Makes the system look dark (or light) from now on (`nsh test
+/// --target`'s color scheme).
+#[cfg(feature = "dev")]
 pub(crate) fn simulate_system_scheme(dark: bool) {
     SIMULATED.with(|s| s.set(Some(dark)));
 }
@@ -192,7 +194,7 @@ pub(crate) fn settings_changed(surface: &Rc<Surface>) {
     surface.invalidate();
 }
 
-/// The environment changed (from the system, the app or a script): the
+/// The environment changed (from the system, the app or a test): the
 /// title bar and the root's background follow its scheme.
 pub(crate) fn environment_applied(surface: &Surface) {
     let hwnd = surface.hwnd();
@@ -433,6 +435,25 @@ fn accent(dark: bool) -> Color {
 // ---------------------------------------------------------------------------
 // Commands
 
+/// Opens `url` with the app registered for its scheme (`ShellExecuteW`'s
+/// `open`): whether one took it. The URL passed `nsh_core::open_url`'s
+/// check, so it names no file or program to run.
+pub(crate) fn open_url(url: &str) -> bool {
+    // SAFETY: plain call with valid NUL-terminated strings.
+    let instance = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            &HSTRING::from(url),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // Above 32 is success; the rest are error codes.
+    instance.0 as isize > 32
+}
+
 /// A command not addressed to a kind of view.
 pub(crate) fn command(surface: &Rc<Surface>, _id: NodeId, command: &Command) {
     match command {
@@ -462,7 +483,7 @@ pub(crate) fn command(surface: &Rc<Surface>, _id: NodeId, command: &Command) {
                     log::debug!("windows: cannot set the clipboard");
                 }
             }
-            _ => log::warn!("Clipboard.setImage: Windows takes a base64 PNG data: URI"),
+            _ => log::warn!("Clipboard.writeImage: Windows takes a base64 PNG data: URI"),
         },
         Command::ReadClipboardImage { id, has_only } => {
             let has = clipboard_has_image();
@@ -479,6 +500,18 @@ pub(crate) fn command(surface: &Rc<Surface>, _id: NodeId, command: &Command) {
             EventKind::Clipboard,
             clipboard::files_answer(*id, &clipboard_files()),
         ),
+        Command::PickImages { id, request } => crate::picker::pick_images(surface, *id, *request),
+        Command::OpenUrl { id, url } => {
+            let opened = open_url(url);
+            surface.event(
+                ROOT_ID,
+                EventKind::OpenUrl,
+                EventPayload::Map(vec![
+                    ("id", PayloadValue::Number(*id as f64)),
+                    ("opened", PayloadValue::Bool(opened)),
+                ]),
+            );
+        }
         Command::Back => crate::navigation::default_back(surface),
         Command::ExitApp => {
             // Closing destroys the window, whose handler stops the surface:
@@ -504,7 +537,7 @@ pub(crate) fn command(surface: &Rc<Surface>, _id: NodeId, command: &Command) {
     }
 }
 
-/// The answer to `Clipboard.getString` / `hasString` read `id`.
+/// The answer to `Clipboard.readText` / `hasString` read `id`.
 fn clipboard_answer(id: u32, has: bool, text: Option<String>) -> EventPayload {
     let mut fields = vec![
         ("id", PayloadValue::Number(id as f64)),
@@ -1269,6 +1302,9 @@ struct DialogItem {
     opacity: Cell<f32>,
     /// Answered: fading out, no more input.
     closing: Cell<bool>,
+    /// The buttons' texts, in order.
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))]
+    labels: Vec<String>,
 }
 
 impl DialogItem {
@@ -1686,8 +1722,51 @@ fn show_dialog(surface: &Rc<Surface>, dialog: &Dialog) {
         keyboard: Cell::new(false),
         opacity: Cell::new(0.0),
         closing: Cell::new(false),
+        labels: buttons.iter().map(|b| b.text.clone()).collect(),
     });
     add_overlay(surface, serial, OverlayKind::Dialog(item));
+}
+
+/// Where a user presses to answer the newest dialog on `surface` (root
+/// points): the middle of its button titled `button`, or outside its card
+/// to close it without one (`None`; only a dialog that can be closed so).
+#[cfg(feature = "dev")]
+pub(crate) fn dialog_point(
+    surface: &Rc<Surface>,
+    button: Option<&str>,
+) -> Result<(f32, f32), String> {
+    let dialog = OVERLAYS
+        .with(|o| {
+            o.borrow().iter().rev().find_map(|o| match &o.kind {
+                OverlayKind::Dialog(d) if o.key == surface.key() && !d.closing.get() => {
+                    Some(d.clone())
+                }
+                _ => None,
+            })
+        })
+        .ok_or("no dialog is shown")?;
+    let layout = dialog.layout.borrow();
+    let layout = layout.as_ref().ok_or("the dialog is not drawn yet")?;
+    match button {
+        Some(text) => {
+            let index = dialog
+                .labels
+                .iter()
+                .position(|l| l == text)
+                .ok_or_else(|| format!("the dialog has no button {text:?}"))?;
+            let r = layout
+                .geometry
+                .buttons
+                .get(index)
+                .ok_or("the dialog's button is not laid out")?;
+            Ok((
+                r.origin.x.0 + r.size.width.0 / 2.0,
+                r.origin.y.0 + r.size.height.0 / 2.0,
+            ))
+        }
+        None if dialog.cancelable => Ok((1.0, 1.0)),
+        None => Err("the dialog can only be answered with a button".into()),
+    }
 }
 
 /// Keys while a dialog shows over the app (it is modal: every key goes to
@@ -1948,7 +2027,7 @@ fn set_clipboard_bytes(format: u32, bytes: &[u8]) -> bool {
 }
 
 /// True when the clipboard has an image (a PNG or a bitmap).
-fn clipboard_has_image() -> bool {
+pub(crate) fn clipboard_has_image() -> bool {
     use windows::Win32::System::{DataExchange::IsClipboardFormatAvailable, Ole::CF_DIB};
     // SAFETY: plain queries.
     unsafe {
@@ -1958,7 +2037,7 @@ fn clipboard_has_image() -> bool {
 }
 
 /// The clipboard's image: its PNG, else its bitmap as a BMP file.
-fn clipboard_image() -> Option<Vec<u8>> {
+pub(crate) fn clipboard_image() -> Option<Vec<u8>> {
     use windows::Win32::System::Ole::CF_DIB;
     clipboard_bytes(png_format())
         .or_else(|| clipboard_bytes(u32::from(CF_DIB.0)).and_then(|dib| bmp_file(&dib)))
@@ -1995,7 +2074,7 @@ fn bmp_file(dib: &[u8]) -> Option<Vec<u8>> {
 
 /// The `file:` URLs of the files on the clipboard (`CF_HDROP`: files
 /// copied in Explorer).
-fn clipboard_files() -> Vec<String> {
+pub(crate) fn clipboard_files() -> Vec<String> {
     use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::PathBuf};
 
     use windows::Win32::{

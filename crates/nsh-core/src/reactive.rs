@@ -335,7 +335,9 @@ impl<H: Host> Graph<H> {
         id
     }
 
-    fn context_of(&self, owner: u32) -> Option<Rc<Frame<H>>> {
+    /// The context frames owner `owner` sees, innermost first (none for
+    /// [`NONE`], [`UNOWNED`] and [`DISPOSED`]).
+    pub fn context_of(&self, owner: u32) -> Option<Rc<Frame<H>>> {
         if !is_node(owner) {
             return None;
         }
@@ -685,6 +687,11 @@ pub fn run_updates<H: Host, R>(h: H, init: bool, f: impl FnOnce() -> R) -> R {
     graph.exec += 1;
     let r = f();
     complete_updates(h, wait);
+    if !wait {
+        // The round ended: the runaway count starts over. The JS host also
+        // resets it when a call returns; Rust components make no such call.
+        g(h).reset_runs();
+    }
     r
 }
 

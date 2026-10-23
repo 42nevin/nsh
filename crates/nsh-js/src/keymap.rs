@@ -211,7 +211,7 @@ fn unbind(cx: Ctx, ids: std::ops::Range<u32>) -> R<()> {
 /// The function undoing a binding runs when the current owner (a
 /// component, an effect) goes, or, at a module's top level, when hot
 /// module replacement runs the module again.
-fn undo_with_owner(cx: Ctx, unbind: &V) {
+pub(crate) fn undo_with_owner(cx: Ctx, unbind: &V) {
     if crate::reactive::has_owner(cx) {
         let mut f = unbind.raw();
         // SAFETY: one borrowed argument; the result is a new reference.
@@ -288,8 +288,8 @@ pub(crate) const TYPES: &str = r#"export interface KeyBindingOptions {
   repeat?: boolean;
 }
 
-/** The app's keyboard shortcuts (desktop platforms; elsewhere bindings are
- * kept but no key fires them). A keystroke is modifiers and a key joined by
+/** The app's keyboard shortcuts: on the desktops, the web, and iOS and
+ * Android with a hardware keyboard. A keystroke is modifiers and a key joined by
  * `+`, in any case (lowercase is the recommended style; a capital letter is
  * the same key, not Shift): `"mod+k"`, `"ctrl+shift+p"`, `"alt+enter"`, `"escape"`,
  * `"f5"`, `"mod+plus"`. Modifiers: `mod` (`cmdorctrl`): Command on Apple

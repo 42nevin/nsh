@@ -7,8 +7,10 @@ group: delivery
 
 # 沙箱与能力
 
-每个 NSH 应用都运行在自己的 QuickJS VM 中，应用在 VM 之外能做的一切都要经过 NSH 的原生运行时。因此，你可以在宿主应用
-制定的规则下运行并非自己编写的代码，例如第三方小程序或下载的更新：
+用 Rust 编写的应用是编译进发布它的应用中的原生代码，和该应用的其余部分一样，以它的信任运行；它对 NSH 服务的调用（`fetch`、图片、
+web view、状态栏）和 TSX 一样经过同样的原生检查，受宿主授予的范围约束。应用运行的 TSX 和 JavaScript（它自己的，或它下载的
+[签名包](./signed-packages.md)）在每个视图一个的 QuickJS VM 中运行，它们在 VM 之外能做的一切都要经过 NSH 的原生运行时。因此，
+你可以在宿主应用制定的规则下运行并非自己编写的代码，例如第三方小程序或下载的更新：
 
 - **限制（Limits）** 约束单个应用可使用的内存、时间和原生资源。
 - **加固（Hardening）** 在 release 构建中移除所有把字符串变成代码的途径。
@@ -20,7 +22,7 @@ bundle 中只有应用自己的代码：响应式图、渲染器以及应用导�
 
 ## 限制
 
-嵌入在其他应用中的应用，在宿主应用决定的限制内运行。独立运行的应用（用 `nsh package` 打包的应用，包括 Web，以及用
+限制约束的是 VM：它们作用于 TSX 和 JavaScript。嵌入在其他应用中的应用，在宿主应用决定的限制内运行。独立运行的应用（用 `nsh package` 打包的应用，包括 Web，以及用
 `nsh run` 运行的应用）是你自己的代码，和原生应用一样：它可以使用设备给它的内存和时间；4096 KB 的解释器栈让过深的递归
 抛出应用可以捕获的 `RangeError`。
 
@@ -56,10 +58,10 @@ VM 会继续运行：下一个事件、定时器或帧照常执行。
 > 对普通应用来说，这些限制相当宽松。如果你触到了 2 s 的调用预算，说明这项工作本来就不该放在一个事件里：它会让应用的
 > 更新冻结那么久。可以用 `setTimeout` 把它拆开，或者把它移出事件处理函数。
 
-宿主应用按视图设定限制：[iOS](./embedding-ios.md) 上用 `NshAppView.limits`，
-[Android](./embedding-android.md) 上用 `NshView.setLimits`，[GPUI 应用](./gpui.md) 里用 `AppOptions::limits` / `AppView::set_limits`。修改从下一次加载开始生效。
+宿主应用按视图设定限制：[iOS](./ios.md) 上用 `NshAppView.limits`，
+[Android](./android.md) 上用 `NshView.setLimits`，[GPUI 应用](./gpui.md) 里用 `AppOptions::limits` / `AppView::set_limits`。修改从下一次加载开始生效。
 
-开发时想看应用在宿主应用的限制下表现如何，用 [`--limits`](./cli.md#nsh-run) 运行它：`nsh run --limits` 使用上面的默认值，
+开发时想看 TSX 应用在宿主应用的限制下表现如何，用 [`--limits`](./cli.md#nsh-run) 运行它：`nsh run App.tsx --limits` 使用上面的默认值，
 `nsh run --limits memory=128MB,call=500ms` 像宿主应用那样设置这两项，其余保持默认值。
 
 ## 加固
@@ -103,19 +105,22 @@ release 构建（所有并非从开发服务器加载的代码）在加载时会
     },
     "webview": { "hosts": ["*.example.com"] },
     "statusBar": true,
-    "clipboard": true
+    "clipboard": true,
+    "picker": true,
+    "host": ["getUserInfo", "bridge.*"],
+    "openUrl": { "schemes": ["https", "mailto"] }
   }
 }
 ```
 
 **没有 `"capabilities"` 的应用可以做任何事**：独立应用归开发者自己所有，不受任何限制。原始 TCP socket 在每个应用中都按名称授予，即
-`network.sockets`。**有 `"capabilities"` 的应用
+`network.sockets`；宿主的函数也一样，即 `host`。**有 `"capabilities"` 的应用
 只能做其中列出的事**：其他一律拒绝。未知的键会导致构建错误，因此拼写错误会在构建时被发现，而不会变成运行时缺失的权限。由更新的 NSH 签名的
 [签名包](./signed-packages.md#由更新版本的-nsh-签名的包)可能声明了旧运行时不认识的能力：旧运行时不会授予它们。
 
 ### `network`
 
-涵盖 `fetch`（包括每一次重定向）、WebSocket、远程图片（`<Image>`、`defaultSource`、canvas 图片、`Image.getSize` /
+涵盖 `fetch`（包括每一次重定向）、WebSocket、远程图片（`<Image>`、`placeholder`、canvas 图片、`Image.getSize` /
 `Image.prefetch`）、视频源以及原始 TCP socket（`net.connect`）。
 
 | 键 | 类型 | 说明 |
@@ -149,7 +154,7 @@ WebSocket 握手是一次 HTTP GET：`ws://` 按 `http://`、`wss://` 按 `https
 | `hosts` | `string[]` | [web view](./web-view-and-video.md) 可以显示和导航到的主机（`http` 和 `https`）。没有 `webview` 时，应用完全不能显示网页。 |
 
 web view 内的顶层导航也会在加载前由平台的导航代理检查。页面自身的子资源（脚本、图片、XHR）属于网页内容自己的事，
-不做检查。`about:blank` 和内联 HTML（`source={{ html }}`）只要求 web view 被授予即可：`"webview": { "hosts": [] }`
+不做检查。`about:blank` 和内联 HTML（`html`）只要求 web view 被授予即可：`"webview": { "hosts": [] }`
 允许它们，但不允许任何远程页面。
 
 ### `statusBar`
@@ -160,9 +165,40 @@ web view 内的顶层导航也会在加载前由平台的导航代理检查。�
 
 `"clipboard": true` 允许应用读写系统剪贴板（[`nsh/clipboard`](../modules/nsh-clipboard.md)）。从可选文本的编辑菜单复制是用户自己的操作，不需要这项能力。
 
+### `picker`
+
+`"picker": true` 允许应用显示系统的照片选择器（[`nsh/picker`](../modules/nsh-picker.md)）：由用户决定哪些内容交给应用。
+
+### `openUrl`
+
+允许应用在应用之外打开 URL（[`openUrl`](../modules/nsh-device.md#openurl)，以及 `links="open"` 的 `TextView` 中的链接）：`"openUrl": true` 允许所有 scheme，`"openUrl": { "schemes": ["https", "mailto"] }` 只允许列出的 scheme。scheme 未被授予的 URL 会抛出 `TypeError`。会执行代码或访问应用自身数据的 URL（`javascript:`、`data:`、`file:` 等）无论能力如何都不会打开。
+
 ### 存储
 
 每个应用都可以用 [`nsh/storage`](../modules/nsh-storage.md) 在设备上保存自己的数据，无需任何能力：存储里只有该应用自己的数据，保存位置由宿主应用决定。
+
+### `host`
+
+`host` 列出 `nsh/host` 的 `host.call(name, args)` 可以调用的、嵌入 NSH 的宿主应用的函数：确切的函数名
+（`"getUserInfo"`），或以 `*` 结尾的前缀（`"bridge.*"` 匹配 `bridge.call` 和 `bridge.share`）。`"host": true`
+允许所有函数。没有列出的函数会被拒绝，没有 `"capabilities"` 的应用也一样：宿主的函数从不默认授予；构建导入了
+`nsh/host` 却没有声明 `host` 的应用时会警告每次调用都会被拒绝。函数名由 `A`–`Z`、`a`–`z`、`0`–`9`、`_`、`.`、`:`、`-`
+组成，长度 1 到 128，不含 `..`；其他名字的调用在检查授权之前就被拒绝。前缀以分隔符结尾（`"bridge.*"`）：`"bridge*"`
+也会匹配 `bridgeAdmin`。宿主发来的事件（`host.on(event, listener)`）在宿主发送时
+送到应用的监听函数。
+
+```ts
+import { host } from "nsh/host";
+
+if (host.available()) {
+  const user = await host.call("getUserInfo");
+  const sub = host.on("loginChanged", (payload) => console.log(payload));
+  sub.remove();
+}
+```
+
+在嵌入了宿主的平台上 `host.available()` 为 true；在其他平台上 `host.call` 会以
+`nsh/host: this platform has no host` reject。
 
 ### 被拒绝时的表现
 
@@ -171,7 +207,9 @@ web view 内的顶层导航也会在加载前由平台的导航代理检查。�
 | `fetch` | Promise 被 reject；请求根本不会发到网络。 |
 | 远程图片 | 图片加载失败，触发 `onError`。 |
 | 视频源、web view 源、状态栏修改 | 不显示也不修改任何东西。 |
-| 剪贴板 | `setString` 不做任何事；`getString` 返回 `""`，`hasString` 返回 `false`。 |
+| 剪贴板 | `writeText` 和 `writeImage` 不做任何事；`readText` 返回 `""`，`readImage` 返回 `null`，`readFiles` 返回 `[]`，`hasText` 和 `hasImage` 返回 `false`。 |
+| 选择器 | `pickImages` 不显示任何内容，返回 `[]`。 |
+| 宿主调用 | Promise 被 reject，错误信息提示把该函数加入 `capabilities.host`；调用不会到达宿主。 |
 
 每种拒绝只记录一次日志，并说明需要添加哪个键：
 
@@ -193,6 +231,14 @@ fetch GET https://evil.example.org/x is not granted: add `evil.example.org` to c
 ## 授权：宿主应用允许什么
 
 嵌入 NSH 的宿主应用可以用同样的 JSON 格式授予 **至多** 哪些能力：
+
+```rust
+// iOS，用 Rust（nsh_platform_ios::AppView）
+let grant = nsh_engine::Capabilities::from_json(&serde_json::json!({
+    "network": { "hosts": ["api.example.com"] }
+}))?;
+app.set_granted_capabilities(Some(grant));
+```
 
 ```swift
 // iOS
@@ -227,4 +273,4 @@ nsh.setGrantedCapabilities("{ \"network\": { \"hosts\": [\"api.example.com\"] } 
 
 - [签名包](./signed-packages.md)
 - [网络](./networking.md)
-- [嵌入 iOS 应用](./embedding-ios.md)、[嵌入 Android 应用](./embedding-android.md)
+- [嵌入 iOS 应用](./ios.md)、[嵌入 Android 应用](./android.md)

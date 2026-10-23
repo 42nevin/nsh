@@ -22,7 +22,8 @@ on:
       - "crates/nsh-windows-app/**"
       - "crates/nsh-windows-host/**"
       - "crates/xtask/**"
-      - "examples/gallery/fonts/**"
+      - "examples/counter/**"
+      - "examples/gallery/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
@@ -44,12 +45,15 @@ on:
       - "crates/nsh-windows-app/**"
       - "crates/nsh-windows-host/**"
       - "crates/xtask/**"
-      - "examples/gallery/fonts/**"
+      - "examples/counter/**"
+      - "examples/gallery/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
       - "rust-toolchain.toml"
       - ".github/workflows/windows.yml"
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 permissions:
@@ -100,3 +104,21 @@ jobs:
       # Tests need no display: they open no window.
       - name: Test
         run: cargo test -p nsh-platform-windows -p nsh-windows-host -p nsh-windows-app -p nsh-cli -p nsh-dev -p xtask
+
+      # The examples' tests in Win32 windows, with the platform's input
+      # (`nsh test --target windows`): those a real platform runs (real
+      # time).
+      - name: Run the examples' tests in Win32 windows
+        shell: bash
+        run: |
+          cargo build -p nsh-cli
+          run() { ./target/debug/nsh test "$@" --target windows; }
+          run examples/counter
+          for file in context-menu device dock form gestures hover links navigation network photos resizable shortcuts storage timers; do
+            run "examples/gallery/tests/$file.test.tsx"
+          done
+          run examples/gallery/tests/environment.test.tsx --filter appearance
+          # Apps with Rust crates, in hosts built with them: a TSX app and a
+          # Rust app (its root).
+          run examples/rust-exports
+          run examples/gallery-rs/App.test.tsx

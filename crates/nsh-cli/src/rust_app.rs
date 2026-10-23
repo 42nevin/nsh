@@ -253,6 +253,10 @@ impl Nsh {
     }
 }
 
+/// `nsh-base`'s features the hosts and runners name: they show TextView's
+/// code blocks highlighted, whatever `nsh-base`'s defaults are.
+const HIGHLIGHT: &str = ", features = [\"highlight\"]";
+
 /// The checkout of nsh the crate directory `path` is in: the nearest
 /// directory above it with `crates/nsh-core` (GPUI's crates are in
 /// `crates/gpui`, a level deeper).
@@ -348,7 +352,7 @@ pub(crate) fn of(entry: &Path) -> anyhow::Result<Option<RustApp>> {
 /// (`#[native_module("…")]`, [`specifier_of`]) would make two sets one
 /// import cannot tell apart.
 fn crates(dir: &Path, rust: &serde_json::Value) -> anyhow::Result<Vec<AppCrate>> {
-    const WHAT: &str = "nsh.json: \"rust\" is the path of the app's crate (\"native\") or a list of them (\"native/charts\", \"native/storage\")";
+    const WHAT: &str = "nsh.json: \"rust\" is the path of the app's crate (\".\", \"native\") or a list of them (\"native/charts\", \"native/storage\")";
     let paths: Vec<&str> = match rust {
         serde_json::Value::String(path) => vec![path],
         serde_json::Value::Array(paths) if !paths.is_empty() => paths
@@ -967,15 +971,26 @@ opt-level = 3
                 self.android_lib(false),
                 src("nsh-core"),
                 src("nsh-platform-android"),
-                src("nsh-base"),
+                self.nsh.dep("nsh-base", HIGHLIGHT),
             ),
         )?;
+        write(&ws.join("android/build.rs"), ANDROID_BUILD_RS)?;
+        let android = "#[cfg(target_os = \"android\")]\n";
+        // A Rust app's root, which the development library runs when a
+        // test session says so (`nsh test --target android`).
+        let root = match &self.root {
+            Some(root) => format!(
+                "{android}nsh::root!(app_root());\n{}",
+                self.root_fn(android, root)
+            ),
+            None => String::new(),
+        };
         write(
             &ws.join("android/lib.rs"),
             &format!(
                 "//! The app's `libnsh.so`: the Android runtime with `nsh/base` and the\n//! app's Rust components.\n\n\
-                 #[cfg(target_os = \"android\")]\nnsh::ui_sets!({sets});\n{}",
-                self.app_sets("#[cfg(target_os = \"android\")]\n")
+                 {android}nsh::ui_sets!({sets});\n{root}{}",
+                self.app_sets(android)
             ),
         )?;
         Ok(())
@@ -1074,7 +1089,7 @@ opt-level = 3
                 self.bin("rust-android"),
                 self.android_lib(true),
                 self.nsh.dep("nsh-core", ""),
-                self.nsh.dep("nsh-base", ""),
+                self.nsh.dep("nsh-base", HIGHLIGHT),
                 self.nsh
                     .dep("nsh-platform-android", ", default-features = false"),
             ),
@@ -1092,6 +1107,7 @@ opt-level = 3
                 self.root_fn(android, root),
             ),
         )?;
+        write(&ws.join("rust-android/build.rs"), ANDROID_BUILD_RS)?;
         let wasm = "#[cfg(target_arch = \"wasm32\")]\n";
         write(
             &ws.join("rust-web/Cargo.toml"),
@@ -1104,7 +1120,7 @@ opt-level = 3
                 self.bin("rust-web"),
                 self.rust_web_lib(),
                 self.nsh.dep("nsh-core", ""),
-                self.nsh.dep("nsh-base", ""),
+                self.nsh.dep("nsh-base", HIGHLIGHT),
                 self.nsh
                     .dep("nsh-platform-web", ", default-features = false"),
             ),
@@ -1132,33 +1148,24 @@ opt-level = 3
     fn write_rust_runner(&self, ws: &Path, dir: &str, root: &RootConfig) -> anyhow::Result<()> {
         let app = self.dependencies();
         let sets = self.sets();
-        let (os, lib, platform, features, exit) = match dir {
+        let (os, lib, platform, exit) = match dir {
             "rust-linux" => (
                 "target_os = \"linux\"",
                 "nsh-linux-app",
                 "nsh-platform-linux",
-                ", features = [\"webview\"]",
                 true,
             ),
             "rust-macos" => (
                 "target_os = \"macos\"",
                 "nsh-macos-app",
                 "nsh-platform-macos",
-                "",
                 true,
             ),
-            "rust-windows" => (
-                "windows",
-                "nsh-windows-app",
-                "nsh-platform-windows",
-                "",
-                true,
-            ),
+            "rust-windows" => ("windows", "nsh-windows-app", "nsh-platform-windows", true),
             _ => (
                 "target_os = \"ios\"",
                 "nsh-ios-app",
                 "nsh-platform-ios",
-                "",
                 false,
             ),
         };
@@ -1172,10 +1179,9 @@ opt-level = 3
                  [target.'cfg({os})'.dependencies]\n{platform} = {}\n",
                 self.bin(dir),
                 self.bin(dir),
-                self.nsh
-                    .dep(lib, &format!(", default-features = false{features}")),
+                self.nsh.dep(lib, ", default-features = false"),
                 self.nsh.dep("nsh-core", ""),
-                self.nsh.dep("nsh-base", ""),
+                self.nsh.dep("nsh-base", HIGHLIGHT),
                 self.nsh.dep(platform, ", default-features = false"),
             ),
         )?;
@@ -1237,13 +1243,15 @@ opt-level = 3
                 "[package]\nname = {:?}\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
                  [lib]\nname = {:?}\npath = \"lib.rs\"\ncrate-type = [\"cdylib\"]\n\n\
                  [features]\n# The runtime of published apps: bytecode only (nsh-platform-web).\n\
-                 bytecode-only = [\"nsh-platform-web/bytecode-only\"]\n\n\
+                 bytecode-only = [\"nsh-platform-web/bytecode-only\"]\n\
+                 # The development host's: what `nsh test --target web` asks about.\n\
+                 dev = [\"nsh-platform-web/dev\"]\n\n\
                  [dependencies]\nnsh-core = {}\nnsh-base = {}\n{app}\n\n\
                  [target.'cfg(target_arch = \"wasm32\")'.dependencies]\nnsh-platform-web = {}\n",
                 self.bin("web"),
                 self.web_lib(),
                 src("nsh-core"),
-                src("nsh-base"),
+                self.nsh.dep("nsh-base", HIGHLIGHT),
                 src("nsh-platform-web"),
             ),
         )?;
@@ -1251,11 +1259,23 @@ opt-level = 3
         // (QuickJS recursion, deep component trees); the app's build does
         // not run under it, so this package passes the link argument.
         write(&ws.join("web/build.rs"), WEB_BUILD_RS)?;
+        // A Rust app's root too, which the development host's page runs
+        // when a test session says so (`nsh test --target web`).
+        let (register, root) = match &self.root {
+            Some(root) => (
+                format!("nsh_platform_web::rust_app!({sets}, app_root());"),
+                self.root_fn(wasm, root),
+            ),
+            None => (
+                format!("nsh_platform_web::ui_sets!({sets});"),
+                String::new(),
+            ),
+        };
         write(
             &ws.join("web/lib.rs"),
             &format!(
                 "//! The app's web runtime: `nsh.wasm` with `nsh/base` and the app's\n//! Rust components.\n\n\
-                 {wasm}nsh_platform_web::ui_sets!({sets});\n{}\n\
+                 {wasm}{register}\n{}{root}\n\
                  // Off WebAssembly it is empty, as nsh-platform-web is.\n\
                  #[cfg(not(target_arch = \"wasm32\"))]\nuse nsh_core as _;\n\
                  #[cfg(not(target_arch = \"wasm32\"))]\nuse nsh_base as _;\n",
@@ -1279,14 +1299,42 @@ opt-level = 3
         kind: crate::runtime::WebKind,
         build: bool,
     ) -> anyhow::Result<Option<crate::runtime::WebRuntime>> {
+        self.web_runtime(kind, build, self.root.is_some())
+    }
+
+    /// The web runtime `nsh test --target web` runs the app in: the
+    /// development host's, a Rust app's too (with its root, which the page
+    /// runs when the test session says so).
+    pub(crate) fn test_web(&self) -> anyhow::Result<crate::runtime::WebRuntime> {
+        self.web_runtime(crate::runtime::WebKind::Dev, true, false)?
+            .context("no web runtime")
+    }
+
+    /// [`Self::web`]; `rust`: a Rust app's runtime, with no QuickJS.
+    fn web_runtime(
+        &self,
+        kind: crate::runtime::WebKind,
+        build: bool,
+        rust: bool,
+    ) -> anyhow::Result<Option<crate::runtime::WebRuntime>> {
         const WASM: &str = "wasm32-unknown-unknown";
         let out = self.workspace.join("web-runtime");
-        let runtime = crate::runtime::WebRuntime {
-            wasm: if self.root.is_some() {
-                out.join("nsh-rust.wasm")
-            } else {
-                out.join(kind.file())
-            },
+        let wasm = if rust {
+            out.join("nsh-rust.wasm")
+        } else {
+            out.join(kind.file())
+        };
+        // The module's wasm-bindgen glue, when the app's crates call JS
+        // through wasm-bindgen (`crate::bindgen`).
+        let stem = wasm
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("nsh")
+            .to_owned();
+        let glue = out.join(format!("{stem}-bindgen.js"));
+        let mut runtime = crate::runtime::WebRuntime {
+            glue: glue.exists().then_some(glue),
+            wasm,
             // A checkout's own, so edits to it apply; from crates.io the
             // published crate's, copied next to the module when it is built.
             js: match &self.nsh {
@@ -1308,11 +1356,10 @@ opt-level = 3
         }
         // A Rust app's runtime is one: no QuickJS, so neither the parser
         // nor hot updates.
-        let rust = self.root.is_some();
         let features: &[&str] = match kind {
             _ if rust => &[],
             crate::runtime::WebKind::Release => &["--features", "bytecode-only"],
-            crate::runtime::WebKind::Dev => &[],
+            crate::runtime::WebKind::Dev => &["--features", "dev"],
         };
         let (package, artifact) = if rust {
             (
@@ -1334,9 +1381,9 @@ opt-level = 3
         };
         let built = self.build_with(cmd, &build)?;
         fs::create_dir_all(&out)?;
-        // Both kinds build to the same file: each keeps a copy of its own.
-        fs::copy(&built, &runtime.wasm)
-            .with_context(|| format!("copy {} to {}", built.display(), runtime.wasm.display()))?;
+        // Both kinds build to the same file: each keeps a copy of its own,
+        // through wasm-bindgen when the app's crates call JS through it.
+        runtime.glue = crate::bindgen::install(&built, &out, &stem)?;
         if self.nsh == Nsh::Registry {
             let js = self.registry_crate("nsh-platform-web")?.join("web/nsh.js");
             fs::copy(&js, &runtime.js)
@@ -1467,7 +1514,7 @@ opt-level = 3
                 self.bin(dir),
                 src(lib),
                 src("nsh-core"),
-                src("nsh-base"),
+                self.nsh.dep("nsh-base", HIGHLIGHT),
                 src(platform),
             ),
         )?;
@@ -1479,12 +1526,22 @@ opt-level = 3
         } else {
             ""
         };
+        let cfg = format!("#[cfg({os})]\n");
+        // A Rust app's development host runs its root when a test session
+        // says so (`nsh test --target`): its runners have no dev server.
+        let (set_root, root_fn) = match &self.root {
+            Some(root) if dir.ends_with("-host") => (
+                format!("\n    #[cfg({os})]\n    {platform}::set_root(app_root);"),
+                self.root_fn(&cfg, root),
+            ),
+            _ => (String::new(), String::new()),
+        };
         write(
             &ws.join(dir).join("main.rs"),
             &format!(
                 "//! The {name} {what} with `nsh/base` and the app's Rust components.\n{subsystem}\n\
-                 fn main(){exit} {{\n    #[cfg({os})]\n    {platform}::set_ui_sets({sets});\n    {lib}::main()\n}}\n{}",
-                self.app_sets(&format!("#[cfg({os})]\n"))
+                 fn main(){exit} {{\n    #[cfg({os})]\n    {platform}::set_ui_sets({sets});{set_root}\n    {lib}::main()\n}}\n{}{root_fn}",
+                self.app_sets(&cfg)
             ),
         )
     }
@@ -1585,6 +1642,19 @@ opt-level = 3
         if self.root.is_some() {
             return self.rust_runner(platform, runner);
         }
+        self.host(platform, runner)
+    }
+
+    /// The development host `nsh test --target` runs the app in: a Rust
+    /// app's too, built with its root (its runners have no dev server
+    /// client), which it runs when the test session says so.
+    pub(crate) fn test_host(&self, platform: Platform) -> anyhow::Result<PathBuf> {
+        self.host(platform, false)
+    }
+
+    /// The development host (`runner` false) or release runner for
+    /// `platform` with the app's crates.
+    fn host(&self, platform: Platform, runner: bool) -> anyhow::Result<PathBuf> {
         let name = match (platform, runner) {
             (Platform::Linux, false) => "linux-host",
             (Platform::Linux, true) => "linux-app",
@@ -1682,8 +1752,20 @@ opt-level = 3
     /// The Android runtime of the app: the prebuilt runtime's `classes.dex`
     /// with the app's `libnsh.so` for each of its ABIs.
     pub(crate) fn android(&self, prebuilt: &Path, dev: bool) -> anyhow::Result<PathBuf> {
+        self.android_runtime(prebuilt, dev, self.root.is_some())
+    }
+
+    /// The Android runtime `nsh test --target android` runs the app in: the
+    /// development library, a Rust app's too (with its root, which it runs
+    /// when the test session says so).
+    pub(crate) fn test_android(&self, prebuilt: &Path) -> anyhow::Result<PathBuf> {
+        self.android_runtime(prebuilt, true, false)
+    }
+
+    /// [`Self::android`]; `rust`: a Rust app's runner library, with no
+    /// development support.
+    fn android_runtime(&self, prebuilt: &Path, dev: bool, rust: bool) -> anyhow::Result<PathBuf> {
         let sdk = crate::android::Sdk::find()?;
-        let rust = self.root.is_some();
         let out = self.workspace.join(match (rust, dev) {
             (true, true) => "android-rust-dev",
             (true, false) => "android-rust-release",
@@ -1748,10 +1830,26 @@ struct Build<'a> {
     what: &'a str,
 }
 
-/// The `build.rs` of the web runtimes: the 8 MiB stack nsh's own has.
-const WEB_BUILD_RS: &str = "//! The web runtime's stack: 8 MiB, as nsh's own (`.cargo/config.toml`).\n\n\
+/// Link arguments belong to the final cdylib, so apps' Android runtimes
+/// need the same 16 KB alignment as `nsh-platform-android`'s `build.rs`.
+const ANDROID_BUILD_RS: &str = r#"//! Android's shared runtime supports both 4 KB and 16 KB page sizes.
+
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        println!("cargo:rustc-link-arg-cdylib=-Wl,-z,max-page-size=16384");
+        println!("cargo:rustc-link-arg-cdylib=-Wl,-z,common-page-size=16384");
+    }
+}
+"#;
+
+/// The `build.rs` of the web runtimes: the 8 MiB stack nsh's own has, and
+/// QuickJS' local time from the page (`nsh-platform-web`'s `build.rs`).
+const WEB_BUILD_RS: &str = "//! The web runtime's stack: 8 MiB, as nsh's own (`.cargo/config.toml`);\n\
+    //! QuickJS' local time from the page, as nsh's own (`nsh-platform-web`'s `build.rs`).\n\n\
     fn main() {\n    if std::env::var(\"CARGO_CFG_TARGET_ARCH\").as_deref() == Ok(\"wasm32\") {\n        \
-    println!(\"cargo:rustc-link-arg=-zstack-size=8388608\");\n    }\n}\n";
+    println!(\"cargo:rustc-link-arg=-zstack-size=8388608\");\n        \
+    println!(\"cargo:rustc-link-arg=--wrap=localtime_r\");\n    }\n}\n";
 
 impl RustApp {
     /// The `[dependencies]` lines of its crates, for a generated crate.
@@ -2402,7 +2500,8 @@ mod tests {
                 "{main}"
             );
         }
-        assert!(read("rust-linux/Cargo.toml").contains("features = [\"webview\"]"));
+        // Optional platform features come from the app, not its runner.
+        assert!(!read("rust-linux/Cargo.toml").contains("webview"));
         let android = read("rust-android/lib.rs");
         assert!(android.contains("nsh::main!(app_root());"), "{android}");
         assert!(read("rust-android/Cargo.toml").contains("default-features = false"));
@@ -2421,6 +2520,30 @@ mod tests {
         // GPUI has no runner: a Rust app is embedded in GPUI apps instead.
         app.gpui_workspace().unwrap();
         assert!(!read("gpui/Cargo.toml").contains("rust-gpui"));
+        // Its development hosts run the root when a test session says so
+        // (`nsh test --target`); its release runners are the `rust-*` ones.
+        for (dir, platform) in [
+            ("linux-host", "nsh_platform_linux"),
+            ("macos-host", "nsh_platform_macos"),
+            ("windows-host", "nsh_platform_windows"),
+            ("ios-host", "nsh_platform_ios"),
+            ("gpui/gpui-host", "nsh_platform_gpui"),
+        ] {
+            let main = read(&format!("{dir}/main.rs"));
+            assert!(
+                main.contains(&format!("{platform}::set_root(app_root);")),
+                "{main}"
+            );
+            assert!(
+                main.contains("nsh_core::ui::Root::of::<app_app_native::App>()"),
+                "{main}"
+            );
+        }
+        assert!(!read("macos-app/main.rs").contains("set_root"));
+        let android = read("android/lib.rs");
+        assert!(android.contains("nsh::root!(app_root());"), "{android}");
+        let web = read("web/lib.rs");
+        assert!(web.contains("nsh_platform_web::rust_app!(vec![nsh_base::registry(), set_app_app_native()], app_root());"), "{web}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2692,7 +2815,10 @@ mod tests {
             web.contains("bytecode-only = [\"nsh-platform-web/bytecode-only\"]"),
             "{web}"
         );
-        assert!(read("web/build.rs").contains("-zstack-size=8388608"));
+        let build = read("web/build.rs");
+        assert!(build.contains("-zstack-size=8388608"), "{build}");
+        // QuickJS' local time comes from the page (`__wrap_localtime_r`).
+        assert!(build.contains("--wrap=localtime_r"), "{build}");
         assert!(read("web/lib.rs").contains("nsh_platform_web::ui_sets!("));
         assert!(!app.workspace.join("gpui").exists());
         assert_eq!(app.gpui_workspace().unwrap(), app.workspace.join("gpui"));

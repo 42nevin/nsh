@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use crate::{
     geometry::{Point, Points},
-    ui::{JsObject, PropEnum},
+    keymap::{self, Keystroke, Modifiers, When},
+    ui::{JsHost, JsIn, JsKind, JsOwned, JsValue, PropEnum, PropError, TsTypes},
 };
 
 /// How the window's title bar looks (`Window.setTitleBar`).
@@ -25,9 +26,25 @@ pub enum TitleBarStyle {
     Hidden,
 }
 
+/// When the window's menu bar shows (`Window.setMenuBar`), where the app's
+/// window draws one (the GPUI backend on Windows and Linux).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
+pub enum MenuBarMode {
+    /// Always, above the app.
+    #[default]
+    Shown,
+    /// Hidden until Alt is pressed and released alone, which shows it until
+    /// Alt alone hides it again. F10 and Alt with a menu's initial open a
+    /// menu, and the bar shows while it is open.
+    #[prop(rename = "autoHide")]
+    AutoHide,
+}
+
 /// A window's frame (`Window.setFrame`): the part of it to move, in
-/// points, in screen coordinates; a field left out keeps its value.
-#[derive(Debug, Clone, Copy, Default, PartialEq, JsObject)]
+/// points, in screen coordinates; a field left out keeps its value. TS
+/// gives `origin` (`x`, `y`) and `size` (`width`, `height`) as
+/// `Partial<Point>` and `Partial<Size>`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WindowFrame {
     /// Its left edge (macOS's screen coordinates go up: `x` and `y` are the
     /// window's bottom left corner there).
@@ -45,6 +62,88 @@ pub struct WindowFrame {
     /// window's title area stays put). Elsewhere, where `y` already is the
     /// top edge, this is the default.
     pub anchor_top: Option<bool>,
+}
+
+/// TS: `{ origin?: Partial<Point>; size?: Partial<Size>; animated?; anchorTop? }`.
+impl JsValue for WindowFrame {
+    fn ts_type(types: &mut TsTypes) -> String {
+        types.declare("WindowFrame", |_| {
+            "/** A window's frame (`Window.setFrame`): the part of it to move, in points, in screen coordinates; a field left out keeps its value. */\n\
+             export interface WindowFrame {\n  \
+             /** Its left edge and its bottom edge on macOS (whose screen coordinates go up: the window's bottom left corner), its top edge elsewhere. */\n  \
+             origin?: Partial<Point>;\n  \
+             /** Its outer size on macOS / Windows, GTK's default size on Linux. */\n  \
+             size?: Partial<Size>;\n  \
+             /** Animates the change on macOS (false by default). */\n  \
+             animated?: boolean;\n  \
+             /** The top edge keeps its place when the height changes without a `y`: the window grows and shrinks at its bottom edge (a content-sized window's title area stays put). Elsewhere, where `y` already is the top edge, this is the default. */\n  \
+             anchorTop?: boolean;\n}"
+                .into()
+        })
+    }
+
+    fn from_js(value: JsIn<'_>) -> Result<Self, PropError> {
+        if value.kind() != JsKind::Object {
+            return Err(value.expected("an object"));
+        }
+        // Field `key` of `object` as `T`, `None` when it is left out.
+        fn get<T: JsValue>(object: JsIn<'_>, key: &str) -> Result<Option<T>, PropError> {
+            let v = object.field(key)?;
+            let v = v.get();
+            if v.is_nullish() {
+                return Ok(None);
+            }
+            T::from_js(v)
+                .map(Some)
+                .map_err(|e| PropError(format!("`{key}`: {e}")))
+        }
+        let mut frame = WindowFrame {
+            animated: get(value, "animated")?,
+            anchor_top: get(value, "anchorTop")?,
+            ..WindowFrame::default()
+        };
+        let origin = value.field("origin")?;
+        if !origin.get().is_nullish() {
+            frame.x = get(origin.get(), "x")?;
+            frame.y = get(origin.get(), "y")?;
+        }
+        let size = value.field("size")?;
+        if !size.get().is_nullish() {
+            frame.width = get(size.get(), "width")?;
+            frame.height = get(size.get(), "height")?;
+        }
+        Ok(frame)
+    }
+
+    fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+        let owned = JsOwned::new(host, host.new_object()?);
+        let object = owned.get().raw();
+        let part = |fields: [(&str, Option<Points>); 2]| -> Result<Option<JsOwned<'a>>, PropError> {
+            if fields.iter().all(|(_, v)| v.is_none()) {
+                return Ok(None);
+            }
+            let part = JsOwned::new(host, host.new_object()?);
+            for (key, value) in fields {
+                if let Some(value) = value {
+                    host.set_field(part.get().raw(), key, value.to_js(host)?.into_raw())?;
+                }
+            }
+            Ok(Some(part))
+        };
+        if let Some(origin) = part([("x", self.x), ("y", self.y)])? {
+            host.set_field(object, "origin", origin.into_raw())?;
+        }
+        if let Some(size) = part([("width", self.width), ("height", self.height)])? {
+            host.set_field(object, "size", size.into_raw())?;
+        }
+        if let Some(v) = self.animated {
+            host.set_field(object, "animated", v.to_js(host)?.into_raw())?;
+        }
+        if let Some(v) = self.anchor_top {
+            host.set_field(object, "anchorTop", v.to_js(host)?.into_raw())?;
+        }
+        Ok(owned)
+    }
 }
 
 /// How high a window floats (`Window.setLevel`).
@@ -202,6 +301,37 @@ impl Shortcut {
         }
         out.push_str(&self.key.label());
         out
+    }
+
+    /// Whether a focused text field uses this shortcut itself, as it uses
+    /// the same keystroke of `nsh/keymap` ([`Keystroke::edits_text`]).
+    pub fn edits_text(&self) -> bool {
+        let key = match self.key {
+            Key::Char(c) => keymap::Key::Char(c),
+            Key::Space => keymap::Key::Char(' '),
+            Key::Enter => keymap::Key::Enter,
+            Key::Escape => keymap::Key::Escape,
+            Key::Tab => keymap::Key::Tab,
+            Key::Backspace => keymap::Key::Backspace,
+            Key::Delete => keymap::Key::Delete,
+            Key::Insert => keymap::Key::Insert,
+            Key::Up => keymap::Key::Up,
+            Key::Down => keymap::Key::Down,
+            Key::Left => keymap::Key::Left,
+            Key::Right => keymap::Key::Right,
+            Key::Home => keymap::Key::Home,
+            Key::End => keymap::Key::End,
+            Key::PageUp => keymap::Key::PageUp,
+            Key::PageDown => keymap::Key::PageDown,
+            Key::F(n) => keymap::Key::F(n),
+        };
+        let modifiers = Modifiers {
+            ctrl: self.ctrl,
+            alt: self.alt,
+            shift: self.shift,
+            cmd: self.meta,
+        };
+        Keystroke { modifiers, key }.edits_text()
     }
 }
 
@@ -523,6 +653,22 @@ pub struct MenuAction {
     pub checked: Option<bool>,
     /// What the platform does with it (the app is not told).
     pub role: Option<MenuRole>,
+    /// When its shortcut chooses it while a text field has the keyboard
+    /// focus (`when`); [`When::Always`] unless the app says otherwise.
+    pub when: When,
+}
+
+impl MenuAction {
+    /// Whether its shortcut chooses it while a text field has the keyboard
+    /// focus: with [`When::Auto`], unless the field uses the keystroke
+    /// itself ([`Shortcut::edits_text`]), as `nsh/keymap`'s bindings.
+    pub fn fires_while_editing(&self) -> bool {
+        match self.when {
+            When::Always => true,
+            When::NotEditing => false,
+            When::Auto => !self.shortcut.is_some_and(|s| s.edits_text()),
+        }
+    }
 }
 
 /// An item of a menu.
@@ -619,6 +765,8 @@ pub enum DesktopCommand {
     /// Windows and Linux; not shown there while the title bar is hidden,
     /// its shortcuts still work); `None` restores the platform's default.
     SetMenu(Option<Arc<[MenuItem]>>),
+    /// When the menu bar the window draws for the application menu shows.
+    SetMenuBar(MenuBarMode),
     /// Shows a context menu at `at` (root coordinates, points) or at the
     /// pointer.
     PopupMenu {
@@ -747,6 +895,7 @@ mod tests {
                 enabled: true,
                 checked: None,
                 role,
+                when: When::Always,
             })
         };
         let menu = vec![MenuItem::Submenu {
@@ -761,5 +910,29 @@ mod tests {
         assert_eq!(MenuItem::find_shortcut(&menu, &new).map(|a| a.id), Some(1));
         // Text fields keep their own shortcuts.
         assert!(MenuItem::find_shortcut(&menu, &copy).is_none());
+    }
+
+    #[test]
+    fn items_leave_a_focused_field_the_keys_it_uses_when_asked() {
+        let item = |shortcut: &str, when| MenuAction {
+            id: 1,
+            label: String::new(),
+            shortcut: Some(Shortcut::parse(shortcut, false).unwrap()),
+            enabled: true,
+            checked: None,
+            role: None,
+            when,
+        };
+        let fires = |shortcut, when| item(shortcut, when).fires_while_editing();
+        assert!(fires("ctrl+z", When::Always));
+        assert!(!fires("ctrl+z", When::Auto));
+        assert!(!fires("ctrl+y", When::Auto));
+        assert!(fires("ctrl+y", When::Always));
+        assert!(!fires("delete", When::Auto));
+        assert!(!fires("ctrl+enter", When::Auto));
+        assert!(!fires("space", When::Auto));
+        assert!(fires("ctrl+shift+n", When::Auto));
+        assert!(fires("f5", When::Auto));
+        assert!(!fires("ctrl+shift+n", When::NotEditing));
     }
 }

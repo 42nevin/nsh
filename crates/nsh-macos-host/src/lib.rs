@@ -5,9 +5,6 @@
 //! - `nsh-macos-host --bundle <path> [--trace]` runs a built bundle (`.nshc`
 //!   is QuickJS bytecode, anything else JS source).
 //!
-//! - `--script "wait 800; shot a.png; tap 100 200; wait 300; shot b.png;
-//!   quit"` runs steps once the window shows: window screenshots and
-//!   simulated input, to check the backend without touching the screen.
 //! - `--fps` shows the performance monitor (frame rate, frame and commit
 //!   costs, CPU, GPU, memory) at the top right.
 //! - `--window-size 1200x800` sets the window size (1200×800 by default; 390x844
@@ -59,6 +56,9 @@ pub fn main() -> std::process::ExitCode {
                 options.asset_base = path
                     .parent()
                     .map(|dir| AssetBase::Directory(dir.join("assets")));
+                // `nsh build --split` writes the chunks `import()` loads
+                // next to the bundle.
+                options.chunks = path.parent().map(std::path::Path::to_path_buf);
                 source = Some(AppSource::Bundle(bundle));
             }
             "--trace" => options.trace = true,
@@ -74,12 +74,17 @@ pub fn main() -> std::process::ExitCode {
             }
             // The performance monitor over the app.
             "--fps" => options.fps = true,
-            // Steps run once the window shows (`nsh_platform_macos`'s
-            // `script` module): window screenshots and simulated input.
-            "--script" => options.script = args.next(),
             // Where apps keep their data (`nsh test --target` gives each app
             // a fresh one); the system's data directory otherwise.
-            "--data-dir" => options.data_dir = args.next().map(std::path::PathBuf::from),
+            "--data-dir" => {
+                options.data_dir = args.next().map(std::path::PathBuf::from);
+                // Its caches too (downloaded images): a test's app starts with none.
+                if let Some(dir) = &options.data_dir {
+                    options.cache = nsh_engine::CacheOptions::at(nsh_engine::CacheLocation::Dir(
+                        dir.join("cache"),
+                    ));
+                }
+            }
             "--window-size" => {
                 if let Some((w, h)) = args.next().as_deref().and_then(|s| s.split_once('x')) {
                     options.size = (w.parse().unwrap_or(1200), h.parse().unwrap_or(800));

@@ -335,12 +335,19 @@ impl<'js> HostInput for Js<'js> {
     fn truthy(&self) -> bool {
         truthy(&self.0)
     }
+
+    fn node(&self) -> Option<NodeId> {
+        crate::dom::node_id(self.0.ctx().as_raw().as_ptr(), self.0.as_raw())
+    }
 }
 
 /// The op setting prop `name` to `value`: a style, a registered native
 /// component's prop, one of the core's host props or an event listener.
+/// `tag` is the element's, when known: it picks the prop of a name several
+/// elements share (`src`, `placeholder`).
 pub(crate) fn decode_prop<'js>(
     id: NodeId,
+    tag: Option<nsh_core::Tag>,
     name: &str,
     value: Value<'js>,
     warnings: &mut Warnings,
@@ -363,7 +370,7 @@ pub(crate) fn decode_prop<'js>(
         let (style, patch) = decode_style(entries, warnings)?;
         return Ok(Some(Op::SetStyle { id, style, patch }));
     }
-    let mut cx = HostCx::default();
+    let mut cx = tag.map_or_else(HostCx::default, HostCx::for_element);
     let input = Js(value);
     let decoded = <Prop as HostProps>::decode(name, &input, &mut cx);
     for message in cx.warnings {
@@ -797,6 +804,18 @@ fn decode_driver(cx: &Ctx<'_>, config: &Value<'_>) -> rquickjs::Result<Driver> {
     })
 }
 
+/// Where the channels of motion `value` (a preset's name or a spec) start,
+/// by `MotionChannel::ALL` (`None` for those it does not move).
+pub(crate) fn motion_start(value: Value<'_>) -> [Option<f32>; 9] {
+    let mut starts = [None; 9];
+    if let Some(spec) = nsh_core::js::animation::motion_spec(&Js(value)) {
+        for (channel, start) in spec.start_values() {
+            starts[channel.index()] = Some(start);
+        }
+    }
+    starts
+}
+
 /// A composite animation: `{ type, ... }` with `node` on the runs.
 fn decode_composite(
     r: &Reader<'_, '_>,
@@ -833,6 +852,24 @@ fn decode_composite(
                 .map(|n| n as u32),
             reset: o.get::<_, Option<bool>>("reset")?.unwrap_or(true),
         },
+        // `Animated.keyframes`: the tree is made natively from the config.
+        "keyframes" => nsh_core::js::animation::keyframes_composite(
+            &Js(spec.clone()),
+            o.get::<_, f64>("node")? as nsh_core::animation::NodeId,
+        ),
+        // A motion's `play`: its channels' nodes (by `MotionChannel::ALL`) and
+        // the motion; `reduced` lands it at its end without moving.
+        "motion" => {
+            let nodes: Vec<f64> = o.get("nodes")?;
+            let nodes: [nsh_core::animation::NodeId; 9] =
+                std::array::from_fn(|i| nodes.get(i).copied().unwrap_or(0.0) as _);
+            let motion = nsh_core::js::animation::motion_spec(&Js(o.get("motion")?))
+                .ok_or_else(|| Exception::throw_type(r.cx, "motion: unknown motion"))?;
+            motion.composite(
+                &nodes,
+                o.get::<_, Option<bool>>("reduced")?.unwrap_or(false),
+            )
+        }
         _ => Composite::Run {
             node: o.get::<_, f64>("node")? as nsh_core::animation::NodeId,
             driver: decode_driver(r.cx, spec)?,

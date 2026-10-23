@@ -10,19 +10,24 @@ use std::sync::Arc;
 use super::{
     Accessible, AnyElement, Interactive, IntoReactive,
     element::{ElNode, Element, IntoElement, IntoListener, Listener, ParentElement},
-    events::{self, NativeEvent, Selection, VideoInfo, VideoProgress, WebNavigation},
+    events::{
+        self, CaretEvent, Composition, NativeEvent, OverlayPosition, Selection, VideoInfo,
+        VideoProgress, WebNavigation,
+    },
 };
 use crate::{
-    AutoCapitalize, AutoFill, Color, EventKind, HeaderSlot, Hsla, JsonValue, KeyboardAppearance,
-    KeyboardType, ModalAnimation, ModalPresentation, ModalProp, NativeProp, Points, Prop,
-    ResizeMode, ReturnKeyType, Rgba, ScreenAnimation, ScreenProp, ScrollProp, Size,
-    StatusBarSetting, SubmitBehavior, Tag, WebSource,
+    AudioSession, AutoCapitalize, AutoFill, Color, EventKind, HeaderSlot, Hsla, JsonValue,
+    KeyboardAppearance, KeyboardType, ModalAnimation, ModalPresentation, ModalProp, NativeProp,
+    OverlayProp, PasteBehavior, PasteEvent, Points, Prop, ResizeMode, ReturnKeyType, Rgba,
+    ScreenAnimation, ScreenProp, ScrollProp, Size, StatusBarSetting, SubmitBehavior, Tag,
+    WebSource,
     canvas::{
         CanvasFont, CanvasGradient, CanvasImage, CanvasOp, CanvasTextAlign, CanvasTextBaseline,
         Composite, Drawing, FillRule, LineCap, LineJoin, Num, Paint, Path, PathOp,
     },
     geometry::{Bounds, Corners, Point, Radians, ScaledPixels},
     js::host::HostProps,
+    overlay::{Align, OverlayAnchor, Placement},
 };
 
 /// Whether `a` and `b` set the same property (their values aside).
@@ -54,6 +59,7 @@ crate::static_reactive!(Hsla: Hsla, Rgba, Color);
 crate::static_reactive!(crate::AccessibilityRole: crate::AccessibilityRole);
 crate::static_reactive!(AutoCapitalize: AutoCapitalize);
 crate::static_reactive!(AutoFill: AutoFill);
+crate::static_reactive!(crate::HeaderSystemItem: crate::HeaderSystemItem);
 crate::static_reactive!(KeyboardAppearance: KeyboardAppearance);
 crate::static_reactive!(KeyboardType: KeyboardType);
 crate::static_reactive!(ModalAnimation: ModalAnimation);
@@ -61,9 +67,15 @@ crate::static_reactive!(ModalPresentation: ModalPresentation);
 crate::static_reactive!(ResizeMode: ResizeMode);
 crate::static_reactive!(ReturnKeyType: ReturnKeyType);
 crate::static_reactive!(SubmitBehavior: SubmitBehavior);
+crate::static_reactive!(PasteBehavior: PasteBehavior);
+crate::static_reactive!(crate::EllipsizeMode: crate::EllipsizeMode);
+crate::static_reactive!(JsonValue: JsonValue);
+crate::static_reactive!(StatusBarSetting: StatusBarSetting, crate::StatusBarStyle);
+crate::static_reactive!(Placement: Placement);
+crate::static_reactive!(Align: Align);
 
 /// Sets `prop` among `props`, replacing one of its kind.
-fn set_in(props: &mut Vec<Prop>, prop: Prop) {
+pub(crate) fn set_in(props: &mut Vec<Prop>, prop: Prop) {
     match props.iter_mut().find(|p| same_kind(p, &prop)) {
         Some(p) => *p = prop,
         None => props.push(prop),
@@ -111,6 +123,12 @@ macro_rules! host_element {
         impl Accessible for $name {}
         impl Interactive for $name {}
 
+        impl super::element::IntoTooltip for $name {
+            fn apply_tooltip(self, node: &mut ElNode) {
+                self.into_element().apply_tooltip(node);
+            }
+        }
+
         // Not every element has props of its own and events.
         #[allow(dead_code)]
         impl $name {
@@ -154,7 +172,8 @@ host_element! {
 }
 
 host_element! {
-    /// A native navigation stack (`<stack>`), made by [`stack`]:
+    /// A native navigation stack (`<stack>`, TS: `NavStack` of `nsh/base`),
+    /// made by `nsh_base::nav_stack`:
     /// UINavigationController on iOS (swipe back, native header), a stack
     /// with a toolbar and predictive back on Android. Its children are its
     /// [`Screen`]s, bottom to top.
@@ -162,14 +181,16 @@ host_element! {
 }
 
 host_element! {
-    /// One screen of a [`Stack`] (`<screen>`), made by [`screen`]: its
-    /// header options and its content (its children).
+    /// One page of a [`Stack`] (`<screen>`, TS: `NavPage` of `nsh/base`),
+    /// made by `nsh_base::nav_page`: its header options and its content (its
+    /// children).
     Screen
 }
 
 host_element! {
-    /// A modal (`<modal>`), made by [`modal`]: presented while it is in the
-    /// view, over everything else; its children are its content.
+    /// A dialog (`<modal>`, TS: `Dialog` of `nsh/base`), made by
+    /// `nsh_base::dialog`: presented while it is in the view, over everything
+    /// else; its children are its content.
     Modal
 }
 
@@ -201,6 +222,15 @@ host_element! {
     NativeView
 }
 
+host_element! {
+    /// Its children on top of the root view it is in (`<overlay>`, TS:
+    /// `Overlay` of `nsh`), made by [`overlay`]: the surface, or the dialog
+    /// around it; outside its parent's layout and clipping, while it stays
+    /// where it is for everything else (context, events, lifetime).
+    Overlay
+}
+
+impl ParentElement for Overlay {}
 impl ParentElement for Scroll {}
 impl ParentElement for Stack {}
 impl ParentElement for Screen {}
@@ -225,6 +255,17 @@ impl ParentElement for InputAccessoryView {
     }
 }
 
+/// An overlay: its children shown on top of the root view it is in (the
+/// surface, or the dialog around it), above what that root view shows and
+/// the overlays shown before it, while it is in the view (in a region:
+/// [`super::If`]). Without an anchor it is laid out as a `position: fixed`
+/// box of the root view (`.absolute().inset_0()` covers it); with one
+/// ([`Overlay::anchor`], [`Overlay::anchor_point`]) it goes on a side of it
+/// and follows it ([`crate::overlay`]).
+pub fn overlay() -> Overlay {
+    Overlay(ElNode::new(Tag::Overlay))
+}
+
 /// A text field.
 pub fn input() -> Input {
     Input(ElNode::new(Tag::Input))
@@ -238,12 +279,14 @@ pub fn scroll() -> Scroll {
 /// A native navigation stack of [`screen`]s: put a screen in to push it,
 /// leave it out to pop it. Give each screen a [`Element::key`] (its route)
 /// so the screens below keep their state.
+#[deprecated(note = "use nsh_base::nav_stack, as TSX's `NavStack` of `nsh/base`")]
 pub fn stack() -> Stack {
     Stack(ElNode::new(Tag::Stack))
 }
 
 /// A screen of a [`stack`]. What it shows reads its insets below the
 /// header ([`super::Scope::insets`]).
+#[deprecated(note = "use nsh_base::nav_page, as TSX's `NavPage` of `nsh/base`")]
 pub fn screen() -> Screen {
     let mut node = ElNode::new(Tag::Screen);
     // Its insets come with this event.
@@ -253,6 +296,7 @@ pub fn screen() -> Screen {
 
 /// A modal presenting its children. Put it in the view to present it (in
 /// a region: [`super::If`]), leave it out to dismiss it.
+#[deprecated(note = "use nsh_base::dialog, as TSX's `Dialog` of `nsh/base`")]
 pub fn modal() -> Modal {
     let mut node = ElNode::new(Tag::Modal);
     // Its insets (`Scope::insets` inside it) come with this event.
@@ -295,21 +339,25 @@ pub fn canvas(painter: impl IntoReactive<Painter>) -> CanvasView {
 
 crate::static_reactive!(Painter: Painter, Drawing);
 
-/// A web view loading `url`.
-pub fn web_view(url: &str) -> WebView {
-    WebView(ElNode::new(Tag::WebView))
-        .set(Prop::Native(NativeProp::Source(WebSource::Uri(url.into()))))
+/// A web view loading `url` (a bound one loads again when it changes).
+pub fn web_view(url: impl IntoReactive<String>) -> WebView {
+    WebView(ElNode::new(Tag::WebView)).bind_prop(url, |url: String| {
+        Prop::Native(NativeProp::Source(WebSource::Uri(url.into())))
+    })
 }
 
 /// A web view showing the page `html`, its relative links resolved against
-/// `base_url` (TS: `source={{ html, baseUrl }}`).
+/// `base_url` (TS: `html` and `baseUrl`).
 pub fn web_view_html(html: impl IntoReactive<String>, base_url: Option<&str>) -> WebView {
     WebView(ElNode::new(Tag::WebView)).html(html, base_url)
 }
 
-/// A video playing the file or stream at `url`.
-pub fn video(url: &str) -> Video {
-    Video(ElNode::new(Tag::Video)).set(Prop::Native(NativeProp::Source(WebSource::Uri(url.into()))))
+/// A video playing the file or stream at `url` (a bound one plays the new
+/// one when it changes).
+pub fn video(url: impl IntoReactive<String>) -> Video {
+    Video(ElNode::new(Tag::Video)).bind_prop(url, |url: String| {
+        Prop::Native(NativeProp::Source(WebSource::Uri(url.into())))
+    })
 }
 
 /// The embedder's native component registered as `name`.
@@ -409,14 +457,27 @@ impl Input {
         })
     }
 
+    /// What a paste does (`pasteBehavior`; default: insert its text).
+    /// [`Self::on_paste`] hears what was pasted either way.
+    pub fn paste_behavior(self, behavior: impl IntoReactive<PasteBehavior>) -> Self {
+        self.bind_prop(behavior, Prop::PasteBehavior)
+    }
+
+    /// The user pasted: the text, the files with their bytes (a
+    /// screenshot) and local files' URLs, before the text it inserts is
+    /// reported.
+    pub fn on_paste<M>(self, listener: impl IntoListener<PasteEvent, M>) -> Self {
+        self.listen(EventKind::Paste, listener.into_listener(), events::paste)
+    }
+
     /// Focused when it appears.
     pub fn auto_focus(self, focus: impl IntoReactive<bool>) -> Self {
         self.bind_prop(focus, |focus: bool| Prop::AutoFocus(focus))
     }
 
-    /// No caret.
-    pub fn caret_hidden(self, hidden: impl IntoReactive<bool>) -> Self {
-        self.bind_prop(hidden, |hidden: bool| Prop::CaretHidden(hidden))
+    /// The caret is drawn (default yes; TS: `caret`).
+    pub fn caret(self, caret: impl IntoReactive<bool>) -> Self {
+        self.bind_prop(caret, |caret: bool| Prop::Caret(caret))
     }
 
     /// Shows the input accessory with this `nativeID` over the keyboard
@@ -474,9 +535,31 @@ impl Input {
         )
     }
 
+    /// The caret moved: with the selection, or as the text scrolled or
+    /// wrapped again ([`CaretEvent`]: where it is, in the input and in the
+    /// root view).
+    pub fn on_caret_move<M>(self, listener: impl IntoListener<CaretEvent, M>) -> Self {
+        self.listen(
+            EventKind::CaretMove,
+            listener.into_listener(),
+            events::caret,
+        )
+    }
+
     /// A key was pressed: the character, `Backspace` or `Enter`.
     pub fn on_key_press<M>(self, listener: impl IntoListener<str, M>) -> Self {
         self.listen(EventKind::KeyPress, listener.into_listener(), events::key)
+    }
+
+    /// An input method's composition started, changed or ended (the text
+    /// being composed, empty once it ends): the text is the input's only
+    /// once committed, reported by [`Self::on_change`] first.
+    pub fn on_composition_change<M>(self, listener: impl IntoListener<Composition, M>) -> Self {
+        self.listen(
+            EventKind::CompositionChange,
+            listener.into_listener(),
+            events::composition,
+        )
     }
 
     /// The text's size changed (multiline inputs growing).
@@ -496,8 +579,8 @@ impl Scroll {
     }
 
     /// Whether the scroll indicator shows (default yes).
-    pub fn shows_indicator(self, shows: impl IntoReactive<bool>) -> Self {
-        self.bind_prop(shows, |shows: bool| Prop::ShowsIndicator(shows))
+    pub fn scrollbar(self, shows: impl IntoReactive<bool>) -> Self {
+        self.bind_prop(shows, |shows: bool| Prop::Scrollbar(shows))
     }
 
     /// Pinch zoom between `min` and `max`.
@@ -519,8 +602,8 @@ impl Scroll {
         })
     }
 
-    /// The user can pinch to zoom (default yes; TS: `pinchGestureEnabled`).
-    pub fn pinch_gesture_enabled(self, enabled: impl IntoReactive<bool>) -> Self {
+    /// The user can pinch to zoom (default yes; TS: `zoomable`).
+    pub fn zoomable(self, enabled: impl IntoReactive<bool>) -> Self {
         self.bind_prop(enabled, |enabled: bool| {
             Prop::Scroll(ScrollProp::Pinch(enabled))
         })
@@ -554,8 +637,8 @@ impl Screen {
     }
 
     /// Whether the header shows (default true).
-    pub fn header_shown(self, shown: impl IntoReactive<bool>) -> Self {
-        self.bind_prop(shown, |v| Prop::Screen(ScreenProp::HeaderShown(v)))
+    pub fn header_visible(self, shown: impl IntoReactive<bool>) -> Self {
+        self.bind_prop(shown, |v| Prop::Screen(ScreenProp::HeaderVisible(v)))
     }
 
     /// A large title (iOS); the content scrolls under the header.
@@ -572,15 +655,62 @@ impl Screen {
 
     /// The header's colors: `backgroundColor`, `color` (the title's) and
     /// `tintColor` (the buttons'), as [`super::Style::from_decls`] makes
-    /// them (TS: `headerStyle`).
-    pub fn header_style(self, style: impl IntoReactive<super::Style>) -> Self {
-        self.bind_prop(style, |s: super::Style| Prop::HeaderStyle(s.0))
+    /// them (TS: `headerStyle`); a style of typed styles applies as
+    /// [`Self::header_style_with`]'s do.
+    pub fn header_style(mut self, style: impl IntoReactive<super::Style>) -> Self {
+        let style = match style.into_reactive() {
+            // Its bound parts are read in the binding, which follows them.
+            super::Reactive::Static(s) if s.1.is_bound() => {
+                super::Reactive::Bound(std::rc::Rc::new(move || s.clone()))
+            }
+            style => style,
+        };
+        self.0.bind_attr(style, |a, s: super::Style| {
+            set_in(&mut a.props, Prop::HeaderStyle(s.0));
+            if !s.1.is_empty() {
+                let typed = s.1.resolved();
+                let list = (!typed.is_empty()).then(|| Arc::new(typed.lower()));
+                set_in(&mut a.props, Prop::HeaderClassList(list));
+            }
+        });
+        self
+    }
+
+    /// The header's colors as typed styles: the background
+    /// ([`super::Styled::bg`]), the title's color
+    /// ([`super::Styled::text_color`]) and the buttons'
+    /// ([`super::Styled::tint_color`]), theme colors following the
+    /// appearance natively (TS: `headerClass`). `f` runs again when what it
+    /// reads changes. [`Self::header_style`] wins over it, key by key.
+    pub fn header_style_with(
+        self,
+        f: impl Fn(super::StyleRefinement) -> super::StyleRefinement + 'static,
+    ) -> Self {
+        let list = move || {
+            let style = f(super::StyleRefinement::default()).resolved();
+            (!style.is_empty()).then(|| Arc::new(style.lower()))
+        };
+        self.bind_prop(super::Reactive::Bound(std::rc::Rc::new(list)), |list| {
+            Prop::HeaderClassList(list)
+        })
     }
 
     /// The label of the back button leading back to this screen (iOS).
     pub fn header_back_title(self, title: impl IntoReactive<super::SharedString>) -> Self {
         self.bind_prop(title, |t| {
             Prop::Screen(ScreenProp::HeaderBackTitle(Some(Arc::from(t.as_str()))))
+        })
+    }
+
+    /// The trailing header button is UIKit's own, drawn instead of the
+    /// `header_right` view (iOS; a press on it presses that view's first
+    /// pressable view).
+    pub fn header_right_system_item(
+        self,
+        item: impl IntoReactive<crate::HeaderSystemItem>,
+    ) -> Self {
+        self.bind_prop(item, |item| {
+            Prop::Screen(ScreenProp::HeaderRightSystemItem(Some(item)))
         })
     }
 
@@ -649,6 +779,131 @@ impl Screen {
             EventKind::BackRequest,
             listener.into_listener(),
             events::unit,
+        )
+    }
+}
+
+impl Overlay {
+    /// Places it against the element carrying `anchor` (rendered before
+    /// it), following it as it moves: on the [`Self::placement`] side, on
+    /// the other when only that one has room, kept inside the safe area.
+    pub fn anchor(self, anchor: &super::ElementRef) -> Self {
+        let anchor = *anchor;
+        self.bind_prop(
+            move || match anchor.node() {
+                Some(id) => OverlayAnchor::Node(id),
+                None => OverlayAnchor::None,
+            },
+            |a| Prop::Overlay(OverlayProp::Anchor(a)),
+        )
+    }
+
+    /// Places it against what the element carrying `anchor` draws: the box
+    /// around its children, so a trigger in a wrapper its parent stretches
+    /// is placed against what shows ([`OverlayAnchor::Content`]).
+    pub fn anchor_content(self, anchor: &super::ElementRef) -> Self {
+        let anchor = *anchor;
+        self.bind_prop(
+            move || match anchor.node() {
+                Some(id) => OverlayAnchor::Content(id),
+                None => OverlayAnchor::None,
+            },
+            |a| Prop::Overlay(OverlayProp::Anchor(a)),
+        )
+    }
+
+    /// Places it against a point of the root view (a touch's `page`: a
+    /// menu where the pointer is).
+    pub fn anchor_point(self, point: impl IntoReactive<Point<Points>>) -> Self {
+        self.bind_prop(point, |p| {
+            Prop::Overlay(OverlayProp::Anchor(OverlayAnchor::Point(p)))
+        })
+    }
+
+    /// Places it against a box of the root view: an input's caret
+    /// ([`CaretEvent::page_bounds`]), where suggestions for what is being
+    /// typed open.
+    pub fn anchor_bounds(self, bounds: impl IntoReactive<Bounds<Points>>) -> Self {
+        self.bind_prop(bounds, |b| {
+            Prop::Overlay(OverlayProp::Anchor(OverlayAnchor::Bounds(b)))
+        })
+    }
+
+    /// The side of the anchor it goes on (default below).
+    pub fn placement(self, placement: impl IntoReactive<Placement>) -> Self {
+        self.bind_prop(placement, |p| Prop::Overlay(OverlayProp::Placement(p)))
+    }
+
+    /// How it lines up with the anchor along that side (default centered).
+    pub fn align(self, align: impl IntoReactive<Align>) -> Self {
+        self.bind_prop(align, |a| Prop::Overlay(OverlayProp::Align(a)))
+    }
+
+    /// The gap between the anchor and it.
+    pub fn offset(self, offset: impl IntoReactive<Points>) -> Self {
+        self.bind_prop(offset, |o| Prop::Overlay(OverlayProp::Offset(o)))
+    }
+
+    /// The distance it keeps from the edges of the safe area.
+    pub fn margin(self, margin: impl IntoReactive<Points>) -> Self {
+        self.bind_prop(margin, |m| Prop::Overlay(OverlayProp::Margin(m)))
+    }
+
+    /// A press went down outside it, its anchor and the overlays inside it
+    /// (where, in the root view). Closing is the listener's: leave it out
+    /// of the view.
+    pub fn on_press_outside<M>(self, listener: impl IntoListener<Point<Points>, M>) -> Self {
+        self.listen(
+            EventKind::PressOutside,
+            listener.into_listener(),
+            events::page_point,
+        )
+    }
+
+    /// Escape or the Android back button, while it is the top overlay
+    /// listening (it takes them from those below, the pages and
+    /// [`super::on_back_press`]).
+    pub fn on_cancel<M>(self, listener: impl IntoListener<(), M>) -> Self {
+        self.listen(EventKind::Cancel, listener.into_listener(), events::unit)
+    }
+
+    /// Makes it a hint (a tooltip): shown once the pointer rested on its
+    /// anchor (its parent without one) for `delay`, until the pointer
+    /// leaves or presses the anchor, on the desktops only; it is placed
+    /// against the anchor and should not take the pointer
+    /// ([`Interactive::pointer_events`] none). [`Self::hint_open`] decides
+    /// instead of the pointer.
+    pub fn hint(self, delay: impl IntoReactive<std::time::Duration>) -> Self {
+        self.bind_prop(delay, |d| Prop::Overlay(OverlayProp::Hint(Some(d))))
+    }
+
+    /// A hint shown (`Some(true)`) or hidden (`Some(false)`) whatever the
+    /// pointer does: its owner follows [`Self::on_hint_show`] /
+    /// [`Self::on_hint_hide`] (a `Tooltip` controlled by the app). `None`:
+    /// the pointer decides.
+    pub fn hint_open(self, open: impl IntoReactive<Option<bool>>) -> Self {
+        self.bind_prop(open, |o| Prop::Overlay(OverlayProp::Open(o)))
+    }
+
+    /// The pointer rested on a hint's anchor for its delay: it asks to
+    /// show (and shows, unless [`Self::hint_open`] decides).
+    pub fn on_hint_show<M>(self, listener: impl IntoListener<(), M>) -> Self {
+        self.listen(EventKind::Show, listener.into_listener(), events::unit)
+    }
+
+    /// The pointer left or pressed a hint's anchor, or the hint left the
+    /// view, after it asked to show: it asks to hide.
+    pub fn on_hint_hide<M>(self, listener: impl IntoListener<(), M>) -> Self {
+        self.listen(EventKind::Dismiss, listener.into_listener(), events::unit)
+    }
+
+    /// The core placed it against its anchor: the side it went on, its
+    /// frame and the room on that side.
+    pub fn on_position<M>(self, listener: impl IntoListener<OverlayPosition, M>) -> Self {
+        self.listen(
+            EventKind::Position,
+            listener.into_listener(),
+            events::overlay_position,
         )
     }
 }
@@ -796,9 +1051,9 @@ impl WebView {
     }
 
     /// Scrolls (default yes).
-    pub fn scroll_enabled(self, enabled: impl IntoReactive<bool>) -> Self {
+    pub fn scrollable(self, enabled: impl IntoReactive<bool>) -> Self {
         self.bind_prop(enabled, |enabled: bool| {
-            Prop::Native(NativeProp::ScrollEnabled(enabled))
+            Prop::Native(NativeProp::Scrollable(enabled))
         })
     }
 
@@ -839,7 +1094,7 @@ impl WebView {
         self.listen(EventKind::Error, listener.into_listener(), events::message)
     }
 
-    /// The page called `window.ReactNativeWebView.postMessage(data)`.
+    /// The page called `window.nsh.postMessage(data)`.
     pub fn on_message<M>(self, listener: impl IntoListener<str, M>) -> Self {
         self.listen(EventKind::Message, listener.into_listener(), events::data)
     }
@@ -908,6 +1163,14 @@ impl Video {
         self.bind_prop(ms, |ms: f32| Prop::Native(NativeProp::ProgressInterval(ms)))
     }
 
+    /// What its sound does to the rest of the device's audio while it
+    /// plays (default: the app's audio settings).
+    pub fn audio_session(self, session: impl IntoReactive<AudioSession>) -> Self {
+        self.bind_prop(session, |session: AudioSession| {
+            Prop::Native(NativeProp::AudioSession(session))
+        })
+    }
+
     /// It started loading.
     pub fn on_load_start<M>(self, listener: impl IntoListener<(), M>) -> Self {
         self.listen(EventKind::LoadStart, listener.into_listener(), events::unit)
@@ -948,9 +1211,13 @@ impl Video {
 }
 
 impl NativeView {
-    /// Its prop `name` (any JSON value), as JS's `nativeComponent` passes it.
-    pub fn prop(self, name: &str, value: JsonValue) -> Self {
-        self.set(Prop::ComponentProp(name.into(), Some(value)))
+    /// Its prop `name` (any JSON value), as JS's `nativeComponent` passes it;
+    /// a bound one is passed again when it changes.
+    pub fn prop(self, name: &str, value: impl IntoReactive<JsonValue>) -> Self {
+        let name: Arc<str> = name.into();
+        self.bind_prop(value, move |value| {
+            Prop::ComponentProp(name.clone(), Some(value))
+        })
     }
 
     /// It emitted an event.
@@ -1107,6 +1374,13 @@ impl Painter {
         let slot = self.drawing.slot(node.id());
         self.nodes.push(node);
         slot
+    }
+
+    /// Adds `node`: a part of the drawing that assistive technologies and
+    /// UI tests see as an element of its own ([`crate::canvas::CanvasNode`]).
+    pub fn node(mut self, node: crate::canvas::CanvasNode) -> Self {
+        self.drawing.nodes.push(node);
+        self
     }
 
     /// Records `op` (one built by hand: its numbers and paints from

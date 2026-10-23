@@ -1,6 +1,6 @@
 # Canvas
 
-- **Canvas** (`Canvas` from `nsh/canvas`, the `canvas` host element): an HTML Canvas 2D subset, recorded and replayed natively
+- **Canvas** (`Canvas` from `nsh`, the `canvas` host element): an HTML Canvas 2D subset, recorded and replayed natively
   (`nsh_core::canvas`: `Drawing { ops, slots }`). `draw={(cx, { width, height }) => ...}` runs again when the signals it reads
   change (sizes come from `onLayout`). `CanvasRenderingContext2D`: state (`save` / `restore`, `globalAlpha`,
   `globalCompositeOperation`, line styles and dashes, shadows, `font` (CSS shorthand; besides `small-caps` it takes the
@@ -15,7 +15,9 @@
   for its transform, current path and line style and tests the flattened path; after `draw` returned a kept context
   answers from everything it drew, so press handlers can hit-test the shapes; strokes take joins as round and ignore
   dashes; animated values count as 0, since JS does not see their current values), linear / radial / conic
-  gradients, `drawImage` (all three forms, images by URI or asset). Any number argument and colors may be animated values
+  gradients, `drawImage` (all three forms, images by URI or asset: native canvases draw bitmaps, loaded through their
+  platform's image module, whose canvas loads fail an SVG with a warning naming it, as bytes no decoder reads fail;
+  the web's draws what the browser draws). Any number argument and colors may be animated values
   (`createAnimatedValue`, `interpolate`, ...): those become slots bound like style values (`AnimationProp::CanvasArg`) and the
   platform redraws on its own while they animate, without JS (only what they change on iOS and macOS: "Partial
   redraws" below). Deriving a node again (`interpolate`, `mul`, ... in a `draw`
@@ -30,7 +32,7 @@
   (overloads, `roundRect`'s radii, `save` / `restore`, gradients, images) is written in `canvas.rs`. The core's decoder
   (`nsh_core::js::canvas::decode`) reads the recorded list. Recording costs: `docs/dev/performance.md`. iOS replays
   into the `drawRect:` context, keeping its own transform and path in view space; Android `CanvasBox.java` interprets an `int[]` (`encode.rs`). Not
-  supported: `getImageData` / `putImageData`, filters, SVG images.
+  supported: `getImageData` / `putImageData`, filters.
 
 **Partial redraws.** While animated values animate, iOS (`setNeedsDisplayInRect:`) and macOS (`NshView::redraw_rect`:
 `setNeedsDisplayInRect:` on the content layer) redraw only what changes: `nsh_core::canvas::DamageScan` replays the
@@ -54,8 +56,24 @@ whole canvas. Numbers:
 `docs/dev/performance.md`.
 
 Rust components record drawings with `ui::Painter` (the same operations; `docs/dev/components.md`), measure text
-with `measure_text(font, text)`, on the core's text engine, and hit-test what a painter recorded with the same
+with `measure_text(font, text)` and `text_metrics(font, text)` (its width and the font's ascent, descent and line
+height, from the first line the core's text engine lays it out in: `canvas::line_metrics`), and hit-test what a painter recorded with the same
 `point_in_path` / `point_in_stroke` (`Painter::is_point_in_path` / `is_point_in_stroke` for the current path,
 `path_contains` / `stroke_contains` for a `Path`; animated values count as 0 there too).
 
 The drawing format is documented in `crates/nsh-core/src/canvas.rs`.
+
+**Nodes** (Rust components). A drawing can name parts of what it draws as elements of their own
+(`Painter::node(CanvasNode::new(bounds, role, label))`, with `test_id` and `selected`): a grid's cells, a chart's bars.
+They are the canvas's children to assistive technologies and UI tests, at their bounds in the canvas, with their role,
+name, test id and selected state (`Drawing::nodes`, sent with the drawing). A press on one is a press at its center, as
+a pointer there makes it: it goes to the view under that point that takes presses, so a canvas drawn over the view that
+handles presses (`pointerEvents: "none"`) keeps working. The GPUI backend makes them AccessKit nodes (`access.rs`
+`canvas_nodes`, no actions of their own) and the headless driver views of its model (`label:`, `text:`, `id:` and
+`role:` find them, `press` presses under them, `Screen::selected` reads their selected state as it reads a view's);
+the other backends do not show them yet.
+
+The test model skips hidden subtrees when finding the view under a node and follows visible overflow until a
+clipping view stops it. Headless touches carry the node's center in root and target-local coordinates. A real
+host's agent keeps the center relative to the canvas (`Scene::canvas_node`, `SceneQuery::CanvasNode`), brings
+that point into view, and presses it at the canvas's native position.

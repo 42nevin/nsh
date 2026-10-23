@@ -13,13 +13,13 @@ use std::{
 };
 
 use super::{
-    Accessible, AnyElement, If, Interactive, IntoReactive, Position, Reactive,
+    Accessible, AnyElement, Interactive, IntoReactive, Position, Reactive,
     element::{BoundListConfig, ElKind, ElNode, Element, IntoElement, IntoListener, ListConfig},
-    events,
+    events, when,
 };
 use crate::{
-    CellSlot, EventKind, EventPayload, ListContentStyle, PayloadValue, Prop, Tag, Viewability,
-    geometry::Points,
+    CellSlot, EventKind, EventPayload, ListContentStyle, ListViewport, PayloadValue, Prop, Tag,
+    Viewability, geometry::Points,
 };
 
 /// How a list lays out its rows: [`super::ListElement`] (the app's rows)
@@ -62,6 +62,17 @@ pub trait ListLayout: Sized {
         self
     }
 
+    /// What the list scrolls in (TS: `viewport`): [`ListViewport::Parent`]
+    /// lays it out at its full length and renders the rows near the
+    /// viewport of the scroll view around it, which scrolls it with what
+    /// else it holds (headers above the list, other lists); the default,
+    /// [`ListViewport::Own`], is a scroll view of its own. Fixed when the
+    /// list is made.
+    fn viewport(mut self, viewport: ListViewport) -> Self {
+        self.config().viewport = Some(viewport);
+        self
+    }
+
     /// Item 0 at the end (chats), starting scrolled to the end.
     fn inverted(mut self) -> Self {
         self.config().inverted = Some(true);
@@ -82,8 +93,8 @@ pub trait ListLayout: Sized {
     }
 
     /// Whether the scroll indicator shows (default yes).
-    fn shows_indicator(self, shows: impl IntoReactive<bool>) -> Self {
-        self.layout(shows, |c, shows| c.shows_indicator = Some(shows))
+    fn scrollbar(self, shows: impl IntoReactive<bool>) -> Self {
+        self.layout(shows, |c, shows| c.scrollbar_visible = Some(shows))
     }
 
     /// Padding around the rows.
@@ -267,7 +278,7 @@ impl VirtualList {
             // While the bound count is 0.
             Reactive::Bound(count) => {
                 let cell = extra_cell(CellSlot::Empty, "\0empty", empty);
-                let shown = If::new(move || count() == 0, move || AnyElement(cell.clone()));
+                let shown = when(move || count() == 0, move || AnyElement(cell.clone()));
                 self.0.children.push(shown.into_element().0);
                 self
             }
@@ -291,6 +302,26 @@ impl VirtualList {
         self
     }
 
+    /// The sticky rows stick this far from the start instead, as CSS
+    /// `position: sticky`'s `top` (`.sticky_header_offset(px(56.0))` under a
+    /// 56 pt translucent bar; the rows scroll under the space before them;
+    /// TS: `stickyHeaderOffset`).
+    pub fn sticky_header_offset(mut self, offset: Points) -> Self {
+        super::host::set(&mut self.0, Prop::StickyOffset(offset));
+        self
+    }
+
+    /// The sticky rows stick this animated value from the start instead,
+    /// following it (below a header that moves, `header` the header's
+    /// visible height; TS: `stickyHeaderOffset` set to an animated value).
+    pub fn bind_sticky_header_offset(mut self, value: &impl super::Animated) -> Self {
+        if let Some(node) = value.animated_node().live() {
+            super::host::set(&mut self.0, Prop::StickyOffsetNode(Some(node.id())));
+            self.0.attrs.bound.push(node);
+        }
+        self
+    }
+
     /// Scrolls to row `index` before the first frame (TS:
     /// `initialScrollIndex`).
     pub fn initial_scroll_index(mut self, index: usize) -> Self {
@@ -299,7 +330,7 @@ impl VirtualList {
     }
 
     /// When rows count as viewable for
-    /// [`Self::on_viewable_items_changed`] (TS: `viewabilityConfig`'s
+    /// [`Self::on_viewable_items_change`] (TS: `viewabilityConfig`'s
     /// thresholds; without one, any visible pixel counts).
     pub fn viewability(mut self, config: Viewability) -> Self {
         super::host::set(&mut self.0, Prop::Viewability(config));
@@ -313,29 +344,48 @@ impl VirtualList {
         self
     }
 
-    /// The viewable rows changed (TS: `onViewableItemsChanged`).
-    pub fn on_viewable_items_changed<M>(
+    /// The viewable rows changed (TS: `onViewableItemsChange`).
+    pub fn on_viewable_items_change<M>(
         self,
         listener: impl IntoListener<ViewableItems, M>,
     ) -> Self {
         self.on(
-            EventKind::ViewableItemsChanged,
+            EventKind::ViewableItemsChange,
             events::typed(listener.into_listener(), viewable),
         )
     }
 
     /// Scrolled close to the end (load more).
-    pub fn on_end_reached<M>(self, listener: impl IntoListener<(), M>) -> Self {
+    pub fn on_load_more<M>(self, listener: impl IntoListener<(), M>) -> Self {
         self.on(
-            EventKind::EndReached,
+            EventKind::LoadMore,
             events::typed(listener.into_listener(), events::unit),
         )
     }
 
-    /// How close to the end [`Self::on_end_reached`] fires, in viewports
-    /// (default 1; TS: `onEndReachedThreshold`).
-    pub fn end_reached_threshold(mut self, viewports: f32) -> Self {
-        super::host::set(&mut self.0, Prop::EndReachedThreshold(viewports));
+    /// How close to the end [`Self::on_load_more`] fires, in viewports
+    /// (default 1; TS: `loadMoreThreshold`).
+    pub fn load_more_threshold(mut self, viewports: f32) -> Self {
+        super::host::set(&mut self.0, Prop::LoadMoreThreshold(viewports));
+        self
+    }
+
+    /// Scrolled close to the start, once the user or a scroll command
+    /// moved the list (load what comes before the first row: the newer
+    /// messages of a chat opened at an old one; TS: `onLoadMoreAtStart`).
+    /// Fires once per approach, and again while the list stays near the
+    /// start when the rows change.
+    pub fn on_load_more_at_start<M>(self, listener: impl IntoListener<(), M>) -> Self {
+        self.on(
+            EventKind::LoadMoreAtStart,
+            events::typed(listener.into_listener(), events::unit),
+        )
+    }
+
+    /// How close to the start [`Self::on_load_more_at_start`] fires, in
+    /// viewports (default 1; TS: `loadMoreAtStartThreshold`).
+    pub fn load_more_at_start_threshold(mut self, viewports: f32) -> Self {
+        super::host::set(&mut self.0, Prop::LoadMoreAtStartThreshold(viewports));
         self
     }
 
@@ -351,7 +401,7 @@ impl VirtualList {
     }
 }
 
-/// The rows a list shows ([`VirtualList::on_viewable_items_changed`]), by
+/// The rows a list shows ([`VirtualList::on_viewable_items_change`]), by
 /// index, and the ones it showed at the report before.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ViewableItems {

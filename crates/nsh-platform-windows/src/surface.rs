@@ -139,6 +139,10 @@ pub(crate) struct Surface {
     /// The embedding app's locale and text size, standing in for the
     /// system's ([`crate::AppView::set_locale`], `set_font_scale`).
     pub(crate) host_environment: Cell<nsh_core::platform::HostEnvironment>,
+    /// The embedding app's theme overrides
+    /// ([`crate::AppView::set_theme_overrides`]): sent to every engine the
+    /// surface starts, before its first frame.
+    pub(crate) host_tokens: RefCell<Option<nsh_engine::Tokens>>,
     /// JS asked for a display frame.
     js_frame: Cell<bool>,
     /// Paces animation frames while something animates.
@@ -146,6 +150,9 @@ pub(crate) struct Surface {
     /// Extra frame clients (transitions, glides, spinners): called on every
     /// frame until they return false ([`Surface::on_frame`]).
     frame_clients: RefCell<Vec<FrameClient>>,
+    /// The model of a test session's app (`nsh test --target windows`).
+    #[cfg(feature = "dev")]
+    test_model: RefCell<Option<std::sync::Arc<nsh_testing::agent::Model>>>,
     /// The time of the current frame (seconds since the surface was made).
     now: Cell<f64>,
     epoch: std::time::Instant,
@@ -153,6 +160,8 @@ pub(crate) struct Surface {
     on_hot_update_failed: RefCell<Option<Box<dyn Fn()>>>,
     /// Where `asset:/` image URIs resolve ([`crate::image::set_asset_base`]).
     pub(crate) asset_base: RefCell<Option<crate::image::AssetBase>>,
+    /// The disk cache of downloaded images ([`crate::image::set_disk_cache`]).
+    pub(crate) image_cache: RefCell<Option<nsh_core::image::DiskCache>>,
     /// Videos, web views and registered native components.
     pub(crate) native: crate::native::NativeState,
     /// The app's keyboard shortcuts ([`crate::keymap`]).
@@ -200,14 +209,18 @@ impl Surface {
             environment: Cell::new(environment),
             appearance: Cell::default(),
             host_environment: Cell::default(),
+            host_tokens: RefCell::new(None),
             js_frame: Cell::new(false),
             ticker: RefCell::new(None),
             frame_clients: RefCell::default(),
+            #[cfg(feature = "dev")]
+            test_model: RefCell::default(),
             now: Cell::new(0.0),
             epoch: std::time::Instant::now(),
             on_error: RefCell::new(None),
             on_hot_update_failed: RefCell::new(None),
             asset_base: RefCell::new(None),
+            image_cache: RefCell::new(None),
             native: Default::default(),
             keymap: Default::default(),
             placed: RefCell::default(),
@@ -280,6 +293,11 @@ impl Surface {
         let env = self.environment.get();
         config.viewport = env.window;
         config.environment = env;
+        // A test session's app: the test's storage, network and trace.
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self.test_model.borrow() {
+            model.set_up_engine(&mut config);
+        }
         let (tx, rx) = crossbeam_channel::unbounded();
         let pending = Arc::new(AtomicBool::new(false));
         let sink = Sink {
@@ -290,8 +308,22 @@ impl Surface {
         *self.rx.borrow_mut() = Some(rx);
         *self.pending.borrow_mut() = pending;
         let family = crate::text::ui_family();
-        match Engine::start(config, move || DWriteTextEngine::new(family), sink) {
+        // The embedding app's theme overrides are in the first frame.
+        let tokens = self.host_tokens.borrow().clone();
+        let setup = |control: &EngineControl| {
+            if tokens.is_some() {
+                control.set_tokens(tokens);
+            }
+        };
+        match Engine::start_with(config, move || DWriteTextEngine::new(family), sink, setup) {
             Ok(engine) => {
+                // The app's downloaded images go through its disk cache.
+                crate::image::set_disk_cache(self, engine.image_cache());
+                // The test moves its clock through the engine.
+                #[cfg(feature = "dev")]
+                if let Some(model) = &*self.test_model.borrow() {
+                    model.engine_started(engine.control());
+                }
                 *self.control.borrow_mut() = Some(engine.control());
                 *self.engine.borrow_mut() = Some(engine);
             }
@@ -486,6 +518,10 @@ impl Surface {
                 }
                 Message::Error(message) => {
                     log::error!("{message}");
+                    #[cfg(feature = "dev")]
+                    if let Some(model) = &*self.test_model.borrow() {
+                        model.error(message.to_string());
+                    }
                     if let Some(f) = &*self.on_error.borrow() {
                         f(&message);
                     }
@@ -516,6 +552,10 @@ impl Surface {
             }
         }
         self.mounter.borrow_mut().end_batch(self);
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self.test_model.borrow() {
+            model.apply(batch);
+        }
         crate::access::batch_applied(self);
     }
 
@@ -527,6 +567,7 @@ impl Surface {
             anim.write(&self.mounter.borrow());
             std::mem::take(&mut anim.finished)
         };
+        crate::scroll::pin_animated_sticky(self);
         if !finished.is_empty() {
             self.control(|c| c.animations_finished(finished));
         }
@@ -537,6 +578,21 @@ impl Surface {
     pub(crate) fn on_frame(self: &Rc<Self>, f: impl FnMut(&Rc<Surface>, f64) -> bool + 'static) {
         self.frame_clients.borrow_mut().push(Box::new(f));
         self.ensure_ticking();
+    }
+
+    /// Whether a native animation runs: the graph's, or the platform's own
+    /// (transitions, scroll glides).
+    #[cfg(feature = "dev")]
+    pub(crate) fn animating(&self) -> bool {
+        self.anim.borrow().animating() || !self.frame_clients.borrow().is_empty()
+    }
+
+    /// Keeps the model `nsh test --target` steps see of the app
+    /// ([`nsh_testing::agent::Model`]): every batch applied and every error
+    /// go to it from now on.
+    #[cfg(feature = "dev")]
+    pub(crate) fn set_test_model(&self, model: Option<std::sync::Arc<nsh_testing::agent::Model>>) {
+        *self.test_model.borrow_mut() = model;
     }
 
     fn wants_frames(&self) -> bool {

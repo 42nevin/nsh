@@ -11,7 +11,7 @@
 //! like any view, with no round trip. What changes is bound: a text, prop
 //! or style given a signal, a memo, a [`Prop`] or a closure is a render
 //! effect whose runs patch that part alone, and a region ([`dynamic`],
-//! [`If`], [`Each`], [`catch_error`]) makes its own elements again. State
+//! [`when`], [`each`], [`catch_error`]) makes its own elements again. State
 //! is signals the view makes (under the component's owner: they go with
 //! it), changed by listeners, timers and tasks ([`ambient::spawn`]); the
 //! component's listeners hear its elements' events first and decide what
@@ -42,6 +42,7 @@ pub mod description;
 pub mod desktop;
 pub(crate) mod element;
 mod element_ref;
+mod engine_context;
 pub(crate) mod env;
 mod events;
 pub(crate) mod flow;
@@ -55,15 +56,17 @@ mod once;
 pub mod palette;
 mod prop;
 pub mod reactive;
+pub(crate) mod renderer;
 mod resource;
 pub(crate) mod responder;
+mod rows;
 mod scrollable;
 pub(crate) mod services;
 pub(crate) mod status_bar;
 mod style;
 mod system;
 pub(crate) mod task;
-pub(crate) mod tokens;
+pub mod tokens;
 mod value;
 pub(crate) mod virtual_list;
 
@@ -92,6 +95,10 @@ pub use nsh_macros::{
     native_module,
 };
 
+// Kept for apps written before `nsh_base` presented dialogs and
+// navigation, as TSX's `nsh/base` does.
+#[allow(deprecated)]
+pub use self::host::{modal, screen, stack};
 pub(crate) use self::{
     animated::LiveNode,
     back::BackListener,
@@ -102,7 +109,7 @@ pub(crate) use self::{
 pub use self::{
     animated::{
         Animated, AnimatedNode, AnimatedValue, Animation, AnimationEnd, AnimationOperand,
-        Interpolation, Spring, Timing, sample_decay, sample_decay_within, sample_spring,
+        Interpolation, Motion, Spring, Timing, sample_decay, sample_decay_within, sample_spring,
     },
     asset::{AssetFile, AssetKind, FileAsset, FontAsset, ImageAsset, ImageSrc},
     call::{
@@ -122,22 +129,23 @@ pub use self::{
         declarations,
     },
     element::{
-        Accessible, AnyElement, Attrs, BoundListConfig, Child, Children, ComponentElement, ElNode,
-        Element, FluentBuilder, Image, Interactive, IntoChild, IntoElement, IntoListener, Items,
-        ListConfig, ListElement, Listener, ParentElement, Position, Slot, SlotElement, Style, Text,
-        View, image, text, view,
+        __hint_tooltip, Accessible, AnyElement, Attrs, BoundListConfig, Child, Children,
+        ComponentBuilder, ComponentElement, ElNode, Element, FluentBuilder, Image, Interactive,
+        IntoChild, IntoElement, IntoListener, IntoTooltip, Items, ListConfig, ListElement,
+        Listener, ParentElement, Position, Slot, SlotElement, Style, Text, View, image, text, view,
     },
     element_ref::{ComponentRef, ElementRef},
+    engine_context::{EngineContext, EngineContextGuard, engine_context},
     env::Environment,
     events::{
-        FileDropEvent, GestureEvent, ImageProgress, NativeEvent, PanEvent, ScrollEvent, Selection,
-        VideoInfo, VideoProgress, WebNavigation,
+        CaretEvent, Composition, FileDropEvent, GestureEvent, ImageProgress, NativeEvent,
+        OverlayPosition, PanEvent, ScrollEvent, Selection, VideoInfo, VideoProgress, WebNavigation,
     },
-    flow::{Each, If, IntoElements, Reset, catch_error, dynamic},
+    flow::{Each, If, IntoElements, Reset, catch_error, dynamic, each, when},
     host::{
         CanvasArg, CanvasPaint, CanvasView, Input, InputAccessoryView, Modal, NativeView,
-        Orientation, Painter, Screen, Scroll, Stack, Video, WebView, canvas, input,
-        input_accessory_view, modal, native, screen, scroll, stack, video, web_view, web_view_html,
+        Orientation, Overlay, Painter, Screen, Scroll, Stack, Video, WebView, canvas, input,
+        input_accessory_view, native, overlay, scroll, video, web_view, web_view_html,
     },
     js::{JsHost, JsIn, JsKind, JsOwned, JsRaw},
     module::{
@@ -145,23 +153,28 @@ pub use self::{
         ModuleCx, ModuleFuture, ModuleParam, ModuleSpec, Overload, OverloadSpec, SyncCall,
     },
     once::Scope,
-    prop::Prop,
+    prop::{IntoProp, Prop},
     reactive::{
         IntoReactive, Memo, Owner, Reactive, ReadSignal, Runtime, Signal, SignalEquals, Stored,
         batch, cleanup, computed, create_root, effect, provide_context, signal, signal_with,
         stored, untracked, use_context,
     },
+    renderer::{__decoding_props_of, RenderValue, Rendered, Renderer},
     resource::{Resource, ResourceInfo, ResourceState, resource, resource_with_value},
     responder::{ClaimRequest, PanGesture, ResponderEvent, TouchClaim},
+    rows::Rows,
     scrollable::Scrollable,
     services::{Fetch, HttpResponse, Prefetch, ToastDuration},
-    style::{AdaptiveColor, BorderCurve, FontWeight, StyleRefinement, Styled, WritingDirection},
+    style::{
+        AdaptiveColor, BorderCurve, FontWeight, LayoutDirection, StyleRefinement, Styled,
+        WritingDirection,
+    },
     system::{
         CallCx, Cleanup, ErrorClass, ErrorFields, Held, IntoThrown, JsError, Later, Local, Locals,
         Quotas, System, io_code,
     },
     task::{Answer, ClipboardImage, DialogAnswer, ImageSize, Task},
-    tokens::{TokenSource, Tokens},
+    tokens::{FONT_MONO, FONT_SANS, Token, TokenSource, Tokens},
     value::{JsValue, NodeRef, PropEnum, PropError, SharedString, TsType, TsTypes, ts_of},
     virtual_list::{ListLayout, ViewableItems, VirtualList, virtual_list},
 };
@@ -172,18 +185,25 @@ pub use crate::geometry::{
     relative, rems, size,
 };
 pub use crate::{
-    AccessibilityRole, AccessibilityState, AutoCapitalize, AutoFill, BlendMode, BoxShadow,
-    ContextMenuEvent, Cursor, Dialog, DialogButton, DialogButtonStyle, EdgeInsets, EllipsizeMode,
-    EventKind, EventPayload, HoverEvent, KeyboardAppearance, KeyboardDismissMode, KeyboardTaps,
-    KeyboardType, KeyframeAnimation, Keyframes, LayoutAnimation, LayoutCurve, LayoutProperty,
-    LayoutTransition, Measurement, ModalAnimation, ModalPresentation, PanActivation, PointerEvents,
-    ResizeMode, ReturnKeyType, ScreenAnimation, SnapAlignment, StatusBarConfig, StatusBarSetting,
-    StatusBarStyle, SubmitBehavior, TouchEvent, TransformKind, TransformOrigin, Viewability,
-    animation::{Curve, EaseMode, Easing, Extrapolate, Output as AnimationOutput, sample_easing},
+    AccessibilityRole, AccessibilityState, AutoCapitalize, AutoFill, BackdropMaterial, BlendMode,
+    BoxShadow, ContextMenuEvent, Cursor, Dialog, DialogButton, DialogButtonStyle, EdgeInsets,
+    EllipsizeMode, EventKind, EventPayload, HeaderSystemItem, HoverEvent, KeyboardAppearance,
+    KeyboardDismissMode, KeyboardTaps, KeyboardType, KeyframeAnimation, Keyframes, LayoutAnimation,
+    LayoutCurve, LayoutProperty, LayoutTransition, ListViewport, Measurement, ModalAnimation,
+    ModalPresentation, PanActivation, PasteBehavior, PasteEvent, PastedFile, PointerEvents,
+    PressEvent, ResizeMode, ReturnKeyType, ScreenAnimation, SnapAlignment, StatusBarConfig,
+    StatusBarSetting, StatusBarStyle, SubmitBehavior, TouchEvent, TransformKind, TransformOrigin,
+    Viewability,
+    animation::{
+        Curve, EaseMode, Easing, Extrapolate, Keyframe, KeyframeTiming, MotionChannel, MotionKind,
+        MotionPreset, MotionSpec, Output as AnimationOutput, PlaybackDirection, StaggerFrom,
+        StepPosition, sample_easing,
+    },
     color::{
         ColorParseError, Hsla, Rgba, black, blue, green, hsl, hsla, opaque_grey, red, rgb, rgba,
         transparent_black, transparent_white, white, yellow,
     },
+    overlay::{Align, Placement},
     platform::{Appearance, HttpBody, HttpHead, HttpRequest, Idiom, Locale, Os},
     style::Color,
 };
@@ -200,6 +220,7 @@ pub mod prelude {
         AccessibilityState,
         Accessible,
         AdaptiveColor,
+        Align,
         Animated,
         AnimatedNode,
         AnimatedValue,
@@ -209,6 +230,7 @@ pub mod prelude {
         Appearance,
         // Host elements and their settings.
         AutoCapitalize,
+        BackdropMaterial,
         BlendMode,
         BorderCurve,
         Bounds,
@@ -216,13 +238,16 @@ pub mod prelude {
         CallCx,
         Callback,
         CanvasView,
+        CaretEvent,
         Child,
         Children,
         ClaimRequest,
         Component,
+        ComponentBuilder,
         ComponentElement,
         ComponentError,
         ComponentRef,
+        Composition,
         ContextMenuEvent,
         Corners,
         Cursor,
@@ -261,6 +286,7 @@ pub mod prelude {
         Interpolation,
         IntoElement,
         IntoListener,
+        IntoTooltip,
         Items,
         JsError,
         JsObject,
@@ -270,11 +296,15 @@ pub mod prelude {
         KeyboardDismissMode,
         KeyboardTaps,
         KeyboardType,
+        Keyframe,
         KeyframeAnimation,
+        KeyframeTiming,
         Keyframes,
         Later,
+        LayoutDirection,
         Length,
         ListLayout,
+        ListViewport,
         Listener,
         Measurement,
         Method,
@@ -283,25 +313,39 @@ pub mod prelude {
         ModalAnimation,
         ModalPresentation,
         ModuleCx,
+        Motion,
+        MotionChannel,
+        MotionPreset,
+        MotionSpec,
         NativeEvent,
         NativeView,
         NoEvent,
         Orientation,
+        Overlay,
+        OverlayPosition,
         Painter,
         PanActivation,
         PanEvent,
         PanGesture,
         ParentElement,
+        PasteBehavior,
+        PasteEvent,
+        PastedFile,
         Percentage,
+        Placement,
+        PlaybackDirection,
         Point,
         PointerEvents,
         Points,
         Position,
+        PressEvent,
         PropEnum,
         Props,
         Radians,
         Registry,
         Rems,
+        Rendered,
+        Renderer,
         ResizeMode,
         ResponderEvent,
         ReturnKeyType,
@@ -318,8 +362,10 @@ pub mod prelude {
         SnapAlignment,
         Spring,
         Stack,
+        StaggerFrom,
         StatusBarSetting,
         StatusBarStyle,
+        StepPosition,
         Styled,
         SubmitBehavior,
         System,
@@ -353,11 +399,11 @@ pub mod prelude {
         input,
         input_accessory_view,
         methods,
-        modal,
         module,
         native,
         native_module,
         opaque_grey,
+        overlay,
         percentage,
         point,
         px,
@@ -366,10 +412,8 @@ pub mod prelude {
         rems,
         rgb,
         rgba,
-        screen,
         scroll,
         size,
-        stack,
         text,
         transparent_black,
         transparent_white,
@@ -384,25 +428,62 @@ pub mod prelude {
         Each, If, IntoElements, IntoReactive, Memo, Owner, Prop, Reactive, ReadSignal, Resource,
         ResourceInfo, ResourceState, Scope, Signal, SignalEquals, Stored,
         ambient::{
-            Delay, KeyOptions, Spawned, allow_rtl, animate_layout, animated_value,
-            announce_for_accessibility, clipboard_files, clipboard_has_image, clipboard_has_string,
-            clipboard_image, clipboard_string, color, component_ref, dark, dialog,
-            dismiss_keyboard, element_ref, fetch, font_scale, force_rtl, global, idiom, image_size,
-            is_desktop, key_label, keyboard_duration, keyboard_height, locale, measure_text,
-            next_frame, on_back_press, on_key, on_key_with, os, os_version, pixel_ratio,
-            prefetch_image, reduce_motion, request_animation_frame, round_to_nearest_pixel, rtl,
-            safe_area, screen_reader, set_clipboard, set_clipboard_image, set_color_scheme,
-            set_interval, set_timeout, spawn, timer, timer_until, toast, tokens, window,
+            Delay, KeyOptions, Spawned, animate_layout, animated_value, announce_for_accessibility,
+            clipboard_files, clipboard_has_image, clipboard_has_string, clipboard_image,
+            clipboard_string, color, component_ref, dark, dismiss_keyboard, element_ref, fetch,
+            font_scale, global, idiom, image_size, is_desktop, key_label, keyboard_duration,
+            keyboard_height, locale, measure_text, motion, next_frame, on_back_press, on_key,
+            on_key_with, open_url, os, os_version, pick_images, pixel_ratio, prefetch_image,
+            reduce_motion, request_animation_frame, round_to_nearest_pixel, safe_area,
+            screen_reader, set_clipboard, set_clipboard_image, set_color_scheme, set_interval,
+            set_timeout, spawn, text_metrics, timer, timer_until, toast, tokens, window,
         },
-        batch, catch_error, cleanup, component, computed, dynamic, effect, provide_context,
-        resource, resource_with_value, signal, signal_with, stored, untracked, use_context,
+        batch, catch_error, cleanup, component, computed, dynamic, each, effect, engine_context,
+        provide_context, resource, resource_with_value, signal, signal_with, stored, untracked,
+        use_context, when,
     };
+    // Kept for apps written before `nsh_base` presented dialogs,
+    // navigation and system alerts (`nsh_base::{dialog, nav_stack, nav_page,
+    // alert_dialog}`).
+    #[allow(deprecated)]
+    pub use super::{ambient::dialog, modal, screen, stack};
 }
 
 /// What the macros' code and nsh's generated workspace name.
 #[doc(hidden)]
 pub mod __private {
     pub use serde_json::Map as JsonMap;
+
+    /// The type of a props struct's field `I` as its setter takes it (the
+    /// value of an `Option`): `#[derive(Props)]` implements it where the
+    /// field's type is in scope, for the setters a `#[component]` makes on
+    /// its element.
+    pub trait PropField<const I: usize> {
+        /// What the setter takes.
+        type Value;
+    }
+
+    /// The values a render prop's function renders (`Option<Renderer<T>>`'s
+    /// `T`), for the setter a `#[component]` makes for the prop.
+    pub trait RendererOf {
+        /// What the function renders.
+        type Item;
+    }
+
+    impl<T> RendererOf for Option<super::Renderer<T>> {
+        type Item = T;
+    }
+
+    /// The data of an event enum's variant `I` as its listener hears it:
+    /// `#[derive(Event)]` implements it, for the listener methods a
+    /// `#[component]` makes on its element.
+    pub trait EventVariant<const I: usize> {
+        /// What the listener hears.
+        type Data: ?Sized + 'static;
+
+        /// The data of `event`, when it is this variant.
+        fn pick(event: &Self) -> Option<&Self::Data>;
+    }
 
     pub use super::{callback::NamedArgs, class::__private::*};
 

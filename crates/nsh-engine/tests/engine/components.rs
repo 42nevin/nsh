@@ -26,7 +26,7 @@ fn start_in(app: &str, environment: Environment) -> (Engine, Receiver<MountBatch
 
 /// [`start_in`] with the capabilities the app declares (JSON, `nsh.json`'s
 /// `capabilities` form) and an `nsh.json`.
-fn start_with(
+pub(crate) fn start_with(
     app: &str,
     environment: Environment,
     capabilities: Option<&str>,
@@ -78,8 +78,14 @@ fn start_with(
         ui_sets,
         runtime: None,
         data_dir: None,
+        cache: nsh_engine::CacheOptions::off(),
         storage: None,
         clock: Default::default(),
+        context: Default::default(),
+        pinned: Default::default(),
+        clipboard: None,
+        host: Default::default(),
+        picker: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
@@ -206,7 +212,10 @@ fn a_stateful_component_steps_while_held_on((engine, rx): (Engine, Receiver<Moun
 }
 
 /// The batches until `done` holds for one (or nothing came for 500ms).
-fn until(rx: &Receiver<MountBatch>, mut done: impl FnMut(&MountBatch) -> bool) -> Vec<MountBatch> {
+pub(crate) fn until(
+    rx: &Receiver<MountBatch>,
+    mut done: impl FnMut(&MountBatch) -> bool,
+) -> Vec<MountBatch> {
     let mut batches = Vec::new();
     while let Ok(batch) = rx.recv_timeout(Duration::from_millis(500)) {
         let stop = done(&batch);
@@ -218,8 +227,50 @@ fn until(rx: &Receiver<MountBatch>, mut done: impl FnMut(&MountBatch) -> bool) -
     batches
 }
 
-fn shows(batch: &MountBatch, wanted: &str) -> bool {
+pub(crate) fn shows(batch: &MountBatch, wanted: &str) -> bool {
     text_ids(batch, wanted).is_some()
+}
+
+const KEYED_CHILDREN: &str = r#"import { mount, signal, Text } from "nsh";
+import { Group } from "test/ui";
+
+const items = signal([{ id: "a", label: "A1" }, { id: "b", label: "B1" }]);
+// New objects, the same keys: the rows are kept.
+setTimeout(() => items.set([{ id: "a", label: "A2" }, { id: "b", label: "B2" }]), 50);
+
+mount(() => (
+  <Group>
+    <Each of={items()} key={(i: { id: string }) => i.id}>
+      {(item) => <Text>{item().label}</Text>}
+    </Each>
+  </Group>
+));
+"#;
+
+/// A component's children made by a keyed `<Each>` keep their rows when
+/// the items change: the children's expression is not made again.
+#[test]
+fn a_components_keyed_children_keep_their_rows() {
+    let (_engine, rx) = start(KEYED_CHILDREN);
+    let batches = until(&rx, |b| shows(b, "A2"));
+    let first = &batches[0];
+    let a = text_ids(first, "A1").expect("A1 shown");
+    let last = batches.last().unwrap();
+    assert_eq!(
+        text_ids(last, "A2"),
+        Some(a),
+        "the row's text is updated in place"
+    );
+    let deleted = batches[1..]
+        .iter()
+        .flat_map(|b| &b.items)
+        .any(|i| matches!(i, MountItem::Delete { id } if *id % 2 == 0));
+    assert!(!deleted, "no row of the app's is made again");
+    let removed = batches[1..]
+        .iter()
+        .flat_map(|b| &b.items)
+        .any(|i| matches!(i, MountItem::Remove { id } if *id % 2 == 0));
+    assert!(!removed, "the moved row stays in its wrapper");
 }
 
 const LAZY_SHEET: &str = r#"import { mount, signal, untracked, Text } from "nsh";
@@ -734,24 +785,24 @@ fn safe_area_and_keyboard_avoiding_views() {
 }
 
 const RUNTIME_MODULES: &str = r#"import { mount, signal, Text } from "nsh";
-import { AccessibilityInfo } from "nsh/accessibility";
-import { Platform } from "nsh/device";
+import { reduceMotion, setAccessibilityFocus } from "nsh/accessibility";
+import { platform } from "nsh/device";
 import { Toast } from "nsh/android";
-import { Image } from "nsh/image";
+import { Image } from "nsh";
 
 const shown = signal("waiting");
 let note: unknown;
 setTimeout(async () => {
   Toast.show("hello", "long");
-  AccessibilityInfo.setAccessibilityFocus(note);
-  const size = await Image.getSize({ uri: "https://example.com/a.png" });
+  setAccessibilityFocus(note);
+  const size = await Image.getSize("https://example.com/a.png");
   let failed = "no";
   try {
     await Image.getSize("https://example.com/missing.png");
   } catch (e) {
     failed = String((e as Error).message);
   }
-  shown.set(`${size.width}x${size.height} ${failed} ${Platform.OS} ${await AccessibilityInfo.isReduceMotionEnabled()}`);
+  shown.set(`${size.width}x${size.height} ${failed} ${platform.os} ${reduceMotion()}`);
 }, 0);
 
 mount(() => <Text ref={note}>{shown()}</Text>);
@@ -821,7 +872,8 @@ const detached = <View ref={(n: YNode) => (ghost = n)} />;
 setTimeout(async () => {
   const m = (await box.measure())!;
   const none = await ghost.measure();
-  shown.set(`at ${m.x},${m.y} ${m.width}x${m.height} page ${m.pageX},${m.pageY} ${none}`);
+  const b = m.bounds;
+  shown.set(`at ${b.origin.x},${b.origin.y} ${b.size.width}x${b.size.height} page ${m.pagePosition.x},${m.pagePosition.y} ${none}`);
 }, 0);
 
 mount(() => (
@@ -829,7 +881,7 @@ mount(() => (
     <Text>{shown()}</Text>
     <Scroll
       style={{ marginTop: 50, height: 300 }}
-      onScroll={async () => shown.set(`scrolled ${(await box.measure())!.pageY}`)}
+      onScroll={async () => shown.set(`scrolled ${(await box.measure())!.pagePosition.y}`)}
     >
       <View style={{ padding: 20, height: 1000 }}>
         <View ref={box} style={{ marginTop: 500, height: 30 }} />
@@ -890,10 +942,10 @@ import { Clipboard } from "nsh/clipboard";
 
 const shown = signal("waiting");
 setTimeout(async () => {
-  const before = await Clipboard.hasString();
-  Clipboard.setString("copied");
-  const has = await Clipboard.hasString();
-  const text = await Clipboard.getString();
+  const before = await Clipboard.hasText();
+  Clipboard.writeText("copied");
+  const has = await Clipboard.hasText();
+  const text = await Clipboard.readText();
   shown.set(`${before} ${has} ${text}`);
 }, 0);
 
@@ -984,11 +1036,11 @@ import { Clipboard } from "nsh/clipboard";
 const shown = signal("waiting");
 setTimeout(async () => {
   const before = await Clipboard.hasImage();
-  Clipboard.setImage("data:image/png;base64,aGk=");
-  const image = await Clipboard.getImage();
-  const bytes = new Uint8Array(await (await fetch(image!.uri)).arrayBuffer());
-  const files = await Clipboard.getFiles();
-  shown.set(`${before} ${image!.width}x${image!.height} ${bytes.join(",")} ${files.join(" ")}`);
+  Clipboard.writeImage("data:image/png;base64,aGk=");
+  const image = await Clipboard.readImage();
+  const bytes = new Uint8Array(await (await fetch(image!.url)).arrayBuffer());
+  const files = await Clipboard.readFiles();
+  shown.set(`${before} ${image!.size.width}x${image!.size.height} ${bytes.join(",")} ${files.join(" ")}`);
 }, 0);
 
 mount(() => <Text>{shown()}</Text>);
@@ -1063,6 +1115,71 @@ fn clipboard_images_and_files_reach_js() {
     );
 }
 
+const PICKER: &str = r#"import { mount, signal, Text } from "nsh";
+import { Picker } from "nsh/picker";
+
+const shown = signal("");
+setTimeout(async () => {
+  const images = await Picker.pickImages({ multiple: true, limit: 3, maxDimension: 1024 });
+  const [{ file, size }] = images;
+  const bytes = await file.bytes();
+  const url = URL.createObjectURL(file);
+  shown.set(
+    `${images.length} ${file instanceof File} ${file.name} ${file.type} ${file.size} ${size.width}x${size.height} ${bytes.slice(1, 4).join(",")} ${url.startsWith("blob:")} ${file.lastModified}`,
+  );
+}, 0);
+
+mount(() => <Text>{shown()}</Text>);
+"#;
+
+#[test]
+fn picked_images_reach_js_as_files() {
+    let (engine, rx) = start(PICKER);
+    let control = engine.control();
+    let mut asked = None;
+    until(&rx, |batch| {
+        for item in &batch.items {
+            if let MountItem::Command {
+                id: ROOT_ID,
+                command: Command::PickImages { id, request },
+            } = item
+            {
+                asked = Some(*request);
+                let mut file = nsh_core::picker::PickedFile::new(
+                    "IMG_0042.HEIC",
+                    "image/jpeg",
+                    nsh_core::ImageData::new(vec![0xff, 0xd8, 0xff, 0xe0, 0, 0]),
+                );
+                file.size = Size::new(
+                    nsh_core::geometry::DevicePixels(1024),
+                    nsh_core::geometry::DevicePixels(768),
+                );
+                file.last_modified = Some(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_000),
+                );
+                control.dispatch_event(
+                    ROOT_ID,
+                    EventKind::Pick,
+                    EventPayload::Picked {
+                        id: *id,
+                        files: vec![file],
+                    },
+                );
+            }
+        }
+        shows(
+            batch,
+            "1 true IMG_0042.jpg image/jpeg 6 1024x768 216,255,224 true 1700000000000",
+        )
+    });
+    let asked = asked.expect("a pick");
+    assert_eq!(asked.limit, 3);
+    assert_eq!(
+        asked.max_dimension,
+        Some(nsh_core::geometry::DevicePixels(1024))
+    );
+}
+
 const INPUT_TRAITS: &str = r##"import { mount, Input, Text } from "nsh";
 
 mount(() => (
@@ -1075,7 +1192,7 @@ mount(() => (
       multiline
       style={{ placeholderColor: "#00ff00", selectionColor: "#0000ff" }}
     />
-    <Input class="placeholder:text-white selection:text-black" />
+    <Input class="placeholder:text-white selection:bg-black" />
     <Text selectable style={{ selectionColor: "#ff0000" }}>Pick me</Text>
   </>
 ));
@@ -1257,7 +1374,7 @@ const BACK: &str = r#"import { mount, signal, Text } from "nsh";
 import { BackHandler } from "nsh/android";
 
 const presses = signal(0);
-BackHandler.addEventListener("hardwareBackPress", () => {
+BackHandler.onBackPress(() => {
   presses.update((p) => p + 1);
   // The first press is handled, the second one leaves the app.
   return presses() === 1;
@@ -1326,6 +1443,35 @@ fn the_apps_appearance_overrides_the_systems() {
     assert_eq!(background(&later), Some(nsh_core::Color(0xffff_ffff)));
 }
 
+const TOKENS: &str = r#"import { mount, Text, token } from "nsh";
+
+mount(() => (
+  <Text>{`up ${token("up")} radius ${token("radius")} font ${token("font-sans")} primary ${token("primary") !== undefined}`}</Text>
+));
+"#;
+
+#[test]
+fn token_reads_the_apps_theme_in_the_appearance_shown() {
+    let shown = |appearance: &str| {
+        let config = format!(
+            r##"{{ "appearance": "{appearance}", "theme": {{ "cssVars": {{
+                "theme": {{ "font-sans": "Inter, sans-serif", "radius": "0.5rem" }},
+                "light": {{ "up": "#00ff00" }}, "dark": {{ "up": "#004400" }} }} }} }}"##
+        );
+        let (_engine, rx) = start_with(TOKENS, Environment::default(), None, Some(&config));
+        let up = if appearance == "dark" {
+            "#004400ff"
+        } else {
+            "#00ff00ff"
+        };
+        let wanted = format!("up {up} radius 8 font Inter primary true");
+        let batches = until(&rx, |b| shows(b, &wanted));
+        assert!(batches.iter().any(|b| shows(b, &wanted)), "{batches:?}");
+    };
+    shown("light");
+    shown("dark");
+}
+
 const MENU: &str = r#"import { mount, signal, Text } from "nsh";
 import { Menu } from "nsh/desktop";
 
@@ -1388,6 +1534,7 @@ fn menus_reach_the_platform_and_call_back() {
         enabled: true,
         checked: None,
         role: None,
+        when: nsh_core::keymap::When::Always,
     };
     let quit = MenuAction {
         id: 0,
@@ -1396,6 +1543,7 @@ fn menus_reach_the_platform_and_call_back() {
         enabled: true,
         checked: None,
         role: Some(MenuRole::Quit),
+        when: nsh_core::keymap::When::Always,
     };
     assert_eq!(
         &*menu,
@@ -1539,4 +1687,988 @@ fn a_base_button_has_behavior_and_no_look() {
         selected.accessibility.state.selected,
         "selected follows the app"
     );
+}
+
+const BASE_SWITCH: &str = r##"import { mount, signal, Text, View } from "nsh";
+import { Switch } from "nsh/base";
+
+function App() {
+  const on = signal(false);
+  const changes = signal<boolean[]>([]);
+  const parts = {
+    trackClass: "w-[20px] checked:bg-[#00ff00]",
+    thumbClass: "w-[10px] checked:translate-x-[6px] disabled:opacity-50",
+  };
+  return (
+    <View>
+      <Switch
+        testID="wifi"
+        checked={on()}
+        checkedStyle={{ backgroundColor: "#0000ff" }}
+        onChange={(next) => {
+          changes.set([...changes(), next]);
+          on.set(next);
+        }}
+        {...parts}
+      >
+        <Text>Wi-Fi</Text>
+      </Switch>
+      <Switch
+        testID="locked"
+        checked
+        accessibilityLabel="Locked"
+        onChange={(next) => changes.set([...changes(), next])}
+        {...parts}
+      />
+      <Switch testID="off" checked disabled {...parts} />
+      <Text>{`Changes: ${changes().join(",")}`}</Text>
+    </View>
+  );
+}
+
+mount(App);
+"##;
+
+/// `nsh/base`'s `Switch`: the switch role and its value for screen readers
+/// on its root alone, presses reporting the next value while the app owns
+/// it, and the track and thumb styled by the switch's state.
+#[test]
+fn a_base_switch_reports_the_next_value_and_styles_its_parts() {
+    use nsh_core::{AccessibilityRole, Checked, ViewProps};
+    let (engine, rx) = start(BASE_SWITCH);
+    let first = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first frame");
+    assert!(shows(&first, "Changes: "));
+    let view_props = |batch: &MountBatch, view| {
+        batch.items.iter().rev().find_map(|i| match i {
+            MountItem::ViewProps { id, props } if *id == view => Some(props.clone()),
+            _ => None,
+        })
+    };
+    let root = |test_id: &str| {
+        first
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::ViewProps { id, props } if props.test_id.as_deref() == Some(test_id) => {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect(test_id)
+    };
+    // The view inside `parent` (a part; the label is text).
+    let child = |parent: u32| {
+        let views: Vec<u32> = first
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::Create {
+                    id,
+                    kind: nsh_core::ViewKind::View,
+                } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        first
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Insert {
+                    parent: p, child, ..
+                } if *p == parent && views.contains(child) => Some(*child),
+                _ => None,
+            })
+            .expect("a part")
+    };
+    let (wifi, locked, off) = (root("wifi"), root("locked"), root("off"));
+    let (track, thumb) = (child(wifi), child(child(wifi)));
+    let style = |batches: &[MountBatch], view| {
+        batches
+            .iter()
+            .rev()
+            .flat_map(|b| b.items.iter().rev())
+            .find_map(|i| match i {
+                MountItem::ViewStyle { id, style } if *id == view => Some(style.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    let state = |props: &ViewProps| props.accessibility.state;
+
+    // The root is the switch for screen readers; its parts are no
+    // accessibility elements.
+    let props = view_props(&first, wifi).unwrap();
+    assert_eq!(props.accessibility.role, AccessibilityRole::Switch);
+    assert_eq!(state(&props).checked, Some(Checked::False));
+    assert!(view_props(&first, track).is_none());
+    assert!(view_props(&first, thumb).is_none());
+    assert_eq!(
+        view_props(&first, locked)
+            .unwrap()
+            .accessibility
+            .label
+            .as_deref(),
+        Some("Locked")
+    );
+    let unchecked = std::slice::from_ref(&first);
+    assert!(style(unchecked, thumb).transform.ops().is_empty());
+
+    // A press reports the next value; the app sets it, so the switch, its
+    // `checkedStyle` and its parts' `checked:` classes follow.
+    engine
+        .control()
+        .dispatch_event(wifi, EventKind::Press, EventPayload::None);
+    let after = until(&rx, |b| shows(b, "Changes: true"));
+    let props = after
+        .iter()
+        .rev()
+        .find_map(|b| view_props(b, wifi))
+        .unwrap();
+    assert_eq!(state(&props).checked, Some(Checked::True));
+    assert_eq!(style(&after, wifi).background_color.0, 0x0000_ffff);
+    assert_eq!(style(&after, track).background_color.0, 0x00ff_00ff);
+    assert_eq!(style(&after, thumb).transform.ops()[0].value, 6.0);
+    assert!(after.iter().all(|b| view_props(b, thumb).is_none()));
+
+    // The value is the app's: a switch it keeps checked reports `false`
+    // and stays checked.
+    engine
+        .control()
+        .dispatch_event(locked, EventKind::Press, EventPayload::None);
+    let after = until(&rx, |b| shows(b, "Changes: true,false"));
+    assert!(after.iter().any(|b| shows(b, "Changes: true,false")));
+    assert!(after.iter().all(|b| view_props(b, locked).is_none()));
+
+    // Disabled: no presses, dimmed for screen readers, and its parts take
+    // `disabled:` over `checked:`.
+    let disabled = view_props(&first, off).unwrap();
+    assert!(state(&disabled).disabled);
+    assert_eq!(state(&disabled).checked, Some(Checked::True));
+    assert!(!first.items.iter().any(|i| matches!(
+        i,
+        MountItem::Events { id, events } if *id == off && events.contains(EventKind::Press)
+    )));
+    let off_thumb = child(child(off));
+    let thumb_style = style(unchecked, off_thumb);
+    assert_eq!(thumb_style.opacity, 0.5);
+    assert_eq!(thumb_style.transform.ops()[0].value, 6.0);
+    assert!(view_props(&first, off_thumb).is_none());
+}
+
+const BASE_CHECKBOX: &str = r##"import { mount, signal, Text, View } from "nsh";
+import { Checkbox } from "nsh/base";
+
+function App() {
+  const all = signal(false);
+  const some = signal(true);
+  const changes = signal<boolean[]>([]);
+  const parts = {
+    indicatorClass:
+      "w-[20px] checked:bg-[#00ff00] indeterminate:bg-[#ff0000] disabled:opacity-50",
+  };
+  return (
+    <View>
+      <Checkbox
+        testID="all"
+        checked={all()}
+        indeterminate={some() && !all()}
+        checkedStyle={{ backgroundColor: "#0000ff" }}
+        indeterminateStyle={{ backgroundColor: "#ffff00" }}
+        onChange={(next) => {
+          changes.set([...changes(), next]);
+          all.set(next);
+        }}
+        indicator={<Text>{all() ? "✓" : "-"}</Text>}
+        {...parts}
+      >
+        <Text>All</Text>
+      </Checkbox>
+      <Checkbox
+        testID="kept"
+        checked
+        accessibilityLabel="Kept"
+        onChange={(next) => changes.set([...changes(), next])}
+        {...parts}
+      />
+      <Checkbox testID="off" checked disabled role="menuitem" {...parts} />
+      <Text>{`Changes: ${changes().join(",")}`}</Text>
+    </View>
+  );
+}
+
+mount(App);
+"##;
+
+/// `nsh/base`'s `Checkbox`: the checkbox role and its value (mixed
+/// included) for screen readers on its root alone, presses reporting the
+/// next value while the app owns it, and the indicator styled by the
+/// checkbox's state with the app's mark inside.
+#[test]
+fn a_base_checkbox_reports_the_next_value_and_styles_its_indicator() {
+    use nsh_core::{AccessibilityRole, Checked, ViewProps};
+    let (engine, rx) = start(BASE_CHECKBOX);
+    let first = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first frame");
+    assert!(shows(&first, "Changes: "));
+    assert!(shows(&first, "-"), "the app's mark in the indicator");
+    let view_props = |batch: &MountBatch, view| {
+        batch.items.iter().rev().find_map(|i| match i {
+            MountItem::ViewProps { id, props } if *id == view => Some(props.clone()),
+            _ => None,
+        })
+    };
+    let root = |test_id: &str| {
+        first
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::ViewProps { id, props } if props.test_id.as_deref() == Some(test_id) => {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect(test_id)
+    };
+    // The first view inside `parent`: the indicator.
+    let indicator = |parent: u32| {
+        let views: Vec<u32> = first
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::Create {
+                    id,
+                    kind: nsh_core::ViewKind::View,
+                } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        first
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Insert {
+                    parent: p, child, ..
+                } if *p == parent && views.contains(child) => Some(*child),
+                _ => None,
+            })
+            .expect("the indicator")
+    };
+    let (all, kept, off) = (root("all"), root("kept"), root("off"));
+    let mark = indicator(all);
+    let style = |batches: &[MountBatch], view| {
+        batches
+            .iter()
+            .rev()
+            .flat_map(|b| b.items.iter().rev())
+            .find_map(|i| match i {
+                MountItem::ViewStyle { id, style } if *id == view => Some(style.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    let state = |props: &ViewProps| props.accessibility.state;
+
+    // Indeterminate: mixed for screen readers on the root alone;
+    // `indeterminateStyle` on the root, `indeterminate:` on the indicator.
+    let props = view_props(&first, all).unwrap();
+    assert_eq!(props.accessibility.role, AccessibilityRole::Checkbox);
+    assert_eq!(state(&props).checked, Some(Checked::Mixed));
+    assert!(view_props(&first, mark).is_none());
+    let mixed = std::slice::from_ref(&first);
+    assert_eq!(style(mixed, all).background_color.0, 0xffff_00ff);
+    assert_eq!(style(mixed, mark).background_color.0, 0xff00_00ff);
+    assert_eq!(
+        view_props(&first, kept)
+            .unwrap()
+            .accessibility
+            .label
+            .as_deref(),
+        Some("Kept")
+    );
+
+    // A press from indeterminate asks for checked; the app sets it, so the
+    // checkbox, its `checkedStyle`, the indicator's `checked:` classes and
+    // the app's mark follow.
+    engine
+        .control()
+        .dispatch_event(all, EventKind::Press, EventPayload::None);
+    let after = until(&rx, |b| shows(b, "Changes: true"));
+    let props = after.iter().rev().find_map(|b| view_props(b, all)).unwrap();
+    assert_eq!(state(&props).checked, Some(Checked::True));
+    assert_eq!(style(&after, all).background_color.0, 0x0000_ffff);
+    assert_eq!(style(&after, mark).background_color.0, 0x00ff_00ff);
+    assert!(after.iter().any(|b| shows(b, "✓")));
+    assert!(after.iter().all(|b| view_props(b, mark).is_none()));
+
+    // From checked it asks for unchecked; the app's value stays the
+    // value: a checkbox it keeps checked stays checked.
+    engine
+        .control()
+        .dispatch_event(kept, EventKind::Press, EventPayload::None);
+    let after = until(&rx, |b| shows(b, "Changes: true,false"));
+    assert!(after.iter().all(|b| view_props(b, kept).is_none()));
+
+    // Disabled: no presses, dimmed for screen readers, its own role, and
+    // its indicator takes `disabled:` with `checked:`.
+    let disabled = view_props(&first, off).unwrap();
+    assert!(state(&disabled).disabled);
+    assert_eq!(state(&disabled).checked, Some(Checked::True));
+    assert_eq!(disabled.accessibility.role, AccessibilityRole::Menuitem);
+    assert!(!first.items.iter().any(|i| matches!(
+        i,
+        MountItem::Events { id, events } if *id == off && events.contains(EventKind::Press)
+    )));
+    let off_mark = style(mixed, indicator(off));
+    assert_eq!(off_mark.opacity, 0.5);
+    assert_eq!(off_mark.background_color.0, 0x00ff_00ff);
+}
+
+const BASE_RADIO: &str = r##"import { mount, signal, Text, View } from "nsh";
+import { Radio, RadioGroup } from "nsh/base";
+
+function App() {
+  const plan = signal("a");
+  const changes = signal<string[]>([]);
+  const radio = (value: string, label: string, disabled = false) => (
+    <Radio
+      testID={value}
+      checked={plan() === value}
+      disabled={disabled}
+      accessibilityLabel={label}
+      class="group flex-row disabled:opacity-50"
+      checkedStyle={{ backgroundColor: "#0000ff" }}
+      onChange={(next) => {
+        changes.set([...changes(), `${value}:${next}`]);
+        plan.set(value);
+      }}
+    >
+      <View class="w-[20px] group-checked:bg-[#00ff00]" />
+      <Text>{label}</Text>
+    </Radio>
+  );
+  return (
+    <View>
+      <RadioGroup testID="plans" class="flex-row">
+        {radio("a", "Basic")}
+        {radio("b", "Pro")}
+        {radio("c", "Team", true)}
+      </RadioGroup>
+      <Text>{`Changes: ${changes().join(",")}`}</Text>
+    </View>
+  );
+}
+
+mount(App);
+"##;
+
+/// `nsh/base`'s `Radio` in a `RadioGroup`: the radio group role on the
+/// group, the radio role and its checked state on each radio alone, a
+/// press on an unchecked radio asking for `true` while the app owns which
+/// one is checked, a checked or disabled radio reporting nothing, and the
+/// app's dot inside following the radio with `group-checked:`.
+#[test]
+fn a_base_radio_asks_to_be_checked_and_its_group_holds_no_value() {
+    use nsh_core::{AccessibilityRole, Checked, ViewProps};
+    let (engine, rx) = start(BASE_RADIO);
+    let first = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first frame");
+    assert!(shows(&first, "Changes: "));
+    let view_props = |batch: &MountBatch, view| {
+        batch.items.iter().rev().find_map(|i| match i {
+            MountItem::ViewProps { id, props } if *id == view => Some(props.clone()),
+            _ => None,
+        })
+    };
+    let root = |test_id: &str| {
+        first
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::ViewProps { id, props } if props.test_id.as_deref() == Some(test_id) => {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect(test_id)
+    };
+    // The first view inside `parent`: the app's dot.
+    let dot = |parent: u32| {
+        let views: Vec<u32> = first
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::Create {
+                    id,
+                    kind: nsh_core::ViewKind::View,
+                } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        first
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Insert {
+                    parent: p, child, ..
+                } if *p == parent && views.contains(child) => Some(*child),
+                _ => None,
+            })
+            .expect("the dot")
+    };
+    let style = |batches: &[MountBatch], view| {
+        batches
+            .iter()
+            .rev()
+            .flat_map(|b| b.items.iter().rev())
+            .find_map(|i| match i {
+                MountItem::ViewStyle { id, style } if *id == view => Some(style.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    let state = |props: &ViewProps| props.accessibility.state;
+    let (plans, a, b, c) = (root("plans"), root("a"), root("b"), root("c"));
+    let (dot_a, dot_b) = (dot(a), dot(b));
+    let initial = std::slice::from_ref(&first);
+
+    // The group: a radio group for screen readers, laid out by the app.
+    let group = view_props(&first, plans).unwrap();
+    assert_eq!(group.accessibility.role, AccessibilityRole::Radiogroup);
+    assert_eq!(group.accessibility.label, None);
+
+    // The checked radio: checked and selected for screen readers, its
+    // `checkedStyle`, and the app's dot `group-checked:`.
+    let props = view_props(&first, a).unwrap();
+    assert_eq!(props.accessibility.role, AccessibilityRole::Radio);
+    assert_eq!(props.accessibility.label.as_deref(), Some("Basic"));
+    assert_eq!(state(&props).checked, Some(Checked::True));
+    assert!(state(&props).selected);
+    assert_eq!(style(initial, a).background_color.0, 0x0000_ffff);
+    assert_eq!(style(initial, dot_a).background_color.0, 0x00ff_00ff);
+    let props = view_props(&first, b).unwrap();
+    assert_eq!(state(&props).checked, Some(Checked::False));
+    assert!(!state(&props).selected);
+    assert_eq!(style(initial, dot_b).background_color.0, 0);
+    // The dot is a part of the radio, no second element.
+    assert!(view_props(&first, dot_a).is_none());
+
+    // A press on an unchecked radio asks for `true`; the app checks it and
+    // unchecks the other, and the styles follow.
+    engine
+        .control()
+        .dispatch_event(b, EventKind::Press, EventPayload::None);
+    let after = until(&rx, |b| shows(b, "Changes: b:true"));
+    assert!(after.iter().any(|batch| shows(batch, "Changes: b:true")));
+    let now = |view| after.iter().rev().find_map(|batch| view_props(batch, view));
+    assert_eq!(state(&now(b).unwrap()).checked, Some(Checked::True));
+    assert_eq!(state(&now(a).unwrap()).checked, Some(Checked::False));
+    assert_eq!(style(&after, b).background_color.0, 0x0000_ffff);
+    assert_eq!(style(&after, dot_b).background_color.0, 0x00ff_00ff);
+    assert_eq!(style(&after, dot_a).background_color.0, 0);
+
+    // A checked radio cannot uncheck itself: a press on it reports
+    // nothing, so the next change the app sees is `a`'s.
+    engine
+        .control()
+        .dispatch_event(b, EventKind::Press, EventPayload::None);
+    engine
+        .control()
+        .dispatch_event(a, EventKind::Press, EventPayload::None);
+    let after = until(&rx, |batch| shows(batch, "Changes: b:true,a:true"));
+    assert!(
+        after
+            .iter()
+            .any(|batch| shows(batch, "Changes: b:true,a:true"))
+    );
+
+    // Disabled: no presses, dimmed for screen readers.
+    let disabled = view_props(&first, c).unwrap();
+    assert!(state(&disabled).disabled);
+    assert_eq!(state(&disabled).checked, Some(Checked::False));
+    assert!(!first.items.iter().any(|i| matches!(
+        i,
+        MountItem::Events { id, events } if *id == c && events.contains(EventKind::Press)
+    )));
+    assert_eq!(style(initial, c).opacity, 0.5);
+}
+
+const BASE_TABS: &str = r##"import { mount, signal, Text, View } from "nsh";
+import { Tab, Tabs } from "nsh/base";
+
+function App() {
+  const current = signal("a");
+  const presses = signal<string[]>([]);
+  const tab = (value: string, label: string, disabled = false) => (
+    <Tab
+      testID={value}
+      selected={current() === value}
+      disabled={disabled}
+      accessibilityLabel={label}
+      class="group flex-row disabled:opacity-50"
+      selectedStyle={{ backgroundColor: "#0000ff" }}
+      onPress={() => {
+        presses.set([...presses(), value]);
+        current.set(value);
+      }}
+    >
+      <View class="w-[20px] group-selected:bg-[#00ff00]" />
+      <Text>{label}</Text>
+    </Tab>
+  );
+  return (
+    <View>
+      <Tabs testID="sections" class="flex-row">
+        {tab("a", "Overview")}
+        {tab("b", "Activity")}
+        {tab("c", "Billing", true)}
+      </Tabs>
+      <Text>{`Presses: ${presses().join(",")}`}</Text>
+    </View>
+  );
+}
+
+mount(App);
+"##;
+
+/// `nsh/base`'s `Tab` in `Tabs`: the tab list role on the list, the tab
+/// role and its selected state on each tab alone, a press reported with
+/// `onPress` (the selected tab's too) while the app owns which tab is
+/// selected, a disabled tab reporting nothing, and the app's content
+/// inside following the tab with `group-selected:`.
+#[test]
+fn a_base_tab_reports_presses_and_its_list_holds_no_value() {
+    use nsh_core::{AccessibilityRole, ViewProps};
+    let (engine, rx) = start(BASE_TABS);
+    let first = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first frame");
+    assert!(shows(&first, "Presses: "));
+    let view_props = |batch: &MountBatch, view| {
+        batch.items.iter().rev().find_map(|i| match i {
+            MountItem::ViewProps { id, props } if *id == view => Some(props.clone()),
+            _ => None,
+        })
+    };
+    let root = |test_id: &str| {
+        first
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::ViewProps { id, props } if props.test_id.as_deref() == Some(test_id) => {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect(test_id)
+    };
+    // The first view inside `parent`: the app's marker.
+    let marker = |parent: u32| {
+        let views: Vec<u32> = first
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::Create {
+                    id,
+                    kind: nsh_core::ViewKind::View,
+                } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        first
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Insert {
+                    parent: p, child, ..
+                } if *p == parent && views.contains(child) => Some(*child),
+                _ => None,
+            })
+            .expect("the marker")
+    };
+    let style = |batches: &[MountBatch], view| {
+        batches
+            .iter()
+            .rev()
+            .flat_map(|b| b.items.iter().rev())
+            .find_map(|i| match i {
+                MountItem::ViewStyle { id, style } if *id == view => Some(style.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    let state = |props: &ViewProps| props.accessibility.state;
+    let (sections, a, b, c) = (root("sections"), root("a"), root("b"), root("c"));
+    let (marker_a, marker_b) = (marker(a), marker(b));
+    let initial = std::slice::from_ref(&first);
+
+    // The list: a tab list for screen readers, laid out by the app.
+    let list = view_props(&first, sections).unwrap();
+    assert_eq!(list.accessibility.role, AccessibilityRole::Tablist);
+    assert_eq!(list.accessibility.label, None);
+
+    // The selected tab: selected for screen readers, its `selectedStyle`,
+    // and the app's marker `group-selected:`.
+    let props = view_props(&first, a).unwrap();
+    assert_eq!(props.accessibility.role, AccessibilityRole::Tab);
+    assert_eq!(props.accessibility.label.as_deref(), Some("Overview"));
+    assert!(state(&props).selected);
+    assert_eq!(state(&props).checked, None);
+    assert_eq!(style(initial, a).background_color.0, 0x0000_ffff);
+    assert_eq!(style(initial, marker_a).background_color.0, 0x00ff_00ff);
+    let props = view_props(&first, b).unwrap();
+    assert_eq!(props.accessibility.role, AccessibilityRole::Tab);
+    assert!(!state(&props).selected);
+    assert_eq!(style(initial, b).background_color.0, 0);
+    assert_eq!(style(initial, marker_b).background_color.0, 0);
+    // The marker is a part of the tab, no second element.
+    assert!(view_props(&first, marker_a).is_none());
+
+    // A press reports `onPress`; the app selects the tab and deselects the
+    // other, and the styles follow.
+    engine
+        .control()
+        .dispatch_event(b, EventKind::Press, EventPayload::None);
+    let after = until(&rx, |batch| shows(batch, "Presses: b"));
+    let now = |view| after.iter().rev().find_map(|batch| view_props(batch, view));
+    assert!(state(&now(b).unwrap()).selected);
+    assert!(!state(&now(a).unwrap()).selected);
+    assert_eq!(style(&after, b).background_color.0, 0x0000_ffff);
+    assert_eq!(style(&after, marker_b).background_color.0, 0x00ff_00ff);
+    assert_eq!(style(&after, a).background_color.0, 0);
+    assert_eq!(style(&after, marker_a).background_color.0, 0);
+
+    // The selected tab reports its presses too (the app may scroll its
+    // content to the top).
+    engine
+        .control()
+        .dispatch_event(b, EventKind::Press, EventPayload::None);
+    let after = until(&rx, |batch| shows(batch, "Presses: b,b"));
+    assert!(after.iter().any(|batch| shows(batch, "Presses: b,b")));
+
+    // Disabled: no presses, dimmed for screen readers.
+    let disabled = view_props(&first, c).unwrap();
+    assert!(state(&disabled).disabled);
+    assert!(!state(&disabled).selected);
+    assert!(!first.items.iter().any(|i| matches!(
+        i,
+        MountItem::Events { id, events } if *id == c && events.contains(EventKind::Press)
+    )));
+    assert_eq!(style(initial, c).opacity, 0.5);
+}
+
+const BASE_COLLAPSIBLE: &str = r##"import { mount, signal, Text, View } from "nsh";
+import { Collapsible } from "nsh/base";
+
+function App() {
+  const open = signal(false);
+  const count = signal(0);
+  return (
+    <View>
+      <Collapsible
+        testID="region"
+        open={open()}
+        class="gap-[4px]"
+        content={<Text>{`Details ${count()}`}</Text>}
+      >
+        <View
+          testID="trigger"
+          role="button"
+          accessibilityState={{ expanded: open() }}
+          onPress={() => open.set(!open())}
+        >
+          <Text>Summary</Text>
+        </View>
+      </Collapsible>
+      <View testID="bump" onPress={() => count.set(count() + 1)} />
+    </View>
+  );
+}
+
+mount(App);
+"##;
+
+/// `nsh/base`'s `Collapsible`: its children always, its `content` after
+/// them only while the app's `open` holds, made once and kept, so what is in
+/// it keeps its state and follows the app while collapsed; the trigger is
+/// the app's, with the expanded state it gives screen readers.
+#[test]
+fn a_base_collapsible_places_its_content_while_open() {
+    let (engine, rx) = start(BASE_COLLAPSIBLE);
+    let first = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first frame");
+    assert!(shows(&first, "Summary"));
+    assert!(
+        !first
+            .items
+            .iter()
+            .any(|i| matches!(i, MountItem::Text { text, .. } if text.text.starts_with("Details"))),
+        "collapsed: no content"
+    );
+    let by_test_id = |test_id: &str| {
+        first
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::ViewProps { id, props } if props.test_id.as_deref() == Some(test_id) => {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect(test_id)
+    };
+    let (region, trigger, bump) = (
+        by_test_id("region"),
+        by_test_id("trigger"),
+        by_test_id("bump"),
+    );
+    let expanded = |batches: &[MountBatch]| {
+        batches
+            .iter()
+            .rev()
+            .flat_map(|b| b.items.iter().rev())
+            .find_map(|i| match i {
+                MountItem::ViewProps { id, props } if *id == trigger => {
+                    Some(props.accessibility.state.expanded)
+                }
+                _ => None,
+            })
+            .flatten()
+    };
+    assert_eq!(expanded(std::slice::from_ref(&first)), Some(false));
+    // The region itself is no element of its own for screen readers: the
+    // trigger is.
+    let region_props = first
+        .items
+        .iter()
+        .find_map(|i| match i {
+            MountItem::ViewProps { id, props } if *id == region => Some(props.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        region_props.accessibility.role,
+        nsh_core::AccessibilityRole::None
+    );
+    let press = |view| {
+        engine
+            .control()
+            .dispatch_event(view, EventKind::Press, EventPayload::None)
+    };
+
+    // Open: the content after the children, in the region.
+    press(trigger);
+    let opened = until(&rx, |b| shows(b, "Details 0"));
+    let text = opened
+        .iter()
+        .find_map(|b| text_ids(b, "Details 0"))
+        .expect("the content shows");
+    assert_eq!(expanded(&opened), Some(true));
+    let parent_of = |batches: &[MountBatch], child: u32| {
+        batches
+            .iter()
+            .flat_map(|b| b.items.iter())
+            .find_map(|i| match i {
+                MountItem::Insert {
+                    parent, child: c, ..
+                } if *c == child => Some(*parent),
+                _ => None,
+            })
+    };
+    // The text is in the slot's holder, the holder in the region.
+    let holder = parent_of(&opened, text).expect("the holder");
+    assert_eq!(parent_of(&opened, holder), Some(region));
+
+    // Collapse: the content leaves the tree and is kept.
+    press(trigger);
+    let closed = until(&rx, |b| {
+        b.items
+            .iter()
+            .any(|i| matches!(i, MountItem::Remove { id } if *id == holder))
+    });
+    assert_eq!(expanded(&closed), Some(false));
+    assert!(
+        !closed
+            .iter()
+            .flat_map(|b| b.items.iter())
+            .any(|i| matches!(i, MountItem::Delete { id } if *id == holder || *id == text)),
+        "kept, not released"
+    );
+
+    // While collapsed, it follows the app; open again, it is back as it is.
+    press(bump);
+    press(trigger);
+    let reopened = until(&rx, |b| {
+        b.items.iter().any(
+            |i| matches!(i, MountItem::Insert { parent, child, .. } if *parent == region && *child == holder),
+        )
+    });
+    assert_eq!(expanded(&reopened), Some(true));
+    let all: Vec<&MountBatch> = closed.iter().chain(reopened.iter()).collect();
+    assert!(
+        all.iter().any(|b| shows(b, "Details 1")),
+        "the content followed the app"
+    );
+}
+
+const BASE_PROGRESS: &str = r##"import { mount, signal, Text, View } from "nsh";
+import { Progress } from "nsh/base";
+
+function App() {
+  const value = signal(40);
+  const loading = signal(false);
+  return (
+    <View>
+      <Progress
+        testID="download"
+        value={value()}
+        indeterminate={loading()}
+        accessibilityLabel="Downloading"
+        class="w-[200px]"
+        trackClass="h-[4px]"
+        indicatorClass={loading() ? "h-full w-[50px]" : "h-full"}
+        indicatorStyle={{ backgroundColor: "#00ff00" }}
+      >
+        <Text>{`${value()}%`}</Text>
+      </Progress>
+      <View testID="more" onPress={() => value.set(value() + 80)} />
+      <View testID="loading" onPress={() => loading.set(!loading())} />
+    </View>
+  );
+}
+
+mount(App);
+"##;
+
+/// `nsh/base`'s `Progress`: the progress bar role and its range for
+/// screen readers on its root alone, the value the app owns (clamped to
+/// 0 to 100) as the indicator's share of the track and as the value
+/// screen readers say, and no value while indeterminate, when the
+/// indicator's width is the app's.
+#[test]
+fn a_base_progress_shows_the_apps_value_in_its_indicator() {
+    use nsh_core::{AccessibilityRole, AccessibilityValue};
+    let (engine, rx) = start(BASE_PROGRESS);
+    let first = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first frame");
+    assert!(shows(&first, "40%"));
+    let by_test_id = |test_id: &str| {
+        first
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::ViewProps { id, props } if props.test_id.as_deref() == Some(test_id) => {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect(test_id)
+    };
+    let (root, more, loading) = (
+        by_test_id("download"),
+        by_test_id("more"),
+        by_test_id("loading"),
+    );
+    // The view inside `parent` (a part; the value is text).
+    let child = |parent: u32| {
+        let views: Vec<u32> = first
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::Create {
+                    id,
+                    kind: nsh_core::ViewKind::View,
+                } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        first
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Insert {
+                    parent: p, child, ..
+                } if *p == parent && views.contains(child) => Some(*child),
+                _ => None,
+            })
+            .expect("a part")
+    };
+    let (track, indicator) = (child(root), child(child(root)));
+    let value = |batches: &[MountBatch]| {
+        batches
+            .iter()
+            .rev()
+            .flat_map(|b| b.items.iter().rev())
+            .find_map(|i| match i {
+                MountItem::ViewProps { id, props } if *id == root => {
+                    Some(props.accessibility.value.clone())
+                }
+                _ => None,
+            })
+            .flatten()
+    };
+    let range = |now| AccessibilityValue {
+        min: Some(0.0),
+        max: Some(100.0),
+        now,
+        text: None,
+    };
+    let width = |batches: &[MountBatch]| frame_of(batches, indicator).map(|f| f.size.width.0);
+
+    // One element for screen readers, the progress bar with its range and
+    // value; its parts are none.
+    let props = first
+        .items
+        .iter()
+        .find_map(|i| match i {
+            MountItem::ViewProps { id, props } if *id == root => Some(props.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(props.accessibility.role, AccessibilityRole::Progressbar);
+    assert_eq!(props.accessibility.accessible, Some(true));
+    assert_eq!(props.accessibility.label.as_deref(), Some("Downloading"));
+    let first = std::slice::from_ref(&first);
+    assert_eq!(value(first), Some(range(Some(40.0))));
+    assert!(first.iter().all(|b| !b.items.iter().any(
+        |i| matches!(i, MountItem::ViewProps { id, .. } if *id == track || *id == indicator)
+    )));
+    // The indicator is the value's share of the track, in the app's look.
+    assert_eq!(width(first), Some(80.0));
+    assert_eq!(
+        first
+            .iter()
+            .flat_map(|b| b.items.iter())
+            .find_map(|i| match i {
+                MountItem::ViewStyle { id, style } if *id == indicator => {
+                    Some(style.background_color.0)
+                }
+                _ => None,
+            }),
+        Some(0x00ff_00ff)
+    );
+
+    let press = |view| {
+        engine
+            .control()
+            .dispatch_event(view, EventKind::Press, EventPayload::None)
+    };
+    // Past 100: held to the range.
+    press(more);
+    let after = until(&rx, |b| shows(b, "120%"));
+    assert_eq!(value(&after), Some(range(Some(100.0))));
+    assert_eq!(width(&after), Some(200.0));
+
+    // Indeterminate: the range without a value, the app's width.
+    press(loading);
+    let after = until(&rx, |b| {
+        frame_of(std::slice::from_ref(b), indicator).is_some()
+    });
+    assert_eq!(value(&after), Some(range(None)));
+    assert_eq!(width(&after), Some(50.0));
 }

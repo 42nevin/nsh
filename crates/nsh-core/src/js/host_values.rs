@@ -2,15 +2,15 @@
 //! descriptions, list layouts) and the props whose whole variant is
 //! decoded by hand (`#[prop(with = …)]`): the shapes JS sends them in.
 
-use std::sync::Arc;
-
-use super::host::{HostCx, HostInput, HostValue, field};
+use super::host::{HostCx, HostInput, HostList, HostValue, field};
 use crate::{
     AccessibilityProp, AccessibilityRole, AccessibilityState, AutoFill, CellSlot, EdgeInsets,
-    ImageSource, KeyboardTaps, ListContentStyle, ModalProp, Prop, ScrollProp, StatusBarSetting,
-    StatusBarStyle, Viewability, WebSource,
-    geometry::{Points, point, size},
+    ImageScales, ImageSource, KeyboardTaps, ListContentStyle, ModalProp, Prop, ScrollProp,
+    StatusBarSetting, StatusBarStyle, Viewability,
+    geometry::{Bounds, Points, point, size},
     mount::ModalConfig,
+    ops::OverlayProp,
+    overlay::{OverlayAnchor, TooltipContent},
     props::{AccessibilityActionDef, AccessibilityValue, Checked, PanActivation, Ripple},
     ui::TsTypes,
 };
@@ -27,49 +27,48 @@ fn points<I: HostInput>(input: &I, key: &str) -> Option<Points> {
     number(input, key).map(Points)
 }
 
-/// `"https://…"` or a bundled asset `{ uri, width, height }`.
+/// The `scales` of an image asset (its first [`crate::ops::SCALES_READ`]
+/// entries); values that are not [`crate::IMAGE_SCALES`] are left out.
+fn scales<I: HostInput>(input: &I) -> ImageScales {
+    let Some(list) = input.field("scales").and_then(|s| s.as_list()) else {
+        return ImageScales::NONE;
+    };
+    (0..list.len().min(crate::ops::SCALES_READ))
+        .filter_map(|i| list.item(i)?.as_number())
+        .map(|n| n as f32)
+        .collect()
+}
+
+/// `"https://…"` or a bundled asset `{ url, size: { width, height }, scales }`.
 impl HostValue for ImageSource {
     fn decode<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Self> {
-        if let Some(uri) = input.as_string() {
-            return (!uri.is_empty()).then(|| ImageSource {
-                uri: uri.into(),
+        if let Some(url) = input.as_string() {
+            return (!url.is_empty()).then(|| ImageSource {
+                uri: url.into(),
                 size: None,
+                scales: ImageScales::NONE,
+                data: None,
             });
         }
-        let uri = input.field("uri")?.as_string()?;
-        let size = match (number(input, "width"), number(input, "height")) {
-            (Some(w), Some(h)) => Some(size(Points(w), Points(h))),
+        let url = input.field("url")?.as_string()?;
+        let extent = input.field("size");
+        let size = match extent
+            .as_ref()
+            .map(|e| (number(e, "width"), number(e, "height")))
+        {
+            Some((Some(w), Some(h))) => Some(size(Points(w), Points(h))),
             _ => None,
         };
         Some(ImageSource {
-            uri: uri.into(),
+            uri: url.into(),
             size,
+            scales: scales(input),
+            data: None,
         })
     }
 
     fn ts_type(_: &mut TsTypes) -> String {
-        "string | ImageAsset | { uri: string }".into()
-    }
-}
-
-/// `"https://…"`, `{ uri }` or `{ html, baseUrl }`.
-impl HostValue for WebSource {
-    fn decode<I: HostInput>(input: &I, cx: &mut HostCx) -> Option<Self> {
-        if let Some(uri) = input.as_string() {
-            return Some(WebSource::Uri(uri.into()));
-        }
-        if let Some(html) = input.field("html").and_then(|h| h.as_string()) {
-            return Some(WebSource::Html {
-                html: html.into(),
-                base_url: field::<Arc<str>, _>(input, "baseUrl", cx),
-            });
-        }
-        let uri = input.field("uri")?.as_string()?;
-        Some(WebSource::Uri(uri.into()))
-    }
-
-    fn ts_type(_: &mut TsTypes) -> String {
-        "string | { uri: string } | { html: string; baseUrl?: string }".into()
+        "string | ImageAsset".into()
     }
 }
 
@@ -415,6 +414,38 @@ pub(crate) fn pinch<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
     ))
 }
 
+/// `anchor`: a host element (a ref), `{ x, y }`, `{ origin, size }`, or
+/// nothing.
+pub(crate) fn overlay_anchor<I: HostInput>(input: &I, _: &mut HostCx) -> Option<OverlayProp> {
+    let bounds = || {
+        let origin = input.field("origin")?;
+        let extent = input.field("size")?;
+        Some(Bounds {
+            origin: point(points(&origin, "x")?, points(&origin, "y")?),
+            size: size(
+                points(&extent, "width")?.max(Points::ZERO),
+                points(&extent, "height")?.max(Points::ZERO),
+            ),
+        })
+    };
+    let anchor = match (input.node(), points(input, "x"), points(input, "y")) {
+        (Some(id), ..) => OverlayAnchor::Node(id),
+        (None, Some(x), Some(y)) => OverlayAnchor::Point(point(x, y)),
+        _ => bounds().map_or(OverlayAnchor::None, OverlayAnchor::Bounds),
+    };
+    Some(OverlayProp::Anchor(anchor))
+}
+
+/// `tooltip`: a string, an element (a node JS made), or nothing.
+pub(crate) fn tooltip<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
+    let content = match (input.node(), input.as_string()) {
+        (Some(id), _) => TooltipContent::Node(id),
+        (None, Some(text)) if !text.is_empty() => TooltipContent::Text(text.into()),
+        _ => TooltipContent::None,
+    };
+    Some(Prop::Tooltip(content))
+}
+
 /// `rotation`: `{ angle }`.
 pub(crate) fn rotation<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
     Some(Prop::RotationValue(
@@ -425,6 +456,16 @@ pub(crate) fn rotation<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> 
 /// `scrollValue`: an animated value.
 pub(crate) fn scroll_value<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
     Some(Prop::ScrollValue(input.animated_node()))
+}
+
+/// `stickyHeaderOffset`: a number, or an animated value.
+pub(crate) fn sticky_offset<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
+    match input.as_number() {
+        Some(n) => Some(Prop::StickyOffset(Points(n as f32))),
+        None => input
+            .animated_node()
+            .map(|node| Prop::StickyOffsetNode(Some(node))),
+    }
 }
 
 /// `hitSlop`: one number for every edge, or the edges.

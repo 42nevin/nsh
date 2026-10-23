@@ -38,9 +38,9 @@
 //! moves keyboard focus when the view can take it, is the mounter's.)
 //!
 //! The clipboard is the display's (`GdkClipboard`, the "CLIPBOARD"
-//! selection): `Clipboard.setString` sets its text, reads are answered as
+//! selection): `Clipboard.writeText` sets its text, reads are answered as
 //! [`EventKind::Clipboard`] once GDK has the text (reading another app's
-//! clipboard is asynchronous); `hasString` only looks at the formats on
+//! clipboard is asynchronous); `hasText` only looks at the formats on
 //! offer.
 
 use std::{
@@ -144,6 +144,10 @@ enum OverlayKind {
         sized: gtk::Widget,
         max: f32,
         gutter: f32,
+        /// What closing it without a button does: `None` when it cannot
+        /// be closed so.
+        #[cfg_attr(not(feature = "dev"), allow(dead_code))]
+        dismiss: Option<Rc<DialogAnswer>>,
     },
 }
 
@@ -298,7 +302,7 @@ fn update(surface: &Surface, appearance: Appearance) {
     surface.set_environment(env);
 }
 
-/// The surface's environment changed (from the system or a script): GTK's
+/// The surface's environment changed (from the system or a test): GTK's
 /// theme and the root's background follow its scheme.
 pub(crate) fn environment_applied(surface: &Surface) {
     let dark = surface.environment.get().color_scheme == ColorScheme::Dark;
@@ -497,6 +501,8 @@ pub(crate) fn command(surface: &Rc<Surface>, _id: NodeId, command: &Command) {
             read_clipboard_image(surface, *id, *has_only)
         }
         Command::ReadClipboardFiles { id } => read_clipboard_files(surface, *id),
+        Command::PickImages { id, request } => pick_images(surface, *id, *request),
+        Command::OpenUrl { id, url } => open_url(surface, *id, url),
         Command::Back => crate::navigation::default_back(surface),
         Command::ExitApp => {
             // Closing destroys the window, whose handler stops the surface:
@@ -560,7 +566,9 @@ pub(crate) fn clear(surface: &Surface) {
 
 fn place(overlay: &Overlay, width: f32, height: f32) {
     match &overlay.kind {
-        OverlayKind::Dialog { sized, max, gutter } => {
+        OverlayKind::Dialog {
+            sized, max, gutter, ..
+        } => {
             sized.set_width_request((width - gutter).min(*max).max(0.0) as i32);
             overlay.root.set_native(
                 &overlay.widget,
@@ -940,11 +948,66 @@ fn show_dialog(surface: &Rc<Surface>, dialog: &Dialog) {
     add_overlay(
         surface,
         backdrop.upcast(),
-        OverlayKind::Dialog { sized, max, gutter },
+        OverlayKind::Dialog {
+            sized,
+            max,
+            gutter,
+            dismiss: cancelable.then(|| answer.clone()),
+        },
     );
     if let Some(focus) = focus {
         focus.grab_focus();
     }
+}
+
+/// Answers the newest dialog on `surface` as a user does: presses its
+/// button titled `button`, or closes it without one (`None`; only a dialog
+/// that can be closed so).
+#[cfg(feature = "dev")]
+pub(crate) fn answer_dialog(surface: &Surface, button: Option<&str>) -> Result<(), String> {
+    let (widget, dismiss) = SYSTEM
+        .with(|s| {
+            s.borrow()
+                .overlays
+                .iter()
+                .rev()
+                .find_map(|o| match &o.kind {
+                    OverlayKind::Dialog { dismiss, .. }
+                        if o.root == surface.root && o.widget.can_target() =>
+                    {
+                        Some((o.widget.clone(), dismiss.clone()))
+                    }
+                    _ => None,
+                })
+        })
+        .ok_or("no dialog is shown")?;
+    let Some(text) = button else {
+        let dismiss = dismiss.ok_or("the dialog can only be answered with a button")?;
+        dismiss.answer(-1);
+        return Ok(());
+    };
+    let found = descendants(&widget).find_map(|w| {
+        let button = w.downcast::<gtk::Button>().ok()?;
+        (button.label().as_deref() == Some(text)).then_some(button)
+    });
+    let button = found.ok_or_else(|| format!("the dialog has no button {text:?}"))?;
+    button.emit_clicked();
+    Ok(())
+}
+
+/// `widget` and every widget inside it, depth first.
+#[cfg(feature = "dev")]
+fn descendants(widget: &gtk::Widget) -> impl Iterator<Item = gtk::Widget> {
+    let mut stack = vec![widget.clone()];
+    std::iter::from_fn(move || {
+        let w = stack.pop()?;
+        let mut child = w.last_child();
+        while let Some(c) = child {
+            child = c.prev_sibling();
+            stack.push(c);
+        }
+        Some(w)
+    })
 }
 
 /// Shows `text` at the bottom of the surface for a while (one at a time:
@@ -979,8 +1042,32 @@ fn show_toast(surface: &Rc<Surface>, text: &str, long: bool) {
     glib::timeout_add_local_once(duration, move || remove_overlay(&widget));
 }
 
-/// `Clipboard.getString` / `hasString`: answers read `id` with whether the
+/// `Clipboard.readText` / `hasText`: answers read `id` with whether the
 /// clipboard holds text and, unless `has_only`, the text.
+/// Opens `url` with the app the desktop has for its scheme
+/// (`GtkUriLauncher`: the desktop portal in a sandbox, `GAppInfo`
+/// otherwise), parented to the surface's window, and reports whether it
+/// did ([`EventKind::OpenUrl`]).
+fn open_url(surface: &Rc<Surface>, id: u32, url: &str) {
+    let window = surface.root.root().and_downcast::<gtk::Window>();
+    let surface = Rc::downgrade(surface);
+    gtk::UriLauncher::new(url).launch(window.as_ref(), gio::Cancellable::NONE, move |result| {
+        if let Err(err) = &result {
+            log::debug!("linux: opening a URL failed: {err}");
+        }
+        if let Some(surface) = surface.upgrade() {
+            surface.event(
+                ROOT_ID,
+                EventKind::OpenUrl,
+                EventPayload::Map(vec![
+                    ("id", PayloadValue::Number(id as f64)),
+                    ("opened", PayloadValue::Bool(result.is_ok())),
+                ]),
+            );
+        }
+    });
+}
+
 fn read_clipboard(surface: &Rc<Surface>, id: u32, has_only: bool) {
     let answer = move |surface: &Surface, has: bool, text: Option<String>| {
         let mut fields = vec![
@@ -1019,11 +1106,11 @@ fn read_clipboard(surface: &Rc<Surface>, id: u32, has_only: bool) {
     });
 }
 
-/// `Clipboard.setImage`: the image of a `data:` URI as a GDK texture,
+/// `Clipboard.writeImage`: the image of a `data:` URI as a GDK texture,
 /// which GDK offers in the formats it encodes (PNG, TIFF, ...).
 fn set_clipboard_image(uri: &str) {
     let Some((_, bytes)) = clipboard::decode_data_uri(uri) else {
-        log::warn!("Clipboard.setImage: not a base64 data: URI");
+        log::warn!("Clipboard.writeImage: not a base64 data: URI");
         return;
     };
     match gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)) {
@@ -1032,11 +1119,11 @@ fn set_clipboard_image(uri: &str) {
                 display.clipboard().set_texture(&texture);
             }
         }
-        Err(err) => log::warn!("Clipboard.setImage: {err}"),
+        Err(err) => log::warn!("Clipboard.writeImage: {err}"),
     }
 }
 
-/// `Clipboard.getImage` / `hasImage`: the clipboard's image as a GDK
+/// `Clipboard.readImage` / `hasImage`: the clipboard's image as a GDK
 /// texture (whatever format the app offering it put), answered as PNG.
 fn read_clipboard_image(surface: &Rc<Surface>, id: u32, has_only: bool) {
     let answer = move |surface: &Surface, payload| {
@@ -1069,7 +1156,97 @@ fn read_clipboard_image(surface: &Rc<Surface>, id: u32, has_only: bool) {
     });
 }
 
-/// `Clipboard.getFiles`: the `file:` URIs of a file list on the clipboard
+/// What `board` holds, read as the user pastes into an input (`onPaste`):
+/// its text, its image (as PNG) and its local files' `file:` URIs. GTK
+/// reads a clipboard asynchronously: `done` gets it once read.
+pub(crate) fn read_pasted(
+    board: gdk::Clipboard,
+    done: impl FnOnce(nsh_core::PasteEvent) + 'static,
+) {
+    let types = board.formats().union_deserialize_types();
+    let (has_image, has_files) = (
+        types.contains_type(gdk::Texture::static_type()),
+        types.contains_type(gdk::FileList::static_type()),
+    );
+    glib::spawn_future_local(async move {
+        let text = board.read_text_future().await.ok().flatten();
+        let mut paste = nsh_core::PasteEvent::new(text.map(|t| t.to_string()).unwrap_or_default());
+        if has_files
+            && let Ok(value) = board
+                .read_value_future(gdk::FileList::static_type(), glib::Priority::DEFAULT)
+                .await
+            && let Ok(list) = value.get::<gdk::FileList>()
+        {
+            paste.uris = list
+                .files()
+                .into_iter()
+                .filter(|file| file.path().is_some_and(|path| path.is_absolute()))
+                .map(|file| file.uri().to_string())
+                .collect();
+        }
+        // A file list's icon is no image of the user's.
+        if has_image
+            && paste.uris.is_empty()
+            && let Ok(Some(texture)) = board.read_texture_future().await
+        {
+            paste.files.push(nsh_core::PastedFile::image(
+                texture.save_to_png_bytes().to_vec(),
+            ));
+        }
+        done(paste);
+    });
+}
+
+/// `Picker.pickImages`: GTK's file dialog (the portal's where there is
+/// one), filtered to the image formats the request takes. The files are
+/// read as they are, on a thread of their own (no scaling or conversion
+/// here: `nsh_core::picker::read_files`).
+fn pick_images(surface: &Rc<Surface>, id: u32, request: nsh_core::picker::PickRequest) {
+    let mut control = None;
+    surface.control(|c| control = Some(c.clone()));
+    let Some(control) = control else { return };
+    let filter = gtk::FileFilter::new();
+    for extension in nsh_core::picker::dialog_extensions(&request) {
+        filter.add_suffix(extension);
+    }
+    let filters = gio::ListStore::new::<gtk::FileFilter>();
+    filters.append(&filter);
+    let dialog = gtk::FileDialog::builder().modal(true).build();
+    dialog.set_filters(Some(&filters));
+    dialog.set_default_filter(Some(&filter));
+    let window = surface.root.root().and_downcast::<gtk::Window>();
+    let read = move |paths: Vec<std::path::PathBuf>| {
+        std::thread::spawn(move || {
+            let files = nsh_core::picker::read_files(&paths, &request);
+            control.dispatch_event(ROOT_ID, EventKind::Pick, EventPayload::Picked { id, files });
+        });
+    };
+    if request.multiple() {
+        dialog.open_multiple(window.as_ref(), gio::Cancellable::NONE, move |result| {
+            let paths = result
+                .map(|list| {
+                    (0..list.n_items())
+                        .filter_map(|i| list.item(i).and_downcast::<gio::File>())
+                        .filter_map(|file| file.path())
+                        .collect()
+                })
+                .unwrap_or_default();
+            read(paths);
+        });
+    } else {
+        dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
+            read(
+                result
+                    .ok()
+                    .and_then(|file| file.path())
+                    .into_iter()
+                    .collect(),
+            );
+        });
+    }
+}
+
+/// `Clipboard.readFiles`: the `file:` URIs of a file list on the clipboard
 /// (files copied in a file manager).
 fn read_clipboard_files(surface: &Rc<Surface>, id: u32) {
     let answer = move |surface: &Surface, files: &[String]| {
@@ -1126,8 +1303,9 @@ pub(crate) fn set_appearance(surface: &Rc<Surface>, appearance: nsh_core::platfo
     }
 }
 
-/// Scripts: the system's color scheme is now dark (or light), as the
+/// Tests: the system's color scheme is now dark (or light), as the
 /// portal would say.
+#[cfg(feature = "dev")]
 pub(crate) fn simulate_system_scheme(dark: bool) {
     SYSTEM.with(|s| s.borrow_mut().portal_dark = Some(dark));
     system_changed();

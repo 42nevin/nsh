@@ -1,14 +1,14 @@
-import { batch, cleanup, computed, effect, Input, Scroll, signal, Text, View, type ViewStyle, type YNode } from "nsh";
+import { batch, cleanup, computed, effect, Input, List, Scroll, signal, Text, View, type ViewStyle, type YNode } from "nsh";
 import { createAnimatedValue, LayoutAnimation } from "nsh/animated";
 import { Clipboard } from "nsh/clipboard";
-import { Platform } from "nsh/device";
-import { keyboardFrame, KeyboardAvoidingView, safeAreaInsets } from "nsh/base";
-import { List } from "nsh/list";
+import { platform } from "nsh/device";
+import { Picker } from "nsh/picker";
+import { keyboardFrame, KeyboardAvoidingView, safeAreaInsets, SelectionArea } from "nsh/base";
 import { Icon, type IconName } from "../icons";
 import { alpha, Appear, Badge, colors, desktop, finish, IconTile, motion, Press, radius, RoundButton, Segmented, toneTint } from "../ui";
 import { localReply, type Provider } from "./chat/local";
 import { Glyph } from "./chat/glyphs";
-import { type Block, Markdown, parse } from "./chat/markdown";
+import { Markdown } from "./chat/markdown";
 import { ActionButton, Avatar, Caret, DateSeparator, ErrorRow, FileChip, Photo, Spinner, ToolCard } from "./chat/parts";
 import { type FileRef, freeform, history, type Model, type Msg, photo, retried, type Scenario, scenarios, type Status, type Tool } from "./chat/scripts";
 
@@ -51,7 +51,7 @@ export function Chat() {
 
   const messages = signal<Msg[]>([]);
   const model = signal<Model>("Swift");
-  const native = Platform.isDesktop && Platform.OS !== "web";
+  const native = platform.idiom === "desktop" && platform.os !== "web";
   const provider = signal<Provider>("Codex");
   let cancelLocal: (() => void) | undefined;
   const draft = signal("");
@@ -68,7 +68,7 @@ export function Chat() {
   const liveReason = signal("");
   const liveThinking = signal<{ start: number; seconds: number | null } | null>(null);
   const liveTools = signal<Tool[]>([]);
-  const liveBlocks = signal<Block[]>([]);
+  const liveMd = signal("");
   const now = signal(0);
 
   /** Whether the user is at the bottom (the list then follows the stream
@@ -103,7 +103,7 @@ export function Chat() {
       if (pendingText) {
         r.md += pendingText;
         pendingText = "";
-        liveBlocks.set(parse(r.md, liveBlocks(), true));
+        liveMd.set(r.md);
       }
     });
   };
@@ -150,7 +150,6 @@ export function Chat() {
       reasoning: r.reason ? { text: r.reason, seconds, open: false } : undefined,
       tools: liveTools().map((t) => (t.state === "done" ? t : ({ ...t, state: "cancelled" } as Tool))),
       md: r.md,
-      blocks: parse(r.md),
       status,
       error,
     };
@@ -169,13 +168,13 @@ export function Chat() {
   const reply = async (s: Scenario, at?: string) => {
     const r: Run = { id: nextId(), model: s.model, script: native ? `local:${provider()}` : s.id, cancelled: false, md: "", reason: "", thinkStart: performance.now(), thinkSeconds: null };
     run = r;
-    const placeholder: Assistant = { kind: "assistant", id: r.id, model: s.model, script: r.script, tools: [], md: "", blocks: [], status: "done" };
+    const placeholder: Assistant = { kind: "assistant", id: r.id, model: s.model, script: r.script, tools: [], md: "", status: "done" };
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     batch(() => {
       liveReason.set("");
       liveThinking.set(null);
       liveTools.set([]);
-      liveBlocks.set([]);
+      liveMd.set("");
       liveId.set(r.id);
       messages.set(at ? messages().map((m) => (m.id === at ? placeholder : m)) : [...messages(), placeholder]);
     });
@@ -290,6 +289,15 @@ export function Chat() {
     } else void submit(freeform(text, model()), text);
   };
 
+  /** Attaches a photo from the system's picker: its bytes stay native, shown through a blob URL. */
+  const choosePhoto = async () => {
+    const [picked] = await Picker.pickImages({ maxDimension: 2048, quality: 0.85 });
+    if (!picked) return;
+    const { file } = picked;
+    const size = file.size < 1024 * 1024 ? `${Math.max(1, Math.round(file.size / 1024))} KB` : `${(file.size / 1024 / 1024).toFixed(1)} MB`;
+    attachment.set({ image: URL.createObjectURL(file), file: { name: file.name, size } });
+  };
+
   const play = (id: string) => {
     if (id === "history") {
       menu.set(false);
@@ -325,7 +333,7 @@ export function Chat() {
     else void reply(retried, m.id);
   };
   const copy = (key: string, text: string) => {
-    Clipboard.setString(text);
+    Clipboard.writeText(text);
     copied.set(key);
     setTimeout(() => copied() === key && copied.set(null), 1600);
   };
@@ -358,8 +366,8 @@ export function Chat() {
             borderRadius: 20,
             borderBottomRightRadius: 6,
             borderCurve: "continuous",
+            // A message is read, not pressed: flat, a hairline around it.
             backgroundColor: colors.raised,
-            ...finish.raised,
             borderWidth: 1,
             borderColor: colors.border,
           }}
@@ -388,8 +396,8 @@ export function Chat() {
       return `Thought for ${m().reasoning?.seconds ?? 1} s`;
     };
     const tools = () => (live() ? liveTools() : m().tools);
-    const blocks = () => (live() ? liveBlocks() : m().blocks);
-    const waitingForWords = () => live() && !liveBlocks().length && !liveTools().length && !(liveThinking() && liveThinking()!.seconds === null);
+    const md = () => (live() ? liveMd() : m().md);
+    const waitingForWords = () => live() && !liveMd() && !liveTools().length && !(liveThinking() && liveThinking()!.seconds === null);
     return (
       <View style={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 4, gap: 12 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8, height: 26 }}>
@@ -444,7 +452,7 @@ export function Chat() {
             <Caret />
           </View>
         </If>
-        <Markdown blocks={blocks()} id={m().id} caret={live() ? Caret : undefined} copied={copied()} onCopy={(key, text) => copy(key, text)} />
+        <Markdown md={md()} id={m().id} streaming={live()} caret={live() ? <Caret /> : undefined} />
         <If when={!live() && m().status === "error"}>
           <ErrorRow message={m().error ?? "Something went wrong."} onRetry={() => retry(m())} />
         </If>
@@ -526,6 +534,7 @@ export function Chat() {
   const chips = [...scenarios.map((s) => ({ id: s.id, label: s.chip })), { id: "history", label: "Load a long conversation" }];
 
   const menuRows: { id: string; glyph: "clip" | "regenerate"; label: string }[] = [
+    { id: "photo", glyph: "clip", label: "Choose a photo" },
     { id: "attach", glyph: "clip", label: "Attach a photo and a file" },
     ...chips.map((c) => ({ id: c.id, glyph: "regenerate" as const, label: c.label })),
   ];
@@ -535,42 +544,45 @@ export function Chat() {
       <KeyboardAvoidingView style={{ flex: 1 }}>
         <View style={{ flex: 1 }}>
           <If when={messages().length} else={empty}>
-            <List
-              ref={list}
-              each={messages()}
-              keyExtractor={(m) => m.id}
-              estimatedItemSize={140}
-              initialScrollIndex={Math.max(0, messages().length - 1)}
-              style={{ flex: 1 }}
-              contentStyle={{ paddingTop: 8, paddingBottom: 16 }}
-              keyboardDismissMode="interactive"
-              maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 40 }}
-              scrollEventThrottle={100}
-              onScrollBeginDrag={() => (dragging = true)}
-              onScroll={(e) => {
-                if (dragging) following.set(e.y + e.height >= e.contentHeight - 40);
-              }}
-              onMomentumScrollEnd={() => (dragging = false)}
-              onScrollEnd={() => (dragging = false)}
-            >
-              {(item) => {
-                const kind = computed(() => item().kind);
-                return (
-                  <View style={wide ? column : undefined}>
-                    {(() => {
-                      switch (kind()) {
-                        case "date":
-                          return <DateSeparator label={(item() as Extract<Msg, { kind: "date" }>).label} />;
-                        case "user":
-                          return userRow(item as () => User);
-                        case "assistant":
-                          return assistantRow(item as () => Assistant);
-                      }
-                    })()}
-                  </View>
-                );
-              }}
-            </List>
+            {/* One selection across messages: in the List, over the rows that are mounted. */}
+            <SelectionArea style={{ flex: 1 }}>
+              <List
+                ref={list}
+                each={messages()}
+                keyExtractor={(m) => m.id}
+                estimatedItemSize={140}
+                initialScrollIndex={Math.max(0, messages().length - 1)}
+                style={{ flex: 1 }}
+                contentStyle={{ paddingTop: 8, paddingBottom: 16 }}
+                keyboardDismissMode="interactive"
+                maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 40 }}
+                scrollEventThrottle={100}
+                onScrollDragStart={() => (dragging = true)}
+                onScroll={(e) => {
+                  if (dragging) following.set(e.offset.y + e.size.height >= e.contentSize.height - 40);
+                }}
+                onMomentumEnd={() => (dragging = false)}
+                onScrollEnd={() => (dragging = false)}
+              >
+                {(item) => {
+                  const kind = computed(() => item().kind);
+                  return (
+                    <View style={wide ? column : undefined}>
+                      {(() => {
+                        switch (kind()) {
+                          case "date":
+                            return <DateSeparator label={(item() as Extract<Msg, { kind: "date" }>).label} />;
+                          case "user":
+                            return userRow(item as () => User);
+                          case "assistant":
+                            return assistantRow(item as () => Assistant);
+                        }
+                      })()}
+                    </View>
+                  );
+                }}
+              </List>
+            </SelectionArea>
           </If>
 
           {/* Jump to the latest message: shown while scrolled up. */}
@@ -675,7 +687,8 @@ export function Chat() {
                     <View
                       onPress={() => {
                         menu.set(false);
-                        if (row().id === "attach") attachment.set({ image: photo, file: { name: "trip-notes.pdf", size: "2.4 MB" } });
+                        if (row().id === "photo") void choosePhoto();
+                        else if (row().id === "attach") attachment.set({ image: photo, file: { name: "trip-notes.pdf", size: "2.4 MB" } });
                         else play(row().id);
                       }}
                       activeStyle={{ backgroundColor: alpha(colors.text, 0.06) }}
@@ -683,7 +696,7 @@ export function Chat() {
                       accessibilityLabel={row().label}
                       style={{ flexDirection: "row", alignItems: "center", gap: 12, height: 48, paddingHorizontal: 16 }}
                     >
-                      <Glyph name={row().glyph} size={16} tint={i() === 0 ? colors.accent : colors.muted} />
+                      <Glyph name={row().glyph} size={16} tint={i() < 2 ? colors.accent : colors.muted} />
                       <Text style={{ flex: 1, fontSize: 15, color: colors.text }}>{row().label}</Text>
                     </View>
                   )}
@@ -695,7 +708,7 @@ export function Chat() {
 
         {/* Suggestions while the conversation is empty. */}
         <If when={!messages().length}>
-          <Scroll horizontal showsIndicator={false} keyboardShouldPersistTaps="handled" style={{ flexGrow: 0 }}>
+          <Scroll horizontal scrollbar={false} keyboardShouldPersistTaps="handled" style={{ flexGrow: 0 }}>
             <View style={{ flexDirection: "row", gap: 8, paddingHorizontal: 16, paddingVertical: 8 }}>
               <Each of={chips}>
                 {(chip) => (
@@ -749,7 +762,7 @@ export function Chat() {
               multiline
               // Return sends on desktops, as in chat apps there (Shift+Return
               // adds a line); phones keep return for line breaks.
-              submitBehavior={Platform.isDesktop ? "submit" : "newline"}
+              submitBehavior={platform.idiom === "desktop" ? "submit" : "newline"}
               onSubmit={() => {
                 if (!streaming()) send();
               }}
@@ -846,7 +859,7 @@ export function Chat() {
               role="button"
               accessibilityLabel={chip().label}
               accessibilityState={{ selected: current() === chip().id }}
-              class={current() === chip().id ? "bg-paper-border dark:bg-graphite-raised" : "hover:bg-paper-card active:bg-paper-border dark:hover:bg-graphite-card dark:active:bg-graphite-raised"}
+              class={current() === chip().id ? "bg-accent" : "hover:bg-card active:bg-accent"}
               style={{ paddingHorizontal: 12, paddingVertical: 9, borderRadius: radius.control, gap: 2, cursor: "pointer" }}
             >
               <Text numberOfLines={1} style={{ fontSize: 14, fontWeight: current() === chip().id ? "600" : "400", color: colors.text }}>

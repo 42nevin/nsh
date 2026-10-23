@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
+use nsh_macros::PropEnum;
+
 use crate::{
     animation::{AnimationOp, AnimationProp},
     geometry::{Bounds, Points, Size},
     ops::{
         AutoCapitalize, Command, EventMask, ImageSource, KeyboardAppearance, KeyboardDismissMode,
-        KeyboardTaps, KeyboardType, ModalAnimation, ModalPresentation, NodeId, ResizeMode,
-        ReturnKeyType, ScreenAnimation, SnapAlignment, SubmitBehavior, WebSource,
+        KeyboardTaps, KeyboardType, ModalAnimation, ModalPresentation, NodeId, PasteBehavior,
+        ResizeMode, ReturnKeyType, ScreenAnimation, SnapAlignment, SubmitBehavior, WebSource,
     },
     props::{EdgeInsets, GestureValues, LayoutAnimation, ViewProps},
     style::{Color, TextAlign, ViewStyle},
@@ -59,6 +61,11 @@ pub enum ViewKind {
 pub struct WebProps {
     /// What it shows.
     pub source: WebSource,
+    /// The `src` prop, which [`Self::source`] loads unless `html` is set.
+    pub src: Option<Arc<str>>,
+    /// The `baseUrl` prop, which [`Self::source`] holds while `html` is
+    /// set.
+    pub base_url: Option<Arc<str>>,
     /// Script run after each page loads.
     pub injected_js: Option<Arc<str>>,
     /// Script run before each page's own scripts.
@@ -66,7 +73,7 @@ pub struct WebProps {
     /// User agent; the platform's when `None`.
     pub user_agent: Option<Arc<str>>,
     /// The page scrolls.
-    pub scroll_enabled: bool,
+    pub scrollable: bool,
     /// The page may run JavaScript.
     pub javascript_enabled: bool,
     /// Swipes go back and forward (iOS).
@@ -77,14 +84,37 @@ impl Default for WebProps {
     fn default() -> Self {
         Self {
             source: WebSource::None,
+            src: None,
+            base_url: None,
             injected_js: None,
             injected_js_before: None,
             user_agent: None,
-            scroll_enabled: true,
+            scrollable: true,
             javascript_enabled: true,
             back_forward_gestures: false,
         }
     }
+}
+
+/// What a video's sound does to the rest of the device's audio while it
+/// plays: whether it plays in silent mode, whether other apps' audio pauses,
+/// and whether the system treats it as speech. iOS sets the shared
+/// `AVAudioSession` while such a video plays and restores it after; Android
+/// marks the sound as speech and holds audio focus for `Playback`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PropEnum)]
+pub enum AudioSession {
+    /// The app's audio settings (the platform's for video unless the app, or
+    /// the app embedding NSH, set others): nothing is changed.
+    #[default]
+    Default,
+    /// Plays speech: audible in silent mode, other apps' audio pauses while
+    /// it plays (Apple's `playback` category, `spokenAudio` mode; Android's
+    /// speech content type with transient audio focus).
+    Playback,
+    /// Plays speech over other apps' audio, which keeps playing
+    /// (Apple's `playback` category with `mixWithOthers`; Android's speech
+    /// content type without audio focus).
+    MixWithOthers,
 }
 
 /// A video player.
@@ -92,6 +122,8 @@ impl Default for WebProps {
 pub struct VideoProps {
     /// The video's URL (or `asset:/` URI).
     pub source: Option<Arc<str>>,
+    /// What its sound does to the rest of the device's audio.
+    pub audio_session: AudioSession,
     /// Paused.
     pub paused: bool,
     /// Muted.
@@ -114,6 +146,7 @@ impl Default for VideoProps {
     fn default() -> Self {
         Self {
             source: None,
+            audio_session: AudioSession::default(),
             paused: false,
             muted: false,
             volume: 1.0,
@@ -165,7 +198,7 @@ pub struct ScrollBehavior {
     pub max_zoom: f32,
     /// `bouncesZoom`: pinching may go past the limits and springs back.
     pub bounces_zoom: bool,
-    /// `pinchGestureEnabled`: the user can pinch to zoom.
+    /// `zoomable`: the user can pinch to zoom.
     pub pinch: bool,
     /// `centerContent`: content smaller than the viewport is centered.
     pub center_content: bool,
@@ -279,15 +312,27 @@ fn nearest(points: &[f32], to: f32) -> Option<f32> {
         .min_by(|a, b| (a - to).abs().total_cmp(&(b - to).abs()))
 }
 
-/// A list cell that sticks to the start of the viewport.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// A list cell that sticks to the start of the viewport (or the list's
+/// sticky offset from it): at scroll offset `offset` (along the main axis)
+/// it shows `clamp(offset - start, 0, end - start)` past where it is laid
+/// out.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
 pub struct StickyCell {
     /// The cell.
     pub cell: NodeId,
-    /// Its position along the main axis (content coordinates).
+    /// The scroll offset from which it moves with the scroll: its position
+    /// in the content less the list's sticky offset.
     pub start: Points,
-    /// Where the next sticky cell pushes it out (may be infinite).
+    /// The scroll offset at which the next sticky cell pushes it out (may be
+    /// infinite).
     pub end: Points,
+    /// An animated value added to the scroll offset: it sticks that much
+    /// further from the viewport's start (below a header that moves), at
+    /// `clamp(offset + value - start, 0, end - start)`. The platforms read
+    /// it from the animation graph whenever they pin, and pin again on the
+    /// graph's frames.
+    pub offset: Option<crate::animation::NodeId>,
 }
 
 /// The header heights a platform without a native header gives the core
@@ -308,7 +353,7 @@ pub struct ScreenConfig {
     /// Title in the header.
     pub title: Option<Arc<str>>,
     /// Show the native header.
-    pub header_shown: bool,
+    pub header_visible: bool,
     /// Large title (iOS; the content scrolls under the header).
     pub large_title: bool,
     /// The content extends under the header.
@@ -338,6 +383,9 @@ pub struct ScreenConfig {
     pub left: Option<NodeId>,
     /// Trailing header item view.
     pub right: Option<NodeId>,
+    /// UIKit's own bar button in the trailing slot instead of `right`'s
+    /// view (iOS); a press on it presses `right`'s first pressable view.
+    pub right_system_item: Option<crate::HeaderSystemItem>,
     /// Custom title view.
     pub title_view: Option<NodeId>,
     /// The app's header (`header`): on a platform without a native header
@@ -355,7 +403,7 @@ impl Default for ScreenConfig {
     fn default() -> Self {
         Self {
             title: None,
-            header_shown: true,
+            header_visible: true,
             large_title: false,
             header_transparent: false,
             tint_color: None,
@@ -368,6 +416,7 @@ impl Default for ScreenConfig {
             animation: ScreenAnimation::Default,
             left: None,
             right: None,
+            right_system_item: None,
             title_view: None,
             header_view: None,
             header_height: Points::ZERO,
@@ -464,6 +513,8 @@ pub struct InputConfig {
     pub blur_on_submit: bool,
     /// `submitBehavior` as set; [`InputConfig::submit`] resolves it.
     pub submit_behavior: Option<SubmitBehavior>,
+    /// What a paste does (`pasteBehavior`).
+    pub paste_behavior: PasteBehavior,
     /// Focus once on screen.
     pub auto_focus: bool,
     /// Caret and selection color.
@@ -472,7 +523,7 @@ pub struct InputConfig {
     pub auto_fill: crate::ops::AutoFill,
     /// The text runs right to left.
     pub rtl: bool,
-    /// `caretHidden`.
+    /// No caret is drawn (`caret={false}`).
     pub caret_hidden: bool,
     /// `inputAccessoryViewID` as set.
     pub accessory_id: Option<Box<str>>,
@@ -514,6 +565,7 @@ impl Default for InputConfig {
             editable: true,
             blur_on_submit: true,
             submit_behavior: None,
+            paste_behavior: PasteBehavior::Insert,
             auto_focus: false,
             selection_color: None,
             auto_fill: crate::ops::AutoFill::Default,
@@ -528,13 +580,16 @@ impl Default for InputConfig {
 /// How an image is shown, besides its source.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ImageOptions {
-    /// `defaultSource`: shown until the image loads (and if it fails).
+    /// `placeholder`: shown until the image loads (and if it fails).
     pub placeholder: Option<ImageSource>,
     /// `blurRadius` in points (0: sharp).
     pub blur_radius: Points,
     /// `fadeDuration` in milliseconds; the platform's default when `None`
     /// (React Native: 300 on Android, none on iOS).
     pub fade_ms: Option<f32>,
+    /// `objectPosition`: where the image sits in its box once the resize
+    /// mode has sized it ([`crate::ResizeMode::fit`]).
+    pub position: crate::style::ObjectPosition,
 }
 
 /// One instruction for the platform backend.
@@ -646,7 +701,7 @@ pub enum MountItem {
         /// Scrolls horizontally.
         horizontal: bool,
         /// Shows the scroll indicator.
-        shows_indicator: bool,
+        scrollbar_visible: bool,
         /// Native animation value fed with the main-axis offset.
         scroll_value: Option<crate::animation::NodeId>,
         /// When dragging dismisses the keyboard.

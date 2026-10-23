@@ -7,9 +7,12 @@ group: delivery
 
 # Sandbox and Capabilities
 
-Every NSH app runs in its own QuickJS VM, and everything an app can do outside that VM goes through NSH's native
-runtime. That makes it possible to run code you did not write, such as third-party mini apps or downloaded updates,
-under rules the host app controls:
+An app written in Rust is native code compiled into the app that ships it, as the rest of that app is, and runs with
+its trust; its calls into NSH's services (`fetch`, images, web views, the status bar) go through the same native
+checks as TSX's, under what a host grants. The TSX and JavaScript an app runs, its own or a [signed
+package](./signed-packages.md) it downloads, run in a QuickJS VM per view, and everything they can do outside that VM
+goes through NSH's native runtime. That makes it possible to run code you did not write, such as third-party mini apps
+or downloaded updates, under rules the host app controls:
 
 - **Limits** bound the memory, time and native resources one app can use.
 - **Hardening** removes the ways to turn strings into code in release builds.
@@ -22,7 +25,7 @@ around them.
 
 ## Limits
 
-An app embedded in another app runs within limits its host app decides. An app on its own (packaged with
+Limits bound a VM: they apply to TSX and JavaScript. An app embedded in another app runs within limits its host app decides. An app on its own (packaged with
 `nsh package`, the web included, or run with `nsh run`) is your own code, as a native app is: it uses the memory and
 time the device gives it, and its interpreter stack of 4096 KB turns deep recursion into a `RangeError` the app can
 catch.
@@ -63,12 +66,12 @@ not cover: without them, an app could exhaust the device's memory through the UI
 > anyway: it would freeze the app's updates for that long. Split it with `setTimeout`, or move it out of the event
 > handler.
 
-Host apps set the limits per view: `NshAppView.limits` on [iOS](./embedding-ios.md#limits),
-`NshView.setLimits` on [Android](./embedding-android.md#limits), `AppOptions::limits` / `AppView::set_limits` in a
+Host apps set the limits per view: `NshAppView.limits` on [iOS](./ios.md#limits),
+`NshView.setLimits` on [Android](./android.md#limits), `AppOptions::limits` / `AppView::set_limits` in a
 [GPUI app](./gpui.md#embedding-in-a-gpui-app). They apply from the next load.
 
-To see in development what an app does within a host app's limits, run it with
-[`--limits`](./cli.md#nsh-run): `nsh run --limits` uses the defaults above, and
+To see in development what a TSX app does within a host app's limits, run it with
+[`--limits`](./cli.md#nsh-run): `nsh run App.tsx --limits` uses the defaults above, and
 `nsh run --limits memory=128MB,call=500ms` sets those two as a host app would, the rest keeping their defaults.
 
 ## Hardening
@@ -112,20 +115,24 @@ An app declares what it may reach outside its VM in `nsh.json`:
     },
     "webview": { "hosts": ["*.example.com"] },
     "statusBar": true,
-    "clipboard": true
+    "clipboard": true,
+    "picker": true,
+    "host": ["getUserInfo", "bridge.*"],
+    "openUrl": { "schemes": ["https", "mailto"] }
   }
 }
 ```
 
 **An app without `"capabilities"` may do everything**: a standalone app is its developer's own, and nothing is
-restricted. Raw TCP sockets are granted by name in every app, through `network.sockets`. **An app with `"capabilities"` may do only what it lists**: everything else is denied. Unknown keys are
+restricted. Raw TCP sockets are granted by name in every app, through `network.sockets`, and the host's functions
+through `host`. **An app with `"capabilities"` may do only what it lists**: everything else is denied. Unknown keys are
 build errors, so a typo is caught when you build instead of becoming a missing permission at runtime. A [signed
 package](./signed-packages.md#packages-from-newer-versions-of-nsh) from a newer NSH may declare capabilities an older
 runtime does not know: they are not granted there.
 
 ### `network`
 
-Covers `fetch` (including every redirect), WebSockets, remote images (`<Image>`, `defaultSource`, canvas images,
+Covers `fetch` (including every redirect), WebSockets, remote images (`<Image>`, `placeholder`, canvas images,
 `Image.getSize` / `Image.prefetch`), video sources and raw TCP sockets (`net.connect`).
 
 | Key | Type | Description |
@@ -161,7 +168,7 @@ paths.
 
 Top-level navigations inside the web view are checked too, by the platform's navigation delegate, before they load.
 The page's own subresources (its scripts, images, XHRs) are the web content's business and are not checked.
-`about:blank` and inline HTML (`source={{ html }}`) need only web views to be granted at all: `"webview": { "hosts": [] }`
+`about:blank` and inline HTML (`html`) need only web views to be granted at all: `"webview": { "hosts": [] }`
 allows them without allowing any remote page.
 
 ### `statusBar`
@@ -173,9 +180,44 @@ allows them without allowing any remote page.
 
 `"clipboard": true` lets the app read and write the system clipboard ([`nsh/clipboard`](../modules/nsh-clipboard.md)). Copying from a selectable text's edit menu is the user's own act and needs no capability.
 
+### `picker`
+
+`"picker": true` lets the app show the system's picker for photos ([`nsh/picker`](../modules/nsh-picker.md)): the user
+picks what reaches the app.
+
+### `openUrl`
+
+Lets the app open URLs outside it ([`openUrl`](../modules/nsh-device.md#openurl), a `TextView`'s links with
+`links="open"`): `"openUrl": true` for every scheme, `"openUrl": { "schemes": ["https", "mailto"] }` for the schemes
+listed. A URL whose scheme is not granted throws a `TypeError`. URLs that would run code or reach the app's own data
+(`javascript:`, `data:`, `file:`, ...) are never opened, whatever the capability.
+
 ### Storage
 
 Every app may keep its own data on the device with [`nsh/storage`](../modules/nsh-storage.md), with no capability: the storage holds only that app's data, and the embedding app decides where it is kept.
+
+### `host`
+
+`host` lists the functions of the app embedding NSH that `nsh/host`'s `host.call(name, args)` may call: exact names
+(`"getUserInfo"`) or prefixes ending in `*` (`"bridge.*"` matches `bridge.call` and `bridge.share`). `"host": true`
+allows every function. A function not listed is refused, also in an app without `"capabilities"`: the host's
+functions are never granted by default, and building an app that imports `nsh/host` without `host` warns that every
+call will be refused. Names are 1 to 128 characters from `A`–`Z`, `a`–`z`, `0`–`9`, `_`, `.`, `:` and `-`, without `..`;
+the call of any other name is refused before the grants are read. End a prefix with a separator (`"bridge.*"`):
+`"bridge*"` matches `bridgeAdmin` too. The host's events (`host.on(event, listener)`) reach the app's listeners as the host sends them.
+
+```ts
+import { host } from "nsh/host";
+
+if (host.available()) {
+  const user = await host.call("getUserInfo");
+  const sub = host.on("loginChanged", (payload) => console.log(payload));
+  sub.remove();
+}
+```
+
+`host.available()` is true on platforms that embed a host; elsewhere `host.call` rejects with
+`nsh/host: this platform has no host`.
 
 ### What a refusal looks like
 
@@ -184,7 +226,9 @@ Every app may keep its own data on the device with [`nsh/storage`](../modules/ns
 | `fetch` | The promise rejects; the request never reaches the network. |
 | Remote image | The image fails with `onError`. |
 | Video source, web view source, status bar change | Nothing is shown or changed. |
-| Clipboard | `setString` does nothing; `getString` resolves `""` and `hasString` `false`. |
+| Clipboard | `writeText` and `writeImage` do nothing; `readText` resolves `""`, `readImage` `null`, `readFiles` `[]`, and `hasText` and `hasImage` `false`. |
+| Picker | `pickImages` shows nothing and resolves `[]`. |
+| Host call | The promise rejects, saying to add the function to `capabilities.host`; the call never reaches the host. |
 
 Each refusal is logged once, saying which key to add:
 
@@ -207,6 +251,14 @@ The declaration goes with the app wherever it goes:
 ## Grants: what a host app allows
 
 A host app that embeds NSH can grant **at most** some capabilities, in the same JSON form:
+
+```rust
+// iOS, in Rust (nsh_platform_ios::AppView)
+let grant = nsh_engine::Capabilities::from_json(&serde_json::json!({
+    "network": { "hosts": ["api.example.com"] }
+}))?;
+app.set_granted_capabilities(Some(grant));
+```
 
 ```swift
 // iOS
@@ -243,4 +295,4 @@ them.
 
 - [Signed packages](./signed-packages.md)
 - [Networking](./networking.md)
-- [Embedding in iOS apps](./embedding-ios.md), [Embedding in Android apps](./embedding-android.md)
+- [Embedding in iOS apps](./ios.md), [Embedding in Android apps](./android.md)

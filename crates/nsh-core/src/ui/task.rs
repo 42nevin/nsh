@@ -79,6 +79,26 @@ pub(crate) enum Action {
     ),
     /// Reads the system clipboard; the answer resolves the slot.
     ReadClipboard(ClipboardRead),
+    /// Shows the system's picker for images; the files picked (none when
+    /// cancelled) resolve the slot.
+    PickImages(
+        crate::picker::PickRequest,
+        AnswerSlot<Vec<crate::picker::PickedFile>>,
+    ),
+    /// Calls function `name` of the embedding app (`nsh/host`); its
+    /// value, or why it failed, resolves the slot.
+    HostCall {
+        name: String,
+        args: crate::JsonValue,
+        answer: AnswerSlot<Result<crate::JsonValue, String>>,
+    },
+    /// Drops the slots of the host calls whose answers are gone (they
+    /// timed out).
+    ForgetHostCalls,
+    /// Opens a URL outside the app (checked by
+    /// [`crate::open_url::check_url`]); whether it opened resolves the
+    /// slot.
+    OpenUrl(String, AnswerSlot<bool>),
     /// An operation on the native animation graph.
     Animation(crate::animation::AnimationOp),
     /// Starts an animation; its end resolves the slot.
@@ -95,10 +115,11 @@ pub(crate) enum Action {
     /// A component's own list reports the rows viewable now (they stayed
     /// so for its minimum view time).
     ReportViewable(NodeId),
+    /// A hint overlay's delay is over with the pointer on its anchor: it
+    /// shows.
+    Hint(NodeId),
     /// The start of the next display frame resolves the slot.
     Frame(AnswerSlot<Instant>),
-    /// Changes the layout direction's policy.
-    Direction(super::services::Direction),
     /// Sets the app's appearance.
     Appearance(crate::platform::Appearance),
     /// Measures the node with the layout of the commit the action goes out
@@ -120,27 +141,19 @@ pub(crate) enum ClipboardRead {
     Files(AnswerSlot<Vec<String>>),
 }
 
-/// An image read from the system clipboard (`Clipboard.getImage`).
+/// An image read from the system clipboard (`Clipboard.readImage`).
 #[derive(Debug, Clone, Default, PartialEq, super::JsObject)]
 pub struct ClipboardImage {
-    /// The image as a `data:` URI (`data:image/png;base64,…`): an image's
-    /// source, and `fetch(uri)` gives its bytes.
-    pub uri: String,
-    /// Width in pixels.
-    pub width: DevicePixels,
-    /// Height in pixels.
-    pub height: DevicePixels,
-}
-
-impl ClipboardImage {
+    /// The image as a `data:` URL (`data:image/png;base64,…`): an image's
+    /// `src`, and `fetch(url)` gives its bytes.
+    pub url: String,
     /// Its size in pixels.
-    pub fn size(&self) -> Size<DevicePixels> {
-        Size::new(self.width, self.height)
-    }
+    pub size: Size<DevicePixels>,
 }
 
-/// An image's size in pixels (`Image.getSize`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, super::JsObject)]
+/// An image's size in pixels (`Image.getSize`); TS: `ImageSize`, an alias of
+/// `Size`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ImageSize {
     /// Width.
     pub width: DevicePixels,
@@ -158,6 +171,41 @@ impl ImageSize {
 impl From<ImageSize> for Size<DevicePixels> {
     fn from(s: ImageSize) -> Self {
         s.size()
+    }
+}
+
+/// TS: `type ImageSize = Size` (`{ width, height }`, in pixels here).
+impl super::JsValue for ImageSize {
+    fn ts_type(types: &mut super::TsTypes) -> String {
+        types.declare("ImageSize", |_| {
+            "/** An image's size in pixels (`Image.getSize`). */\nexport type ImageSize = Size;"
+                .into()
+        })
+    }
+
+    fn from_js(value: super::JsIn<'_>) -> Result<Self, super::PropError> {
+        if value.kind() != super::JsKind::Object {
+            return Err(value.expected("an object"));
+        }
+        let side = |key: &str| -> Result<DevicePixels, super::PropError> {
+            let v = value.field(key)?;
+            DevicePixels::from_js(v.get()).map_err(|e| super::PropError(format!("`{key}`: {e}")))
+        };
+        Ok(ImageSize {
+            width: side("width")?,
+            height: side("height")?,
+        })
+    }
+
+    fn to_js<'a>(
+        &self,
+        host: &'a dyn super::JsHost,
+    ) -> Result<super::JsOwned<'a>, super::PropError> {
+        let owned = super::JsOwned::new(host, host.new_object()?);
+        let object = owned.get().raw();
+        host.set_field(object, "width", self.width.to_js(host)?.into_raw())?;
+        host.set_field(object, "height", self.height.to_js(host)?.into_raw())?;
+        Ok(owned)
     }
 }
 
@@ -518,10 +566,12 @@ pub(crate) fn act_after(
 ) -> Task<()> {
     let weak = Rc::downgrade(executor);
     let acting = weak.clone();
+    // From now, not from when the task is first polled.
+    let at = crate::time::now() + delay;
     let id = executor.spawn(
         host,
         Box::pin(async move {
-            super::ambient::timer(delay).await;
+            super::ambient::timer_until(at).await;
             if let Some(executor) = acting.upgrade() {
                 executor.act(action);
             }

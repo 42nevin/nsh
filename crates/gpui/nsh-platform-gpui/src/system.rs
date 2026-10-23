@@ -98,7 +98,7 @@ const VK_RIGHT: u16 = 0x27;
 const VK_DOWN: u16 = 0x28;
 
 thread_local! {
-    /// The system appearance a script switched to (`dark` / `light`).
+    /// The system appearance a test switched to (`nsh test --target`).
     static SIMULATED: Cell<Option<bool>> = const { Cell::new(None) };
     /// The surfaces whose environment this module keeps.
     static WATCHED: RefCell<Vec<Watched>> = const { RefCell::new(Vec::new()) };
@@ -142,7 +142,9 @@ struct Settings {
     os_version: (u16, u16),
 }
 
-/// Makes the system look dark (or light) from now on (`--script`).
+/// Makes the system look dark (or light) from now on (`nsh test
+/// --target`'s color scheme).
+#[cfg(feature = "dev")]
 pub(crate) fn simulate_system_scheme(dark: bool) {
     SIMULATED.with(|s| s.set(Some(dark)));
     let surfaces: Vec<Rc<Surface>> = WATCHED.with(|w| {
@@ -177,7 +179,7 @@ fn settings_changed() {
     }
 }
 
-/// True when the window looks dark (or a script made the system look so).
+/// True when the window looks dark (or a test made the system look so).
 fn window_dark(window: &Window) -> bool {
     if let Some(dark) = SIMULATED.with(Cell::get) {
         return dark;
@@ -280,7 +282,7 @@ pub(crate) fn window_prepaint(surface: &Rc<Surface>, window: &mut Window, cx: &m
     }
 }
 
-/// The environment changed (from the system, the app or a script): the
+/// The environment changed (from the system, the app or a test): the
 /// root's background follows its scheme.
 pub(crate) fn environment_applied(surface: &Surface) {
     surface.invalidate();
@@ -928,6 +930,25 @@ pub(crate) fn command(surface: &Rc<Surface>, _id: NodeId, command: &Command) {
         Command::ReadClipboardImage { id, has_only } => {
             read_clipboard_image(surface.key(), *id, *has_only)
         }
+        Command::OpenUrl { id, url } => {
+            let (key, id, url) = (surface.key(), *id, url.clone());
+            crate::rt::on_app(move |cx| {
+                // GPUI hands it to the system's opener (`NSWorkspace`,
+                // `ShellExecuteW`, the desktop portal / `xdg-open`) and
+                // reports nothing back: it went out.
+                cx.open_url(&url);
+                if let Some(surface) = Surface::by_key(key) {
+                    surface.event(
+                        ROOT_ID,
+                        EventKind::OpenUrl,
+                        EventPayload::Map(vec![
+                            ("id", PayloadValue::Number(id as f64)),
+                            ("opened", PayloadValue::Bool(true)),
+                        ]),
+                    );
+                }
+            });
+        }
         Command::ReadClipboardFiles { id } => {
             let (key, id) = (surface.key(), *id);
             crate::rt::on_app(move |cx| {
@@ -952,6 +973,7 @@ pub(crate) fn command(surface: &Rc<Surface>, _id: NodeId, command: &Command) {
                 }
             });
         }
+        Command::PickImages { id, request } => pick_images(surface, *id, *request),
         Command::ExitApp => {
             // The window goes after the batch is applied (closing it stops
             // the surface). An embedded surface closes the window it is in,
@@ -971,7 +993,7 @@ pub(crate) fn command(surface: &Rc<Surface>, _id: NodeId, command: &Command) {
     }
 }
 
-/// The answer to `Clipboard.getString` / `hasString` read `id`.
+/// The answer to `Clipboard.readText` / `hasString` read `id`.
 fn clipboard_answer(id: u32, has: bool, text: Option<String>) -> EventPayload {
     let mut fields = vec![
         ("id", PayloadValue::Number(id as f64)),
@@ -983,22 +1005,66 @@ fn clipboard_answer(id: u32, has: bool, text: Option<String>) -> EventPayload {
     EventPayload::Map(fields)
 }
 
-/// `Clipboard.setImage`: the image of a `data:` URI on GPUI's clipboard,
+/// `Clipboard.writeImage`: the image of a `data:` URI on GPUI's clipboard,
 /// in its own format when GPUI knows it.
+/// `Picker.pickImages`: GPUI's open dialog. It filters nothing, so the
+/// files whose extension the request does not take are left out; they are
+/// read as they are, on a thread of their own (no scaling or conversion
+/// here: `nsh_core::picker::read_files`).
+fn pick_images(surface: &Rc<Surface>, id: u32, request: nsh_core::picker::PickRequest) {
+    let mut control = None;
+    surface.control(|c| control = Some(c.clone()));
+    let Some(control) = control else { return };
+    crate::rt::on_app(move |cx| {
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: request.multiple(),
+            prompt: None,
+        });
+        cx.spawn(async move |_| {
+            let paths = paths
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+                .unwrap_or_default();
+            let extensions = nsh_core::picker::dialog_extensions(&request);
+            let paths: Vec<_> = paths
+                .into_iter()
+                .filter(|p| {
+                    p.extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| extensions.contains(&e.to_ascii_lowercase().as_str()))
+                })
+                .collect();
+            std::thread::spawn(move || {
+                let files = nsh_core::picker::read_files(&paths, &request);
+                control.dispatch_event(
+                    ROOT_ID,
+                    EventKind::Pick,
+                    EventPayload::Picked { id, files },
+                );
+            });
+        })
+        .detach();
+    });
+}
+
 fn set_clipboard_image(uri: &str) {
     let Some((mime, bytes)) = clipboard::decode_data_uri(uri) else {
-        log::warn!("Clipboard.setImage: not a base64 data: URI");
+        log::warn!("Clipboard.writeImage: not a base64 data: URI");
         return;
     };
     let Some(format) = gpui::ImageFormat::from_mime_type(mime) else {
-        log::warn!("Clipboard.setImage: unsupported image type {mime}");
+        log::warn!("Clipboard.writeImage: unsupported image type {mime}");
         return;
     };
     let image = gpui::Image::from_bytes(format, bytes);
     crate::rt::on_app(move |cx| cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image)));
 }
 
-/// `Clipboard.getImage` / `hasImage`: answers read `id` from GPUI's
+/// `Clipboard.readImage` / `hasImage`: answers read `id` from GPUI's
 /// clipboard. Formats other than PNG, JPEG, GIF, BMP and WebP (a TIFF) are
 /// converted to PNG on a worker thread, so every image source shows them.
 fn read_clipboard_image(key: u64, id: u32, has_only: bool) {
@@ -1801,6 +1867,9 @@ struct DialogItem {
     opacity: Cell<f32>,
     /// Answered: fading out, no more input.
     closing: Cell<bool>,
+    /// The buttons' texts, in order.
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))]
+    labels: Vec<String>,
 }
 
 impl DialogItem {
@@ -2136,8 +2205,50 @@ fn show_dialog(surface: &Rc<Surface>, dialog: &Dialog) {
         keyboard: Cell::new(false),
         opacity: Cell::new(0.0),
         closing: Cell::new(false),
+        labels: buttons.iter().map(|b| b.text.clone()).collect(),
     });
     add_overlay(surface, serial, OverlayKind::Dialog(item));
+}
+
+/// Where a user presses to answer the newest dialog on `surface` (root
+/// points): the middle of its button titled `button`, or outside its card
+/// to close it without one (`None`; only a dialog that can be closed so).
+#[cfg(feature = "dev")]
+pub(crate) fn dialog_point(
+    surface: &Rc<Surface>,
+    button: Option<&str>,
+) -> Result<(f32, f32), String> {
+    let dialog = OVERLAYS
+        .with(|o| {
+            o.borrow().iter().rev().find_map(|o| match &o.kind {
+                OverlayKind::Dialog(d) if o.key == surface.key() && !d.closing.get() => {
+                    Some(d.clone())
+                }
+                _ => None,
+            })
+        })
+        .ok_or("no dialog is shown")?;
+    let layout = dialog.layout.borrow();
+    let (_, geometry) = layout.as_ref().ok_or("the dialog is not drawn yet")?;
+    match button {
+        Some(text) => {
+            let index = dialog
+                .labels
+                .iter()
+                .position(|l| l == text)
+                .ok_or_else(|| format!("the dialog has no button {text:?}"))?;
+            let r = geometry
+                .buttons
+                .get(index)
+                .ok_or("the dialog's button is not laid out")?;
+            Ok((
+                r.origin.x.0 + r.size.width.0 / 2.0,
+                r.origin.y.0 + r.size.height.0 / 2.0,
+            ))
+        }
+        None if dialog.cancelable => Ok((1.0, 1.0)),
+        None => Err("the dialog can only be answered with a button".into()),
+    }
 }
 
 /// Keys while a dialog shows over the app (it is modal: every key goes to

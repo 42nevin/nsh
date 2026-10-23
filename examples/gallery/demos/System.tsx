@@ -3,6 +3,7 @@ import { createAnimatedValue, Easing } from "nsh/animated";
 import { Toast } from "nsh/android";
 import { colorScheme, fontScale, windowSize } from "nsh/device";
 import { AlertDialog, Dialog, keyboardFrame, safeArea, type StatusBarForeground } from "nsh/base";
+import { Menu } from "nsh/desktop";
 import { keymap } from "nsh/keymap";
 import { Icon, type IconName } from "../icons";
 import {
@@ -132,6 +133,7 @@ function StatusBarCard() {
         animation="fade"
         statusBar={{ foreground: foreground(), hidden: barHidden(), animated: true }}
         onOpenChange={(o) => open.set(o)}
+        style={{ flex: 1 }}
       >
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 16, backgroundColor: backdrop() }}>
           <Text style={{ fontSize: 13, color: foreground() === "light" ? "#ffffff" : "#111214", fontFamily: mono }}>
@@ -365,6 +367,28 @@ function Shortcuts() {
   );
 }
 
+/** A context menu on a right click (desktops: `Menu.popup`). */
+function ContextMenu() {
+  const chosen = signal("");
+  const menu = () =>
+    Menu.popup([
+      { label: "Copy", onSelect: () => chosen.set("Copy") },
+      { label: "Paste", disabled: true },
+      { label: "Share", submenu: [{ label: "Mail", onSelect: () => chosen.set("Share > Mail") }] },
+    ]);
+  return (
+    <Card icon="bell" title="Context menu" subtitle="nsh/desktop · right click">
+      <View
+        testID="menu-target"
+        onContextMenu={() => void menu()}
+        style={{ height: 72, borderRadius: 12, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" }}
+      >
+        <Text style={{ fontSize: 14, color: colors.muted }}>{chosen() ? `Chose ${chosen()}` : "Right-click here"}</Text>
+      </View>
+    </Card>
+  );
+}
+
 type Post = { id: number; title: string };
 
 function Network() {
@@ -430,6 +454,6 @@ function Network() {
 }
 
 export function System() {
-  const sections = [Environment, StatusBarCard, Dialogs, FramesAndTimers, Shortcuts, Network];
+  const sections = [Environment, StatusBarCard, Dialogs, FramesAndTimers, Shortcuts, ContextMenu, Network];
   return <DemoPage cards={sections} />;
 }

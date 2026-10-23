@@ -31,13 +31,23 @@
 pub mod agent;
 #[cfg(feature = "js")]
 mod driver;
+// An engine on a thread of its own: not in WebAssembly, where only the
+// agent's model runs (the web's page).
+#[cfg(not(target_arch = "wasm32"))]
 mod headless;
+pub mod menu;
 #[cfg(feature = "js")]
 mod module;
+#[cfg(feature = "js")]
+mod page_host;
 #[cfg(feature = "js")]
 mod run;
 #[cfg(feature = "js")]
 mod runner;
+mod screen;
+mod selector;
+mod storage;
+mod trace;
 
 #[cfg(feature = "bundle")]
 use std::{path::Path, sync::Arc};
@@ -49,24 +59,32 @@ use nsh_core::ui::description::SetDescription;
 #[cfg(feature = "bundle")]
 use nsh_engine::{Bundle, EngineConfig};
 
-#[cfg(feature = "live")]
+#[cfg(all(feature = "live", not(target_arch = "wasm32")))]
 pub use self::headless::UreqNetwork;
+#[cfg(not(target_arch = "wasm32"))]
 pub use self::headless::{
-    DialogAnswer, DirectoryAssets, Headless, MemoryStorage, RecordingNetwork, Screen, StubHandler,
-    StubNetwork, StubReply, StubResponse, StubRoute, WAIT, default_answer, print_batch, start,
+    DialogAnswer, DirectoryAssets, Headless, RecordingNetwork, StubHandler, StubNetwork, StubReply,
+    StubResponse, StubRoute, WAIT, default_answer, print_batch, start,
 };
+#[cfg(feature = "js")]
+#[allow(deprecated)]
+pub use self::module::MobilePlatform;
 #[cfg(feature = "js")]
 pub use self::{
     driver::Host,
     module::{
-        App, ClockOptions, ColorScheme, Entries, Expectation, MobilePlatform, NetworkOption,
-        OpenOptions, RouteOption, SPECIFIER, SafeArea, StubRequest, Testing, registry,
+        App, ClockOptions, ColorScheme, Entries, Expectation, NetworkOption, OpenOptions, Platform,
+        RouteOption, SPECIFIER, SafeArea, StubRequest, Testing, registry,
     },
     run::{
         Built, Compile, Entry, Failure, HostOptions, Output, StartHost, TestResult, TestRun,
         TestStatus, run_file,
     },
     runner::{PROTOCOL, Reply, RunnerMessage, TestRequest, runner},
+};
+pub use self::{
+    screen::{Pick, Screen},
+    storage::MemoryStorage,
 };
 
 /// The sets the entry `nsh test` makes for a test file is built against
@@ -93,7 +111,11 @@ pub fn compile_tsx(entry: impl AsRef<Path>, ui_sets: &[Registry]) -> Result<Bund
 /// `entry` built against `ui_sets`: its bytecode and source map.
 #[cfg(feature = "bundle")]
 fn build(entry: &Path, ui_sets: &[Registry]) -> Result<(Bundle, Option<String>), String> {
-    let sets: Vec<SetDescription> = ui_sets.iter().map(SetDescription::from).collect();
+    let sets: Vec<SetDescription> = ui_sets
+        .iter()
+        .flat_map(Registry::sets)
+        .map(SetDescription::from)
+        .collect();
     let bundle = nsh_bundler::bundle(&nsh_bundler::BundleOptions {
         entry: entry.to_path_buf(),
         minify: false,
@@ -103,8 +125,13 @@ fn build(entry: &Path, ui_sets: &[Registry]) -> Result<(Bundle, Option<String>),
     .map_err(|e| format!("{}: {e}", entry.display()))?;
     let bytecode = nsh_js::compile_bytecode_with(&bundle.code, false, &sets)
         .map_err(|e| format!("{}: {e}", entry.display()))?;
+    // Under what its nsh.json declares, as on a device.
+    let capabilities = bundle.capabilities.map(|c| c.to_json().to_string());
     // SAFETY: compiled by this runtime just now, from the app's sources.
-    Ok((unsafe { Bundle::bytecode(bytecode) }, bundle.source_map))
+    let app = unsafe { Bundle::bytecode(bytecode) }
+        .with_capabilities_json(capabilities.as_deref())
+        .map_err(|e| format!("{}: {e}", entry.display()))?;
+    Ok((app, bundle.source_map))
 }
 
 /// Builds the entries of `nsh test` ([`TestRun::compile`]) in this

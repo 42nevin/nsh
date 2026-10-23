@@ -4,7 +4,7 @@
 
 use super::{Core, Key, Kind, NO_KEY};
 use crate::{
-    JsonValue,
+    EventPayload, JsonValue, PayloadValue,
     geometry::{Bounds, Point, Points, point, rect},
     mount::MountItem,
     ops::NodeId,
@@ -18,7 +18,7 @@ pub struct Measurement {
     pub frame: Bounds<Points>,
     /// The top left corner in the coordinates of the root view the view is
     /// in (the surface, or the modal it is shown in): those of touches'
-    /// `pageX` / `pageY`. Scroll offsets and zoom scales of the scroll
+    /// `pageX` / `pageY` (`pagePosition`). Scroll offsets and zoom scales of the scroll
     /// views and lists around it are applied; transforms are not.
     pub page: Point<Points>,
 }
@@ -27,12 +27,11 @@ impl Measurement {
     /// The JS object `ref.measure()` resolves to.
     pub(crate) fn to_json(self) -> JsonValue {
         serde_json::json!({
-            "x": self.frame.origin.x.0,
-            "y": self.frame.origin.y.0,
-            "width": self.frame.size.width.0,
-            "height": self.frame.size.height.0,
-            "pageX": self.page.x.0,
-            "pageY": self.page.y.0,
+            "bounds": {
+                "origin": { "x": self.frame.origin.x.0, "y": self.frame.origin.y.0 },
+                "size": { "width": self.frame.size.width.0, "height": self.frame.size.height.0 },
+            },
+            "pagePosition": { "x": self.page.x.0, "y": self.page.y.0 },
         })
     }
 }
@@ -79,6 +78,10 @@ impl<M: TextEngine> Core<M> {
                 x += n.frame.origin.x.0;
                 y += n.frame.origin.y.0;
             }
+            // An overlay is placed in its root view.
+            if n.is_overlay() {
+                break;
+            }
             let parent = n.parent;
             if parent == NO_KEY {
                 break;
@@ -94,6 +97,40 @@ impl<M: TextEngine> Core<M> {
             frame: node.frame,
             page: point(Points(x), Points(y)),
         })
+    }
+
+    /// Completes an input's `onCaretMove` payload from its platform: adds
+    /// `pageBounds`, its `bounds` (in the input) moved by where the input is
+    /// in its root view. The platforms know the caret in their text views,
+    /// the core where the input is (`ref.measure()`'s `pagePosition`, with
+    /// the scroll views around it).
+    pub fn locate_caret(&self, id: NodeId, payload: &mut EventPayload) {
+        if matches!(payload, EventPayload::None) {
+            *payload = EventPayload::Map(Vec::new());
+        }
+        let EventPayload::Map(fields) = payload else {
+            return;
+        };
+        if fields.iter().any(|(k, _)| *k == "pageBounds") {
+            return;
+        }
+        // A platform that could not place the caret reports an empty one.
+        let caret = match fields.iter().find(|(k, _)| *k == "bounds") {
+            Some(&(_, PayloadValue::Bounds(caret))) => caret,
+            _ => {
+                fields.retain(|(k, _)| *k != "bounds");
+                fields.push(("bounds", PayloadValue::Bounds(Bounds::default())));
+                Bounds::default()
+            }
+        };
+        let page = self.measure(id).map_or(Point::default(), |m| m.page);
+        fields.push((
+            "pageBounds",
+            PayloadValue::Bounds(Bounds {
+                origin: point(page.x + caret.origin.x, page.y + caret.origin.y),
+                size: caret.size,
+            }),
+        ));
     }
 
     /// Whether `key` hangs from the main tree's root or a root view that
@@ -134,7 +171,7 @@ impl<M: TextEngine> Core<M> {
             let (mut x0, mut y0, mut x1, mut y1) = (0.0f32, 0.0f32, w, h);
             for &child in &node.children {
                 let c = &self.nodes[child as usize];
-                if c.kind.is_root() || c.layout.is_none() || !c.created || !valid(&c.frame) {
+                if c.is_layout_root() || c.layout.is_none() || !c.created || !valid(&c.frame) {
                     continue;
                 }
                 let f = c.frame;

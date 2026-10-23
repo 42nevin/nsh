@@ -26,6 +26,8 @@
 #![cfg(any(target_os = "linux", target_os = "macos", windows))]
 
 mod access;
+#[cfg(feature = "dev")]
+mod agent;
 mod animation;
 mod app;
 mod canvas;
@@ -42,13 +44,14 @@ mod keys;
 mod mount;
 mod native;
 mod navigation;
-mod net;
 mod render;
 mod rt;
-mod script;
 mod scroll;
+mod selection_area;
 mod stats;
 mod surface;
+#[cfg(feature = "dev")]
+mod synth;
 mod system;
 mod text;
 mod text_input;
@@ -65,14 +68,20 @@ pub use nsh_core::{
     platform::{Appearance, Locale},
     ui::{AdaptiveColor, Color, Hsla, Rgba},
 };
-pub use nsh_engine::{App, AppError, AppErrorKind, Bundle, Limits, PackageInfo, Root};
+pub use nsh_engine::{
+    App, AppError, AppErrorKind, Bundle, ByteSize, CacheLocation, CacheOptions, CachePolicy,
+    Limits, PackageInfo, Root,
+};
 /// Signed packages: verifying, unpacking and accepting them
 /// (`docs/dev/signed-packages.md`).
 #[cfg(feature = "js")]
 pub use nsh_engine::{LoadedPackage, accept_package, load_package, package, verify_package};
 
+#[cfg(feature = "dev")]
+pub use crate::app::set_root;
 pub use crate::{
-    app::{AppOptions, AppSource, AppView, open_app_window, run_app, set_ui_sets},
+    app::{AppOptions, AppSource, AppView, CloseRequest, open_app_window, run_app, set_ui_sets},
+    chrome::titlebar_options,
     image::AssetBase,
     native::{ComponentContext, ComponentFactory, Components, NativeComponent},
 };

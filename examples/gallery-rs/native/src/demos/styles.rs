@@ -9,9 +9,8 @@ use nsh_core::{
 };
 
 use crate::ui::{
-    Badge, Button, ButtonVariant, Card, DemoPage, Finish, Finished, IconName, MONO, PressProps,
-    Segment, SegmentedEvent, ToggleEvent, caption, colors, hint, inset_shadow, press_with, radius,
-    rgb_a, segmented, tints, toggle,
+    Badge, Button, ButtonVariant, Card, DemoPage, Finish, Finished, IconName, MONO, Segment,
+    caption, colors, hint, inset_shadow, press, radius, rgb_a, segmented, tints, toggle,
 };
 
 /// The stage every specimen stands on: the card's light, without its
@@ -179,7 +178,6 @@ fn face(
             ],
         )
         .border_color(rim)
-        .perspective(px(800.0))
         .child(
             view().flex_row().justify_between().child(badge).child(
                 text(degrees)
@@ -224,52 +222,49 @@ fn FlipCard() -> impl IntoElement {
     };
     let tone = |light: u32, dark: u32| AdaptiveColor::new(rgb(light), rgb(dark));
     view().flex_1().child(
-        press_with(
-            PressProps {
-                scale: 0.98.into(),
-                label: Some("Flip the card".into()).into(),
-                ..PressProps::default()
-            },
-            flip,
-        )
-        .child(
-            view()
-                .h(px(132.0))
-                // The bound rotations follow the static perspective.
-                .child(
-                    face(
-                        [
-                            tone(0xeef2fc, 0x1a2134),
-                            tone(0xf5f8fe, 0x212a42),
-                            tone(0xe6ecfa, 0x171d2d),
-                            tone(0xcdd8f3, 0x2b3a5c),
-                        ],
-                        Badge::new("front").tone(crate::ui::Tone::Info),
-                        "0°",
-                        hint("Tap to flip", "Click to flip"),
-                        "A spring turns it on the UI thread",
+        press()
+            .scale(0.98)
+            .label("Flip the card")
+            .on_press(flip)
+            .child(
+                view()
+                    .h(px(132.0))
+                    // The faces' bound rotations are seen from 800pt away.
+                    .perspective(px(800.0))
+                    .child(
+                        face(
+                            [
+                                tone(0xeef2fc, 0x1a2134),
+                                tone(0xf5f8fe, 0x212a42),
+                                tone(0xe6ecfa, 0x171d2d),
+                                tone(0xcdd8f3, 0x2b3a5c),
+                            ],
+                            Badge::new("front").tone(crate::ui::Tone::Info),
+                            "0°",
+                            hint("Tap to flip", "Click to flip"),
+                            "A spring turns it on the UI thread",
+                        )
+                        .bind_transform(TransformKind::RotateY, &angle),
                     )
-                    .bind_transform(TransformKind::RotateY, &angle),
-                )
-                .child(
-                    face(
-                        [
-                            tone(0xf1f7e2, 0x202814),
-                            tone(0xf7fbec, 0x283219),
-                            tone(0xe9f2d2, 0x1b2211),
-                            tone(0xd3e3a8, 0x3b4a22),
-                        ],
-                        Badge::new("back").tone(crate::ui::Tone::Accent),
-                        "180°",
-                        "backfaceVisibility",
-                        "hidden: each face hides while turned away",
-                    )
-                    .bind_transform(
-                        TransformKind::RotateY,
-                        &angle.interpolate(&[0.0, 180.0], &[180.0, 360.0]),
+                    .child(
+                        face(
+                            [
+                                tone(0xf1f7e2, 0x202814),
+                                tone(0xf7fbec, 0x283219),
+                                tone(0xe9f2d2, 0x1b2211),
+                                tone(0xd3e3a8, 0x3b4a22),
+                            ],
+                            Badge::new("back").tone(crate::ui::Tone::Accent),
+                            "180°",
+                            "backfaceVisibility",
+                            "hidden: each face hides while turned away",
+                        )
+                        .bind_transform(
+                            TransformKind::RotateY,
+                            &angle.interpolate(&[0.0, 180.0], &[180.0, 360.0]),
+                        ),
                     ),
-                ),
-        ),
+            ),
     )
 }
 
@@ -557,10 +552,14 @@ fn layers() -> Card {
         .icon(IconName::Lists)
         .title("Clipping and layers")
         .subtitle("overflow · zIndex · opacity")
-        .right(toggle(clip, "Clip").on_event(move |event: &ToggleEvent| {
-            let ToggleEvent::Change(on) = *event;
-            clip.set(on);
-        }))
+        .right(
+            toggle()
+                .value(clip)
+                .label("Clip")
+                .on_change(move |&on: &bool| {
+                    clip.set(on);
+                }),
+        )
         .child(
             grid()
                 .child(tile(
@@ -601,7 +600,12 @@ fn layers() -> Card {
                         (move || format!("Front: {} of 3 · tap", front.get() + 1)).into_reactive(),
                     ),
                     Some(next.into()),
-                    view().w(px(130.0)).h(px(84.0)).children(squares),
+                    // Its squares have no text: tests find it by id.
+                    view()
+                        .w(px(130.0))
+                        .h(px(84.0))
+                        .test_id("stacking")
+                        .children(squares),
                 )),
         )
         .child(
@@ -632,17 +636,17 @@ fn layers() -> Card {
                         .gap_2()
                         .child(caption("Opacity", Some("Animated natively")))
                         .child(
-                            segmented(LEVELS.map(|(l, _)| Segment::new(l)), level).on_event(
-                                move |event: &SegmentedEvent| {
-                                    let SegmentedEvent::Change(to) = *event;
+                            segmented()
+                                .options(LEVELS.map(|(l, _)| Segment::new(l)))
+                                .selected(level)
+                                .on_change(move |&to: &u32| {
                                     level.set(to);
                                     opacity.timing(
                                         LEVELS[to as usize].1,
                                         260.0,
                                         Easing::Curve(Curve::Cubic, EaseMode::Out),
                                     );
-                                },
-                            ),
+                                }),
                         ),
                 ),
         )
@@ -665,7 +669,7 @@ fn transforms() -> Card {
         .icon(IconName::Physics)
         .title("3D transforms")
         .subtitle("perspective · rotateX/Y · skew · origin")
-        .child(FlipCard::element(()))
+        .child(flip_card())
         .child(
             grid()
                 .child(tile(
@@ -673,28 +677,31 @@ fn transforms() -> Card {
                     some("rotateY"),
                     some("Swaying, driven natively"),
                     None,
-                    specimen_box()
-                        .rounded(px(14.0))
-                        .bg(tints::INFO)
-                        .border_1()
-                        .border_color(colors::INFO)
-                        .perspective(px(400.0))
-                        .bind_transform(TransformKind::RotateY, &sway)
-                        .child(label("Y axis", colors::INFO)),
+                    // CSS's `perspective`: the depth of its children.
+                    view().perspective(px(400.0)).child(
+                        specimen_box()
+                            .rounded(px(14.0))
+                            .bg(tints::INFO)
+                            .border_1()
+                            .border_color(colors::INFO)
+                            .bind_transform(TransformKind::RotateY, &sway)
+                            .child(label("Y axis", colors::INFO)),
+                    ),
                 ))
                 .child(tile(
                     "Tilt",
                     some("rotateX: 40deg"),
                     None,
                     None,
-                    specimen_box()
-                        .rounded(px(14.0))
-                        .bg(tints::ACCENT)
-                        .border_1()
-                        .border_color(colors::ACCENT)
-                        .perspective(px(400.0))
-                        .rotate_x(deg(40.0))
-                        .child(label("X axis", colors::ACCENT)),
+                    view().perspective(px(400.0)).child(
+                        specimen_box()
+                            .rounded(px(14.0))
+                            .bg(tints::ACCENT)
+                            .border_1()
+                            .border_color(colors::ACCENT)
+                            .rotate_x(deg(40.0))
+                            .child(label("X axis", colors::ACCENT)),
+                    ),
                 ))
                 .child(tile(
                     "Skew",
@@ -844,13 +851,20 @@ fn right_to_left() -> Card {
             .child(text(n).text_size(px(13.0)).text_color(fg).tabular_nums())
     };
     let mono_note = |label: &'static str, note: &'static str| caption_spans(text(label), note);
-    let flip = |_: &()| force_rtl(!rtl());
-    Card::new()
-            .icon(IconName::Nav)
-            .title("Right to left")
-            .subtitle(|| if rtl() { "isRTL: true" } else { "isRTL: false" })
-            .right(Button::new("Flip", flip).variant(ButtonVariant::Secondary))
-            .child(view().flex_row().gap_2().children(boxes))
+    // The card's content in a direction of its own: the app's follows the
+    // user's language.
+    let rtl = signal(false);
+    let flip = move |_: &()| rtl.set(!rtl.get());
+    let content = view()
+        .gap(px(12.0))
+        .direction(move || {
+            if rtl.get() {
+                LayoutDirection::Rtl
+            } else {
+                LayoutDirection::Ltr
+            }
+        })
+        .child(view().flex_row().gap_2().children(boxes))
             .child(
                 text(
                     "Text aligns to the start side; the first box has marginStart 16 and a round top-start corner.",
@@ -863,7 +877,7 @@ fn right_to_left() -> Card {
             .child(
                 scroll()
                     .horizontal()
-                    .shows_indicator(false)
+                    .scrollbar(false)
                     .h(px(40.0))
                     .child(
                         view()
@@ -882,7 +896,7 @@ fn right_to_left() -> Card {
                 })
                 .horizontal()
                 .estimated_item_size(px(46.0))
-                .shows_indicator(false)
+                .scrollbar(false)
                 .h(px(40.0)),
             )
             .child(view().h(px(1.0)).bg(colors::LINE))
@@ -897,7 +911,19 @@ fn right_to_left() -> Card {
                     .text_size(px(13.0))
                     .writing_direction(WritingDirection::Rtl)
                     .text_color(colors::MUTED),
-            )
+            );
+    Card::new()
+        .icon(IconName::Nav)
+        .title("Right to left")
+        .subtitle(move || {
+            if rtl.get() {
+                "direction: rtl"
+            } else {
+                "direction: ltr"
+            }
+        })
+        .right(Button::new("Flip", flip).variant(ButtonVariant::Secondary))
+        .child(content)
 }
 
 /// The demo's page.

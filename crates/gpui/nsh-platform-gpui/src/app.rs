@@ -67,6 +67,26 @@ pub fn set_ui_sets(sets: Vec<nsh_core::ui::Registry>) {
     *UI_SETS.write().unwrap_or_else(|e| e.into_inner()) = Some(sets);
 }
 
+/// The app's Rust root ([`set_root`]).
+#[cfg(feature = "dev")]
+static ROOT: RwLock<Option<fn() -> Root>> = RwLock::new(None);
+
+/// Sets the root of an app of Rust only (`nsh.json` `"root"`), which this
+/// development host runs when its dev server publishes the app as the
+/// host's root (`nsh test --target gpui` of such an app) instead of a
+/// bundle.
+#[cfg(feature = "dev")]
+pub fn set_root(root: fn() -> Root) {
+    *ROOT.write().unwrap_or_else(|e| e.into_inner()) = Some(root);
+}
+
+/// The app's Rust root, if the host has one ([`set_root`]).
+#[cfg(feature = "dev")]
+pub(crate) fn root() -> Option<Root> {
+    let root = *ROOT.read().unwrap_or_else(|e| e.into_inner());
+    root.map(|root| root())
+}
+
 /// The UI sets engines serve.
 pub(crate) fn ui_sets() -> Vec<nsh_core::ui::Registry> {
     UI_SETS
@@ -105,9 +125,6 @@ pub struct AppOptions {
     pub title: String,
     /// The initial window size in points.
     pub size: (i32, i32),
-    /// Steps run once the window shows (`wait 500; shot a.png; tap 10 20;
-    /// quit`): for checking a backend change without touching the screen.
-    pub script: Option<String>,
     /// The native components apps can use (`nsh/native`); shared by the
     /// views made with these options. See [`AppView::register_component`].
     pub components: crate::native::Components,
@@ -125,9 +142,23 @@ pub struct AppOptions {
     /// system's data directory ([`nsh_engine::data_dir`]); an app that
     /// embeds nsh gives its own (its data directory + `/nsh`, say).
     pub data_dir: Option<PathBuf>,
+    /// Where the apps it runs keep their caches (the images they
+    /// downloaded) and how much each keeps: by default the system's cache
+    /// directory, each app's in `<dir>/<app id>`. See [`AppView::set_cache`].
+    pub cache: nsh_engine::CacheOptions,
     /// The apps' storage (`nsh/storage`), overriding the `storage.json` in
     /// their directory of [`data_dir`](Self::data_dir).
     pub storage: Option<Arc<dyn nsh_engine::StorageBackend>>,
+    /// What the embedding app gives the engines of the views made with
+    /// these options ([`nsh_engine::EngineConfig::context`]): its UI sets'
+    /// functions read it with `nsh_core::ui::engine_context`, so each view
+    /// reaches its own part of the embedding app.
+    pub context: nsh_engine::EngineContext,
+    /// The embedding app's channel with the apps the view runs
+    /// (`nsh/host`): their launch parameters, events to them and handlers of
+    /// their calls and posts ([`AppView::host`]). One for every app the view
+    /// loads; a new one by default.
+    pub host: nsh_engine::HostChannel,
 }
 
 impl Default for AppOptions {
@@ -138,15 +169,32 @@ impl Default for AppOptions {
             app_id: "com.longbridge.nsh.host".to_owned(),
             title: "nsh".to_owned(),
             size: (1200, 800),
-            script: None,
             components: Default::default(),
             appearance: Appearance::System,
             fps: false,
             limits: Limits::default(),
             data_dir: None,
+            cache: Default::default(),
             storage: None,
+            context: Default::default(),
+            host: nsh_engine::HostChannel::default(),
         }
     }
+}
+
+/// What a person asked of the window an [`AppView`] owns
+/// ([`AppView::own_window`]), handed to [`AppView::on_close_request`]'s
+/// handler instead of being carried out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CloseRequest {
+    /// Quit the app: the reserved quit key (Ctrl+Q, Cmd+Q on macOS) or a
+    /// menu item with the `quit` role.
+    Quit,
+    /// Close the window: Ctrl+W (Cmd+W on macOS) the app does not bind, a
+    /// menu item with the `close` role, `Window.close()`, or the window's
+    /// close button.
+    Close,
 }
 
 /// One nsh surface as a GPUI view: an engine running one app, drawn by
@@ -207,6 +255,9 @@ pub struct AppView {
     _keystrokes: gpui::Subscription,
     /// The view itself handled the Tab being dispatched ([`AppView::tab`]).
     tabbed: std::cell::Cell<bool>,
+    /// Answers the apps' picks in place of GPUI's open dialog
+    /// ([`AppView::set_picker`]).
+    picker: RefCell<Option<Arc<dyn nsh_core::picker::PickerBackend>>>,
     #[cfg(feature = "dev")]
     pub(crate) dev: RefCell<Option<crate::dev::DevSession>>,
 }
@@ -250,6 +301,7 @@ impl AppView {
             focus: cx.focus_handle().tab_stop(true),
             options: RefCell::new(options),
             tabbed: std::cell::Cell::new(false),
+            picker: RefCell::new(None),
             _keystrokes: cx.observe_keystrokes(Self::tab_entered),
             #[cfg(feature = "dev")]
             dev: RefCell::new(None),
@@ -269,7 +321,7 @@ impl AppView {
             app,
             viewport: nsh_core::Size::default(),
             trace: options.trace,
-            network: Some(crate::net::network()),
+            network: Some(nsh_engine::net::network()),
             websocket: None,
             filesystem: None,
             assets: Some(Arc::new(AssetReader(options.asset_base.clone()))),
@@ -280,8 +332,14 @@ impl AppView {
             ui_sets: ui_sets(),
             runtime: None,
             data_dir: options.data_dir.clone().or_else(nsh_engine::data_dir),
+            cache: options.cache.clone(),
             storage: options.storage.clone(),
             clock: Default::default(),
+            context: options.context.clone(),
+            pinned: Default::default(),
+            clipboard: None,
+            host: options.host.clone(),
+            picker: self.picker.borrow().clone(),
         };
         crate::image::set_asset_base(&self.surface, options.asset_base.clone());
         self.surface
@@ -314,12 +372,36 @@ impl AppView {
         self.options.borrow_mut().asset_base = base;
     }
 
+    /// The channel with the apps this view runs (`nsh/host`;
+    /// [`AppOptions::host`]): set their launch parameters
+    /// ([`nsh_engine::HostChannel::set_params`], read when an app starts),
+    /// send them events ([`nsh_engine::HostChannel::send`]) and handle their
+    /// calls and posts ([`nsh_engine::HostChannel::handle`]; handlers run on
+    /// the engine thread). Any thread may use it.
+    pub fn host(&self) -> nsh_engine::HostChannel {
+        self.options.borrow().host.clone()
+    }
+
     /// The VM limits ([`AppOptions::limits`]) of the apps loaded from now
     /// on: the JS heap, the stack, the time budgets of loading and of every
     /// other call into JS, and the quotas (nodes, ops). The running app
     /// keeps the limits it was loaded with.
     pub fn set_limits(&self, limits: Limits) {
         self.options.borrow_mut().limits = limits;
+    }
+
+    /// Where the apps loaded from now on keep their caches (the images they
+    /// downloaded) and how much each keeps. The running app keeps the
+    /// caches it was loaded with.
+    pub fn set_cache(&self, cache: nsh_engine::CacheOptions) {
+        self.options.borrow_mut().cache = cache;
+    }
+
+    /// Answers the picks of the apps loaded from now on
+    /// (`Picker.pickImages`) with `picker`, the embedding app's own picker,
+    /// instead of showing GPUI's open dialog; `None`: the dialog again.
+    pub fn set_picker(&self, picker: Option<Arc<dyn nsh_core::picker::PickerBackend>>) {
+        *self.picker.borrow_mut() = picker;
     }
 
     /// Development: loads the app from a `nsh dev` server (`ws://host:port/ws`)
@@ -342,6 +424,37 @@ impl AppView {
         self.surface.native.components().register(name, factory);
     }
 
+    /// Makes the window this view is drawn in its own, as
+    /// [`open_app_window`]'s is: the app's title (`Window.setTitle`), title
+    /// bar, application menu (macOS's menu bar, the menu bar drawn above
+    /// the view elsewhere) and window operations act on it, and the
+    /// window's reserved keys are the view's. The embedding app opens the
+    /// window itself (its bounds, its root element: GPUI Kit's `Root`
+    /// around the view, say), best with [`crate::titlebar_options`], and
+    /// calls this once, from the window's build closure.
+    pub fn own_window(&self, window: &Window, cx: &GpuiApp) {
+        let title = window.window_title();
+        crate::chrome::set_standalone(&self.surface, &title, window.window_handle());
+        crate::system::own_window(&self.surface);
+        let surface = Rc::downgrade(&self.surface);
+        window.on_window_should_close(cx, move |window, cx| {
+            surface.upgrade().is_none_or(|surface| {
+                !crate::chrome::ask_to_close(&surface, CloseRequest::Close, window, cx)
+            })
+        });
+    }
+
+    /// Hands the quit and close requests of the window the view owns
+    /// ([`AppView::own_window`]) to `f`, which decides: the reserved quit
+    /// key, Ctrl+W, the `quit` and `close` menu roles, `Window.close()` and
+    /// the window's close button no longer quit or close by themselves.
+    /// `f` runs on the main thread after the event that asked; it quits
+    /// with `cx.quit()` or closes with `window.remove_window()` when the
+    /// embedding app is ready to. Replaces the handler set before.
+    pub fn on_close_request(&self, f: impl Fn(CloseRequest, &mut Window, &mut GpuiApp) + 'static) {
+        *self.surface.chrome.on_close.borrow_mut() = Some(Rc::new(f));
+    }
+
     /// Stops the app.
     pub fn stop(&self) {
         self.surface.stop();
@@ -361,10 +474,9 @@ impl AppView {
         crate::rt::flush(cx);
     }
 
-    /// [`AppView::set_theme`] with a theme in gpui-kit's JSON format
-    /// (`{ "themes": [{ "mode": "light", "colors": { … } }, …] }`: a
-    /// gpui-kit theme file, or `ThemeConfig`s serialized; null colors are
-    /// left as they are), over `nsh/base`'s default theme.
+    /// [`AppView::set_theme`] with a theme file of shadcn/ui's
+    /// (`{ "cssVars": { "theme": { … }, "light": { … }, "dark": { … } } }`,
+    /// values as CSS writes them), over `nsh/base`'s default theme.
     pub fn set_theme_json(&self, json: &str, cx: &mut GpuiApp) -> Result<(), ThemeError> {
         let theme = Theme::from_json(json)?;
         self.set_theme(Some(theme), cx);
@@ -714,7 +826,7 @@ pub fn open_app_window(
     let bounds = gpui::Bounds::centered(None, size, cx);
     let window_options = gpui::WindowOptions {
         window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
-        titlebar: Some(crate::chrome::titlebar_options(&options.title)),
+        titlebar: Some(crate::titlebar_options(&options.title)),
         app_id: Some(options.app_id.clone()),
         // Linux: the window manager's decorations until the app hides the
         // title bar (`crate::chrome`).
@@ -725,11 +837,9 @@ pub fn open_app_window(
         inactive_frame_interval: None,
         ..Default::default()
     };
-    let script = options.script.clone();
     let handle = cx.open_window(window_options, move |window, cx| {
-        let title = options.title.clone();
         let view: Entity<AppView> = cx.new(|cx| AppView::new(options, window, cx));
-        crate::chrome::set_standalone(view.read(cx).surface(), &title, window.window_handle());
+        view.read(cx).own_window(window, cx);
         match source {
             AppSource::Rust(root) => view.read(cx).load(App::Rust(root)),
             AppSource::Bundle(bundle) => view.read(cx).load(App::Js(bundle)),
@@ -739,18 +849,14 @@ pub fn open_app_window(
             }
         }
         let focus = view.read(cx).focus.clone();
-        crate::system::own_window(view.read(cx).surface());
         window.focus(&focus, cx);
         view
     })?;
-    if let Some(script) = script {
-        crate::script::run(handle, &script, cx);
-    }
     Ok(handle)
 }
 
 /// Runs `source` in a window until it is closed. Fails when the window
-/// cannot open or [`AppOptions::script`] failed.
+/// cannot open.
 pub fn run_app(source: AppSource, options: AppOptions) -> std::process::ExitCode {
     let ok = Rc::new(std::cell::Cell::new(true));
     let result = ok.clone();
@@ -769,7 +875,7 @@ pub fn run_app(source: AppSource, options: AppOptions) -> std::process::ExitCode
         }
         cx.activate(true);
     });
-    if result.get() && !crate::script::failed() {
+    if result.get() {
         std::process::ExitCode::SUCCESS
     } else {
         std::process::ExitCode::FAILURE

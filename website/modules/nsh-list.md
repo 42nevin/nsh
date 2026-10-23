@@ -1,15 +1,15 @@
 ---
-title: nsh/list
+title: List
 description: List, a virtualized and recycling list on a native scroll view, with all its props, events and ref methods.
-order: 4
+order: 2.1
 ---
 
-# nsh/list
+# List
 
-`nsh/list` exports `List`: a virtualized list on a native scroll view. Only the rows near the viewport exist, and their cells are reused as you scroll. Which rows exist, where they are, columns, sticky headers and viewability are all computed natively, so scrolling a list of ten thousand items runs no JS except the row bindings that change when a cell is reused.
+`nsh` exports `List`: a virtualized list on a native scroll view. Only the rows near the viewport exist, and their cells are reused as you scroll. Which rows exist, where they are, columns, sticky headers and viewability are all computed natively, so scrolling a list of ten thousand items runs no JS except the row bindings that change when a cell is reused.
 
 ```ts
-import { List, type ListProps, type ViewToken, type ViewabilityConfig } from "nsh/list";
+import { List, type ListProps, type ViewToken, type ViewabilityConfig } from "nsh";
 ```
 
 See [Lists](../docs/lists.md) for the guide and [`<List>`](../elements/list.md) for the element's props.
@@ -21,8 +21,7 @@ function List<T>(props: ListProps<T>): YNode;
 ```
 
 ```tsx
-import { mount, Text, View } from "nsh";
-import { List } from "nsh/list";
+import { List, mount, Text, View } from "nsh";
 
 const contacts = Array.from({ length: 1000 }, (_, i) => ({ id: String(i), name: `Contact ${i}` }));
 
@@ -82,11 +81,13 @@ element takes, which go to the list's scroll view.
 
 | Prop | Type | Default | Description |
 |---|---|---|---|
-| `onEndReached` | `() => void` | | Called when the end comes within `onEndReachedThreshold` viewports: load more. |
-| `onEndReachedThreshold` | `number` | `1` | How close to the end (in viewport lengths) `onEndReached` fires. |
+| `onLoadMore` | `() => void` | | Called when the end comes within `loadMoreThreshold` viewports: load more. |
+| `loadMoreThreshold` | `number` | `1` | How close to the end (in viewport lengths) `onLoadMore` fires. |
+| `onLoadMoreAtStart` | `() => void` | | Called when the start comes within `loadMoreAtStartThreshold` viewports after the user or a scroll command moved the list: load what comes before the first item. |
+| `loadMoreAtStartThreshold` | `number` | `1` | How close to the start (in viewport lengths) `onLoadMoreAtStart` fires. |
 | `refreshing` | `boolean` | | The pull-to-refresh spinner shows. |
 | `onRefresh` | `() => void` | | Enables pull to refresh; set `refreshing` while you load. |
-| `onViewableItemsChanged` | `(info: { viewableItems: ViewToken<T>[]; changed: ViewToken<T>[] }) => void` | | Items that became or stopped being viewable. |
+| `onViewableItemsChange` | `(info: { viewableItems: ViewToken<T>[]; changed: ViewToken<T>[] }) => void` | | Items that became or stopped being viewable. |
 | `viewabilityConfig` | `ViewabilityConfig` | | When an item counts as viewable. |
 
 ```ts
@@ -111,8 +112,8 @@ interface ViewabilityConfig {
 
 | Prop | Type | Default | Description |
 |---|---|---|---|
-| `showsIndicator` | `boolean` | `true` | The scroll indicator shows. |
-| `scrollEnabled` | `boolean` | `true` | The user can scroll it. |
+| `scrollbar` | `boolean` | `true` | The scroll indicator shows. |
+| `scrollable` | `boolean` | `true` | The user can scroll it. |
 | `bounces` | `boolean` | `true` | Overscroll past the edges. |
 | `pagingEnabled` | `boolean` | `false` | Stops at multiples of the viewport. |
 | `snapToInterval` | `number` | `0` | Stops at multiples of this length (0: off). |
@@ -120,7 +121,7 @@ interface ViewabilityConfig {
 | `snapToAlignment` | `"start" \| "center" \| "end"` | `"start"` | Which point of an item aligns with the viewport with `snapToInterval`. |
 | `disableIntervalMomentum` | `boolean` | `false` | A fling moves one snap point at most. |
 | `decelerationRate` | `"normal" \| "fast" \| number` | platform | How fast a fling slows down (`0.998` / `0.99`, or the velocity kept per millisecond). |
-| `contentInset` | `{ top?, right?, bottom?, left? }` | | Room around the content. |
+| `contentInset` | `Partial<Edges>` | | Room around the content. |
 | `contentOffset` | `{ x?, y? }` | | Where it starts. |
 | `keyboardShouldPersistTaps` | `"never" \| "always" \| "handled" \| boolean` | `"never"` | Whether a tap dismisses the keyboard (`"never"`: the tap only dismisses it). |
 | `keyboardDismissMode` | `"none" \| "on-drag" \| "interactive"` | `"none"` | Whether dragging dismisses the keyboard. |
@@ -131,11 +132,11 @@ interface ViewabilityConfig {
 
 | Event | Payload | When |
 |---|---|---|
-| `onScroll` | `ScrollEvent`: `{ x, y, contentWidth, contentHeight, width, height, zoomScale }` | While scrolling. |
-| `onScrollBeginDrag` | `{ x, y }` | A drag starts. |
-| `onScrollEndDrag` | `{ x, y }` | The finger lifts. |
-| `onMomentumScrollBegin` | `{ x, y }` | A glide starts after the drag. |
-| `onMomentumScrollEnd` | `{ x, y }` | The glide ends (also when a new drag catches it). |
+| `onScroll` | `ScrollEvent`: `{ offset, contentSize, size, zoomScale }` | While scrolling. |
+| `onScrollDragStart` | `{ x, y }` | A drag starts. |
+| `onScrollDragEnd` | `{ x, y }` | The finger lifts. |
+| `onMomentumStart` | `{ x, y }` | A glide starts after the drag. |
+| `onMomentumEnd` | `{ x, y }` | The glide ends (also when a new drag catches it). |
 | `onScrollEnd` | `{ x, y }` | Scrolling came to rest. |
 
 Lists also take the props every element takes ([common props](../elements/index.md)).
@@ -152,8 +153,7 @@ A list's `ref` receives a `YNode` with these methods:
 | `scrollTo({ x?, y?, animated? })` | Scrolls to an offset. |
 
 ```tsx
-import { Text, View, type YNode } from "nsh";
-import { List } from "nsh/list";
+import { List, Text, View, type YNode } from "nsh";
 
 let list!: YNode;
 
@@ -178,8 +178,8 @@ A chat: newest message at the bottom, older messages loaded as you scroll up.
   style={{ flex: 1 }}
   contentStyle={{ padding: 12, gap: 6 }}
   keyboardDismissMode="interactive"
-  onEndReached={loadOlder}
-  onEndReachedThreshold={0.5}
+  onLoadMore={loadOlder}
+  loadMoreThreshold={0.5}
 >
   {(m) => (
     <View style={{ alignSelf: m().mine ? "flex-end" : "flex-start", maxWidth: "75%", padding: 10, borderRadius: 14, backgroundColor: m().mine ? "#6366f1" : "#e2e8f0" }}>
@@ -209,8 +209,8 @@ const refresh = async () => {
 ```ts
 type ListItemsProps<T> = Pick<ListProps<T>,
   "each" | "children" | "keyExtractor" | "stickyHeaderIndices" | "initialScrollIndex"
-  | "onViewableItemsChanged" | "viewabilityConfig" | "refreshing" | "onRefresh"
-  | "onEndReached" | "onEndReachedThreshold"
+  | "onViewableItemsChange" | "viewabilityConfig" | "refreshing" | "onRefresh"
+  | "onLoadMore" | "loadMoreThreshold"
   | "header" | "footer" | "empty">;
 ```
 

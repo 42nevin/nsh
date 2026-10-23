@@ -57,6 +57,26 @@ pub enum ClientMessage {
         /// What it gave, or why it failed.
         outcome: StepOutcome,
     },
+    /// A request of a test session's app, which the test answers
+    /// ([`ServerMessage::Fetch`] of the same id).
+    Fetch {
+        /// The request's id, chosen by the host.
+        id: u64,
+        /// The request.
+        request: WireRequest,
+    },
+    /// The app no longer wants the answer to request `id`.
+    FetchCancel {
+        /// The request's id.
+        id: u64,
+    },
+    /// A batch a traced test session's app applied
+    /// ([`ServerMessage::TestSetup`]): its mount items, a line each, as
+    /// `nsh test --trace` prints them.
+    Trace {
+        /// The items.
+        items: Vec<String>,
+    },
     /// A log line from the host (JS console or native).
     Log {
         /// Severity.
@@ -95,6 +115,62 @@ pub enum HostPlatform {
     Other,
 }
 
+/// What a test fixes of its app's environment on a host, whatever the
+/// platform reports, and the clipboard its app's calls are served from
+/// (`open`'s options; [`ServerMessage::TestSetup`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TestEnvironment {
+    /// The text on the test's clipboard at first: the app's clipboard calls
+    /// are served from a clipboard of the test's own, never the machine's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipboard: Option<String>,
+    /// The locale, a BCP 47 tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    /// Whether the user asked for less motion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduced_motion: Option<bool>,
+    /// The safe area insets in points: top, right, bottom, left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe_area: Option<[f32; 4]>,
+    /// The app runs on a manual clock standing at this wall time, in
+    /// milliseconds since the Unix epoch: its time moves only as the test
+    /// moves it ([`TestStep::Clock`]) and by a frame's time with each frame
+    /// the platform shows, as a headless app's does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<f64>,
+    /// The launch parameters the app reads as `host.params` (`nsh/host`):
+    /// the embedding app's, which the test plays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_params: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// How a test moves its app's manual clock ([`TestEnvironment::clock`];
+/// `app.clock`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "change", rename_all = "snake_case")]
+pub enum ClockChange {
+    /// Moves it by `ms`, a time at a time: the timers due on the way run
+    /// in order, each at its time (`clock.runFor`).
+    RunFor {
+        /// Milliseconds.
+        ms: u64,
+    },
+    /// Moves it by `ms` at once, as a device waking from sleep does: the
+    /// timers due meanwhile run once each (`clock.fastForward`).
+    FastForward {
+        /// Milliseconds.
+        ms: u64,
+    },
+    /// Sets its wall time (`Date.now()`) without moving its timers
+    /// (`clock.setSystemTime`).
+    SetSystemTime {
+        /// Milliseconds since the Unix epoch.
+        unix_ms: f64,
+    },
+}
+
 /// Messages from the server to dev hosts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -113,6 +189,30 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         test: bool,
     },
+    /// What a test session's app starts with (after [`ServerMessage::Hello`],
+    /// before the first bundle): the storage it finds, in place of its
+    /// own. Its requests go to the test ([`ClientMessage::Fetch`]).
+    TestSetup {
+        /// The storage's entries.
+        #[serde(default)]
+        storage: Vec<(String, String)>,
+        /// Trace the app (`nsh test --trace`): its engine logs each
+        /// commit's timings, and the host sends each batch it applies
+        /// ([`ClientMessage::Trace`]).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        trace: bool,
+        /// What the test fixes of the app's environment, and its clipboard.
+        #[serde(default)]
+        environment: TestEnvironment,
+    },
+    /// What the test answers to the app's request `id`
+    /// ([`ClientMessage::Fetch`]), a message per event, in order.
+    Fetch {
+        /// The request's id.
+        id: u64,
+        /// The event.
+        reply: FetchReply,
+    },
     /// A step of a test, which the host answers with a
     /// [`ClientMessage::StepDone`] of the same id.
     Step {
@@ -121,6 +221,9 @@ pub enum ServerMessage {
         /// What to do.
         step: TestStep,
     },
+    /// A test session's app is the host's own Rust root (`nsh.json`
+    /// `"root"`, an app of Rust only), which it runs in place of a bundle.
+    Root,
     /// A rebuild started.
     Building,
     /// The host cannot run the app: the latest bundle imports UI sets it
@@ -177,6 +280,29 @@ pub enum ServerMessage {
     },
 }
 
+/// A file a test pastes ([`TestStep::Paste`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TestFile {
+    /// Its name.
+    pub name: String,
+    /// Its MIME type.
+    pub mime: String,
+    /// Its bytes.
+    pub data: Vec<u8>,
+}
+
+impl TestFile {
+    /// A file named `name` of type `mime` holding `data`.
+    pub fn new(name: impl Into<String>, mime: impl Into<String>, data: Vec<u8>) -> TestFile {
+        TestFile {
+            name: name.into(),
+            mime: mime.into(),
+            data,
+        }
+    }
+}
+
 /// A step of a test on a host's app, named as `nsh/test` names them: views
 /// are found by selectors (`id:save`, `text:Add`, `role:button[Save]`), and
 /// actions are native input at the view the selector names.
@@ -223,12 +349,80 @@ pub enum TestStep {
         /// Points; negative scrolls back.
         distance: f32,
     },
+    /// Drags the view: a finger (or the mouse) on its middle moves by
+    /// `x`, `y` points and lifts (`app.drag`).
+    Drag {
+        /// The view.
+        selector: String,
+        /// Points rightwards.
+        x: f32,
+        /// Points downwards.
+        y: f32,
+    },
+    /// Moves the mouse over the view (`app.hover`).
+    Hover {
+        /// The view.
+        selector: String,
+    },
+    /// The mouse's secondary button over the view (`app.rightClick`).
+    RightClick {
+        /// The view.
+        selector: String,
+    },
+    /// Pastes into the input (`app.paste`), as the user's paste does with
+    /// this on the clipboard.
+    Paste {
+        /// The input.
+        selector: String,
+        /// The text (empty: none).
+        text: String,
+        /// Files with their bytes (images).
+        files: Vec<TestFile>,
+        /// Local files' `file:` URLs.
+        uris: Vec<String>,
+    },
+    /// The open context menu's actions (`app.menu`): `null` when none is.
+    Menu,
+    /// The text on the test's clipboard (`app.clipboard`): `null` when it
+    /// holds none.
+    Clipboard,
+    /// The embedding app sends event `name` with `data` to the app
+    /// (`app.host.send`; `nsh/host`'s `host.on`), then the app settles.
+    HostSend {
+        /// The event.
+        name: String,
+        /// Its data.
+        #[serde(default)]
+        data: serde_json::Value,
+    },
+    /// The URLs the app opened (`app.openedUrls`; `openUrl` of
+    /// `nsh/device`), in order: recorded, never opened.
+    OpenedUrls,
+    /// Chooses the open context menu's action (`app.chooseMenuItem`).
+    ChooseMenuItem {
+        /// Its label (a submenu's: `"Share > Mail"`).
+        label: String,
+    },
+    /// Closes the open context menu with nothing chosen (`app.closeMenu`).
+    CloseMenu,
+    /// Presses a key with its modifiers, as `nsh/keymap` names it
+    /// (`app.keyboard.press`).
+    PressKey {
+        /// The keystroke: `"mod+k"`, `"escape"`.
+        keys: String,
+    },
     /// Goes back as the user does (`app.back`).
     Back,
     /// Lets the app run (`app.wait`).
     Wait {
         /// Milliseconds.
         ms: u64,
+    },
+    /// Moves the app's manual clock ([`TestEnvironment::clock`]), then
+    /// waits until it is quiet.
+    Clock {
+        /// How.
+        change: ClockChange,
     },
     /// Waits until a view matches, or none does (`app.waitFor`).
     WaitFor {
@@ -296,6 +490,216 @@ pub enum TestStep {
     },
     /// Closes the app: the host exits.
     Quit,
+    /// A question about the host's model of the app or about its views,
+    /// from a test agent that runs elsewhere (the web: `nsh` acts through
+    /// the browser, the page knows the app).
+    Scene {
+        /// The question.
+        query: SceneQuery,
+    },
+}
+
+/// What a test agent that runs outside the host asks of it
+/// ([`TestStep::Scene`]); the answers' shapes are `nsh_testing::agent`'s.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "query", rename_all = "snake_case")]
+pub enum SceneQuery {
+    /// How many batches the app applied and how long ago the last was.
+    Activity,
+    /// The app's errors since the last time, taken.
+    TakeErrors,
+    /// The one view `selector` names for a step on `target`.
+    Pick {
+        /// The selector.
+        selector: String,
+        /// What the step acts on.
+        target: PickTarget,
+    },
+    /// The scroll views around view `id`, innermost first.
+    ScrollAncestors {
+        /// The view.
+        id: u32,
+    },
+    /// View `id`'s long press delay in milliseconds, if it says.
+    LongPressDelay {
+        /// The view.
+        id: u32,
+    },
+    /// Whether scroll view `id` scrolls horizontally.
+    Horizontal {
+        /// The view.
+        id: u32,
+    },
+    /// The input `selector` names.
+    InputId {
+        /// The selector.
+        selector: String,
+    },
+    /// The oldest dialog was answered.
+    Answered,
+    /// The context menu the app shows (`Menu.popup`): its items, or `null`.
+    Menu,
+    /// The text on the test's clipboard, or `null`.
+    Clipboard,
+    /// The embedding app sends event `name` with `data` to the app
+    /// ([`TestStep::HostSend`]).
+    HostSend {
+        /// The event.
+        name: String,
+        /// Its data.
+        #[serde(default)]
+        data: serde_json::Value,
+    },
+    /// The URLs the app opened, in order ([`TestStep::OpenedUrls`]).
+    OpenedUrls,
+    /// The open context menu was chosen from or closed.
+    MenuClosed,
+    /// The app's storage: its entries.
+    Storage,
+    /// Moves the app's manual clock ([`TestStep::Clock`]).
+    Clock {
+        /// How.
+        change: ClockChange,
+    },
+    /// The window's content is this size: what lies outside it, and no
+    /// scroll view brings in, is not on screen.
+    SetViewport {
+        /// Width in points.
+        width: f32,
+        /// Height in points.
+        height: f32,
+    },
+    /// View `id`'s bounds on screen, in points from the viewport's top left.
+    Bounds {
+        /// The view.
+        id: u32,
+    },
+    /// The viewport's size in points.
+    Viewport,
+    /// The text view showing span `id` (a nested text that takes presses)
+    /// and where in its text it is: `[view, start, end]` (UTF-16 units),
+    /// or `null` for a view.
+    Span {
+        /// The span.
+        id: u32,
+    },
+    /// The canvas containing the node `selector` names, and its center
+    /// in the canvas's coordinates: `[view, {x, y}]`, or `null` for a view.
+    CanvasNode {
+        /// The canvas node's selector.
+        selector: String,
+    },
+
+    /// The text input `id` holds.
+    InputText {
+        /// The view.
+        id: u32,
+    },
+    /// Whether a native animation runs.
+    Animating,
+    /// Where to press to answer the dialog shown: its button `button`, or
+    /// outside it (`None`).
+    DialogPoint {
+        /// The button's text.
+        button: Option<String>,
+    },
+}
+
+/// An app's HTTP request, as a test session's host forwards it
+/// ([`ClientMessage::Fetch`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WireRequest {
+    /// Upper-case method.
+    pub method: String,
+    /// Absolute URL.
+    pub url: String,
+    /// Header names and values, in order.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    /// The body (a streamed one, gathered).
+    #[serde(default, with = "base64_bytes")]
+    pub body: Vec<u8>,
+    /// Follow redirects.
+    #[serde(default)]
+    pub follow_redirects: bool,
+}
+
+/// What a test answers to an app's request ([`ServerMessage::Fetch`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "reply", rename_all = "snake_case")]
+pub enum FetchReply {
+    /// The host makes the request itself, on its own network (the test
+    /// lets requests through).
+    Pass,
+    /// The response's status and headers.
+    Head {
+        /// The status code.
+        status: u16,
+        /// Header names and values.
+        headers: Vec<(String, String)>,
+        /// The response's URL.
+        url: String,
+    },
+    /// Bytes of the body, in order.
+    Data {
+        /// The bytes.
+        #[serde(with = "base64_bytes")]
+        bytes: Vec<u8>,
+    },
+    /// The body is complete.
+    End,
+    /// The request failed.
+    Failed {
+        /// Why.
+        message: String,
+    },
+}
+
+/// What answers the requests of a test session's app (the test's routes):
+/// `DevServer::set_test_network`.
+pub trait TestNetwork: Send + Sync {
+    /// Answers `request` through `reply`, an event at a time in order, from
+    /// any thread ([`FetchReply::Pass`]: the host makes it itself). The
+    /// function returned cancels it.
+    fn fetch(
+        &self,
+        request: WireRequest,
+        reply: Box<dyn FnMut(FetchReply) + Send>,
+    ) -> Box<dyn FnOnce() + Send>;
+}
+
+/// Bytes as base64 text in JSON.
+mod base64_bytes {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(d)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// What a step acts on, which decides the view a selector names
+/// ([`SceneQuery::Pick`]).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PickTarget {
+    /// A press: the view, or the nearest around it that hears presses.
+    Pressable,
+    /// A long press.
+    LongPressable,
+    /// An input.
+    Input,
+    /// A scroll view.
+    ScrollView,
+    /// The view itself (a drag lands on it).
+    View,
 }
 
 /// How a [`TestStep`] ended.
