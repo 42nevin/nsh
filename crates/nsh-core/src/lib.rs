@@ -80,12 +80,12 @@ pub use crate::{
     },
     ops::{
         AutoCapitalize, AutoFill, CellSlot, Command, ContextMenuEvent, Dialog, DialogButton,
-        DialogButtonStyle, EventKind, EventMask, EventPayload, HeaderSlot, HoverEvent,
-        IMAGE_SCALES, ImageProp, ImageScales, ImageSource, KeyboardAppearance, KeyboardDismissMode,
-        KeyboardTaps, KeyboardType, ListContentStyle, ListViewport, ModalAnimation,
-        ModalPresentation, ModalProp, NativeProp, NodeId, Op, OverlayProp, PayloadValue,
-        PressEvent, Prop, ROOT_ID, ResizeMode, ReturnKeyType, ScreenAnimation, ScreenProp,
-        ScrollProp, SnapAlignment, StatusBarConfig, StatusBarSetting, StatusBarStyle,
+        DialogButtonStyle, EventKind, EventMask, EventPayload, HeaderSlot, HeaderSystemItem,
+        HoverEvent, IMAGE_SCALES, ImageProp, ImageScales, ImageSource, KeyboardAppearance,
+        KeyboardDismissMode, KeyboardTaps, KeyboardType, ListContentStyle, ListViewport,
+        ModalAnimation, ModalPresentation, ModalProp, NativeProp, NodeId, Op, OverlayProp,
+        PayloadValue, PressEvent, Prop, ROOT_ID, ResizeMode, ReturnKeyType, ScreenAnimation,
+        ScreenProp, ScrollProp, SnapAlignment, StatusBarConfig, StatusBarSetting, StatusBarStyle,
         SubmitBehavior, Tag, TouchEvent, TouchPhase, TouchPoint, Viewability, WebSource,
     },
     props::{
