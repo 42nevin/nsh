@@ -1421,6 +1421,7 @@ fn menus_reach_the_platform_and_call_back() {
         enabled: true,
         checked: None,
         role: None,
+        when: nsh_core::keymap::When::Always,
     };
     let quit = MenuAction {
         id: 0,
@@ -1429,6 +1430,7 @@ fn menus_reach_the_platform_and_call_back() {
         enabled: true,
         checked: None,
         role: Some(MenuRole::Quit),
+        when: nsh_core::keymap::When::Always,
     };
     assert_eq!(
         &*menu,
