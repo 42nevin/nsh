@@ -304,6 +304,8 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     e.float(c.start.0);
                     e.float(c.end.0);
                 }
+                // Animated offsets are the UI thread's graph's (`animation.rs`).
+                e.animation.push(MountItem::StickyCells { id, cells });
             }
             MountItem::LayoutDirection { rtl } => {
                 e.int(LAYOUT_DIRECTION);

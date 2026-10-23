@@ -1697,8 +1697,12 @@ pub enum Prop {
     /// `stickyHeaderOffset`: how far from the start of the viewport sticky
     /// items stick, as CSS `position: sticky`'s `top` (negative: partly out
     /// of view); the content scrolls under the space before them.
-    #[prop(js = "stickyHeaderOffset", default = Points(0.0), on = LIST)]
+    #[prop(js = "stickyHeaderOffset", with = crate::js::host_values::sticky_offset, reset = Prop::StickyOffset(Points(0.0)), ts = "number | AnimatedNode", on = LIST)]
     StickyOffset(Points),
+    /// `stickyHeaderOffset` as an animated value: sticky items stick that
+    /// far from the start of the viewport, following the value (below a
+    /// header that moves); the platforms read it as they pin.
+    StickyOffsetNode(Option<crate::animation::NodeId>),
     /// `viewport`: `"parent"` lays the list out at its full length in its
     /// parent and renders the rows near the viewport of the scroll view
     /// around it, which scrolls it (a page of headers and lists); `"own"`

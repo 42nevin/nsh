@@ -446,6 +446,16 @@ pub(crate) fn scroll_value<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Pr
     Some(Prop::ScrollValue(input.animated_node()))
 }
 
+/// `stickyHeaderOffset`: a number, or an animated value.
+pub(crate) fn sticky_offset<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
+    match input.as_number() {
+        Some(n) => Some(Prop::StickyOffset(Points(n as f32))),
+        None => input
+            .animated_node()
+            .map(|node| Prop::StickyOffsetNode(Some(node))),
+    }
+}
+
 /// `hitSlop`: one number for every edge, or the edges.
 pub(crate) fn hit_slop<I: HostInput>(input: &I, cx: &mut HostCx) -> Option<Prop> {
     Some(Prop::HitSlop(match input.as_number() {

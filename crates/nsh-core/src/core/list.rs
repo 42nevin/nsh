@@ -255,6 +255,8 @@ pub(super) struct StickyRange {
     pub(super) cell: u32,
     pub(super) start: f32,
     pub(super) end: f32,
+    /// An animated value it sticks further from the viewport's start by.
+    pub(super) offset: Option<crate::animation::NodeId>,
 }
 
 #[derive(Debug)]
@@ -288,6 +290,9 @@ pub(super) struct ListState {
     /// `stickyHeaderOffset`: sticky items stick this far from the
     /// viewport's start.
     sticky_offset: f32,
+    /// `stickyHeaderOffset` as an animated value: added to `sticky_offset`
+    /// by the platforms as they pin (a header that moves).
+    sticky_node: Option<crate::animation::NodeId>,
     /// Sticky ranges last sent to the platform.
     pub(super) sent_sticky: Vec<StickyRange>,
     pub(super) viewability: Viewability,
@@ -381,6 +386,7 @@ impl ListState {
             follow_end: None,
             sticky: Vec::new(),
             sticky_offset: 0.0,
+            sticky_node: None,
             sent_sticky: Vec::new(),
             viewability: Viewability::default(),
             viewable: None,
@@ -1037,6 +1043,14 @@ impl ListState {
         }
     }
 
+    /// `stickyHeaderOffset` as an animated value.
+    pub(super) fn set_sticky_node(&mut self, node: Option<crate::animation::NodeId>) {
+        if node != self.sticky_node {
+            self.sticky_node = node;
+            self.dirty = true;
+        }
+    }
+
     /// `stickyHeaderOffset`.
     pub(super) fn set_sticky_offset(&mut self, offset: f32) {
         let offset = if offset.is_finite() { offset } else { 0.0 };
@@ -1311,9 +1325,15 @@ impl ListState {
                 cell,
                 start: at + start,
                 end: at + end,
+                offset: self.sticky_node,
             };
         }
-        StickyRange { cell, start, end }
+        StickyRange {
+            cell,
+            start,
+            end,
+            offset: self.sticky_node,
+        }
     }
 
     /// Recomputes the render window. `(slot, index)` bindings due now are
@@ -1828,7 +1848,8 @@ mod tests {
             StickyRange {
                 cell: 1,
                 start: -20.0,
-                end: 1430.0
+                end: 1430.0,
+                offset: None,
             }
         );
         assert_eq!(l.sticky_range(30, 2, 50.0).start, 1480.0);
@@ -1860,7 +1881,8 @@ mod tests {
             StickyRange {
                 cell: 1,
                 start: 0.0,
-                end: 1450.0
+                end: 1450.0,
+                offset: None,
             }
         );
         assert_eq!(l.sticky_range(30, 1, 50.0).end, f32::INFINITY);
@@ -2179,7 +2201,8 @@ mod tests {
             StickyRange {
                 cell: 1,
                 start: 80.0,
-                end: 100.0 + 1500.0 - 50.0 - 20.0
+                end: 100.0 + 1500.0 - 50.0 - 20.0,
+                offset: None,
             }
         );
         // The last one stops with its bottom at the list's end (5100).
