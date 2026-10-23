@@ -66,6 +66,15 @@
   the box is empty, so a component can size itself. Content masks are
   rectangles: rounded corners do not cut a component (videos follow them).
   `crates/gpui/nsh-platform-gpui/examples/embed.rs` runs `examples/embedded` with its badge as a GPUI element.
+- **Native host keystrokes** (macOS): `nsh_platform_macos::keystroke_for_event(&NSEvent)`
+  exposes the same normalization used by the `nsh/keymap` monitor. It returns a
+  `nsh_core::keymap::Keystroke` for key-down/key-up events, or `None` for other events
+  and unsupported keys. Hosts that own synchronous IME admission and retained input
+  queues can use `Keystroke::parse`, `Keystroke::reserved`, `Keystroke::label` and
+  `Keymap::find` directly, after selecting their document context. The helper does
+  not install a monitor, dispatch a command, or retain/consume an event. The host
+  owns those lifetimes and must reject reserved bindings when constructing its
+  table. Do not also register the same shortcut through `on_key` or `keymap.bind`.
 - **Native modules** (`nsh/native`'s `nativeModule`; `platform_modules.rs`, `modules::host_module`): an embedding app
   written in Rust gives its engines a UI set of its own (`Registry::ui_set("host/trading")` with its `#[module]`s,
   `#[class]`es and Rust components) next to NSH's (`set_ui_sets` of the platform crate, `EngineConfig::ui_sets`), and

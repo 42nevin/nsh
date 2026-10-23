@@ -38,6 +38,13 @@ interface KeyBindingOptions {
 
 A Rust binding lives as long as the component (the owner) that made it; the handler gets the keystroke as written.
 
+macOS embedding hosts that own a native text/IME input queue can normalize the
+original `NSEvent` with `nsh_platform_macos::keystroke_for_event`, then use
+`nsh_core::keymap::{Keystroke, Keymap}` for parsing, reserved-key validation,
+labels and matching. This low-level helper neither consumes nor retains events;
+the host owns admission, command delivery and lifetimes. A host must not also
+bind those shortcuts through `on_key` or `keymap.bind`.
+
 Shortcuts work on macOS, Windows, Linux and in browsers (the browser's own keys, such as Ctrl+T or Cmd+W, never reach the page), and on iOS and Android with a hardware keyboard: an iPad's, a Mac's running an iPad app, a tablet's or a Chromebook's, the simulator's and the emulator's. The same code runs everywhere; without a keyboard, no key fires the bindings.
 
 ## keymap.bind

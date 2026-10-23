@@ -24,7 +24,7 @@ use nsh_core::{
     platform::Os,
 };
 use objc2::{rc::Retained, runtime::AnyObject};
-use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSView, NSWindow};
+use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSView, NSWindow};
 
 use crate::surface::Surface;
 
@@ -140,7 +140,24 @@ fn editing(surface: &Surface, window: &NSWindow) -> Option<bool> {
     Some(!crate::view::is_ours(view))
 }
 
-/// The keystroke of `event`, by its key on the US layout.
+/// Normalize an AppKit key-down or key-up event with the same rules as
+/// `nsh/keymap`. Non-key events and keys without a supported identity return
+/// `None`. Shift remains a modifier; non-ASCII layouts use the US key fallback.
+///
+/// Native embedding hosts can match the result with [`Keymap::find`] after
+/// their own text/IME admission. This does not dispatch, consume, or retain the
+/// event. The host owns its lifetime and must still reject reserved bindings
+/// with [`Keystroke::reserved`] when building its table.
+/// Shifted printable keys consult AppKit's active keyboard layout; call from
+/// the application's event-dispatch thread after AppKit initialization.
+pub fn keystroke_for_event(event: &NSEvent) -> Option<Keystroke> {
+    if !matches!(event.r#type(), NSEventType::KeyDown | NSEventType::KeyUp) {
+        return None;
+    }
+    keystroke(event)
+}
+
+/// Shared implementation. The local monitor already admits key-down events.
 fn keystroke(event: &NSEvent) -> Option<Keystroke> {
     let flags = event.modifierFlags();
     let modifiers = Modifiers {
@@ -201,6 +218,55 @@ fn function_key(code: u16) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use objc2_app_kit::NSEventType;
+    use objc2_foundation::{NSPoint, NSString};
+
+    fn event(code: u16, chars: &str, flags: NSEventModifierFlags) -> Retained<NSEvent> {
+        let chars = NSString::from_str(chars);
+        NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            NSEventType::KeyDown, NSPoint::new(0.0, 0.0), flags, 0.0, 0, None,
+            &chars, &chars, false, code,
+        ).unwrap()
+    }
+
+    #[test]
+    fn native_keystrokes_share_shortcut_identity_and_system_reservations() {
+        let cmd = NSEventModifierFlags::Command;
+        for (code, chars, flags, expected) in [
+            (8, "C", cmd, "cmd+c"),
+            (8, "j", cmd, "cmd+j"),
+            (8, "с", cmd, "cmd+c"),
+            (36, "\r", cmd, "cmd+enter"),
+            (76, "\u{3}", cmd, "cmd+enter"),
+            (123, "", cmd | NSEventModifierFlags::Option, "alt+cmd+left"),
+            (123, "", cmd | NSEventModifierFlags::Shift, "shift+cmd+left"),
+        ] {
+            assert_eq!(
+                crate::keystroke_for_event(&event(code, chars, flags)),
+                Some(Keystroke::parse(expected, Os::MacOs).unwrap()),
+                "{expected}"
+            );
+        }
+        let quit = crate::keystroke_for_event(&event(12, "q", cmd)).unwrap();
+        assert!(quit.reserved(Os::MacOs).is_some());
+        let full_screen =
+            crate::keystroke_for_event(&event(3, "f", cmd | NSEventModifierFlags::Control))
+                .unwrap();
+        assert!(full_screen.reserved(Os::MacOs).is_some());
+        // Shifted printable events consult AppKit's keyboard layout services.
+        // Exercise those in an initialized main-thread host, not a libtest worker.
+    }
+
+    #[test]
+    fn non_keyboard_events_have_no_keystroke() {
+        let event = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+            NSEventType::ApplicationDefined, NSPoint::new(0.0, 0.0),
+            NSEventModifierFlags::empty(), 0.0, 0, None, 0, 0, 0,
+        ).unwrap();
+        assert_eq!(crate::keystroke_for_event(&event), None);
+    }
+
     #[test]
     fn function_keys() {
         assert_eq!(super::function_key(122), Some(1));

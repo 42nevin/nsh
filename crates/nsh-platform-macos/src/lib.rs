@@ -67,6 +67,7 @@ pub use crate::app::set_root;
 pub use crate::{
     app::{AppOptions, AppSource, AppView, quit_app, run_app, set_ui_sets},
     image::AssetBase,
+    keymap::keystroke_for_event,
     native::{ComponentContext, ComponentFactory, Components, NativeComponent},
     text::CoreTextEngine,
 };
