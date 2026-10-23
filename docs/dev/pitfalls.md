@@ -451,6 +451,17 @@ Things that were found the hard way. Read the section of the area you change bef
   Safari: the wasm twice in 4 of 11 cold loads on Wi-Fi, each time the runtime asked before the preload was done;
   Chromium hands it over). The published page starts its downloads with `fetch` in a head script instead
   (`web::page`, `fetches`).
+- **A scroll view's smooth wheel and key scrolling is nsh's glide, which no browser call cancels**: `wheel` and the
+  scroll keys are prevented and `scrollSmoothly` moves the view on animation frames, so an instant `scrollTo` lasted
+  one frame and the glide's next one put its offset back (Chromium 141: a 900 px wheel notch, `scrollTo(0)` 50 ms
+  later, then 778, 848, … 900). Commands stop the glide first (`stopGlide`) and `op_sb` moves it. A `scrollTo` to
+  where the view already is, instant or smooth, sends neither `scroll` nor `scrollend` (Chromium 152): `stopGlide`
+  sends the `onScrollEnd` of the scroll it stops then. Headless Chrome (141, 155) scrolls a wheel's delta at once by
+  itself: the scroll that animates there is the glide.
+- **Fractional scroll targets can move less than half a CSS pixel**: at DPR 2, Chromium rounds a target of 40.4
+  to 40.5. A half-pixel stationary tolerance therefore ends the scroll early and duplicates `onScrollEnd`.
+  `stopGlide` compares clamped offsets exactly; a quiet-period fallback covers targets rounded back to the
+  current offset, for which the browser emits no `scrollend`.
 
 ## Testing on simulators and emulators
 
