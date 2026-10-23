@@ -224,7 +224,9 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
 - **Right to left**: the user's language sets the root's direction (again at once when it changes);
   `direction` (`inherit` / `ltr` / `rtl`) overrides it per view. The core resolves each node's direction (inherited, also for
   subtrees built detached), sets taffy's `direction` (rows run from the right) and, right to left, swaps the left and right
-  properties (margins, paddings, insets, borders, corners — always) and places the
+  properties (margins, paddings, insets, borders, corners — always: React Native's rule for style keys; Tailwind's
+  physical classes are resolved for the other side right to left, `tailwind::utilities::directed`, so they come out
+  where they say, as in a browser) and places the
   start / end ones (`marginStart`, `start`, `borderTopEndRadius`, ...). A direction change swaps the current taffy style in place
   (an involution), so authored styles need not be kept. Text: `auto` alignment is the right side right to left, left / right
   swap, `writingDirection` sets the base direction (else the content's). Native widgets mirror (`MountItem::LayoutDirection`:
