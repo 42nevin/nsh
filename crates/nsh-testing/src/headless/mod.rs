@@ -1484,6 +1484,7 @@ impl Headless {
             self.display_frame();
         }
         self.send(id, EventKind::ScrollDragEnd, offset(&self.screen));
+        self.animator.scroll_ended(id);
         self.send(id, EventKind::ScrollEnd, offset(&self.screen));
         self.done()
     }

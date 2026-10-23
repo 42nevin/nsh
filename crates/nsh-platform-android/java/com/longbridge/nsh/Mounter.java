@@ -2215,6 +2215,11 @@ final class Mounter {
         outputs(Native.scroll(handle(), id, x, y, applied));
     }
 
+    /** Scroll view {@code id} came to rest: snapping animated values settle. */
+    void scrollEnded(int id) {
+        outputs(Native.scrollEnded(handle(), id));
+    }
+
     void pan(int id, int state, float tx, float ty, float vx, float vy) {
         if (state == 0) for (TouchTracker t : touchTrackers) t.cancelFeedback();
         outputs(Native.pan(handle(), id, state, tx, ty, vx, vy));
