@@ -289,6 +289,24 @@ try app.loadBundle(at: url)
 Call it before or after loading: classes such as `bg-primary` and `rounded-(--radius)` restyle at once, and every app
 loaded later starts with the overrides in its first frame. `setThemeOverrides(nil)` gives the app its own theme back.
 
+## Links the app opens
+
+The URLs the app opens ([`openUrl`](../modules/nsh-device.md#openurl), a `TextView`'s links with `links="open"`)
+reach `onOpenURL` first, on the main thread: return `true` when the host app handled the URL, such as by routing it
+through its own router, and `false` for the system to open it with `UIApplication.open`. Without `onOpenURL` the
+system opens every URL. URLs reach it after the app's `openUrl` capability allowed them.
+
+```swift
+app.onOpenURL = { url in
+    // The host app's own links open in the host app.
+    if url.scheme == "lb" || url.host == "longbridge.com" {
+        router.open(url)
+        return true
+    }
+    return false
+}
+```
+
 ## Limits
 
 ```swift

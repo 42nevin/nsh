@@ -68,7 +68,7 @@ pub use storage::{FileStorage, data_dir};
 use crate::script::{NetworkQueue, RequestId, Script};
 pub use crate::{
     error::{AppError, AppErrorKind, PackageInfo},
-    host_channel::{HostCall, HostChannel, HostReply},
+    host_channel::{HostCall, HostChannel, HostReply, OpenUrlRequest},
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -880,6 +880,13 @@ enum Message {
     HostEvent(String, nsh_core::JsonValue),
     /// The embedding app's answer to call `.0` (`host.call`).
     HostReply(u64, Result<nsh_core::JsonValue, String>),
+    /// The embedding app's URL handler answered URL request `id`: it took
+    /// the URL, or the platform opens it.
+    UrlHandled {
+        id: u32,
+        url: String,
+        handled: bool,
+    },
     /// Moves a manual clock forward by this much, then calls back.
     Advance(std::time::Duration, Box<dyn FnOnce() + Send>),
     /// Sent by a dropped [`Engine`] (there is none in WebAssembly).
@@ -1428,6 +1435,8 @@ impl<M: TextEngine + 'static> Driver<M> {
             sets_seen: FxHashMap::default(),
             resized: None,
             pinned: config.pinned,
+            host: config.host.clone(),
+            url_opens: Vec::new(),
             net: Net {
                 network: config.network.clone(),
                 tx,
@@ -1778,6 +1787,11 @@ struct State<M: TextEngine> {
     /// `items`; `js` is the rest of the wake-up).
     perf_commit: perf::CommitTiming,
     committed_since_gc: bool,
+    /// The embedding app's channel: its URL handler sees the app's URLs
+    /// first.
+    host: HostChannel,
+    /// URLs the app asked to open, taken from the core (a reused buffer).
+    url_opens: Vec<(u32, String)>,
     net: Net,
     /// Development updates to apply.
     hot: Vec<HotUpdate>,
@@ -2118,6 +2132,21 @@ impl<M: TextEngine> State<M> {
 
     /// Produces one frame: applies JS ops, lays out, and lets lists pull
     /// the items they need, merging everything into a single batch.
+    /// Hands the URLs the app asked to open to the embedding app's URL
+    /// handler, or, without one, to the platform ([`nsh_core::open_url`]);
+    /// true when the platform has one to open (the core's commit sends it).
+    fn open_urls(&mut self) -> bool {
+        self.core.take_url_opens(&mut self.url_opens);
+        let mut platform = false;
+        for (id, url) in self.url_opens.drain(..) {
+            if self.host.open_url(id, url.clone(), &self.net.tx).is_none() {
+                self.core.open_url_on_platform(id, url);
+                platform = true;
+            }
+        }
+        platform
+    }
+
     fn commit(&mut self, script: Option<&Script>) -> Option<MountBatch> {
         let start = Instant::now();
         let mut merged: Option<MountBatch> = None;
@@ -2205,6 +2234,7 @@ impl<M: TextEngine> State<M> {
                     Err(err) => log::error!("invalid op: {err:?}"),
                 }
             }
+            drop(ops);
             if let Some(batch) = self.core.commit() {
                 commits += 1;
                 match &mut merged {
@@ -2214,6 +2244,8 @@ impl<M: TextEngine> State<M> {
             }
             self.core.take_list_binds(&mut self.binds);
             self.core.take_events(&mut self.events);
+            // URLs the platform opens go out in another round.
+            let urls = self.open_urls();
             // Posts the ops queued (in program order) run in another round.
             let posted = script.is_some_and(Script::has_posted);
             // New tokens (the app's theme, the embedding app's) reach what
@@ -2227,7 +2259,12 @@ impl<M: TextEngine> State<M> {
                 _ => false,
             };
             let more_paced = script.is_some() && paced.left() && self.core.has_paced_list_binds();
-            if self.binds.is_empty() && self.events.is_empty() && !posted && !retheme && !more_paced
+            if self.binds.is_empty()
+                && self.events.is_empty()
+                && !posted
+                && !retheme
+                && !more_paced
+                && !urls
             {
                 break;
             }
@@ -2449,6 +2486,13 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
         Message::HostReply(id, result) => {
             if let Some(script) = script {
                 script.host_reply(id, result);
+            }
+        }
+        Message::UrlHandled { id, url, handled } => {
+            if handled {
+                state.core.answer_open_url(id, true);
+            } else {
+                state.core.open_url_on_platform(id, url);
             }
         }
         // The driver handles it ([`Driver::handle`]), and keeps the ones

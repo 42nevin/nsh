@@ -268,6 +268,21 @@ try app.loadBundle(at: url)
 
 在加载之前或之后调用都可以：`bg-primary`、`rounded-(--radius)` 等类名立即更新样式，之后加载的每个应用在第一帧就带有这些覆盖。`setThemeOverrides(nil)` 恢复应用自己的主题。
 
+## 应用打开的链接
+
+应用打开的 URL（[`openUrl`](../modules/nsh-device.md#openurl)，以及 `links="open"` 的 `TextView` 中的链接）先交给 `onOpenURL`，在主线程调用：宿主应用自己处理了这个 URL（例如交给自己的路由）时返回 `true`，返回 `false` 则由系统用 `UIApplication.open` 打开。没有设置 `onOpenURL` 时，所有 URL 都由系统打开。到达这里的 URL 都已通过应用的 `openUrl` 能力检查。
+
+```swift
+app.onOpenURL = { url in
+    // 宿主应用自己的链接在宿主应用里打开。
+    if url.scheme == "lb" || url.host == "longbridge.com" {
+        router.open(url)
+        return true
+    }
+    return false
+}
+```
+
 ## 限制
 
 ```swift

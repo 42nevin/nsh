@@ -253,6 +253,25 @@ nsh.loadAssetBundle("orders");
 Call it before or after loading: classes such as `bg-primary` and `rounded-(--radius)` restyle at once, and every app
 loaded later starts with the overrides in its first frame. `setThemeOverrides(null)` gives the app its own theme back.
 
+## Links the app opens
+
+The URLs the app opens ([`openUrl`](../modules/nsh-device.md#openurl), a `TextView`'s links with `links="open"`)
+reach the view's `OpenUrlHandler` first, on the UI thread: return `true` when the host app handled the URL, such as by
+routing it through its own router, and `false` for the system to open it with an `ACTION_VIEW` intent. Without a
+handler the system opens every URL. URLs reach it after the app's `openUrl` capability allowed them.
+
+```java
+nsh.setOpenUrlHandler(url -> {
+    Uri uri = Uri.parse(url);
+    // The host app's own links open in the host app.
+    if ("lb".equals(uri.getScheme()) || "longbridge.com".equals(uri.getHost())) {
+        router.open(uri);
+        return true;
+    }
+    return false;
+});
+```
+
 ## Limits
 
 ```java

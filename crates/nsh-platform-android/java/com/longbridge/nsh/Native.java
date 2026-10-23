@@ -74,6 +74,7 @@ final class Native {
     static final int HOST = 63;
     static final int PICK = 64;
     static final int LOAD_MORE_AT_START = 65;
+    static final int OPEN_URL = 66;
 
     /**
      * Draws the SVG {@code bytes} for a view {@code maxPx} pixels on its longer side, with its shorter side that long
@@ -174,6 +175,12 @@ final class Native {
 
     /** Frees a call unanswered: it fails in the app. */
     static native void hostCallFree(long call);
+
+    /** The URLs the app opens go to {@code NshView.openUrlMessage} first ({@code handled}), or to the system. */
+    static native void setOpenUrlHandler(long handle, boolean handled);
+
+    /** Answers a URL {@code openUrlMessage} got: whether the embedding app took it. Frees it. */
+    static native void openUrlReply(long request, boolean handled);
 
     /** Root size in dp. */
     static native void resize(long handle, float width, float height);
