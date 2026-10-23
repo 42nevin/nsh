@@ -41,6 +41,8 @@ Rust 应用的 APK 带有它自己的 `libnsh.so`，用你的 crate 构建，其
 
 APK 用 SDK 的 build tools 构建，不需要 Gradle；除非传入发布用的 keystore，否则用调试密钥签名。发布签名和图标见[打包](./packaging.md#android)。
 
+NSH 以 16 KB ELF 对齐构建 `libnsh.so`，并将未压缩的原生库按 16 KB ZIP 边界打包。
+
 ## 嵌入 Android 应用
 
 现有的 Android 应用可以在自己的界面中显示 NSH 应用。运行时以 Android 库 `nsh.aar` 的形式提供：创建一个

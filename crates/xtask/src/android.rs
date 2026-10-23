@@ -121,6 +121,7 @@ pub(crate) fn build(release: bool, dev: bool, abis: &[String]) -> anyhow::Result
     for abi in abis {
         let triple = triple(abi)?;
         let so = cargo_lib(&sdk, triple, abi, release, dev)?;
+        check_alignment(&sdk, &so)?;
         let dest = out.join("lib").join(abi);
         fs::create_dir_all(&dest)?;
         // Unchanged files keep their times: `nsh run` rebuilds and
@@ -143,6 +144,44 @@ pub(crate) fn build(release: bool, dev: bool, abis: &[String]) -> anyhow::Result
     }
     term::note(out.strip_prefix(root()).unwrap_or(&out).display());
     Ok(out)
+}
+
+/// Check the linked ELF, before it is copied into a runtime or an AAR.
+fn check_alignment(sdk: &Sdk, library: &Path) -> anyhow::Result<()> {
+    let output = Command::new(sdk.toolchain().join("bin/llvm-objdump"))
+        .arg("-p")
+        .arg(library)
+        .output()
+        .with_context(|| format!("inspect ELF alignment of {}", library.display()))?;
+    if !output.status.success() {
+        bail!(
+            "llvm-objdump failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    check_load_alignment(&String::from_utf8(output.stdout)?)
+        .with_context(|| format!("{} is not 16 KB aligned", library.display()))
+}
+
+fn check_load_alignment(headers: &str) -> anyhow::Result<()> {
+    let mut loads = 0;
+    for line in headers
+        .lines()
+        .filter(|line| line.split_whitespace().next() == Some("LOAD"))
+    {
+        let (_, exponent) = line
+            .rsplit_once("align 2**")
+            .context("missing LOAD alignment")?;
+        let exponent: u32 = exponent.trim().parse().context("invalid LOAD alignment")?;
+        if exponent < 14 {
+            bail!("LOAD alignment is 2**{exponent}; expected at least 2**14");
+        }
+        loads += 1;
+    }
+    if loads == 0 {
+        bail!("no ELF LOAD segments found");
+    }
+    Ok(())
 }
 
 /// The NDK's name of `triple` in its compilers' names: ARMv7's is
@@ -321,4 +360,34 @@ fn collect_ext(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) -> anyhow::Result<
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_load_alignment;
+
+    #[test]
+    fn load_segments_support_16_kb_pages() {
+        let headers = "libnsh.so: file format elf64-littleaarch64\n\
+            LOAD off 0x0000 vaddr 0x0000 paddr 0x0000 align 2**14\n\
+            LOAD off 0x4000 vaddr 0x4000 paddr 0x4000 align 2**16\n\
+            DYNAMIC off 0x4010 vaddr 0x4010 paddr 0x4010 align 2**3\n";
+        check_load_alignment(headers).unwrap();
+        for exponent in [12, 13] {
+            let headers = headers.replace("align 2**16", &format!("align 2**{exponent}"));
+            let error = check_load_alignment(&headers).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("LOAD alignment is 2**{exponent}"))
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_invalid_load_headers_fail_the_check() {
+        for headers in ["", "LOAD off 0x0000", "LOAD off 0x0000 align 2**invalid"] {
+            assert!(check_load_alignment(headers).is_err(), "{headers}");
+        }
+    }
 }

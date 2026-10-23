@@ -45,6 +45,8 @@ A Rust app's APK holds its own `libnsh.so`, built with your crate, whose activit
 The APK is built with the SDK's build tools, without Gradle, and signed with the debug key unless you pass a release
 keystore. Signing for release and icons: [Packaging](./packaging.md#android).
 
+NSH builds `libnsh.so` with 16 KB ELF alignment and packages the uncompressed native libraries on 16 KB ZIP boundaries.
+
 ## Embedding in an Android app
 
 An existing Android app can show NSH apps inside its own UI. The runtime ships as an Android library, `nsh.aar`: you
