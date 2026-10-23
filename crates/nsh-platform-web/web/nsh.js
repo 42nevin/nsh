@@ -40,6 +40,14 @@ const HOVERED = 2;
 const FOCUSED = 4;
 const PRESS_EVENTS = ["onPress", "onLongPress", "onPressIn", "onPressOut"];
 const HOVER_EVENTS = ["onHoverIn", "onHoverOut", "onHoverMove"];
+// What lays out a field's text, copied to the hidden copy that finds its
+// caret (`caretBounds`).
+const CARET_STYLE = [
+  "direction", "boxSizing", "width", "height", "borderTopWidth", "borderRightWidth", "borderBottomWidth",
+  "borderLeftWidth", "borderStyle", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "fontStyle",
+  "fontVariant", "fontWeight", "fontStretch", "fontSize", "lineHeight", "fontFamily", "textAlign",
+  "textTransform", "textIndent", "letterSpacing", "wordSpacing", "tabSize",
+];
 /** `accessibilityRole`s whose ARIA role has another name; others are the same. */
 const ARIA_ROLES = {
   none: null, header: "heading", image: "img", imagebutton: "button", keyboardkey: "button", adjustable: "slider",
@@ -2880,6 +2888,9 @@ class Player {
     field.addEventListener("select", () => this.selectionChanged(el, field));
     field.addEventListener("keyup", () => this.selectionChanged(el, field));
     field.addEventListener("pointerup", () => this.selectionChanged(el, field));
+    // Scrolling the text moves the caret.
+    field.addEventListener("scroll", () => this.caretMoved(el, field));
+    field.addEventListener("paste", (e) => this.pasted(el, e));
   }
 
   textChanged(el, field) {
@@ -2898,11 +2909,92 @@ class Player {
   }
 
   selectionChanged(el, field) {
+    this.caretMoved(el, field);
     if (!el._events.has("onSelectionChange")) return;
     const sel = [field.selectionStart ?? 0, field.selectionEnd ?? 0];
     if (el._selection && el._selection[0] === sel[0] && el._selection[1] === sel[1]) return;
     el._selection = sel;
     this.event(el._id, "onSelectionChange", { start: sel[0], end: sel[1] });
+  }
+
+  /** A paste into a field: what the clipboard holds (`onPaste`, the files'
+   * bytes handed to WebAssembly as they are), and the field's own paste
+   * of the text unless `pasteBehavior` is `"report"`. The browser gives the
+   * clipboard only to this event, the user's paste. */
+  pasted(el, e) {
+    if (el._config?.pasteInserts === false) e.preventDefault();
+    if (!el._events.has("onPaste")) return;
+    const data = e.clipboardData;
+    const text = data?.getData("text/plain") ?? "";
+    const files = [...(data?.files ?? [])];
+    // A file manager's files are local paths the page cannot read: their
+    // `file:` URLs, when the browser lists them.
+    const uris = (data?.getData("text/uri-list") ?? "").split(/\r?\n/).filter((u) => u.startsWith("file:"));
+    Promise.all(files.map((f) => f.arrayBuffer())).then((buffers) => {
+      const size = buffers.reduce((n, b) => n + b.byteLength, 0);
+      const bytes = new Uint8Array(size);
+      let at = 0;
+      for (const b of buffers) {
+        bytes.set(new Uint8Array(b), at);
+        at += b.byteLength;
+      }
+      const json = JSON.stringify({
+        text,
+        files: files.map((f, i) => ({ name: f.name || "image.png", type: f.type, size: buffers[i].byteLength })),
+        uris,
+      });
+      this.call(() => this.withStrings([json, bytes], (jp, jl, bp, bl) => this.wasm.nsh_paste(el._id, jp, jl, bp, bl)));
+    });
+  }
+
+  /** `onCaretMove` while the field has the focus, if its caret moved. */
+  caretMoved(el, field) {
+    if (!el._events.has("onCaretMove") || document.activeElement !== field) return;
+    const caret = this.caretBounds(el, field);
+    const key = caret.join();
+    if (el._caret === key) return;
+    el._caret = key;
+    const [x, y, width, height] = caret;
+    this.event(el._id, "onCaretMove", { bounds: { origin: { x, y }, size: { width, height } } });
+  }
+
+  /** The caret at the selection's end in view `el` (`[x, y, width,
+   * height]`): a field tells no caret's place, so a hidden copy of it
+   * (its font, box and wrapping) holds the text up to the caret and a
+   * marker where the caret is, as libraries for textarea carets do. */
+  caretBounds(el, field) {
+    const style = getComputedStyle(field);
+    const area = field.tagName === "TEXTAREA";
+    const mirror = this._caretMirror ??= document.createElement("div");
+    const m = mirror.style;
+    for (const p of CARET_STYLE) m[p] = style[p];
+    m.position = "absolute";
+    m.visibility = "hidden";
+    m.top = "0";
+    m.left = "-9999px";
+    m.overflow = "hidden";
+    m.whiteSpace = area ? "pre-wrap" : "pre";
+    m.overflowWrap = area ? "break-word" : "normal";
+    document.body.appendChild(mirror);
+    const end = field.selectionEnd ?? field.value.length;
+    const before = field.value.slice(0, end);
+    mirror.textContent = field.type === "password" ? "•".repeat(before.length) : before;
+    const marker = document.createElement("span");
+    // Something to measure, even at the end of the text.
+    marker.textContent = field.value.slice(end) || ".";
+    mirror.appendChild(marker);
+    const fontSize = parseFloat(style.fontSize) || 16;
+    const height = parseFloat(style.lineHeight) || fontSize * 1.2;
+    const border = (side) => parseFloat(style[`border${side}Width`]) || 0;
+    let x = marker.offsetLeft + border("Left") - field.scrollLeft;
+    // A single line is centered in its box.
+    let y = area
+      ? marker.offsetTop + border("Top") - field.scrollTop
+      : (field.clientHeight - height) / 2 + border("Top");
+    mirror.remove();
+    x += field.offsetLeft;
+    y += field.offsetTop;
+    return [x, y, 1, height];
   }
 
   op_iv([, id, text, count]) {
@@ -2932,6 +3024,8 @@ class Player {
     field.style.top = `${y}px`;
     field.style.width = `${w}px`;
     field.style.height = `${h}px`;
+    // Its text may wrap elsewhere now.
+    this.caretMoved(el, field);
   }
 
   // Navigation

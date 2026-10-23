@@ -1836,7 +1836,9 @@ final class Mounter {
         String autofill = optString(b, objects);
         boolean inputRtl = b.getInt() != 0;
         boolean caretHidden = b.getInt() != 0;
+        boolean pasteInserts = b.getInt() != 0;
         if (!(v instanceof InputBox)) return;
+        ((InputBox) v).pasteInserts = pasteInserts;
         ((InputBox) v).edit.setCursorVisible(!caretHidden);
         ((InputBox) v).setAutofill(autofill);
         ((InputBox) v).edit.setLayoutDirection(inputRtl ? View.LAYOUT_DIRECTION_RTL : View.LAYOUT_DIRECTION_LTR);
@@ -2193,6 +2195,10 @@ final class Mounter {
     }
 
     /** An event with an object payload. */
+    void paste(int id, String text, byte[][] images, String[] uris) {
+        Native.paste(handle(), id, text, images, uris);
+    }
+
     void eventMap(int id, int kind, String[] keys, Object[] values) {
         Native.eventMap(handle(), id, kind, keys, values);
     }
