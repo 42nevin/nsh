@@ -88,7 +88,9 @@ Things that were found the hard way. Read the section of the area you change bef
   has applied (`EngineControl::scroll(.., applied)`), and the core adds the ones still pending; otherwise a stale offset
   moves the window (and fires `onLoadMore`) backwards.
 - **Unbound list cells still show their last item**: the core moves them out of sight (never with a NaN frame: cells that
-  were never placed are skipped; UIKit throws on NaN geometry).
+  were never placed are skipped; UIKit throws on NaN geometry). Out of sight is not out of reach: the backends'
+  accessibility trees go by props, not frames, and a browser keeps such a cell in its accessibility tree, as a Tab
+  stop and for test-id lookups. The core hides them too (`Core::set_spare`) until it places them again.
 - **Tailwind variant order decides between variants**, not their order in the string: `odd:bg-a last:bg-b` gives an odd last row
   `bg-a` (Tailwind sorts `odd` after `last`), exactly as in CSS.
 

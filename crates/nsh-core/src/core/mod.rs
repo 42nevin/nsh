@@ -495,6 +495,10 @@ struct Node {
     text_queued: bool,
     /// A list cell whose subtree was laid out again this commit.
     relaid: bool,
+    /// A list cell without an item, until the list places it again: it
+    /// still shows its last row, so it is hidden from sight, touches and
+    /// assistive technology ([`Core::set_spare`]).
+    spare: bool,
     /// `android={{ elevation }}`.
     elevation: Points,
     /// `ios={{ backdropMaterial }}`.
@@ -546,7 +550,7 @@ impl Node {
     }
 
     /// The view style as platforms take it: translations by a fraction of
-    /// the size resolved with the current frame.
+    /// the size resolved with the current frame, a spare list cell hidden.
     fn mounted_view_style(&self) -> Box<ViewStyle> {
         let mut style = Box::new(self.view_style.clone());
         style.elevation = self.elevation;
@@ -555,6 +559,9 @@ impl Node {
         // cells (a scroll view clips its content).
         if self.list.as_ref().is_some_and(|l| l.parent) {
             style.overflow_hidden = true;
+        }
+        if self.spare {
+            style.hidden = true;
         }
         if style.transform.has_fractions() {
             let size = if self.frame.size.width.is_nan() {
@@ -565,6 +572,25 @@ impl Node {
             style.transform = style.transform.resolve_fractions(size);
         }
         style
+    }
+
+    /// The touch, accessibility and test properties as platforms take
+    /// them: the `pointer-events-*` classes around it apply unless a prop
+    /// says otherwise, a `disabled` view is so for screen readers too (as a
+    /// Rust component's `disabled` and React Native's `Pressable`), and
+    /// screen readers skip a spare list cell.
+    fn mounted_props(&self) -> Box<ViewProps> {
+        let mut props = self.props.clone().unwrap_or_default();
+        if props.pointer_events == crate::props::PointerEvents::Auto {
+            props.pointer_events = self.class_pointer;
+        }
+        if self.states & crate::tailwind::state::DISABLED != 0 {
+            props.accessibility.state.disabled = true;
+        }
+        if self.spare {
+            props.accessibility.hidden = true;
+        }
+        props
     }
 
     fn new(id: NodeId, kind: Kind) -> Self {
@@ -636,6 +662,7 @@ impl Node {
             queued: false,
             text_queued: false,
             relaid: false,
+            spare: false,
         }
     }
 }
@@ -3751,6 +3778,7 @@ impl<M: TextEngine> Core<M> {
             || node.elevation != Points::ZERO
             || node.backdrop_material != crate::BackdropMaterial::default()
             || parent_list
+            || node.spare
         {
             flags |= dirty::VIEW;
         }
@@ -3785,7 +3813,7 @@ impl<M: TextEngine> Core<M> {
         if !node.gestures.is_empty() {
             flags |= dirty::PAN;
         }
-        if node.props.is_some() {
+        if node.props.is_some() || node.spare {
             flags |= dirty::VIEW_PROPS;
         }
         match kind {
@@ -4031,15 +4059,7 @@ impl<M: TextEngine> Core<M> {
                 });
             }
             if flags & dirty::VIEW_PROPS != 0 {
-                let mut props = node.props.clone().unwrap_or_default();
-                if props.pointer_events == crate::props::PointerEvents::Auto {
-                    props.pointer_events = node.class_pointer;
-                }
-                // A `disabled` view is so for screen readers too, as a Rust
-                // component's `disabled` and React Native's `Pressable`.
-                if node.states & crate::tailwind::state::DISABLED != 0 {
-                    props.accessibility.state.disabled = true;
-                }
+                let props = node.mounted_props();
                 self.mount.push(MountItem::ViewProps { id, props });
             } else if flags & dirty::LABEL != 0 {
                 let label = node
@@ -5452,6 +5472,26 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
+    /// Hides list cell `key`, which has no item but still shows its last
+    /// row (`visibility: hidden` and `accessibilityElementsHidden`), or
+    /// shows it again as its list places it. Sent at once: this round's
+    /// dirty flags were flushed before the lists' update.
+    fn set_spare(&mut self, key: Key, spare: bool) {
+        let node = &mut self.nodes[key as usize];
+        if node.spare == spare {
+            return;
+        }
+        node.spare = spare;
+        if !node.created {
+            // Its new view gets both (`ensure_created`).
+            return;
+        }
+        let (id, props) = (node.id, node.mounted_props());
+        let style = self.mounted_view_style(key);
+        self.mount.push(MountItem::ViewStyle { id, style });
+        self.mount.push(MountItem::ViewProps { id, props });
+    }
+
     /// [`Core::update_lists`] for list `key`; `outer`: where a list in its
     /// parent's viewport is in the view it is virtualized against.
     fn update_list(
@@ -5691,22 +5731,32 @@ impl<M: TextEngine> Core<M> {
         // Cells left without an item, or not showing theirs yet (a paced
         // bind, or one the frame's rounds did not reach), still show their
         // last one. Those in the render window (the data changed, the list
-        // jumped) would show through: move them out of sight. Cells the
-        // window left behind while scrolling are out of sight already.
+        // jumped) would show through: move them out of sight. They, the ones
+        // never placed and, once the items changed, all of them are hidden
+        // until placed again ([`Core::set_spare`]); the few the window leaves
+        // behind while scrolling are out of sight already and soon reused.
         let (window_start, window_end) = list.render_window();
         // In its parent's viewport, the cells start inside the list's
         // border and padding.
         let inset = outer.map_or((0.0, 0.0), |o| o.inset);
-        let hidden: Vec<Key> = list
+        let unbound: Vec<Key> = list
             .slots
             .iter()
             .filter(|s| s.ready().is_none() && s.cell != u32::MAX)
             .map(|s| s.cell)
             .collect();
-        for cell in hidden {
+        let changed = std::mem::take(
+            &mut self.nodes[key as usize]
+                .list
+                .as_mut()
+                .expect("list")
+                .items_changed,
+        );
+        for cell in unbound {
             let frame = self.nodes[cell as usize].frame;
             if frame.size.width.0.is_nan() {
-                // Never placed: nothing to see yet.
+                // Never placed: nowhere to move it from.
+                self.set_spare(cell, true);
                 continue;
             }
             let (start, size) = if horizontal {
@@ -5715,8 +5765,12 @@ impl<M: TextEngine> Core<M> {
                 (frame.origin.y.0 - inset.0, frame.size.height.0)
             };
             if start + size <= window_start || start >= window_end {
+                if changed {
+                    self.set_spare(cell, true);
+                }
                 continue;
             }
+            self.set_spare(cell, true);
             let away = if horizontal {
                 Bounds {
                     origin: Point::new(Points(-HIDDEN), frame.origin.y),
@@ -5749,6 +5803,7 @@ impl<M: TextEngine> Core<M> {
                 rect(x, main_at, width, size.height)
             };
             this.set_frame(cell, frame);
+            this.set_spare(cell, false);
             if std::mem::take(&mut this.nodes[cell as usize].relaid) {
                 let children = std::mem::take(&mut this.nodes[cell as usize].children);
                 for &child in &children {
