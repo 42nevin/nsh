@@ -35,6 +35,7 @@ mod keymap;
 mod list;
 mod list_bench;
 mod logs;
+mod menu_lifetime;
 mod native;
 mod net;
 mod open_url;

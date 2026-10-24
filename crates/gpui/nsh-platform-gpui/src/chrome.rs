@@ -82,6 +82,7 @@ use nsh_core::{
     desktop::{DesktopCommand, Key, MenuBarMode, MenuItem, MenuRole, Shortcut, TitleBarStyle},
     geometry::{Edges as Insets, Points},
 };
+use nsh_engine::{EngineControl, MenuLease};
 
 use crate::{
     CloseRequest,
@@ -170,6 +171,12 @@ pub(crate) struct Chrome {
     title: RefCell<String>,
     /// The application menu.
     menu: RefCell<Option<Arc<[MenuItem]>>>,
+    menu_owner: RefCell<Option<(EngineControl, MenuLease)>>,
+    menu_generation: Cell<u64>,
+    /// The installed native menu stays callable while a replacement awaits
+    /// rendering. GPUI's archived Actions must not themselves own leases.
+    native_menu_owner: RefCell<Option<(EngineControl, MenuLease)>>,
+    native_menu_generation: Cell<u64>,
     /// The native menus (macOS) must be set again.
     menu_changed: Cell<bool>,
     /// What the native menus' items do, by [`MenuCommand::index`].
@@ -339,10 +346,24 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
         }
         DesktopCommand::Close => push(surface, Op::Close),
         DesktopCommand::SetMenu(menu) => {
+            let mut owner = None;
+            if let Some(items) = menu {
+                surface.control(|control| {
+                    owner = Some((control.clone(), control.retain_menu_callbacks(items)));
+                });
+            }
+            let previous = c.menu_owner.replace(owner);
+            c.menu_generation.set(
+                c.menu_generation
+                    .get()
+                    .checked_add(1)
+                    .expect("menu generation exhausted"),
+            );
             *c.menu.borrow_mut() = menu.clone();
             c.menu_changed.set(true);
             menus::menu_changed(surface);
             surface.invalidate();
+            drop(previous);
         }
         DesktopCommand::SetMenuBar(mode) => {
             c.menu_bar.set(*mode);
@@ -365,6 +386,22 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
 /// An item was chosen: the platform carries out its role, the app hears
 /// about the rest.
 fn choose(surface: &Rc<Surface>, id: u32, role: Option<MenuRole>) {
+    let mut control = None;
+    surface.control(|engine| control = Some(engine.clone()));
+    choose_owned(surface, control.as_ref(), id, role);
+}
+
+fn choose_application(surface: &Rc<Surface>, id: u32, role: Option<MenuRole>) {
+    let owner = surface.chrome.menu_owner.borrow().clone();
+    choose_owned(surface, owner.as_ref().map(|o| &o.0), id, role);
+}
+
+fn choose_owned(
+    surface: &Rc<Surface>,
+    control: Option<&EngineControl>,
+    id: u32,
+    role: Option<MenuRole>,
+) {
     match role {
         Some(MenuRole::Quit) => push(surface, Op::Quit),
         Some(MenuRole::Close) => push(surface, Op::Close),
@@ -378,8 +415,10 @@ fn choose(surface: &Rc<Surface>, id: u32, role: Option<MenuRole>) {
         // GPUI has no about panel.
         Some(_) | None => {}
     }
-    if id != 0 {
-        surface.event(
+    if id != 0
+        && let Some(control) = control
+    {
+        control.dispatch_event(
             ROOT_ID,
             EventKind::Menu,
             EventPayload::Map(vec![("id", PayloadValue::Number(id as f64))]),
@@ -581,7 +620,7 @@ pub(crate) fn shortcut(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
             return false;
         }
         if !event.repeat {
-            choose(surface, id, role);
+            choose_application(surface, id, role);
         }
         return true;
     }
@@ -1197,6 +1236,7 @@ fn resize_edges() -> Vec<AnyElement> {
 struct MenuCommand {
     /// The surface ([`Surface::by_key`]).
     surface: u64,
+    generation: u64,
     /// The item, in [`Chrome::entries`].
     index: usize,
 }
@@ -1297,6 +1337,7 @@ fn gpui_keystroke(s: &Shortcut) -> String {
 
 fn native_items(
     surface: u64,
+    generation: u64,
     items: &[MenuItem],
     entries: &mut Vec<(u32, Option<MenuRole>)>,
     bindings: &mut Vec<gpui::KeyBinding>,
@@ -1308,6 +1349,7 @@ fn native_items(
             MenuItem::Action(a) => {
                 let action = MenuCommand {
                     surface,
+                    generation,
                     index: entries.len(),
                 };
                 entries.push((a.id, a.role));
@@ -1328,7 +1370,7 @@ fn native_items(
                 items,
             } => gpui::MenuItem::submenu(gpui::Menu {
                 name: label.clone().into(),
-                items: native_items(surface, items, entries, bindings),
+                items: native_items(surface, generation, items, entries, bindings),
                 disabled: !enabled,
             }),
         })
@@ -1343,9 +1385,13 @@ fn set_native_menus(surface: &Surface, cx: &mut App) {
     if !LISTENING.with(|l| l.replace(true)) {
         cx.on_action(|command: &MenuCommand, cx| {
             if let Some(surface) = Surface::by_key(command.surface) {
+                if command.generation != surface.chrome.native_menu_generation.get() {
+                    return;
+                }
                 let entry = surface.chrome.entries.borrow().get(command.index).copied();
                 if let Some((id, role)) = entry {
-                    choose(&surface, id, role);
+                    let owner = surface.chrome.native_menu_owner.borrow().clone();
+                    choose_owned(&surface, owner.as_ref().map(|o| &o.0), id, role);
                 }
             }
             crate::rt::flush(cx);
@@ -1370,16 +1416,24 @@ fn set_native_menus(surface: &Surface, cx: &mut App) {
                 items,
             } => Some(gpui::Menu {
                 name: label.clone().into(),
-                items: native_items(surface.key(), items, &mut entries, &mut bindings),
+                items: native_items(
+                    surface.key(),
+                    c.menu_generation.get(),
+                    items,
+                    &mut entries,
+                    &mut bindings,
+                ),
                 disabled: !enabled,
             }),
             _ => None,
         })
         .collect();
-    *c.entries.borrow_mut() = entries;
     cx.clear_key_bindings();
     cx.bind_keys(bindings);
     cx.set_menus(menus);
+    *c.entries.borrow_mut() = entries;
+    c.native_menu_generation.set(c.menu_generation.get());
+    *c.native_menu_owner.borrow_mut() = c.menu_owner.borrow().clone();
 }
 
 // --- Colors -----------------------------------------------------------------------------

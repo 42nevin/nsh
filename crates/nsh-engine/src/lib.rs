@@ -14,6 +14,7 @@ mod cache;
 mod error;
 mod host_channel;
 mod local_storage;
+mod menu;
 #[cfg(feature = "net")]
 pub mod net;
 pub mod perf;
@@ -40,6 +41,7 @@ use std::{io, mem::ManuallyDrop, rc::Rc, sync::Arc, time::Duration};
 pub use app_directory::app_dir_name;
 use crossbeam_channel::{Receiver, Sender};
 pub use local_storage::local_storage_prefix;
+pub use menu::MenuLease;
 use nsh_core::{
     ApplyError, Core, EdgeInsets, EventKind, EventPayload, ListBind, MountBatch, NodeId, Op,
     PayloadValue, TextEngine, time::Instant, ui::JsEvent,
@@ -859,6 +861,8 @@ const MAX_ADVANCE_ROUNDS: usize = 100_000;
 
 enum Message {
     Event(NodeId, EventKind, EventPayload),
+    /// Native menu ownership ended, after its preceding selection events.
+    MenuRetired(u32),
     Scroll(NodeId, Point<Points>, u32),
     Zoom(NodeId, f32),
     ComponentSize(NodeId, Size<Points>),
@@ -2358,6 +2362,17 @@ fn class_environment(env: &Environment) -> nsh_core::tailwind::ClassEnvironment 
 /// Returns false on shutdown.
 fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message: Message) -> bool {
     match message {
+        Message::MenuRetired(generation) => {
+            // This is VM ownership bookkeeping, not an input event for Rust
+            // components. The same channel orders it after earlier choices.
+            if let Some(script) = script {
+                script.dispatch_event(
+                    nsh_core::ROOT_ID,
+                    EventKind::Menu,
+                    &EventPayload::Map(vec![("retired", PayloadValue::Number(generation as f64))]),
+                );
+            }
+        }
         Message::Event(id, event, mut payload) => {
             if state.trace {
                 log::info!(target: "nsh::perf", "event {event:?} on view {id}");

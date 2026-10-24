@@ -507,7 +507,7 @@ fn open_bar(surface: &Rc<Surface>, index: usize, keyboard: bool) -> bool {
         }
         Some(MenuItem::Action(a)) if a.enabled && !keyboard => {
             close(surface);
-            super::choose(surface, a.id, a.role);
+            super::choose_application(surface, a.id, a.role);
             true
         }
         _ => false,
@@ -595,7 +595,7 @@ fn activate(surface: &Rc<Surface>, level: usize, row: usize, keyboard: bool) {
                     super::choose(surface, a.id, a.role);
                     closed_event(surface);
                 }
-                Kind::Bar(_) => super::choose(surface, a.id, a.role),
+                Kind::Bar(_) => super::choose_application(surface, a.id, a.role),
             }
         }
         _ => {}

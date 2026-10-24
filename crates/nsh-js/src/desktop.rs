@@ -6,6 +6,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::BTreeMap,
     ffi::{CStr, c_int},
     ptr,
     sync::Arc,
@@ -36,8 +37,9 @@ type Functions = Vec<(u32, JsValue)>;
 
 /// The menus' part of a context's state.
 pub(crate) struct Menus {
-    /// The application menu's functions (id, owned function).
-    app: RefCell<Vec<(u32, JsValue)>>,
+    /// Native-owned application menus, by their last callback ID. Native
+    /// objects and already queued choices may outlive a JS replacement.
+    app: RefCell<BTreeMap<u32, Functions>>,
     /// The last context menu's functions.
     popup: RefCell<Vec<(u32, JsValue)>>,
     /// Resolves the promise of the context menu shown (owned), once the
@@ -78,10 +80,9 @@ impl Menus {
     pub(crate) fn free_all(&mut self, raw: *mut JsContext) {
         // SAFETY: owned; no JS runs from here on.
         unsafe { qjs::JS_FreeValue(raw, self.closed.replace(UNDEFINED)) };
-        for (_, f) in self
-            .app
-            .get_mut()
-            .drain(..)
+        for (_, f) in std::mem::take(self.app.get_mut())
+            .into_values()
+            .flatten()
             .chain(self.popup.get_mut().drain(..))
         {
             // SAFETY: owned values; no JS runs from here on.
@@ -335,13 +336,22 @@ unsafe extern "C" fn set_application_menu(
     }
     let list = arg(argc, argv, 0);
     let result = if nullish(list) {
-        keep(cx, &menus(cx).app, Vec::new());
         send(cx, DesktopCommand::SetMenu(None))
     } else {
         match decode(cx, list) {
             Ok((items, functions)) => {
-                keep(cx, &menus(cx).app, functions);
-                listen(cx).and_then(|()| send(cx, DesktopCommand::SetMenu(Some(items))))
+                let result =
+                    listen(cx).and_then(|()| send(cx, DesktopCommand::SetMenu(Some(items))));
+                if result.is_ok() {
+                    if let Some(&(generation, _)) = functions.last() {
+                        menus(cx).app.borrow_mut().insert(generation, functions);
+                    }
+                } else {
+                    for (_, function) in functions {
+                        free(cx, function);
+                    }
+                }
+                result
             }
             Err(e) => Err(e),
         }
@@ -413,6 +423,21 @@ unsafe extern "C" fn on_menu(
     argv: *mut JsValue,
 ) -> JsValue {
     let e = arg(argc, argv, 0);
+    let retired = get(cx, e, c"retired");
+    if !nullish(retired) {
+        let mut generation = 0f64;
+        // SAFETY: A live numeric payload from the engine's menu lease.
+        unsafe { qjs::JS_ToFloat64(cx, &mut generation, retired) };
+        free(cx, retired);
+        let functions = menus(cx).app.borrow_mut().remove(&(generation as u32));
+        if let Some(functions) = functions {
+            for (_, function) in functions {
+                free(cx, function);
+            }
+        }
+        return UNDEFINED;
+    }
+    free(cx, retired);
     let v = get(cx, e, c"id");
     let mut id = 0f64;
     // SAFETY: `ToNumber` of a live value.
@@ -425,13 +450,16 @@ unsafe extern "C" fn on_menu(
         return UNDEFINED;
     }
     let m = menus(cx);
-    let f = [&m.app, &m.popup].into_iter().find_map(|slot| {
-        slot.borrow()
-            .iter()
+    let f = {
+        let app = m.app.borrow();
+        let popup = m.popup.borrow();
+        app.values()
+            .flatten()
+            .chain(popup.iter())
             .find(|(i, _)| *i == id)
             // SAFETY: a dup for the call.
             .map(|&(_, f)| unsafe { qjs::JS_DupValue(cx, f) })
-    });
+    };
     let Some(f) = f else { return UNDEFINED };
     // SAFETY: a call of an owned function, freed after it.
     unsafe {
@@ -583,7 +611,141 @@ export interface MenuModule {
 
 #[cfg(test)]
 mod tests {
-    use nsh_core::{desktop::MenuRole, ui::JsValue as _};
+    use nsh_core::{
+        Command, EventKind, EventPayload, Op, PayloadValue, ROOT_ID,
+        desktop::{DesktopCommand, MenuItem, MenuRole},
+        platform::{Environment, Os},
+        ui::JsValue as _,
+    };
+
+    // Callback counts cannot detect an implementation that leaks every old
+    // function. Weak references observe the captured resources themselves.
+    fn callback_resources(count: usize) -> (crate::Host, Vec<u32>) {
+        let host = crate::Host::new().unwrap();
+        host.set_environment(&Environment {
+            os: Os::MacOs,
+            ..Default::default()
+        });
+        host.eval_source(
+            r#"
+            import { Menu } from "nsh/desktop";
+            globalThis.refs = [];
+            globalThis.installCallback = () => {
+                const marker = {};
+                const callback = () => marker;
+                marker.callback = callback;
+                refs.push(new WeakRef(marker));
+                Menu.setApplicationMenu([{ label: "Actions", submenu: [
+                    { label: "Choose", onSelect: callback },
+                ] }]);
+            };
+            globalThis.clearMenu = () => Menu.setApplicationMenu(null);
+        "#,
+        )
+        .unwrap();
+        host.eval_script(
+            "install-menus",
+            &format!("for (let i = 0; i < {count}; i++) installCallback();"),
+        )
+        .unwrap();
+        let mut ops = Vec::new();
+        host.take_ops(&mut ops);
+        let ids = ops
+            .into_iter()
+            .filter_map(|op| {
+                let Op::Command {
+                    command: Command::Desktop(command),
+                    ..
+                } = op
+                else {
+                    return None;
+                };
+                let DesktopCommand::SetMenu(Some(items)) = *command else {
+                    return None;
+                };
+                let mut last = 0;
+                MenuItem::each_action(&items, &mut |action| last = last.max(action.id));
+                Some(last)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), count);
+        (host, ids)
+    }
+
+    fn retire(host: &crate::Host, id: u32) {
+        host.dispatch_event(
+            ROOT_ID,
+            EventKind::Menu,
+            &EventPayload::Map(vec![("retired", PayloadValue::Number(id as f64))]),
+        );
+    }
+
+    #[test]
+    fn application_callback_resources_follow_independent_native_lifetimes() {
+        let (host, ids) = callback_resources(3);
+        host.collect_garbage();
+        let all_owned = host
+            .eval_script("all-owned", "refs.every(ref => ref.deref() !== undefined)")
+            .unwrap();
+        retire(&host, ids[1]);
+        host.collect_garbage();
+        let only_middle_released = host.eval_script("middle-released",
+            "refs[0].deref() !== undefined && refs[1].deref() === undefined && refs[2].deref() !== undefined").unwrap();
+        retire(&host, ids[2]);
+        retire(&host, ids[0]);
+        host.collect_garbage();
+        let all_released = host
+            .eval_script(
+                "all-released",
+                "refs.every(ref => ref.deref() === undefined)",
+            )
+            .unwrap();
+        drop(host);
+        assert!(
+            all_owned,
+            "in-flight native menus retain their captured JS resources"
+        );
+        assert!(
+            only_middle_released,
+            "one retired menu cannot release another live menu"
+        );
+        assert!(
+            all_released,
+            "retired functions and their captured cycles are collectible"
+        );
+    }
+
+    #[test]
+    fn repeated_and_cleared_menus_leave_no_historical_callback_resources() {
+        let (host, ids) = callback_resources(64);
+        host.eval_script("clear-menu", "clearMenu()").unwrap();
+        host.collect_garbage();
+        let pending_owned = host
+            .eval_script(
+                "clear-pending",
+                "refs.every(ref => ref.deref() !== undefined)",
+            )
+            .unwrap();
+        for id in ids {
+            retire(&host, id);
+        }
+        host.collect_garbage();
+        let released = host
+            .eval_script(
+                "clear-retired",
+                "refs.every(ref => ref.deref() === undefined)",
+            )
+            .unwrap();
+        drop(host);
+        assert!(
+            pending_owned,
+            "clearing waits for native ownership, not the JS call"
+        );
+        assert!(
+            released,
+            "completed updates do not accumulate historical callback resources"
+        );
+    }
 
     /// `MenuRole`'s declaration (written here, with the docs of each role)
     /// names the roles the Rust type reads.

@@ -586,6 +586,16 @@ impl Headless {
         });
         for item in &batch.items {
             self.animator.apply(item);
+            if let MountItem::Command {
+                command: Command::Desktop(command),
+                ..
+            } = item
+                && let nsh_core::desktop::DesktopCommand::SetMenu(Some(items)) = &**command
+            {
+                // Headless has no application menu. Retire every discarded
+                // set, including intermediate sets from the same JS turn.
+                drop(self.engine.control().retain_menu_callbacks(items));
+            }
         }
         #[cfg(feature = "js")]
         if let Some(calls) = &mut self.host_calls {

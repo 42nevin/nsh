@@ -115,6 +115,62 @@ fn headless_preserves_environment_and_data_and_stops_on_process_exit() {
 }
 
 #[test]
+fn headless_retires_every_application_menu_it_does_not_display() {
+    use std::sync::{Arc, Mutex};
+
+    use nsh_core::{
+        Command, EventKind, EventPayload, MountItem, PayloadValue, ROOT_ID,
+        desktop::{DesktopCommand, MenuItem},
+    };
+    use nsh_engine::{Bundle, EngineConfig, Os};
+    use nsh_testing::Headless;
+
+    let bundle = Bundle::source(
+        r#"
+        import { Menu } from 'nsh/desktop';
+        import { keymap } from 'nsh/keymap';
+        for (let i = 0; i < 16; i++) {
+            Menu.setApplicationMenu([{ label: 'Not displayed', onSelect() {
+                throw new Error('headless kept a discarded application menu callable');
+            } }]);
+        }
+        keymap.bind('alt+b', () => {});
+    "#
+        .into(),
+    );
+    let mut config = EngineConfig::new(bundle);
+    config.environment.os = Os::MacOs;
+    let ids = Arc::new(Mutex::new(Vec::new()));
+    let seen = ids.clone();
+    let mut app = Headless::start(config).unwrap();
+    app.observe(move |_, batch| {
+        for item in &batch.items {
+            if let MountItem::Command {
+                command: Command::Desktop(command),
+                ..
+            } = item
+                && let DesktopCommand::SetMenu(Some(items)) = &**command
+            {
+                MenuItem::each_action(items, &mut |action| seen.lock().unwrap().push(action.id));
+            }
+        }
+    });
+    app.first_render().unwrap();
+    let ids = ids.lock().unwrap().clone();
+    assert_eq!(ids.len(), 16);
+    for id in ids {
+        app.engine().control().dispatch_event(
+            ROOT_ID,
+            EventKind::Menu,
+            EventPayload::Map(vec![("id", PayloadValue::Number(f64::from(id)))]),
+        );
+    }
+    // A same-channel barrier makes rejection observable, rather than merely
+    // checking before an incorrectly retained callback has had time to run.
+    app.press_key("alt+b").unwrap();
+}
+
+#[test]
 fn headless_runs_play_the_platform_s_part() {
     let run = TestRun {
         ui_sets: vec![nsh_base::registry()],

@@ -36,6 +36,7 @@ use nsh_core::{
     },
     geometry::{Edges, Points},
 };
+use nsh_engine::{EngineControl, MenuLease};
 use windows::{
     Win32::{
         Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
@@ -147,6 +148,8 @@ pub(crate) struct Chrome {
     inactive: Cell<bool>,
     /// The application menu.
     menu: RefCell<Option<Arc<[MenuItem]>>>,
+    /// Kept with the model even while the title bar/full screen hides it.
+    menu_owner: RefCell<Option<(EngineControl, MenuLease)>>,
     /// The menu bar shown (`HMENU`, 0 for none).
     bar: Cell<isize>,
     /// What the menu bar's items do, by command id - 1.
@@ -277,11 +280,14 @@ fn frame_changed(hwnd: HWND) {
 /// A desktop command (on the root).
 pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
     let hwnd = surface.hwnd();
-    if hwnd.is_invalid() {
-        return;
-    }
     // The embedding app owns its window: only context menus work there.
-    if !top_level(hwnd) && !matches!(command, DesktopCommand::PopupMenu { .. }) {
+    if hwnd.is_invalid()
+        || (!top_level(hwnd) && !matches!(command, DesktopCommand::PopupMenu { .. }))
+    {
+        if let DesktopCommand::SetMenu(Some(items)) = command {
+            // A discarded menu has no native owner, even on a desktop OS.
+            surface.control(|control| drop(control.retain_menu_callbacks(items)));
+        }
         return;
     }
     let c = &surface.chrome;
@@ -321,8 +327,18 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
         }
         DesktopCommand::Close => close(hwnd),
         DesktopCommand::SetMenu(menu) => {
+            let mut owner = None;
+            if let Some(items) = menu {
+                surface.control(|control| {
+                    owner = Some((control.clone(), control.retain_menu_callbacks(items)));
+                });
+            }
+            let previous = c.menu_owner.replace(owner);
             *c.menu.borrow_mut() = menu.clone();
             show_menu_bar(surface);
+            // Win32 destroys the old HMENU in show_menu_bar. Choices sent
+            // before replacement precede this retirement on the engine channel.
+            drop(previous);
         }
         // The Win32 menu bar always shows.
         DesktopCommand::SetMenuBar(_) => {}
@@ -947,13 +963,25 @@ pub(crate) fn menu_command(surface: &Rc<Surface>, command: u16) {
         .get((command as usize).wrapping_sub(1))
         .copied();
     if let Some(entry) = entry {
-        choose(surface, entry.id, entry.role);
+        let owner = surface.chrome.menu_owner.borrow().clone();
+        choose_owned(surface, owner.as_ref().map(|o| &o.0), entry.id, entry.role);
     }
 }
 
 /// An item was chosen: the platform carries out its role, the app hears
 /// about the rest.
 fn choose(surface: &Rc<Surface>, id: u32, role: Option<MenuRole>) {
+    let mut control = None;
+    surface.control(|engine| control = Some(engine.clone()));
+    choose_owned(surface, control.as_ref(), id, role);
+}
+
+fn choose_owned(
+    surface: &Rc<Surface>,
+    control: Option<&EngineControl>,
+    id: u32,
+    role: Option<MenuRole>,
+) {
     let hwnd = surface.hwnd();
     match role {
         Some(MenuRole::Quit | MenuRole::Close) => close(hwnd),
@@ -989,8 +1017,10 @@ fn choose(surface: &Rc<Surface>, id: u32, role: Option<MenuRole>) {
         }
         _ => {}
     }
-    if id != 0 {
-        surface.event(
+    if id != 0
+        && let Some(control) = control
+    {
+        control.dispatch_event(
             ROOT_ID,
             EventKind::Menu,
             EventPayload::Map(vec![("id", PayloadValue::Number(id as f64))]),
@@ -1130,7 +1160,8 @@ pub(crate) fn shortcut(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
     };
     match found {
         Some((id, role)) => {
-            choose(surface, id, role);
+            let owner = surface.chrome.menu_owner.borrow().clone();
+            choose_owned(surface, owner.as_ref().map(|o| &o.0), id, role);
             true
         }
         None => false,

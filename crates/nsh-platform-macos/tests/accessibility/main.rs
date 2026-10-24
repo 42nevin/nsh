@@ -7,9 +7,16 @@
 //! Ordinary package tests do not enable this target or start AppKit.
 
 #[cfg(target_os = "macos")]
+mod menu_lifecycle;
+#[cfg(target_os = "macos")]
 mod target;
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    if let Some(directory) = std::env::var_os("NSH_MENU_LIFECYCLE_DIR") {
+        menu_lifecycle::run(directory.into());
+        return;
+    }
     #[cfg(target_os = "macos")]
     target::run();
     #[cfg(not(target_os = "macos"))]

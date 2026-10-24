@@ -77,6 +77,40 @@ Input                        native gestures -> EngineControl::dispatch_event ->
   then body chunks as they arrive (`FetchEvent`), and JS can pause reading (back pressure); a streamed request body is
   sent in chunks the stack asks for one at a time (`FetchEvent::BodyWanted`, chunked transfer encoding).
 
+### Application-menu callback ownership
+
+`Menu.setApplicationMenu` queues a native command; it does not synchronously
+replace the menu the user can choose. `nsh-js` therefore keeps each callback set
+until its native owner retires it, including sets replaced or cleared in the
+same JS turn. Invalid replacements leave the installed set unchanged.
+
+A desktop backend calls
+`EngineControl::retain_menu_callbacks(&[MenuItem]) -> MenuLease` once for each
+`DesktopCommand::SetMenu(Some(items))`, before filtering platform-specific roles.
+It clones that lease when rebuilding the same menu, and keeps the original
+`EngineControl` for choices. The last lease drop sends private retirement on the
+same engine channel as choices: earlier choices run before the callbacks are
+released. Leases contain no VM pointer and cannot redirect an old menu into a
+new engine after a surface reload. A backend that discards the menu retires it
+immediately; it must process every set, not just the last set in a batch.
+
+On AppKit, every menu item strongly owns its generation's target through
+`representedObject`; AppKit's `target` property alone is weak. The target owns
+the lease and original engine control. Installing a replacement, clearing the
+bar, or ending menu tracking is not itself proof that AppKit released the old
+items. GTK action closures also own a lease, and their names include a
+generation so an old model cannot resolve to new actions. Win32 keeps the
+lease with the installed model through native replacement/destruction and
+while the model is hidden for full screen. GPUI keeps separate model and
+installed-native ownership; archived GPUI Actions contain generation IDs, not
+leases, and a retired generation cannot address the current entry table.
+
+The JS menu API and `DesktopCommand::SetMenu` payload are unchanged. This is
+host-side ownership bookkeeping, not a new application event or a timer-based
+retention policy. Tests cover queued choices, independent retirement, clearing,
+rejected replacements, captured-resource collection, and AppKit tracking and
+reload isolation.
+
 ## Layers
 
 NSH is layered as GPUI Kit is (an architecture rule, `AGENTS.md`):

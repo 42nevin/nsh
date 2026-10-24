@@ -48,6 +48,7 @@ use nsh_core::{
     },
     geometry::{Edges, Points},
 };
+use nsh_engine::{EngineControl, MenuLease};
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
     rc::{Retained, Weak},
@@ -96,12 +97,17 @@ fn app_name() -> String {
         .unwrap_or_default()
 }
 
+pub(crate) struct MenuOwner {
+    control: Option<EngineControl>,
+    _lease: MenuLease,
+}
+
 define_class!(
-    /// The target of a surface's menu items: reports the chosen item's tag
-    /// (its id) to the surface with its key.
+    /// One menu generation's target, kept by its native items. Capturing the
+    /// engine, not a reusable surface key, also isolates menus across reload.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[ivars = u64]
+    #[ivars = MenuOwner]
     #[name = "NshMenuTarget"]
     pub(crate) struct MenuTarget;
 
@@ -110,12 +116,12 @@ define_class!(
     impl MenuTarget {
         #[unsafe(method(menuItemChosen:))]
         fn chosen(&self, item: &NSMenuItem) {
-            let Some(surface) = Surface::with_key(*self.ivars()) else {
+            let Some(control) = &self.ivars().control else {
                 return;
             };
             let id = item.tag();
             if id > 0 {
-                surface.event(
+                control.dispatch_event(
                     ROOT_ID,
                     EventKind::Menu,
                     EventPayload::Map(vec![("id", PayloadValue::Number(id as f64))]),
@@ -131,8 +137,6 @@ pub(crate) struct Chrome {
     style: Cell<TitleBarStyle>,
     /// The app's title bar's height (`Window.setTitleBar`'s).
     height: Cell<Option<f32>>,
-    /// The target of its menu items (made with the first menu).
-    target: RefCell<Option<Retained<MenuTarget>>>,
     /// The main menu it set (`setApplicationMenu`).
     menu: RefCell<Option<Retained<NSMenu>>>,
     /// Only the toolbar this surface attached; dropping it restores the window.
@@ -336,11 +340,12 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
             // main-queue block would hold the queue while the menu tracks,
             // and the app's batches (which come through it) would wait.
             let key = surface.key();
+            let target = target(surface, None);
             let items = items.clone();
             let at = at.map(|p| (p.x.0, p.y.0));
             let block = block2::RcBlock::new(move || {
                 if let Some(surface) = Surface::with_key(key) {
-                    popup(&surface, &items, at);
+                    popup(&surface, &target, &items, at);
                 }
             });
             // SAFETY: the common modes' name is a constant of Foundation's.
@@ -498,16 +503,22 @@ pub(crate) fn mouse_down(surface: &Surface, event: &NSEvent, x: f32, y: f32) -> 
 
 // --- Menus ------------------------------------------------------------------------------
 
-/// The target of `surface`'s menu items.
-fn target(surface: &Surface) -> Retained<MenuTarget> {
-    let mut target = surface.chrome.target.borrow_mut();
-    target
-        .get_or_insert_with(|| {
-            let t = MenuTarget::alloc(surface.mtm).set_ivars(surface.key());
-            // SAFETY: NSObject's initializer.
-            unsafe { msg_send![super(t), init] }
-        })
-        .clone()
+/// Context menus have their own JS lifetime; only application menus lease
+/// callbacks. Both capture the engine before scheduling any native work.
+fn target(surface: &Surface, items: Option<&[MenuItem]>) -> Retained<MenuTarget> {
+    let mut control = None;
+    surface.control(|engine| control = Some(engine.clone()));
+    let lease = control
+        .as_ref()
+        .zip(items)
+        .map(|(engine, items)| engine.retain_menu_callbacks(items))
+        .unwrap_or_default();
+    let target = MenuTarget::alloc(surface.mtm).set_ivars(MenuOwner {
+        control,
+        _lease: lease,
+    });
+    // SAFETY: NSObject's initializer.
+    unsafe { msg_send![super(target), init] }
 }
 
 /// The action of disabled items: nothing answers it, so AppKit disables
@@ -591,7 +602,12 @@ fn key_equivalent(shortcut: &Shortcut) -> (String, NSEventModifierFlags) {
 }
 
 /// A menu of `items`, titled `title`.
-fn menu(surface: &Surface, title: &str, items: &[MenuItem]) -> Retained<NSMenu> {
+fn menu(
+    surface: &Surface,
+    target: &MenuTarget,
+    title: &str,
+    items: &[MenuItem],
+) -> Retained<NSMenu> {
     let mtm = surface.mtm;
     let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
     let mut last_separator = true;
@@ -629,13 +645,17 @@ fn menu(surface: &Surface, title: &str, items: &[MenuItem]) -> Retained<NSMenu> 
                     ns.setKeyEquivalentModifierMask(mask);
                 }
                 if selector == Some(sel!(menuItemChosen:)) {
-                    let target = target(surface);
                     // SAFETY: the target answers `menuItemChosen:`; the
-                    // surface keeps it while its menus exist (menu items do
-                    // not retain their targets).
-                    unsafe { ns.setTarget(Some(&target)) };
+                    // represented object below owns this otherwise weak target.
+                    unsafe { ns.setTarget(Some(target)) };
                     ns.setTag(action.id as isize);
                 }
+                // AppKit may keep an old menu/item through tracking or action
+                // dispatch. Release callbacks only when its last item goes,
+                // not when a replacement is installed or tracking closes.
+                // SAFETY: a valid NSObject, strongly retained by the item;
+                // the target does not retain this item or its menu.
+                unsafe { ns.setRepresentedObject(Some(target)) };
                 if let Some(checked) = action.checked {
                     ns.setState(if checked { 1 } else { 0 });
                 }
@@ -647,7 +667,7 @@ fn menu(surface: &Surface, title: &str, items: &[MenuItem]) -> Retained<NSMenu> 
                 enabled,
                 items,
             } => {
-                let ns = holder(surface, label, *enabled, items);
+                let ns = holder(surface, target, label, *enabled, items);
                 menu.addItem(&ns);
                 last_separator = false;
             }
@@ -659,11 +679,12 @@ fn menu(surface: &Surface, title: &str, items: &[MenuItem]) -> Retained<NSMenu> 
 /// An item holding a submenu of `items`.
 fn holder(
     surface: &Surface,
+    target: &MenuTarget,
     label: &str,
     enabled: bool,
     items: &[MenuItem],
 ) -> Retained<NSMenuItem> {
-    let sub = menu(surface, label, items);
+    let sub = menu(surface, target, label, items);
     // SAFETY: an item with no action (or one nothing answers, which
     // disables it), holding the submenu.
     let ns = unsafe {
@@ -675,6 +696,8 @@ fn holder(
         )
     };
     ns.setSubmenu(Some(&sub));
+    // SAFETY: a valid NSObject without a back-reference to this item.
+    unsafe { ns.setRepresentedObject(Some(target)) };
     ns
 }
 
@@ -694,6 +717,7 @@ fn set_menu(surface: &Surface, items: Option<&[MenuItem]>) {
         restore_menu(&app);
         return;
     };
+    let target = target(surface, Some(items));
     let bar = NSMenu::new(mtm);
     for item in items {
         // A top-level item that is not a submenu gets one of its own.
@@ -706,7 +730,7 @@ fn set_menu(surface: &Surface, items: Option<&[MenuItem]>) {
             MenuItem::Action(action) => (title(action), true, vec![item.clone()]),
             MenuItem::Separator => continue,
         };
-        bar.addItem(&holder(surface, &label, enabled, &sub_items));
+        bar.addItem(&holder(surface, &target, &label, enabled, &sub_items));
     }
     app.setMainMenu(Some(&bar));
     *surface.chrome.menu.borrow_mut() = Some(bar);
@@ -769,9 +793,14 @@ pub(crate) fn close_open_menu() -> Result<(), String> {
 }
 
 /// Shows a context menu at `at` (root coordinates) or at the mouse.
-fn popup(surface: &Rc<Surface>, items: &Arc<[MenuItem]>, at: Option<(f32, f32)>) {
+fn popup(
+    surface: &Rc<Surface>,
+    target: &MenuTarget,
+    items: &Arc<[MenuItem]>,
+    at: Option<(f32, f32)>,
+) {
     let root = surface.root.ns();
-    let menu = menu(surface, "", items);
+    let menu = menu(surface, target, "", items);
     let location = match at {
         // The root view is flipped: y goes down, as the app's.
         Some((x, y)) => NSPoint::new(x as f64, y as f64),
@@ -791,14 +820,16 @@ fn popup(surface: &Rc<Surface>, items: &Arc<[MenuItem]>, at: Option<(f32, f32)>)
     // release: the press ends here, or the view would stay pressed.
     crate::input::cancel_pointer(surface);
     // The app's `Menu.popup` promise settles.
-    surface.event(
-        ROOT_ID,
-        EventKind::Menu,
-        EventPayload::Map(vec![
-            ("id", PayloadValue::Number(0.0)),
-            ("closed", PayloadValue::Bool(true)),
-        ]),
-    );
+    if let Some(control) = &target.ivars().control {
+        control.dispatch_event(
+            ROOT_ID,
+            EventKind::Menu,
+            EventPayload::Map(vec![
+                ("id", PayloadValue::Number(0.0)),
+                ("closed", PayloadValue::Bool(true)),
+            ]),
+        );
+    }
 }
 
 /// The root view moved to a window, or the window changed: a hidden title

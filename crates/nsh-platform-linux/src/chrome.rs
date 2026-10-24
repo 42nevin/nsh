@@ -20,7 +20,7 @@
 //!   `gtk-titlebar-double-click` says (maximize by default); a secondary
 //!   press opens the window menu. Such presses never reach the app.
 //! - **Menus** are `gio::Menu` models: separators split sections, each
-//!   item is an action of a group inserted on the window (`nsh.item-N`;
+//!   item is an action of a group inserted on the window (`nsh.item-G-N`;
 //!   checkable items are stateful boolean actions, so the menu shows the
 //!   check), disabled items disabled actions. The menu bar is a
 //!   `gtk::PopoverMenuBar` above the app, not shown while the title bar is
@@ -42,6 +42,7 @@ use nsh_core::{
     desktop::{DesktopCommand, Key, MenuItem, MenuRole, Shortcut, TitleBarStyle},
     geometry::{Edges, Points},
 };
+use nsh_engine::{EngineControl, MenuLease};
 
 use crate::surface::Surface;
 
@@ -69,6 +70,9 @@ pub(crate) struct Chrome {
     controls: RefCell<Option<(gtk::WindowControls, gtk::WindowControls)>>,
     /// The application menu.
     menu: RefCell<Option<Arc<[MenuItem]>>>,
+    /// Native rebuilds share one lease; action closures may outlive the bar.
+    menu_owner: RefCell<Option<(EngineControl, MenuLease)>>,
+    menu_generation: Cell<u64>,
     /// The app's context menu shown, and its items (`nsh test --target
     /// linux` chooses from it).
     #[cfg(feature = "dev")]
@@ -153,10 +157,24 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
             }
         }
         DesktopCommand::SetMenu(menu) => {
+            let mut owner = None;
+            if let Some(items) = menu {
+                surface.control(|control| {
+                    owner = Some((control.clone(), control.retain_menu_callbacks(items)));
+                });
+            }
+            let previous = c.menu_owner.replace(owner);
+            c.menu_generation.set(
+                c.menu_generation
+                    .get()
+                    .checked_add(1)
+                    .expect("menu generation exhausted"),
+            );
             *c.menu.borrow_mut() = menu.clone();
             if let Some(window) = window(surface) {
                 install_menu(surface, &window);
             }
+            drop(previous);
         }
         DesktopCommand::PopupMenu { items, at } => {
             popup(surface, items, at.map(|p| (p.x.0, p.y.0)))
@@ -528,6 +546,8 @@ fn keysym_name(c: char) -> Option<String> {
 /// `prefix`).
 struct Builder<'a> {
     surface: Weak<Surface>,
+    owner: Option<(EngineControl, MenuLease)>,
+    generation: u64,
     group: &'a gio::SimpleActionGroup,
     prefix: &'a str,
     next: u32,
@@ -579,9 +599,10 @@ impl Builder<'_> {
                     };
                     action.set_enabled(a.enabled);
                     let (weak, id, role) = (self.surface.clone(), a.id, a.role);
+                    let owner = self.owner.clone();
                     action.connect_activate(move |_, _| {
                         if let Some(surface) = weak.upgrade() {
-                            choose(&surface, id, role);
+                            choose_owned(&surface, owner.as_ref().map(|o| &o.0), id, role);
                         }
                     });
                     self.group.add_action(&action);
@@ -611,7 +632,7 @@ impl Builder<'_> {
 
     fn name(&mut self, kind: &str) -> String {
         self.next += 1;
-        format!("{kind}-{}", self.next)
+        format!("{kind}-{}-{}", self.generation, self.next)
     }
 }
 
@@ -631,6 +652,8 @@ fn install_menu(surface: &Rc<Surface>, window: &gtk::Window) {
     let group = gio::SimpleActionGroup::new();
     let mut builder = Builder {
         surface: Rc::downgrade(surface),
+        owner: c.menu_owner.borrow().clone(),
+        generation: c.menu_generation.get(),
         group: &group,
         prefix: "nsh",
         next: 0,
@@ -750,6 +773,12 @@ fn popup(surface: &Rc<Surface>, items: &[MenuItem], at: Option<(f32, f32)>) {
     let group = gio::SimpleActionGroup::new();
     let mut builder = Builder {
         surface: Rc::downgrade(surface),
+        owner: {
+            let mut owner = None;
+            surface.control(|control| owner = Some((control.clone(), MenuLease::default())));
+            owner
+        },
+        generation: 0,
         group: &group,
         prefix: "nshpopup",
         next: 0,
@@ -797,7 +826,19 @@ fn popup(surface: &Rc<Surface>, items: &[MenuItem], at: Option<(f32, f32)>) {
 
 /// An item was chosen: the platform carries out its role, the app hears
 /// about the rest.
+#[cfg(feature = "dev")]
 fn choose(surface: &Rc<Surface>, id: u32, role: Option<MenuRole>) {
+    let mut control = None;
+    surface.control(|engine| control = Some(engine.clone()));
+    choose_owned(surface, control.as_ref(), id, role);
+}
+
+fn choose_owned(
+    surface: &Rc<Surface>,
+    control: Option<&EngineControl>,
+    id: u32,
+    role: Option<MenuRole>,
+) {
     match role {
         Some(MenuRole::Quit | MenuRole::Close) => close(surface),
         Some(MenuRole::Minimize) => {
@@ -830,8 +871,10 @@ fn choose(surface: &Rc<Surface>, id: u32, role: Option<MenuRole>) {
         }
         _ => {}
     }
-    if id != 0 {
-        surface.event(
+    if id != 0
+        && let Some(control) = control
+    {
+        control.dispatch_event(
             ROOT_ID,
             EventKind::Menu,
             EventPayload::Map(vec![("id", PayloadValue::Number(id as f64))]),
