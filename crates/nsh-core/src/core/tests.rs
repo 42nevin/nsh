@@ -256,6 +256,64 @@ fn core() -> Core<FakeEngine> {
     c
 }
 
+#[test]
+fn pan_permission_filters_native_values_and_events_without_losing_them() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::PanValues(None, Some(7)),
+            },
+            Op::Listen {
+                id: 2,
+                event: EventKind::PanEnd,
+                enabled: true,
+            },
+            Op::Listen {
+                id: 2,
+                event: EventKind::Press,
+                enabled: true,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::PanEnabled(false),
+            },
+        ],
+    );
+    let batch = c.commit().unwrap();
+    assert!(batch.items.iter().any(|item| matches!(item,
+        MountItem::Events { id: 2, events } if events.contains(EventKind::Press) && !events.contains(EventKind::PanEnd)
+    )));
+    assert!(batch.items.iter().any(|item| matches!(item,
+        MountItem::Gestures { id: 2, values } if values.pan_y.is_none()
+    )));
+    apply(
+        &mut c,
+        vec![Op::SetProp {
+            id: 2,
+            prop: Prop::PanEnabled(true),
+        }],
+    );
+    let batch = c.commit().unwrap();
+    assert!(batch.items.iter().any(|item| matches!(item,
+        MountItem::Events { id: 2, events } if events.contains(EventKind::PanEnd) && events.contains(EventKind::Press)
+    )));
+    assert!(batch.items.iter().any(|item| matches!(item,
+        MountItem::Gestures { id: 2, values } if values.pan_y == Some(7)
+    )));
+}
+
 /// The tokens of a theme file of the tests' own format, `{ "key":
 /// "#rrggbb", … }` over the sample's (`None`: the sample's): the core reads
 /// `uiTheme` with what a UI set brings.

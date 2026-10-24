@@ -1541,16 +1541,26 @@ pub extern "C" fn nsh_pan(id: u32, phase: u32, tx: f32, ty: f32, vx: f32, vy: f3
             ffi::submit(&out.finish());
         }
         let (value_x, value_y) = app.animation.pan_values(id);
-        let payload = EventPayload::Pan {
-            translation: point(Points(tx), Points(ty)),
-            velocity_x: vx,
-            velocity_y: vy,
-            value_x: value_x.map(Points),
-            value_y: value_y.map(Points),
+        let payload = if phase == 3 {
+            EventPayload::PanCancelled {
+                translation: point(Points(tx), Points(ty)),
+                velocity_x: vx,
+                velocity_y: vy,
+                value_x: value_x.map(Points),
+                value_y: value_y.map(Points),
+            }
+        } else {
+            EventPayload::Pan {
+                translation: point(Points(tx), Points(ty)),
+                velocity_x: vx,
+                velocity_y: vy,
+                value_x: value_x.map(Points),
+                value_y: value_y.map(Points),
+            }
         };
         match phase {
             0 => app.control.dispatch_event(id, EventKind::PanStart, payload),
-            2 => app.control.dispatch_event(id, EventKind::PanEnd, payload),
+            2 | 3 => app.control.dispatch_event(id, EventKind::PanEnd, payload),
             _ => {}
         }
     })

@@ -145,6 +145,13 @@ struct Gestures {
     refresh: Option<Refresh>,
 }
 
+/// The scroll view touched inside a cooperating pan. Its starting offset
+/// is consumed before the panel moves, including within one continuous drag.
+struct PanScroll {
+    view: Retained<UIScrollView>,
+    offset: f32,
+}
+
 /// Pull-to-refresh. `UIRefreshControl` throws under Mac Catalyst's Mac
 /// idiom, so there the pull is detected in the scroll delegate and shown
 /// with a spinner revealed by a content inset.
@@ -366,6 +373,8 @@ struct Slot {
     /// Values of the gesture nodes when the gesture began: pan x, pan y,
     /// pinch, rotation.
     gesture_start: [f32; 4],
+    pan_scroll_handoff: bool,
+    pan_scroll: Option<PanScroll>,
     /// `delayLongPress` (milliseconds).
     long_press_delay: Option<f32>,
     /// A horizontal list laid out right to left: mirrored as a whole.
@@ -421,6 +430,8 @@ impl Slot {
             bindings: Vec::new(),
             values: GestureValues::default(),
             gesture_start: [0.0; 4],
+            pan_scroll_handoff: false,
+            pan_scroll: None,
             long_press_delay: None,
             mirrored: false,
             in_mirrored: false,
@@ -2432,6 +2443,7 @@ impl Mounter {
             input.set_paste_listens(events.contains(EventKind::Paste));
         }
         let v = slot.values;
+        let handoff = slot.pan_scroll_handoff;
         let any = |kinds: &[EventKind]| kinds.iter().any(|&k| events.contains(k));
         let handles_press = any(&[
             EventKind::Press,
@@ -2467,6 +2479,9 @@ impl Mounter {
                     Some(sel!(handlePan:)),
                 );
                 r.setDelegate(Some(delegate));
+                if handoff {
+                    r.setMaximumNumberOfTouches(1);
+                }
                 r
             });
             toggle(&mut g.pinch, wants_pinch, view, || {
@@ -2904,6 +2919,14 @@ impl Mounter {
         let (control, mtm) = (self.control.clone(), self.mtm);
         let Some(s) = self.slot_mut(id) else { return };
         s.long_press_delay = props.long_press_delay;
+        s.pan_scroll_handoff = props.pan_scroll_handoff;
+        if let Some(pan) = &s.gestures.pan {
+            pan.setMaximumNumberOfTouches(if props.pan_scroll_handoff {
+                1
+            } else {
+                usize::MAX
+            });
+        }
         let activation = props.pan_activation;
         toggle(
             &mut s.gestures.gate,
@@ -3055,6 +3078,84 @@ impl Mounter {
         }
     }
 
+    /// A cooperating pan sees only scrolls between its view and the touch,
+    /// never a scroll elsewhere in the sheet or behind its backdrop.
+    pub(crate) fn pan_touch(&mut self, id: NodeId, touched: &UIView) {
+        let Some(s) = self.slot_mut(id) else { return };
+        s.pan_scroll = None;
+        if !s.pan_scroll_handoff {
+            return;
+        }
+        let panel = s.native.view();
+        let mut current = Some(touched.retain());
+        while let Some(view) = current {
+            if &*view == panel {
+                break;
+            }
+            if let Some(scroll) = view.downcast_ref::<UIScrollView>()
+                && scroll.isScrollEnabled()
+                && (scroll.contentSize().height > scroll.bounds().size.height
+                    || scroll.alwaysBounceVertical())
+            {
+                s.pan_scroll = Some(PanScroll {
+                    view: scroll.retain(),
+                    offset: (scroll.contentOffset().y + scroll.adjustedContentInset().top).max(0.0)
+                        as f32,
+                });
+                break;
+            }
+            current = view.superview();
+        }
+    }
+
+    /// Sharing is restricted to the touched descendant's scroll pan.
+    pub(crate) fn pan_shares_scroll(
+        &self,
+        pan: &UIGestureRecognizer,
+        other: &UIGestureRecognizer,
+    ) -> bool {
+        let Some(view) = pan.view() else { return false };
+        let Some(s) = self.slot(view.tag() as NodeId) else {
+            return false;
+        };
+        s.pan_scroll_handoff
+            && s.gestures
+                .pan
+                .as_deref()
+                .is_some_and(|own| std::ptr::eq(own as &UIGestureRecognizer, pan))
+            && s.pan_scroll.as_ref().is_some_and(|scroll| {
+                std::ptr::eq(
+                    &*scroll.view.panGestureRecognizer() as &UIGestureRecognizer,
+                    other,
+                )
+            })
+    }
+
+    /// Keep the native scroll at its top while the panel consumes the
+    /// remaining drag. This also prevents rubber banding under the panel.
+    pub(crate) fn pan_scroll_offset(&self, scroll: &UIScrollView, offset: CGPoint) -> CGPoint {
+        let mut current = scroll.superview();
+        while let Some(view) = current {
+            if let Some(s) = self.slot(view.tag() as NodeId)
+                && s.pan_scroll_handoff
+                && let Some(touched) = &s.pan_scroll
+                && &*touched.view == scroll
+                && let Some(pan) = &s.gestures.pan
+                && (matches!(
+                    pan.state(),
+                    UIGestureRecognizerState::Began | UIGestureRecognizerState::Changed
+                ) || pan.state() == UIGestureRecognizerState::Ended && scroll.isDragging())
+            {
+                let t = pan.translationInView(view.superview().as_deref());
+                if s.gesture_start[1] + t.y as f32 > touched.offset {
+                    return CGPoint::new(offset.x, -scroll.adjustedContentInset().top);
+                }
+            }
+            current = view.superview();
+        }
+        offset
+    }
+
     /// A drag on a view: moves its pan values natively and reports start
     /// and end (with velocity) to JS.
     pub(crate) fn pan(
@@ -3066,12 +3167,24 @@ impl Mounter {
     ) {
         let Some(s) = self.slot(id) else { return };
         let (values, events) = (s.values, s.events);
-        let payload = |m: &Self| EventPayload::Pan {
-            translation: point(Points(t.x as f32), Points(t.y as f32)),
-            velocity_x: v.x as f32,
-            velocity_y: v.y as f32,
-            value_x: values.pan_x.map(|n| Points(m.animator.value(n))),
-            value_y: values.pan_y.map(|n| Points(m.animator.value(n))),
+        let payload = |m: &Self| {
+            if state == UIGestureRecognizerState::Cancelled {
+                EventPayload::PanCancelled {
+                    translation: point(Points(t.x as f32), Points(t.y as f32)),
+                    velocity_x: v.x as f32,
+                    velocity_y: v.y as f32,
+                    value_x: values.pan_x.map(|n| Points(m.animator.value(n))),
+                    value_y: values.pan_y.map(|n| Points(m.animator.value(n))),
+                }
+            } else {
+                EventPayload::Pan {
+                    translation: point(Points(t.x as f32), Points(t.y as f32)),
+                    velocity_x: v.x as f32,
+                    velocity_y: v.y as f32,
+                    value_x: values.pan_x.map(|n| Points(m.animator.value(n))),
+                    value_y: values.pan_y.map(|n| Points(m.animator.value(n))),
+                }
+            }
         };
         if state == UIGestureRecognizerState::Began {
             // Grabbing an animating value stops it where it is.
@@ -3094,7 +3207,20 @@ impl Mounter {
                 self.animator.set(n, start[0] + t.x as f32);
             }
             if let Some(n) = values.pan_y {
-                self.animator.set(n, start[1] + t.y as f32);
+                let y = self
+                    .slot(id)
+                    .and_then(|s| s.pan_scroll.as_ref())
+                    .map_or(start[1] + t.y as f32, |scroll| {
+                        (start[1] + t.y as f32 - scroll.offset).max(0.0)
+                    });
+                self.animator.set(n, y);
+                if let Some(scroll) = self.slot(id).and_then(|s| s.pan_scroll.as_ref()) {
+                    let offset = scroll.view.contentOffset();
+                    let clamped = self.pan_scroll_offset(&scroll.view, offset);
+                    if clamped != offset {
+                        scroll.view.setContentOffset(clamped);
+                    }
+                }
             }
             self.apply_animations();
         }

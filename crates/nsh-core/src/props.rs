@@ -260,6 +260,8 @@ pub struct ViewProps {
     /// `panActivation`: the view's touch responder waits for a pan the
     /// platform recognizes.
     pub pan_activation: Option<PanActivation>,
+    /// A vertical pan cooperates with descendant scroll views on iOS.
+    pub pan_scroll_handoff: bool,
     /// `windowDrag` (desktops): pressing the view drags the window; `None`
     /// leaves it to the views around it.
     pub window_drag: Option<bool>,
