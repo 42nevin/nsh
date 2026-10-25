@@ -1253,7 +1253,7 @@ pub trait Interactive: Element {
     fn on_mouse_move<M>(self, listener: impl IntoListener<crate::Point<crate::Points>, M>) -> Self {
         self.on(
             EventKind::MouseMove,
-            events::typed(listener.into_listener(), events::offset),
+            events::typed(listener.into_listener(), events::mouse_position),
         )
     }
 
@@ -1265,6 +1265,24 @@ pub trait Interactive: Element {
         self.on(
             EventKind::ContextMenu,
             events::typed(listener.into_listener(), events::context_menu),
+        )
+    }
+
+    /// It took the keyboard focus: an input, or a view that takes presses
+    /// reached by Tab (or `focus()`) on the platforms that move the focus
+    /// between pressables.
+    fn on_focus<M>(self, listener: impl IntoListener<(), M>) -> Self {
+        self.on(
+            EventKind::Focus,
+            events::typed(listener.into_listener(), events::unit),
+        )
+    }
+
+    /// It lost the keyboard focus.
+    fn on_blur<M>(self, listener: impl IntoListener<(), M>) -> Self {
+        self.on(
+            EventKind::Blur,
+            events::typed(listener.into_listener(), events::unit),
         )
     }
 
@@ -1422,6 +1440,21 @@ pub trait Interactive: Element {
         let bound = &mut self.node().attrs.bound;
         bound.extend(x);
         bound.extend(y);
+        self
+    }
+
+    /// Enables native pans without replacing their values or listeners.
+    /// A disabled pan leaves presses and scrolling to the content.
+    fn pan_enabled(mut self, enabled: impl IntoReactive<bool>) -> Self {
+        super::host::bind_prop(self.node(), enabled, Prop::PanEnabled);
+        self
+    }
+
+    /// On iOS, a vertical pan shares descendant scroll views' touches and
+    /// follows only the downward distance left after scrolling to the top.
+    /// Other platforms keep their normal pan and scroll arbitration.
+    fn pan_scroll_handoff(mut self, enabled: impl IntoReactive<bool>) -> Self {
+        super::host::bind_prop(self.node(), enabled, Prop::PanScrollHandoff);
         self
     }
 

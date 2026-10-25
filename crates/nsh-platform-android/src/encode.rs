@@ -1110,6 +1110,11 @@ fn role_index(role: AccessibilityRole) -> i32 {
         Toolbar => 26,
         List => 27,
         Grid => 28,
+        Table => 29,
+        Row => 30,
+        Cell => 31,
+        ColumnHeader => 32,
+        RowGroup => 33,
     }
 }
 
@@ -1124,6 +1129,7 @@ fn layout_transition(e: &mut Encoded, t: Option<LayoutTransition>) {
         LayoutCurve::EaseOut => (2, 0.0),
         LayoutCurve::EaseInEaseOut => (3, 0.0),
         LayoutCurve::Spring { damping } => (4, damping),
+        LayoutCurve::Keyboard => (5, 0.0),
     };
     e.int(curve);
     e.float(damping);

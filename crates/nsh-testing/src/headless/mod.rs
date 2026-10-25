@@ -210,6 +210,10 @@ enum Pumped {
     Exited,
 }
 
+/// How soon a press follows the last on the same view to count as its next
+/// click: the platforms' default double-click time.
+const CLICK_INTERVAL: Duration = Duration::from_millis(500);
+
 /// An app on a headless engine ([`start`]) and what it shows ([`Screen`]),
 /// driven by steps: press views, type into inputs, scroll, go back, wait
 /// for what it shows.
@@ -264,6 +268,9 @@ pub struct Headless {
     /// The embedding app's channel with the app (`EngineConfig::host`),
     /// which the test plays.
     host: nsh_engine::HostChannel,
+    /// The last press: its view and when, for counting a double press as
+    /// the platforms do ([`CLICK_INTERVAL`]).
+    last_press: Option<(NodeId, nsh_core::time::Instant, u32)>,
     /// Where the app's `nsh/host` calls go (the web page's host).
     #[cfg(feature = "js")]
     host_calls: Option<HostCalls>,
@@ -302,6 +309,7 @@ impl Headless {
             clock,
             wanted,
             host,
+            last_press: None,
             #[cfg(feature = "js")]
             host_calls: None,
         })
@@ -574,7 +582,19 @@ impl Headless {
     }
 
     fn apply(&mut self, batch: &MountBatch) {
+        let focused = self.screen.focused();
         self.screen.apply(batch);
+        // The app moved the focus (`focus()`, `blur()`): platforms tell the
+        // views as when the user moves it.
+        let now = self.screen.focused();
+        if now != focused {
+            if let Some(old) = focused {
+                self.send(old, EventKind::Blur, EventPayload::None);
+            }
+            if let Some(new) = now {
+                self.send(new, EventKind::Focus, EventPayload::None);
+            }
+        }
         self.exited |= batch.items.iter().any(|item| {
             matches!(
                 item,
@@ -786,8 +806,8 @@ impl Headless {
 
     /// The step `idle`: applies batches until none comes for `quiet`, or
     /// for 10 s at most (false then). Long enough, it lets the engine's
-    /// idle collection run (every second at most), so what the app keeps
-    /// alive shows.
+    /// idle collection run (every second at most, after 0.3 s without
+    /// work), so what the app keeps alive shows.
     pub fn idle(&mut self, quiet: Duration) -> Result<bool, String> {
         self.step("idle");
         let quiet = self.quiet(quiet, MAX_IDLE);
@@ -1091,7 +1111,8 @@ impl Headless {
         if !path.is_empty() {
             self.send_touch(id, nsh_core::TouchPhase::Start, path.clone(), at);
         }
-        let payload = self.press_payload(id, None);
+        let inside = self.screen.press_point(&parsed, id);
+        let payload = self.press_payload(id, inside);
         for kind in [EventKind::PressDown, EventKind::PressUp, EventKind::Press] {
             self.send(id, kind, payload.clone());
         }
@@ -1131,12 +1152,27 @@ impl Headless {
     }
 
     /// A press at `at` in `view` (else the view's center), in that view
-    /// and in the root, as one click with no modifier keys. `None` when the
-    /// view has no bounds.
-    fn press_payload(&self, view: NodeId, at: Option<Point<Points>>) -> EventPayload {
+    /// and in the root, with no modifier keys. Presses on one view within
+    /// [`CLICK_INTERVAL`] of each other count up (`clicks` 2 is a double
+    /// press), as the platforms count them. `None` when the view has no
+    /// bounds.
+    fn press_payload(&mut self, view: NodeId, at: Option<Point<Points>>) -> EventPayload {
+        // A pointer's press takes the keyboard focus off the pressable Tab
+        // gave it to.
+        if self.screen.key_focus().is_some_and(|id| id != view) {
+            self.move_focus(None);
+        }
         let Some(bounds) = self.screen.bounds_in_root(view) else {
             return EventPayload::None;
         };
+        let now = self.clock.now();
+        let clicks = match self.last_press {
+            Some((last, at, clicks)) if last == view && now.duration_since(at) < CLICK_INTERVAL => {
+                clicks + 1
+            }
+            _ => 1,
+        };
+        self.last_press = Some((view, now, clicks));
         let position = at.unwrap_or_else(|| {
             point(
                 Points(bounds.size.width.0 / 2.0),
@@ -1150,7 +1186,7 @@ impl Headless {
                 Points(bounds.origin.y.0 + position.y.0),
             ),
             modifiers: nsh_core::keymap::Modifiers::default(),
-            clicks: 1,
+            clicks,
         })
     }
 
@@ -1494,6 +1530,7 @@ impl Headless {
             self.display_frame();
         }
         self.send(id, EventKind::ScrollDragEnd, offset(&self.screen));
+        self.animator.scroll_ended(id);
         self.send(id, EventKind::ScrollEnd, offset(&self.screen));
         self.done()
     }
@@ -1552,6 +1589,57 @@ mod tests {
     use nsh_core::ui::{Root, prelude::*};
 
     use super::*;
+
+    /// A paragraph with a link and a marked word.
+    #[component]
+    fn Linked() -> impl IntoElement {
+        text("See ")
+            .child(text("the guide").test_id("guide").underline())
+            .child(" or ")
+            .child(text("this").test_id("marked").bg(rgb(0xfde68a)))
+    }
+
+    #[test]
+    fn span_styles_are_read_by_test_id_or_text() {
+        let mut app = Headless::start(EngineConfig::new(Root::of::<Linked>())).unwrap();
+        app.first_render().unwrap();
+        let screen = app.screen();
+        assert!(screen.span_style("id:guide").unwrap().decoration.underline);
+        assert_eq!(screen.span_style("id:guide").unwrap().background, None);
+        let marked = screen.span_style("id:marked").unwrap().background.unwrap();
+        assert_eq!(marked.color, nsh_core::Color(0xfde6_8aff));
+        assert_eq!(
+            screen
+                .span_style("text:this")
+                .unwrap()
+                .background
+                .map(|b| b.color),
+            Some(marked.color)
+        );
+    }
+
+    #[component]
+    fn EmptySpans() -> impl IntoElement {
+        text("before ")
+            .child(text("").test_id("middle").underline())
+            .child(text("after").italic())
+            .child(text("").test_id("end").underline())
+            .child(text("").test_id("after"))
+    }
+
+    #[test]
+    fn empty_span_styles_do_not_read_neighbouring_characters() {
+        let mut app = Headless::start(EngineConfig::new(Root::of::<EmptySpans>())).unwrap();
+        app.first_render().unwrap();
+        let screen = app.screen();
+        for name in ["id:middle", "id:end", "middle", "end", "id:after", "after"] {
+            assert!(
+                screen.span_style(name).is_err(),
+                "empty span {name} has no first character"
+            );
+        }
+        assert!(screen.span_style("text:after").unwrap().italic);
+    }
 
     /// A count and a button that adds one.
     #[component]

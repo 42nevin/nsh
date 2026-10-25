@@ -40,6 +40,8 @@ const HOVERED = 2;
 const FOCUSED = 4;
 const PRESS_EVENTS = ["onPress", "onLongPress", "onPressIn", "onPressOut"];
 const HOVER_EVENTS = ["onHoverIn", "onHoverOut", "onHoverMove"];
+/** The keys whose press or release is reported as a hover move. */
+const MODIFIER_KEYS = new Set(["Control", "Alt", "Shift", "Meta"]);
 // What lays out a field's text, copied to the hidden copy that finds its
 // caret (`caretBounds`).
 const CARET_STYLE = [
@@ -138,7 +140,6 @@ const KEYFRAMES = `
 .nsh-run { position: absolute; white-space: pre; }
 .nsh-run-bg { position: absolute; pointer-events: none; }
 .nsh-border { position: absolute; inset: 0; pointer-events: none; }
-.nsh-pointer { cursor: pointer; }
 /* The mounter's own styles: no element has an inline style but its frame
    and animated values (generated classes, \`op_css\`, come after these). */
 .nsh-page { overscroll-behavior: none; }
@@ -1677,8 +1678,6 @@ class Player {
     if (el._events.has("onMouseMove")) this.mouseTracked.add(id);
     else this.mouseTracked.delete(id);
     const pressable = PRESS_EVENTS.some((e) => el._events.has(e));
-    // Under the view's own `cursor` (its class).
-    el.classList.toggle("nsh-pointer", pressable);
     el._pressable = pressable;
     this.updateFocusable(el);
     this.updateTouchAction(el);
@@ -1794,10 +1793,20 @@ class Player {
     if (!focusable && !el._a11yFocus && document.activeElement === el) el.blur();
     if (focusable && !el._focusListeners) {
       el._focusListeners = true;
-      // `focus:` classes follow the keyboard focus (the browser draws a
-      // ring only then), not the focus a click would give.
-      el.addEventListener("focus", () => el.matches(":focus-visible") && this.setState(el, FOCUSED, true));
-      el.addEventListener("blur", () => this.setState(el, FOCUSED, false));
+      // `focus:` classes and `onFocus` follow the keyboard focus (the
+      // browser draws a ring only then), not the focus a click would give.
+      el.addEventListener("focus", () => {
+        if (!el.matches(":focus-visible")) return;
+        el._keyFocus = true;
+        this.setState(el, FOCUSED, true);
+        this.event(el._id, "onFocus");
+      });
+      el.addEventListener("blur", () => {
+        this.setState(el, FOCUSED, false);
+        if (!el._keyFocus) return;
+        el._keyFocus = false;
+        this.event(el._id, "onBlur");
+      });
     }
     this.updateAria(el);
   }
@@ -2063,6 +2072,14 @@ class Player {
       el._smooth = [el._smooth[0] + dx, el._smooth[1] + dy];
       el.scrollTo({ left: el._smooth[0], top: el._smooth[1], behavior: "smooth" });
       return;
+    }
+    // So does a glide of the wheel's or the keys' (`scrollSmoothly`):
+    // its next frame would put the offset back.
+    const a = el._glide;
+    if (a) {
+      a.x += dx;
+      a.y += dy;
+      if (a.at) a.at = [a.at[0] + dx, a.at[1] + dy];
     }
     el.scrollLeft += dx;
     el.scrollTop += dy;
@@ -2344,6 +2361,7 @@ class Player {
   }
 
   scrolled(el) {
+    if (el._commandEnd) this.waitCommandEnd(el);
     if (this.desktopUI) this.showBar(el);
     // Still moving after the finger left (touch scrolling is the
     // browser's): a glide.
@@ -2358,6 +2376,8 @@ class Player {
   /** The browser's scrolling stopped: the end, unless the scroll is driven
    * here (`drive`) or a finger still holds it. */
   scrollEnded(el) {
+    clearTimeout(el._commandEnd);
+    el._commandEnd = 0;
     el._smooth = null;
     if (el._driven || el._touchDrag) return;
     // The browser's end of a scroll that ended here (`ownEnd`).
@@ -3617,14 +3637,18 @@ class Player {
       case "scrollTo":
         if (!el) break;
         el._applied++;
+        this.stopGlide(el, args[0], args[1]);
         el._smooth = args[2] ? [args[0], args[1]] : null;
         el.scrollTo({ left: args[0], top: args[1], behavior: args[2] ? "smooth" : "instant" });
         break;
-      case "scrollToEnd":
+      case "scrollToEnd": {
         if (!el) break;
         el._applied++;
-        el.scrollTo({ left: el._horizontal ? el.scrollWidth : 0, top: el._horizontal ? 0 : el.scrollHeight, behavior: args[0] ? "smooth" : "instant" });
+        const [x, y] = el._horizontal ? [el.scrollWidth, 0] : [0, el.scrollHeight];
+        this.stopGlide(el, x, y);
+        el.scrollTo({ left: x, top: y, behavior: args[0] ? "smooth" : "instant" });
         break;
+      }
       case "zoomTo": if (el) this.zoomCommand(el, ...args); break;
       case "dialog": this.dialog(args[0], args[1], args[2], args[3], args[4] ?? [], args[5] ?? true, args[6] ?? false); break;
       case "toast": this.toast(args[0], args[1]); break;
@@ -4428,6 +4452,7 @@ class Player {
       this.mouseMoved(e);
       if (e.pointerType !== "mouse") return;
       this.hover = [e.clientX, e.clientY];
+      this.hoverButtons = e.buttons;
       // Reveal only a draggable thumb under the pointer.
       if (!this.desktopUI || e.buttons) return;
       const view = this.viewOf(e.target);
@@ -4520,7 +4545,32 @@ class Player {
 
   // Keyboard
 
+  /**
+   * A modifier key went down or up while the mouse rests over the page
+   * with no button down: the hovered views that listen hear
+   * `onHoverMove` again where it is, with the modifiers as they are now
+   * (an editor underlines a definition while Mod is held), as they would
+   * on the next move.
+   */
+  modifiersChanged(e) {
+    if (!MODIFIER_KEYS.has(e.key) || e.repeat || !this.hover || this.hoverButtons) return;
+    const [x, y] = this.hover;
+    const target = document.elementFromPoint(x, y);
+    if (!target || !this.root.contains(target)) return;
+    const r = this.root.getBoundingClientRect();
+    for (const el of this.ancestors(this.viewOf(target))) {
+      if (!el._hoverIn || !el._events?.has("onHoverMove")) continue;
+      const b = el.getBoundingClientRect();
+      this.event(el._id, "onHoverMove", {
+        position: { x: x - b.left, y: y - b.top },
+        pagePosition: { x: x - r.left, y: y - r.top },
+        modifiers: { control: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, platform: e.metaKey },
+      });
+    }
+  }
+
   keyDown(e) {
+    if (this.wasm) this.modifiersChanged(e);
     if (!this.wasm || !this.takesKeys()) return;
     const focus = document.activeElement;
     const inRoot = focus && this.root.contains(focus);
@@ -4578,6 +4628,7 @@ class Player {
   }
 
   keyUp(e) {
+    if (this.wasm) this.modifiersChanged(e);
     if (e.key === " " && this.keyPress) this.keyPressEnd(true);
   }
 
@@ -4791,6 +4842,41 @@ class Player {
     }, 200);
   }
 
+  /** Stops `el`'s glide where it is for a scroll command of the core's to
+   * (`x`, `y`), as the native backends interrupt theirs: left running, its
+   * next frame would put the offset back. The browser's `scrollend` after
+   * the command's scroll ends the scroll it stopped; a command that leaves
+   * the view where it is moves nothing, and no `scrollend` follows, so its
+   * `onScrollEnd` is sent here. */
+  stopGlide(el, x, y) {
+    const a = el._glide;
+    if (!a) return;
+    cancelAnimationFrame(a.frame);
+    clearTimeout(a.timer);
+    el._glide = null;
+    this.drive(el, -1);
+    // Browsers clamp the offsets of scrolls.
+    const stays = (to, at, max) => Math.min(Math.max(to, 0), max) === at;
+    if (stays(x, el.scrollLeft, el.scrollWidth - el.clientWidth) && stays(y, el.scrollTop, el.scrollHeight - el.clientHeight)) {
+      this.ownEnd(el);
+    } else {
+      // A fractional destination may round back to the current offset,
+      // in which case the browser sends no scrollend. Moving commands
+      // keep this fallback waiting through their scroll events.
+      this.waitCommandEnd(el);
+    }
+  }
+
+  /** Ends a command rounded to the current offset when no browser event
+   * follows; scroll events keep a moving command's fallback waiting. */
+  waitCommandEnd(el) {
+    clearTimeout(el._commandEnd);
+    el._commandEnd = setTimeout(() => {
+      this.scrollEnded(el);
+      el._ownEnd = [el.scrollLeft, el.scrollTop];
+    }, 200);
+  }
+
   /** The snap point of a snapping view next to where it is towards `dir`
    * (0: the nearest). */
   snapPoint(el, dir) {
@@ -4852,6 +4938,8 @@ class Player {
   }
 
   scrollEvent(el, name) {
+    // Snapping animated values that follow it settle, listened to or not.
+    if (name === "onScrollEnd") this.call((w) => w.nsh_scroll_ended(el._id));
     if (el._events.has(name)) this.event(el._id, name, { x: el.scrollLeft, y: el.scrollTop });
   }
 
@@ -4908,6 +4996,9 @@ class Player {
       x, y, startX: x, startY: y, t: performance.now(), vx: 0, vy: 0,
       touchPath: chain.filter((v) => v._events.has("onTouch")).map((v) => v._id),
       press: isField ? null : chain.find((v) => PRESS_EVENTS.some((n) => v._events.has(n)) && !v._props?.disabled) ?? null,
+      // What presses report: the modifier keys at the press and its clicks.
+      modifiers: { control: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, platform: e.metaKey },
+      clicks: e.pointerType === "mouse" ? this.clickCount(x, y) : 1,
       pan: chain.find((v) => v._gestures?.pan || v._events.has("onPanStart") || v._events.has("onPanEnd")) ?? null,
       scroll: !selects && scrollView && e.pointerType !== "mouse" && this.zooms(scrollView) ? scrollView : null,
       // Touch scrolling is the browser's, reported from here (`touchScroll`).
@@ -4931,11 +5022,11 @@ class Player {
   pressIn(p) {
     const el = p.press;
     p.pressed = true;
-    if (el._events.has("onPressIn")) this.event(el._id, "onPressIn");
+    if (el._events.has("onPressIn")) this.event(el._id, "onPressIn", this.pressPayload(p));
     if (el._events.has("onLongPress")) {
       p.longTimer = setTimeout(() => {
         p.long = true;
-        this.event(el._id, "onLongPress");
+        this.event(el._id, "onLongPress", this.pressPayload(p));
       }, el._props?.longPressDelay ?? 500);
     }
   }
@@ -4945,8 +5036,33 @@ class Player {
     if (!el || !p.pressed) return;
     p.pressed = false;
     clearTimeout(p.longTimer);
-    if (el._events.has("onPressOut")) this.event(el._id, "onPressOut");
-    if (inside && !p.long && el._events.has("onPress")) this.event(el._id, "onPress");
+    if (el._events.has("onPressOut")) this.event(el._id, "onPressOut", this.pressPayload(p));
+    if (inside && !p.long && el._events.has("onPress")) this.event(el._id, "onPress", this.pressPayload(p));
+  }
+
+  /** The payload of pointer `p`'s press events, `{ position, pagePosition,
+   * modifiers, clicks }` as handlers get it; none for a press from the
+   * keyboard (`keyPress`), which has no pointer. */
+  pressPayload(p) {
+    if (p.x === undefined) return null;
+    const r = p.press.getBoundingClientRect();
+    const root = this.root.getBoundingClientRect();
+    return {
+      position: { x: p.x + root.left - r.left, y: p.y + root.top - r.top },
+      pagePosition: { x: p.x, y: p.y },
+      modifiers: p.modifiers,
+      clicks: p.clicks,
+    };
+  }
+
+  /** A mouse press's click count at `(x, y)` (root coordinates): 2 or 3
+   * when it follows the last one quickly and close by. */
+  clickCount(x, y) {
+    const now = performance.now();
+    const last = this.lastClick;
+    const n = last && now - last.t <= 500 && Math.abs(x - last.x) <= 5 && Math.abs(y - last.y) <= 5 ? (last.n % 3) + 1 : 1;
+    this.lastClick = { t: now, x, y, n };
+    return n;
   }
 
   /** Remembers where pointer `p` is at `now` (ms), for its velocity. */
@@ -5066,11 +5182,12 @@ class Player {
       // Released after a pause: no speed left.
       this.track(p, performance.now());
       const [vx, vy] = this.velocity(p);
-      this.call((w) => w.nsh_pan(p.pan._id, 2, p.x - p.startX, p.y - p.startY, vx, vy));
+      this.call((w) => w.nsh_pan(p.pan._id, cancelled ? 3 : 2, p.x - p.startX, p.y - p.startY, vx, vy));
     } else if (p.mode === "scroll") {
       this.scrollEvent(p.scroll, "onScrollDragEnd");
       this.glide(p.scroll, -p.vx, -p.vy);
     } else if (p.press) {
+      if (!cancelled) [p.x, p.y] = this.point(e);
       const rect = p.press.getBoundingClientRect();
       const inside = e.clientX >= rect.left - 8 && e.clientX <= rect.right + 8 && e.clientY >= rect.top - 8 && e.clientY <= rect.bottom + 8;
       this.pressOut(p, inside && !cancelled);

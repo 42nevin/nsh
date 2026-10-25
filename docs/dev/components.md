@@ -10,9 +10,9 @@ the styled layer, GPUI Kit's `gpui-component`, is never part of NSH. The look of
 come from two places:
 
 - **`nsh/base`**: unstyled base components of `gpui-base`'s scope, the crate `nsh-base` (`crates/nsh-base`,
-  `nsh_base::registry()`): `SafeAreaView`, `KeyboardAvoidingView`, `Button`, `Checkbox`, `Radio`, `RadioGroup`, `Switch`, `Tab`, `Tabs`, `Collapsible`, `Progress`, `SelectionArea` (texts that select
+  `nsh_base::registry()`): `SafeAreaView`, `KeyboardAvoidingView`, `Button`, `Checkbox`, `Radio`, `RadioGroup`, `Switch`, `Tab`, `Tabs`, `Collapsible`, `Progress`, `Table` with `TableHeader`, `TableBody`, `TableFooter`, `TableRow`, `TableHead`, `TableCell` and `TableCaption` (a table's accessibility roles around the app's rows), `SelectionArea` (texts that select
   together, `text.md` "Selection areas"), `TextView` (`text-view.md`), `ResizablePanelGroup` and `ResizablePanel`, `DockArea`
-  (`dock.md`), the popups on the core's overlays (`Popover`,
+  (`dock.md`), `Editor` (a code editor, `editor.md`), `DiffView` (the changes between two texts, `diff.md`), `DataTable` (a table over any number of rows and columns, `data-table.md`), the popups on the core's overlays (`Popover`,
   `Menu` with `MenuItem`, `MenuSeparator` and `Submenu`, `ContextMenu`, `Tooltip`, `Sheet`: "Popups" below), toasts
   (`Toast`, `ToastStack` and the class `ToastManager`: "Toasts" below) and the
   modules `AlertDialog`, `Keyboard`, beside the navigation `nsh-js` makes for it (`NavStack`, `NavPage`, `Dialog`, `createNavStack`); controls
@@ -26,8 +26,8 @@ come from two places:
   - it owns behavior, state, focus, keyboard handling and accessibility (roles, states, actions), or tells the
     platform (insets, the keyboard's height, the status bar's setting, a system dialog);
   - it has no look: no colors, paddings, radii, fonts or variants of its own; it takes the app's `class` / `style`
-    (and styles per state) and children (the one exception is `TextView`'s default reading typography, colored with
-    the theme's tokens and overridable part by part: `docs/dev/text-view.md`);
+    (and styles per state) and children (the exceptions are `TextView`'s default reading typography and the default looks of `Editor`, `DiffView` and `DataTable`, colored
+    with the theme's tokens and overridable part by part: `docs/dev/text-view.md`, `docs/dev/editor.md`, `docs/dev/diff.md`, `docs/dev/data-table.md`);
   - its state is controlled: it reports changes (`onChange`, `onOpenChange`, ...), the app owns the value;
   - it exposes its parts (a trigger, a thumb, an item, as slots or child components) instead of fixed markup, so an
     app arranges and styles each.
@@ -36,13 +36,16 @@ come from two places:
   cards, list rows with its look), or a community library a third party publishes as a crate, built on `nsh-base`'s
   behavior and the primitives. `examples/gallery-rs` is one (`gallery/native`), and so is the crate
   `nsh init --template rust` / `mixed` writes (`app/native`).
+  What such a crate keeps per engine (the languages and highlighters its editors know,
+  `nsh_base::editor::register_language`; a value of `nsh_core::ui::global`) it sets up in `Registry::setup`, a
+  function each engine serving the set runs once in its runtime before the app's first op (`Core::set_components`).
 
 | Where | What |
 |---|---|
 | `crates/nsh-core/src/ui/` | The API (`nsh_core::ui`, `prelude`): `Component`, `Module`, `Class` (`class.rs`, `callback.rs`; direct JS values: `js.rs`), elements, `Styled`, `Theme`, `Registry`, the status bar's layers (`status_bar.rs`), the declarations generator `typescript` |
 | `crates/nsh-macros` | `#[component]`, `#[derive(Props)]`, `#[derive(PropEnum)]`, `#[derive(Event)]`, `#[derive(JsObject)]`; `#[methods]`, `#[module]`, `#[class]`; `#[native_module("…")]` (an app crate's set: `docs/dev/tooling.md`); `style_helpers!` (the spacing methods of `Styled`) |
 | `crates/nsh-core/src/core/components.rs` | The core side: instances, children and slots, events; `core/views.rs`: views, their bindings' patches and regions |
-| `crates/nsh-base/` | `nsh/base`'s components and modules, one file each (`safe_area.rs`, `keyboard.rs`, `alert_dialog.rs`, `button.rs`, `checkbox.rs`, `radio.rs`, `switch.rs`, `tabs.rs`; `TextView`, `ResizablePanelGroup` and `DockArea` directories, `text_view/`, `resizable/`, `dock/`), one `Registry` (`lib.rs`) |
+| `crates/nsh-base/` | `nsh/base`'s components and modules, one file each (`safe_area.rs`, `keyboard.rs`, `alert_dialog.rs`, `button.rs`, `checkbox.rs`, `radio.rs`, `switch.rs`, `tabs.rs`; `TextView`, `ResizablePanelGroup`, `DockArea`, `Editor` and `DiffView` directories, `text_view/`, `resizable/`, `dock/`, `editor/`, `diff/`; `syntax.rs`, the syntax highlighting `TextView` and `Editor` share), one `Registry` (`lib.rs`) |
 | `crates/nsh-core/src/runtime/` | The runtime's Rust modules (`nsh/android`, `nsh/accessibility`, `nsh/image`, `nsh/clipboard`, `nsh/desktop`), one `Registry` per JS module (`mod.rs`) |
 | `crates/nsh-js/src/components.rs` | The JS face of components and modules, made from their specs when a bundle imports the module; `classes.rs`: classes' (on the web classes' machinery), synchronous functions', callbacks |
 | `crates/nsh-js/src/declarations.rs` | `nsh/base.d.ts`, `app/native.d.ts`, ...: the declarations generated from each registry (`nsh_core::ui::declarations`) with the re-exports and the navigation |
@@ -256,7 +259,11 @@ reasons: `reactive-components.md`.
   the host itself (no view of its own); a region as the root goes in the host view.
 - **Canvases** draw what a `Painter` recorded (the Canvas 2D operations: `.fill_style(..)` / `.stroke_style(..)` take
   colors, `CanvasGradient::linear` / `radial` / `conic` and animated values; `.stroke_path(&canvas::svg_path(d))`;
-  `measure_text(font, text)` is `measureText`; operations built by hand take `painter.num(&v)` / `.paint(..)` and go
+  `measure_text(font, text)` is `measureText`; `.fill_style_from_view(initial)`, `.stroke_style_from_view(initial)`,
+  `.line_width_from_view()` and `.line_dash_from_view()` paint with the canvas view's `fill` / `stroke` /
+  `strokeWidth` / `strokeDasharray` (inherited as CSS inherits them, `currentColor` its text color), which the core
+  sets before the platform gets the drawing (`Drawing::view_paints`), so a component's shapes take the app's
+  `fill-*` / `stroke-*` classes and follow them and the appearance without being drawn again; operations built by hand take `painter.num(&v)` / `.paint(..)` and go
   in with `.op(..)`; `isPointInPath` / `isPointInStroke` are `painter.is_point_in_path(point, rule)` /
   `.is_point_in_stroke(point)` and, with a `Path2D`, `.path_contains(&path, point, rule)` /
   `.stroke_contains(&path, point)`, on a painter made by a function the drawing and the press handler both call, to
@@ -633,7 +640,7 @@ page's; `font-mono` is the monospaced one) and has none of its own. The theme is
 `theme().sidebar_ring`, `theme().radius`), plus Tailwind's fonts `font-sans` / `font-mono` (`theme().font_sans`,
 `theme().font_mono`; `None`, the system's fonts). `theme()` returns the theme of the tokens drawn with now, made once
 per change of them; an app's own tokens are read by name (`theme().color("up")`). The defaults are shadcn's `neutral` theme (`default-theme.json`, `radius` 0.625rem = 10 pt); no component of
-`nsh/base` draws with them but `TextView`'s reading typography.
+`nsh/base` draws with them but `TextView`'s reading typography and the default looks of `Editor` and `DiffView`.
 
 A theme file is shadcn's registry `cssVars`, as shadcn and tweakcn export them: `{ "cssVars": { "theme": {…},
 "light": {…}, "dark": {…} } }` (`theme`'s values in both appearances, `light`'s in the light one and in the dark one
@@ -837,7 +844,7 @@ Their callbacks are one set, as `Dialog`'s (`popup.rs`: `OpenState`, `lifecycle`
 - **`onOpenChange(open, reason)`**: every request to open or close (`OpenState::request`; not a request for what it
   already is), whether controlled or not, with why: `OpenChangeReason`: `"triggerPress"`, `"pressOutside"`,
   `"backdropPress"`, `"cancel"` (Escape or back), `"select"` (a menu's item), `"hover"`, `"longPress"`,
-  `"contextMenu"`. The app changing `open` itself is not reported here.
+  `"contextMenu"`, `"swipe"`. The app changing `open` itself is not reported here.
 - **`onOpen` / `onClose`**: after it is all there and after it is all gone (a sheet, or a menu as a sheet, once its
   motion is over; a popup at once), whoever opened or closed it, the app's `open` included (`lifecycle`, an effect on
   what is shown). `Tooltip` has these two and `onOpenChange`.
@@ -857,6 +864,23 @@ is for, never by replacing one popup with another everywhere:
 | `ContextMenu` | the secondary button opens it at the pointer (`onContextMenu`'s `page`) | a finger held 400 ms on the trigger opens it as the menu's sheet (observed touches: the trigger's own presses and the scroll views around it go on; 10 points of movement cancel) |
 | `Tooltip` | after the pointer rests on the trigger for `delay` (500 ms); leaving or pressing hides it | only when the app opens it (`open`, `defaultOpen`): no pointer to rest |
 | `Sheet` | an edge panel (`side`) over a backdrop | the same |
+
+`Sheet` opts into downward dragging with `closeOnSwipe` (default false, bottom side). Its pan updates
+`SheetMotion.drag_y` on the platform's animation graph; a clamped fraction of the measured panel height drives both
+translation and backdrop opacity. Release past 30% or 800 points/second requests `onOpenChange(false, "swipe")`
+after `onCancel`; a shorter, cancelled or declined gesture returns the panel. Reduced motion snaps the release.
+`Interactive::pan_enabled` filters the mounted pan values and event mask together, retaining the listeners and
+children while a sheet enters, exits or changes permission. `pan_scroll_handoff` asks UIKit to share the touched
+descendant scroll's pan: its initial offset consumes the first part of the drag, and the remaining downward
+distance moves the panel while the scroll stays at its adjusted top. Other backends retain their usual scroll
+arbitration. `SheetMotion` tags completion callbacks and fallback timers with a generation, so a prior exit cannot
+unmount a reopened sheet or its backdrop.
+
+`SheetMotion` derives the programmatic translation from the remaining fade fraction times the current measured
+distance from the edge. Lazy JS children can fill in over several layout rounds in one native batch; later content
+can also resize a panel during its entrance. Each layout updates that distance in the native graph, preserving the
+animation's progress and completion time. `Sheet`, phone menus and compact dock drawers share this path. Dragging
+is a separate value in points, so entrance measurement does not clamp or replace the finger's displacement.
 
 The menus' items reach their menu through context (`MenuContext`: the close function, the sheet's path of submenus,
 the level's open submenu), so the app arranges them freely. Every item of a sheet's hidden levels is out of the tree

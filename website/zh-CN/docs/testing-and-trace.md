@@ -77,6 +77,11 @@ cargo test adds_a_todo        # 名称包含 "adds_a_todo" 的测试
 （[用 Rust 开发](./rust.md#测试)）。`examples/gallery-rs` 就这样测试它的 Rust 根组件，每个演示一个模块；`examples/rust-exports`
 从 Rust 测试它的 TSX 入口。
 
+`nsh test` 也会运行这些测试：传入带有 Rust crate 的应用（`nsh.json` `"rust"`）的目录时，它会在测试文件之前为其中每个 crate
+运行 `cargo test`，并把 Rust 测试与 TypeScript 测试一起显示和计数（`✓ src/lib.rs › tests::adds`），计入汇总和 `--junit`
+报告。所以无论是 Rust 应用、带 crate 的 TSX 应用还是 TSX 应用，`nsh test` 都是同一个命令；`nsh check` 同样会先对 crate 运行
+`cargo check --all-targets`，再对 TypeScript 做类型检查。
+
 ## 用 nsh test 编写测试
 
 测试文件是放在代码旁边的 `*.test.tsx` 或 `*.test.ts` 文件，它导入 `nsh/test`，就像上面的 `App.test.tsx`：
@@ -318,7 +323,7 @@ expect(app.texts()).toContain("Saved at 09:00:10");
 
 | 步骤 | 说明 |
 |---|---|
-| `await app.press(selector)` | 按下该视图，或者它外层最近的可按压视图（文字外面的按钮）：依次触发 `onPressDown`、`onPressUp`、`onPress`，期间手指按下再抬起，外层监听触摸的视图都能收到（例如 Overlay 的 `onPressOutside`）。文本中的片段按在它的文字上（`await app.press("Privacy policy")`），headless 以及 iOS、Android 和桌面平台都支持。视图被禁用时 reject。 |
+| `await app.press(selector)` | 按下该视图，或者它外层最近的可按压视图（文字外面的按钮）：依次触发 `onPressDown`、`onPressUp`、`onPress`，期间手指按下再抬起，外层监听触摸的视图都能收到（例如 Overlay 的 `onPressOutside`）。文本中的片段按在它的文字上（`await app.press("Privacy policy")`），headless 以及 iOS、Android 和桌面平台都支持。500 ms 内再次按下同一视图算作第二次点击（`clicks: 2`，即双击），与各平台的计数方式一致。视图被禁用时 reject。 |
 | `await app.longPress(selector)` | 按住它（或它外层最近的可按压或监听触摸的视图），持续它的 `delayLongPress`（500 ms）：依次触发 `onPressDown`、`onLongPress`、`onPressUp`，之后不再触发 `onPress`。触摸处理函数能收到这根手指（`ContextMenu`、`Tooltip` 会打开）。 |
 | `await app.clear(selector)` | 清空输入框，相当于全选后删除。 |
 | `await app.type(selector, text)` | 在输入框（或该视图内的第一个输入框；`text:` 也匹配输入框的内容或占位文字）已有内容的末尾逐键输入：输入框先获得焦点，然后每个字符触发一次 `onKeyPress` 和一次 `onChange`，不超过 `maxLength`。单行输入框中的 `\n` 相当于回车键。 |
@@ -330,7 +335,7 @@ expect(app.texts()).toContain("Saved at 09:00:10");
 | `app.menu()` | 应用显示的上下文菜单（`Menu.popup`）中的操作：`label`（子菜单中的项写在子菜单名之后，如 `"Share > Mail"`）、`disabled`，可勾选项还有 `checked`；没有打开的菜单时为 `null`。 |
 | `await app.chooseMenuItem(label)` | 选择已打开上下文菜单中的操作，如同点击它：应用收到 `onMenu`（其 `onSelect` 运行），然后菜单关闭。该项被禁用或不存在时 reject。 |
 | `await app.closeMenu()` | 关闭已打开的上下文菜单，不选择任何项，如同按下 Escape。 |
-| `await app.keyboard.press(keys)` | 按下一个带修饰键的按键，写法同 `nsh/keymap`（`"mod+k"`、`"shift+/"`、`"escape"`；`mod` 是平台的命令键），如同硬件键盘，在所有平台上都可用（手机和平板也可以接硬件键盘）：由应用的对应快捷键接收（`keymap.bind`、`onKeyCommand`），否则由获得焦点的输入框接收字符、Backspace 或回车，否则 Escape 执行返回。 |
+| `await app.keyboard.press(keys)` | 按下一个带修饰键的按键，写法同 `nsh/keymap`（`"mod+k"`、`"shift+/"`、`"escape"`；`mod` 是平台的命令键），如同硬件键盘，在所有平台上都可用（手机和平板也可以接硬件键盘）：由应用的对应快捷键接收（`keymap.bind`、`onKeyCommand`），否则在 macOS 和 Web 上由 Tab 和 Shift+Tab 在输入框和可按压的视图之间移动键盘焦点（`onFocus`、`onBlur`、`focus:` 样式），Return 或空格按下焦点所在的视图，否则由获得焦点的输入框接收字符、Backspace 或回车，否则 Escape 执行返回。 |
 | `await app.drag(selector, { x, y })` | 手指落在视图中央，停留 100 ms，再移动 `x`、`y` 点（每帧 10 点）后抬起，由平台的输入系统处理：pan 跟随手指（`pan={{ x, y }}`、`onPanStart`，以及带松手速度的 `onPanEnd`），监听触摸的视图会收到触摸事件（`onTouchStart`、`PanResponder`），滚动视图随手指滚动，拉过顶部足够远时触发刷新（`onRefresh`），手指移开后其下的按压会被取消。在桌面和 web 上由鼠标完成。 |
 | `await app.wait(ms)` | 让应用运行 `ms` 毫秒：定时器、动画、请求。在手动时钟上，把时钟推进 `ms`（`app.clock.runFor`）。 |
 | `await app.waitFor(selector, options?)` | 有视图匹配时 resolve；传 `{ state: "gone" }` 时，等到没有视图匹配才 resolve；`timeout` 毫秒（5000）后 reject。 |
@@ -340,6 +345,7 @@ expect(app.texts()).toContain("Saved at 09:00:10");
 | `app.enabled(selector)` | 视图是否接受输入：它本身和外层视图都没有被禁用，输入框还要求不是 `readonly`。 |
 | `app.texts()` | 当前屏幕上的文字，按顺序排列。 |
 | `app.value(selector)` | 输入框的内容，没有匹配时为 `null`。 |
+| `app.spanStyle(selector)` | 在无界面测试中，返回匹配到的第一个字符的解析样式：`color`、可选的 `backgroundColor`、`fontSize`、`fontWeight`、`italic`、`underline` 和 `lineThrough`。颜色为 `#rrggbbaa`，字号单位为 pt。 |
 | `app.storage()` | 应用存储当前保存的内容。 |
 | `await app.back()` | 像用户那样返回（导航栏的返回按钮、下滑关闭弹出页）：最新的模态窗口里（没有模态窗口时就在整个屏幕上）最内层的导航栈弹出栈顶页面（`onDismiss`），栈顶页面设置了 `preventBack` 时改为询问它（`onBackRequest`）；没有可返回的栈时，最新的模态窗口请求关闭（`onRequestClose`）。没有可返回的内容时 reject。 |
 | `app.onDialog(handler)` | 回答应用之后弹出的对话框（`Alert.alert`、操作表）：`handler` 接收对话框（`title`、`message`、`buttons`、`cancelable`、`sheet`），返回要按的按钮文字，返回 `null` 则不按按钮直接关闭。 |
@@ -359,6 +365,10 @@ expect(app.texts()).toContain("Saved at 09:00:10");
 代码运行时，这一步带来的变化已经在屏幕上；之后才出现的内容（响应、定时器）用 `waitFor` 等待。选择器没有匹配到任何视图
 （错误信息会列出屏幕上的文字）、应用在此期间抛出了异常，或者应用请求了只有真实平台才能回答的内容时，步骤会 reject，
 测试随之失败。
+
+`app.spanStyle("id:guide")` 读取嵌套的 `<Text testID="guide">`；`text:word` 读取匹配文字的第一个字符。
+用 `id:note >> text:word` 限定范围，用 `>> nth=0` 选择重复匹配中的一个。
+没有匹配、匹配不唯一或 span 为空时会报错。更新 span 的 `testID` 会复用文本排版，保持 `onTextLayout` 的回调次数。
 
 ### 无界面运行替平台做了什么
 

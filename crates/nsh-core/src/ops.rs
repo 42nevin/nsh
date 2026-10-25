@@ -167,8 +167,8 @@ events! {
     Error = "onError": "An image failed to load (payload: [`EventPayload::Error`]).",
     ChangeText = "onChangeText" as "onChange": "The user edited an input (payload: [`EventPayload::Text`]).",
     SubmitEditing = "onSubmitEditing" as "onSubmit": "The return key was pressed in an input (payload: [`EventPayload::Text`]).",
-    Focus = "onFocus": "An input became focused.",
-    Blur = "onBlur": "An input lost focus.",
+    Focus = "onFocus": "An input, or a view that takes presses, took the keyboard focus.",
+    Blur = "onBlur": "An input, or a view that takes presses, lost the keyboard focus.",
     PressDown = "onPressIn" as "onPressDown": "A press went down on a pressable view (a finger, a pen or a mouse button; payload as `Press`).",
     PressUp = "onPressOut" as "onPressUp": "The press ended: released, moved away or cancelled (payload as `Press`).",
     Layout = "onLayout": "The frame changed (payload: [`EventPayload::Layout`], relative to the parent).",
@@ -624,6 +624,19 @@ pub enum EventPayload {
     Layout(Bounds<Points>),
     /// A drag: translation since the start and velocity (points / second).
     Pan {
+        /// The translation.
+        translation: Point<Points>,
+        /// Horizontal velocity.
+        velocity_x: f32,
+        /// Vertical velocity.
+        velocity_y: f32,
+        /// The `pan.x` value now (`None` without one).
+        value_x: Option<Points>,
+        /// The `pan.y` value now.
+        value_y: Option<Points>,
+    },
+    /// A system-cancelled drag, with the same last values as `Pan`.
+    PanCancelled {
         /// The translation.
         translation: Point<Points>,
         /// Horizontal velocity.
@@ -1991,6 +2004,12 @@ pub enum Prop {
     /// it keep the touches until then.
     #[prop(js = "panActivation")]
     PanActivation(Option<crate::props::PanActivation>),
+    /// Whether native pans may start or update their bound values. Rust
+    /// components use this to retain gesture state across permission changes.
+    PanEnabled(bool),
+    /// A vertical pan cooperates with descendant scroll views on iOS:
+    /// scrolling consumes the drag until its top, then the pan follows.
+    PanScrollHandoff(bool),
     /// `activeStyle`: the style while pressed (and not disabled), over the
     /// view's style; applied natively, no JS round trip.
     ActiveStyle(Option<Arc<StylePatch>>),

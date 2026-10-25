@@ -218,9 +218,10 @@ fn function_key(code: u16) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use objc2_app_kit::NSEventType;
     use objc2_foundation::{NSPoint, NSString};
+
+    use super::*;
 
     fn event(code: u16, chars: &str, flags: NSEventModifierFlags) -> Retained<NSEvent> {
         let chars = NSString::from_str(chars);

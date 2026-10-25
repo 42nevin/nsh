@@ -109,7 +109,8 @@ pub(crate) use self::{
 pub use self::{
     animated::{
         Animated, AnimatedNode, AnimatedValue, Animation, AnimationEnd, AnimationOperand,
-        Interpolation, Motion, Spring, Timing, sample_decay, sample_decay_within, sample_spring,
+        DiffClamp, Interpolation, Motion, Spring, Timing, sample_decay, sample_decay_within,
+        sample_spring,
     },
     asset::{AssetFile, AssetKind, FileAsset, FontAsset, ImageAsset, ImageSrc},
     call::{
@@ -255,6 +256,7 @@ pub mod prelude {
         DefiniteLength,
         DevicePixels,
         DialogAnswer,
+        DiffClamp,
         EaseMode,
         // Native animation values.
         Easing,
@@ -436,7 +438,8 @@ pub mod prelude {
             on_key_with, open_url, os, os_version, pick_images, pixel_ratio, prefetch_image,
             reduce_motion, request_animation_frame, round_to_nearest_pixel, safe_area,
             screen_reader, set_clipboard, set_clipboard_image, set_color_scheme, set_interval,
-            set_timeout, spawn, text_metrics, timer, timer_until, toast, tokens, window,
+            set_timeout, spawn, text_metrics, timer, timer_until, toast, tokens, try_global,
+            window,
         },
         batch, catch_error, cleanup, component, computed, dynamic, each, effect, engine_context,
         provide_context, resource, resource_with_value, signal, signal_with, stored, untracked,

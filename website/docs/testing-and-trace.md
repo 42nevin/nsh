@@ -82,6 +82,12 @@ returns an error with the texts on screen when it cannot be taken.
 crate's UI sets ([Building with Rust](./rust.md#testing)). `examples/gallery-rs` tests its Rust root this way, one
 module per demo; `examples/rust-exports` tests its TSX entry from Rust.
 
+`nsh test` runs these tests too: given the directory of an app with Rust crates (`nsh.json` `"rust"`), it runs
+`cargo test` for each crate in it before the test files, and shows and counts the Rust tests with the TypeScript ones
+(`✓ src/lib.rs › tests::adds`), in its summary and its `--junit` report. So `nsh test` is the one command for a Rust app,
+a TSX app with a crate and a TSX app alike, and `nsh check` likewise runs `cargo check --all-targets` on the crates
+before it type checks the TypeScript.
+
 ## Tests with nsh test
 
 A test file is a `*.test.tsx` or `*.test.ts` file next to your code. It imports `nsh/test`, as `App.test.tsx` above
@@ -338,7 +344,7 @@ one: a selector matching several fails the step, and the error says how to narro
 
 | Step | Description |
 |---|---|
-| `await app.press(selector)` | Presses the view, or the nearest view around it that hears presses (the button around a text): `onPressDown`, `onPressUp`, `onPress`, inside a finger going down and lifting, which the views around it that listen to touches hear (an overlay's `onPressOutside`). A span of a text is pressed on its characters (`await app.press("Privacy policy")`), headless and on iOS, Android and the desktops. Rejects when it is disabled. |
+| `await app.press(selector)` | Presses the view, or the nearest view around it that hears presses (the button around a text): `onPressDown`, `onPressUp`, `onPress`, inside a finger going down and lifting, which the views around it that listen to touches hear (an overlay's `onPressOutside`). A span of a text is pressed on its characters (`await app.press("Privacy policy")`), headless and on iOS, Android and the desktops. A second press of the same view within 500 ms is its second click (`clicks: 2`, a double press), as the platforms count them. Rejects when it is disabled. |
 | `await app.longPress(selector)` | Holds a finger on it (or the nearest view around it that hears presses or touches) for its `delayLongPress` (500 ms): `onPressDown`, `onLongPress`, `onPressUp`; no `onPress` follows. The touches' handlers hear the finger (a `ContextMenu` or `Tooltip` opens). |
 | `await app.clear(selector)` | Empties the input, as selecting all and deleting does. |
 | `await app.type(selector, text)` | Types into the input (or the first input inside the view; `text:` also matches an input's text or placeholder) at the end of what it holds, key by key: it takes the focus, then each character is an `onKeyPress` and an `onChange`, within `maxLength`. A `\n` in a single-line input is the return key. |
@@ -350,7 +356,7 @@ one: a selector matching several fails the step, and the error says how to narro
 | `app.menu()` | The actions of the context menu the app shows (`Menu.popup`): `label` (a submenu's after its own, `"Share > Mail"`), `disabled`, and `checked` for a checkable item; `null` when none is open. |
 | `await app.chooseMenuItem(label)` | Chooses the open context menu's action, as a click on it does: the app hears `onMenu` (its `onSelect` runs), then the menu closes. Rejects when the item is disabled or missing. |
 | `await app.closeMenu()` | Closes the open context menu with nothing chosen, as Escape does. |
-| `await app.keyboard.press(keys)` | Presses a key with its modifiers, as `nsh/keymap` names it (`"mod+k"`, `"shift+/"`, `"escape"`; `mod` is the platform's command key), on a hardware keyboard, on every platform (phones and tablets have one too): the app's shortcut of it hears it (`keymap.bind`, `onKeyCommand`), else the focused input takes a character, Backspace or the return key, else Escape goes back. |
+| `await app.keyboard.press(keys)` | Presses a key with its modifiers, as `nsh/keymap` names it (`"mod+k"`, `"shift+/"`, `"escape"`; `mod` is the platform's command key), on a hardware keyboard, on every platform (phones and tablets have one too): the app's shortcut of it hears it (`keymap.bind`, `onKeyCommand`), else on macOS and the web Tab and Shift+Tab move the keyboard focus between the inputs and the views that take presses (`onFocus`, `onBlur`, `focus:` styles) and Return or Space presses the view it is on, else the focused input takes a character, Backspace or the return key, else Escape goes back. |
 | `await app.drag(selector, { x, y })` | A finger lands on the middle of the view, rests for 100 ms, moves by `x`, `y` points, 10 per frame, and lifts, as the platform's input takes it: a pan follows it (`pan={{ x, y }}`, `onPanStart`, `onPanEnd` with the release velocity), the views listening to touches hear it (`onTouchStart`, `PanResponder`), a scroll view scrolls with it and, pulled far enough past its top, refreshes (`onRefresh`), and a press under it is cancelled once it moves away. On the desktops and the web it is the mouse. |
 | `await app.wait(ms)` | Lets the app run for `ms` milliseconds: timers, animations, requests. On a manual clock, moves it by `ms` (`app.clock.runFor`). |
 | `await app.waitFor(selector, options?)` | Resolves once a view matches, or with `{ state: "gone" }` once none does; rejects after `timeout` ms (5000). |
@@ -360,6 +366,7 @@ one: a selector matching several fails the step, and the error says how to narro
 | `app.enabled(selector)` | Whether the view takes input: neither it nor a view around it is disabled, and an input is not `readonly`. |
 | `app.texts()` | The texts on screen now, in order. |
 | `app.value(selector)` | The text of an input, `null` when none matches. |
+| `app.spanStyle(selector)` | In headless tests, the first matched character’s resolved style: `color`, optional `backgroundColor`, `fontSize`, `fontWeight`, `italic`, `underline`, and `lineThrough`. Colors are `#rrggbbaa`; sizes are in points. |
 | `app.storage()` | What the app's storage holds now. |
 | `await app.back()` | Goes back as the user does (a header's back button, swiping a sheet down): the innermost stack of the newest modal, else of the screen, pops its top screen (`onDismiss`), or asks it (`onBackRequest`) when it has `preventBack`; without one, the newest modal asks to close (`onRequestClose`). Rejects when there is nothing to go back from. |
 | `app.onDialog(handler)` | Answers the dialogs the app shows from now on (`Alert.alert`, action sheets): `handler` gets the dialog (`title`, `message`, `buttons`, `cancelable`, `sheet`) and returns the text of the button to press, or `null` to close it without one. |
@@ -380,6 +387,11 @@ render all the time; on a manual clock, also 2 s of the app's time), so what it 
 line runs; use `waitFor` for what comes later (a
 response, a timer). A step rejects, failing the test, when nothing matches its selector (the error lists the texts on
 screen), when the app threw an exception meanwhile, and when the app asked for what only a real platform answers.
+
+`app.spanStyle("id:guide")` reads a nested `<Text testID="guide">`; `text:word` reads the first character
+of that match. Scope queries with `id:note >> text:word` and select repeated matches with `>> nth=0`.
+The query reports an error for a missing, ambiguous or empty span. Updating a span’s `testID` reuses its text
+layout and preserves the `onTextLayout` callback count.
 
 ### What headless runs play of the platform
 

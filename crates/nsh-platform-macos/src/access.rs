@@ -15,7 +15,9 @@
 //!   (`accessibilityState`);
 //! - `accessible={true}` makes it one element: its children are hidden
 //!   from VoiceOver (the core labels it with their text);
-//!   `accessibilityElementsHidden` hides it and its subtree;
+//!   `accessibilityElementsHidden` hides it and its subtree, and so does
+//!   `visibility: hidden`, as in a browser (only its layer is hidden, which
+//!   VoiceOver does not see);
 //! - its `testID` as its accessibility identifier (what UI tests find).
 //!
 //! Live regions are emulated by announcing a changed label or text
@@ -33,7 +35,7 @@ use std::sync::Arc;
 
 use nsh_core::{
     Accessibility, AccessibilityRole as Role, AttributedText, Checked, EventKind, EventMask,
-    LiveRegion, MountBatch, ViewKind,
+    LiveRegion, MountBatch, ViewKind, ViewStyle,
 };
 use objc2::{MainThreadOnly, rc::Retained, runtime::AnyObject};
 use objc2_app_kit::{
@@ -44,7 +46,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 
-use crate::view::NshView;
+use crate::view::{NshView, ViewState};
 
 /// What was last given to AppKit for one view.
 #[derive(Debug, Default)]
@@ -60,6 +62,17 @@ pub(crate) struct Applied {
     /// all fifteen attributes per changed text is what a ticking table
     /// spends most of its main-thread time on.
     ax: AxState,
+}
+
+/// Whether the view hides its children from VoiceOver (`accessible={true}`,
+/// `accessibilityElementsHidden`, `visibility: hidden`): its
+/// `accessibilityChildren` are none then, AppKit's otherwise.
+///
+/// The view answers them itself: `setAccessibilityChildren:` cannot be
+/// undone, as `nil` leaves the view without children rather than with
+/// AppKit's again, so a subtree shown again stayed out of reach.
+pub(crate) fn hides_children(s: &ViewState) -> bool {
+    s.access.ax.grouped
 }
 
 /// What `apply` last wrote, field by field.
@@ -81,18 +94,14 @@ struct AxState {
     enabled: bool,
     selected: bool,
     expanded: bool,
-    /// The children are hidden as a group (`grouped`, or the view is hidden).
+    /// The children are hidden as a group (`grouped`, or the view is
+    /// hidden): the view answers none ([`hides_children`]).
     grouped: bool,
     /// The value's lower and upper bounds.
     range: (Option<u64>, Option<u64>),
 }
 
 impl Applied {
-    /// Whether the current semantics conceal descendants from accessibility.
-    pub(crate) fn hides_children(&self) -> bool {
-        self.ax.grouped
-    }
-
     /// Whether this element itself is hidden from accessibility.
     pub(crate) fn is_hidden(&self) -> bool {
         self.ax.hidden
@@ -196,6 +205,13 @@ pub(crate) fn events_changed(view: &NshView) {
     update(view);
 }
 
+/// The view's style changed: `visibility` hides or shows its subtree.
+pub(crate) fn style_changed(view: &NshView, old: &ViewStyle) {
+    if view.state().style.hidden != old.hidden {
+        update(view);
+    }
+}
+
 /// A text view's text changed.
 pub(crate) fn text_changed(view: &NshView) {
     let first = {
@@ -286,7 +302,7 @@ fn update(view: &NshView) -> bool {
         let a = &s.props.accessibility;
         let pressable = is_pressable(s.events);
         let text = s.text.as_ref().map(|t| t.text.text.as_str());
-        let spec = spec_for(a, s.kind, pressable, text);
+        let spec = spec_for(a, s.kind, pressable, text, s.style.hidden);
         if s.access.spec.as_deref() == Some(&spec) {
             return false;
         }
@@ -395,11 +411,6 @@ fn apply(view: &NSView, spec: &Spec, was: &AxState) -> AxState {
     if was.expanded != expanded {
         view.setAccessibilityExpanded(expanded);
     }
-    if was.grouped != grouped {
-        let children = grouped.then(NSArray::<AnyObject>::new);
-        // SAFETY: an array of accessibility elements (none).
-        unsafe { view.setAccessibilityChildren(children.as_deref()) };
-    }
     AxState {
         element,
         hidden: spec.hidden,
@@ -502,8 +513,16 @@ fn ax_role(role: Ax) -> (Option<Retained<NSString>>, Option<Retained<NSString>>)
     }
 }
 
-/// What to give AppKit for a view of `kind` with accessibility `a`.
-fn spec_for(a: &Accessibility, kind: ViewKind, pressable: bool, text: Option<&str>) -> Spec {
+/// What to give AppKit for a view of `kind` with accessibility `a`;
+/// `invisible` for `visibility: hidden`, which hides the subtree as
+/// `accessibilityElementsHidden` does: what is not drawn is not read either.
+fn spec_for(
+    a: &Accessibility,
+    kind: ViewKind,
+    pressable: bool,
+    text: Option<&str>,
+    invisible: bool,
+) -> Spec {
     let role = role_for(a, kind, pressable);
     let label = a.label.as_deref().or(text).map(str::to_owned);
     let checkable = matches!(
@@ -550,7 +569,7 @@ fn spec_for(a: &Accessibility, kind: ViewKind, pressable: bool, text: Option<&st
         disabled: a.state.disabled,
         selected: a.state.selected,
         expanded: a.state.expanded,
-        hidden: a.hidden,
+        hidden: a.hidden || invisible,
         grouped: a.accessible == Some(true) && kind != ViewKind::Text,
     }
 }
@@ -591,7 +610,9 @@ fn role_for(a: &Accessibility, kind: ViewKind, pressable: bool) -> Ax {
         Role::Timer => Ax::Timer,
         Role::Toolbar => Ax::Toolbar,
         Role::List => Ax::List,
-        Role::Grid => Ax::Grid,
+        Role::Grid | Role::Table => Ax::Grid,
+        // Groups that read their children, a cell's text among them.
+        Role::Row | Role::Cell | Role::ColumnHeader | Role::RowGroup => Ax::Group,
     }
 }
 
@@ -677,6 +698,7 @@ mod tests {
             ViewKind::Text,
             false,
             Some("Title"),
+            false,
         );
         assert_eq!(s.label, None);
         assert_eq!(s.value, Value::Text("Title".into()));
@@ -685,7 +707,7 @@ mod tests {
             hint: Some("Opens it".into()),
             ..Default::default()
         };
-        let s = spec_for(&labelled, ViewKind::View, true, None);
+        let s = spec_for(&labelled, ViewKind::View, true, None, false);
         assert_eq!(s.role, Ax::Button);
         assert_eq!(s.label.as_deref(), Some("Label"));
         assert_eq!(s.help.as_deref(), Some("Opens it"));
@@ -701,7 +723,7 @@ mod tests {
             value: Some(value.clone()),
             ..Default::default()
         };
-        let s = spec_for(&slider, ViewKind::View, false, None);
+        let s = spec_for(&slider, ViewKind::View, false, None, false);
         assert!(matches!(s.value, Value::Range { now: Some(3.0), .. }));
         let checkbox = Accessibility {
             role: Role::Checkbox,
@@ -711,7 +733,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let s = spec_for(&checkbox, ViewKind::View, false, None);
+        let s = spec_for(&checkbox, ViewKind::View, false, None, false);
         assert_eq!(s.value, Value::Checked(1));
         // Outside range roles the value is read as text.
         let button = Accessibility {
@@ -719,7 +741,7 @@ mod tests {
             value: Some(value),
             ..Default::default()
         };
-        let s = spec_for(&button, ViewKind::View, false, None);
+        let s = spec_for(&button, ViewKind::View, false, None, false);
         assert_eq!(s.value, Value::Text("3 of 10".into()));
     }
     /// The reviewer's case: `accessibilityValue={{ text: "1" }}` on a view
@@ -737,6 +759,28 @@ mod tests {
         // The same contents on the same kind is unchanged.
         assert_eq!(ValueKind::Text("1".into()), ValueKind::Text("1".into()));
         assert_eq!(ValueKind::Checked(1), ValueKind::Checked(1));
+    }
+
+    /// `visibility: hidden` hides the view and its subtree as
+    /// `accessibilityElementsHidden` does, whatever the view is.
+    #[test]
+    fn a_hidden_style_hides_the_subtree() {
+        let labelled = Accessibility {
+            label: Some("Save".into()),
+            ..Default::default()
+        };
+        let none = Accessibility::default();
+        for (a, kind, pressable, text) in [
+            (&labelled, ViewKind::View, true, None),
+            (&none, ViewKind::Text, false, Some("Title")),
+            (&none, ViewKind::View, false, None),
+        ] {
+            let shown = spec_for(a, kind, pressable, text, false);
+            assert!(!shown.hidden, "{kind:?}");
+            let hidden = spec_for(a, kind, pressable, text, true);
+            assert!(hidden.hidden, "{kind:?}");
+            assert_eq!(hidden.role, shown.role, "only hidden changes");
+        }
     }
 
     /// A hidden container's `element` is false either way, so `hidden` has to

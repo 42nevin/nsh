@@ -110,7 +110,12 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   a view that does not listen gets no event. When the set changes, the views left hear `onHoverOut` from the inside
   out, then the views entered `onHoverIn` from the outside in; then each hovered view with `onHoverMove` hears where
   the mouse is (`EventPayload::Hover`, JS `{ position, pagePosition, modifiers }`: the `Point` in the view, its transforms undone,
-  the `Point` in the root view as touches have it, the modifier keys as GPUI's `Modifiers`). The mouse leaving the window (while no button is down on
+  the `Point` in the root view as touches have it, the modifier keys as GPUI's `Modifiers`). A modifier key pressed or
+  released while the mouse rests is a move to where it is with the new modifiers, so a view hears Control or Command
+  come and go under a still mouse (an `Editor`'s definition link): Linux from the root's key events, macOS from a
+  local `flagsChanged` monitor (installed once a view hears hover moves), Windows from the modifiers' `WM_KEYDOWN` /
+  `WM_KEYUP`, GPUI from `on_modifiers_changed`, the web from `keydown` / `keyup` of `Control`, `Alt`, `Shift` and
+  `Meta` (`nsh.js` `modifiersChanged`). The mouse leaving the window (while no button is down on
   macOS) unhovers everything; on macOS and GPUI hover is picked again after every batch (on macOS also after every
   scroll), so a view removed or moved from under a still mouse hears `onHoverOut` and one that arrives there
   `onHoverIn`; on Linux and Windows that waits for the next mouse move. Moves with a button down are touches
@@ -133,7 +138,9 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   Space press the focused one; a click presses without focusing, so a pressable's `FOCUSED` state (`focus:` classes,
   `.focus(..)`) is keyboard focus, and `focus-visible:` is the same variant. `focusable={false}` (`Prop::Focusable`,
   `ViewProps::focusable`; Rust `.focusable(false)`) keeps a pressable out of the stops: a backdrop that closes a
-  popover, rows a list moves between with the arrow keys. Inputs are always stops; `focusable` changes only views
+  popover, rows a list moves between with the arrow keys. A pressable hears `onFocus` / `onBlur` (`EventKind::Focus` /
+  `Blur`, as inputs do) when the keyboard focus reaches and leaves it: AppKit's first responder, the browser's
+  `:focus-visible`; the headless driver's Tab moves it the same way there. Inputs are always stops; `focusable` changes only views
   that take presses (unlike React Native's, `true` makes nothing focusable that is not). Windows, Linux and GPUI move the focus between fields and
   native components only so far.
 - **`onPanEnd` / `onPanStart`** carry `valueX` / `valueY`: the bound pan values at that moment (a drag may grab a value mid
@@ -245,6 +252,12 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   `colorScheme()`, `fontScale()`. `KeyboardAvoidingView` pads its bottom by `keyboardFrame().height`, animated with the keyboard,
   for content outside scroll views (message bars). Inputs inside a scroll view are kept clear of the keyboard natively (bottom inset + scroll to the
   focused input), with no JS involved.
+  Both move as one with the keyboard: `LayoutCurve::Keyboard` (`type: "keyboard"`) is the system keyboard's own curve,
+  started when the keyboard started to move, however late the batch arrives. iOS takes the notification's curve (7, a
+  spring UIKit has no name for) and moves the layers' new animations back to the notification's time (`beginTime`,
+  `KeyboardMotion::aligned`), and runs the scroll view's inset and scroll in one animation of that curve; Android takes
+  the IME's `WindowInsetsAnimation` (interpolator, duration, start; API 30+) and fast-forwards its animators to it
+  (`Mounter.keyboardAligned`), the scroll to the input included.
 - **Controlled inputs**: each native edit carries an edit count; a `value` from JS is applied only if it is based on the latest
   edit, so a slow JS round trip can never overwrite newer typing (React Native's eventCount).
   While an input method composes, a `value` is held natively and applied when the composition ends, if no edit came

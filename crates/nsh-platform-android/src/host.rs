@@ -1179,6 +1179,43 @@ extern "system" fn Java_com_longbridge_nsh_Native_hover(
     }
 }
 
+/// A press event of node `id` (see `Native.press`).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+extern "system" fn Java_com_longbridge_nsh_Native_press(
+    _: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    id: jint,
+    kind: jint,
+    x: jfloat,
+    y: jfloat,
+    page_x: jfloat,
+    page_y: jfloat,
+    modifiers: jint,
+    clicks: jint,
+) {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    let Some(kind) = encode::kind_from(kind) else {
+        return;
+    };
+    let event = nsh_core::PressEvent {
+        position: point(px(x), px(y)),
+        page_position: point(px(page_x), px(page_y)),
+        modifiers: nsh_core::keymap::Modifiers {
+            ctrl: modifiers & 1 != 0,
+            alt: modifiers & 2 != 0,
+            shift: modifiers & 4 != 0,
+            cmd: modifiers & 8 != 0,
+        },
+        clicks: clicks.max(1) as u32,
+    };
+    if let Some(control) = host.control() {
+        control.dispatch_event(id as NodeId, kind, EventPayload::Press(event));
+    }
+}
+
 /// Touches for the JS responder system (see `Native.touch`).
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
@@ -1502,6 +1539,25 @@ extern "system" fn Java_com_longbridge_nsh_Native_scroll(
     floats(&env, &ui.outputs())
 }
 
+/// A scroll view came to rest: the snapping values that follow its scroll
+/// value settle. Returns bound values when one starts moving, else null.
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_longbridge_nsh_Native_scrollEnded(
+    env: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    id: jint,
+) -> jfloatArray {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    let mut ui = host.ui.lock().expect("ui");
+    if !ui.scroll_ended(id as u32) {
+        return std::ptr::null_mut();
+    }
+    finish(host, &mut ui);
+    floats(&env, &ui.outputs())
+}
+
 /// A zoomable scroll view's zoom scale changed (before its offset report).
 #[unsafe(no_mangle)]
 extern "system" fn Java_com_longbridge_nsh_Native_zoom(
@@ -1556,12 +1612,22 @@ extern "system" fn Java_com_longbridge_nsh_Native_pan(
         ui.pan_moved(id as u32, tx, ty);
     }
     let (value_x, value_y) = ui.pan_values(id as u32);
-    let payload = EventPayload::Pan {
-        translation: point(px(tx), px(ty)),
-        velocity_x: vx,
-        velocity_y: vy,
-        value_x: value_x.map(Points),
-        value_y: value_y.map(Points),
+    let payload = if state == 3 {
+        EventPayload::PanCancelled {
+            translation: point(px(tx), px(ty)),
+            velocity_x: vx,
+            velocity_y: vy,
+            value_x: value_x.map(Points),
+            value_y: value_y.map(Points),
+        }
+    } else {
+        EventPayload::Pan {
+            translation: point(px(tx), px(ty)),
+            velocity_x: vx,
+            velocity_y: vy,
+            value_x: value_x.map(Points),
+            value_y: value_y.map(Points),
+        }
     };
     match (state, &control) {
         (0, Some(c)) => c.dispatch_event(id as NodeId, EventKind::PanStart, payload),
