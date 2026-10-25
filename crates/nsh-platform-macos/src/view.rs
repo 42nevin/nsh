@@ -40,9 +40,9 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSAccessibilityUnignoredChildren, NSDragOperation, NSDraggingDestination, NSDraggingInfo,
-    NSEvent, NSEventType, NSResponder, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSViewLayerContentsRedrawPolicy, NSWindowOrderingMode,
+    NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventType, NSResponder,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSViewLayerContentsRedrawPolicy,
+    NSWindowOrderingMode,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGContext;
@@ -732,7 +732,7 @@ define_class!(
         }
 
         // None while VoiceOver must not reach the children
-        // ([`crate::access::hides_children`]), else live AppKit children.
+        // ([`crate::access::hides_children`]), else AppKit's.
         #[unsafe(method_id(accessibilityChildren))]
         fn accessibility_children(&self) -> Option<Retained<NSArray>> {
             let hides = self
@@ -743,7 +743,8 @@ define_class!(
             if hides {
                 Some(NSArray::new())
             } else {
-                Some(self.live_accessibility_children())
+                // SAFETY: NSView's own children.
+                unsafe { msg_send![super(self), accessibilityChildren] }
             }
         }
 
@@ -783,17 +784,6 @@ define_class!(
 );
 
 impl ViewObj {
-    fn live_accessibility_children(&self) -> Retained<NSArray<AnyObject>> {
-        // AppKit's stored empty children do not resume default traversal
-        // when reset to nil. Query real current subviews instead, including
-        // scroll containers and hosted native controls. Release state before
-        // AppKit recursively asks descendants for their own semantics.
-        let children = self.subviews();
-        // SAFETY: Every retained NSView is an Objective-C object. AppKit
-        // returns its public unignored representations, including cells.
-        unsafe { NSAccessibilityUnignoredChildren(children.cast_unchecked::<AnyObject>()) }
-    }
-
     fn perform_accessibility_press(&self) -> bool {
         self.accessibility_press_target()
             .is_some_and(|(surface, id, kind)| {
