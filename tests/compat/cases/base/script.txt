@@ -1659,3 +1659,155 @@ covers [props] DataTable.sort
 covers [props] DataTable.renderCell
 covers [events] DataTable.onSortChange
 covers [events] DataTable.onVisibleRowsChange
+
+# base-rich-editor-session
+tap id:case-base-rich-editor-session
+tap text:RunSession
+expect Schema: doc,paragraph,text 0 doc
+expect Parse: 2 heading
+expect Serialize: a|b
+expect Check: 1
+expect Plugin: watch true
+expect Classes: true true
+expect Blocks: 2 false
+expect Heading: true true
+expect Bold: true true true
+expect Undo: true false 1
+expect Redo: true true
+expect Marks: false true
+expect Block: true true
+expect Quote: true false
+expect List: true false false
+expect Chain: true Replaced
+expect First: true true
+expect Filter: true
+expect Decorations: set
+expect State: text string true false
+expect Attr: true
+expect Split: true 2
+expect Content: Plain line **b**
+expect Insert: xyb
+expect Dispatch: all xy
+expect Node: true node
+expect Items: true true
+expect Takeover: true 1 ba
+expect Empty: true
+expect Error: thrown
+expect Keys: none
+# The subscriber hears the changes in JS's next turn.
+wait 50
+expect Updates: true
+covers [nsh/base] RichEditorSession
+covers [nsh/base] RichEditorPlugin
+covers [nsh/base] RichSchema
+covers [nsh/base] baseKeymap
+covers [nsh/base] chain
+covers [nsh/base] command
+covers [nsh/base] createRichEditor
+covers [nsh/base] defineSchema
+covers [nsh/base] first
+covers [nsh/base] history
+covers [nsh/base] inputRules
+covers [nsh/base] insertContent
+covers [nsh/base] insertText
+covers [nsh/base] keymap
+covers [nsh/base] lift
+covers [nsh/base] liftListItem
+covers [nsh/base] markRule
+covers [nsh/base] markdown
+covers [nsh/base] markdownRules
+covers [nsh/base] redo
+covers [nsh/base] selectAll
+covers [nsh/base] setBlockType
+covers [nsh/base] setMark
+covers [nsh/base] setNodeAttribute
+covers [nsh/base] setNodeSelection
+covers [nsh/base] setTextSelection
+covers [nsh/base] sinkListItem
+covers [nsh/base] splitListItem
+covers [nsh/base] starterKeymap
+covers [nsh/base] starterKit
+covers [nsh/base] starterSchema
+covers [nsh/base] textRule
+covers [nsh/base] textblockRule
+covers [nsh/base] toggleMark
+covers [nsh/base] typographyRules
+covers [nsh/base] undo
+covers [nsh/base] unsetMark
+covers [nsh/base] wrapIn
+covers [nsh/base] wrapInList
+covers [nsh/base] wrappingRule
+
+# base-rich-editor-extensions
+tap id:case-base-rich-editor-extensions
+tap text:RunExtensions
+expect Autolink: true https://nsh.dev
+expect SetLink: false true true
+expect UnsetLink: true false
+expect ToggleLink: true true
+expect Count: 11 2 12 15
+expect Limit: true Hello world!
+expect SetLimit: null Hello world!?
+expect Schema: true
+expect Suggest: true jo @jo 4-7 false
+expect Mention: Hi @Joan false
+expect Replace: true Hi @Joan done
+expect Exit: true false true
+covers [nsh/base] link
+covers [nsh/base] characterCount
+covers [nsh/base] suggestion
+covers [nsh/base] withMention
+covers [nsh/base] setLink
+covers [nsh/base] toggleLink
+covers [nsh/base] unsetLink
+covers [nsh/base] setCharacterLimit
+covers [nsh/base] replaceSuggestion
+covers [nsh/base] exitSuggestion
+covers [nsh/base] insertMention
+
+# base-rich-editor-kit
+tap id:case-base-rich-editor-kit
+tap text:RunKit
+expect Kit: true true true
+expect Configure: false true unknown
+expect Extension: bold mark 100
+expect Extend: 200 underline true
+expect Define: HEY extension xHI
+expect Named: text threw
+expect Editable: false
+expect Both: threw
+expect Duplicate: threw
+expect Classes: starterKit,doc,paragraph,heading,blockquote,bulletList,orderedList,listItem,taskList,taskItem,codeBlock,hardBreak,horizontalRule,image,bold,italic,strike,code,underline,link,highlight,subscript,superscript,textStyle,textAlign,history,trailingNode,typography,listKeymap
+covers [nsh/base] Blockquote
+covers [nsh/base] Bold
+covers [nsh/base] BulletList
+covers [nsh/base] Code
+covers [nsh/base] CodeBlock
+covers [nsh/base] Document
+covers [nsh/base] HardBreak
+covers [nsh/base] Heading
+covers [nsh/base] Highlight
+covers [nsh/base] History
+covers [nsh/base] HorizontalRule
+covers [nsh/base] Italic
+covers [nsh/base] Link
+covers [nsh/base] ListItem
+covers [nsh/base] ListKeymap
+covers [nsh/base] OrderedList
+covers [nsh/base] Paragraph
+covers [nsh/base] RichExtension
+covers [nsh/base] RichImage
+covers [nsh/base] StarterKit
+covers [nsh/base] Strike
+covers [nsh/base] Subscript
+covers [nsh/base] Superscript
+covers [nsh/base] TaskItem
+covers [nsh/base] TaskList
+covers [nsh/base] TextAlign
+covers [nsh/base] TextStyle
+covers [nsh/base] TrailingNode
+covers [nsh/base] Typography
+covers [nsh/base] Underline
+covers [nsh/base] createRichEditor
+covers [nsh/base] defineExtension
+covers [nsh/base] richExtension

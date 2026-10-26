@@ -10,5 +10,6 @@ mod editor_diagnostics;
 mod editor_languages;
 mod plot;
 mod resizable;
+mod rich_editor;
 mod sheet;
 mod text_view;

@@ -32,6 +32,7 @@ mod popup;
 mod progress;
 mod radio;
 mod resizable;
+pub mod rich_editor;
 mod sheet;
 mod switch;
 mod syntax;
@@ -164,6 +165,7 @@ pub fn registry() -> Registry {
         .register::<TableCell>()
         .register::<TableCaption>()
         .register::<Progress>()
+        .register::<rich_editor::view::RichEditor>()
         .register::<Tab>()
         .register::<Tabs>()
         .register::<TextView>()
@@ -171,7 +173,9 @@ pub fn registry() -> Registry {
         .register::<ToastStack>()
         .class::<toast::ToastManagerClass>()
         .module::<AlertDialog>()
-        .module::<TextView>()
+        .module::<TextView>();
+    rich_editor::js::register(&mut registry);
+    registry
         // Navigation and `Input`: made by `nsh-js` (`navigation.rs`,
         // `env.rs`), declared by hand.
         .native_values(&["NavStack", "NavPage", "Dialog", "createNavStack", "Input"])
@@ -216,6 +220,7 @@ mod tests {
                 "RadioGroup",
                 "ResizablePanel",
                 "ResizablePanelGroup",
+                "RichEditor",
                 "Sheet",
                 "Submenu",
                 "Switch",
@@ -236,7 +241,15 @@ mod tests {
             ]
         );
         let modules: Vec<_> = registry.module_specs().iter().map(|m| m.name).collect();
-        assert_eq!(modules, ["AlertDialog", "TextView"]);
+        assert_eq!(
+            modules,
+            [
+                "AlertDialog",
+                "RichEditorApi",
+                "RichExtensionApi",
+                "TextView"
+            ]
+        );
         let sets: Vec<_> = registry.sets().iter().map(|s| s.specifier()).collect();
         assert_eq!(sets, [Some("nsh/base"), Some("nsh/base/plot")]);
         let plot: Vec<_> = super::plot::registry()
