@@ -1,5 +1,5 @@
 import { mount, signal, Text, View } from "nsh";
-import { desktop, Inspector, Panel, Stage, ui, wide } from "./palette";
+import { button, buttonText, desktop, Inspector, Panel, Stage, ui, wide } from "./palette";
 
 function App() {
   const presses = signal(0);
@@ -8,14 +8,9 @@ function App() {
     <>
       <View
         onPress={() => presses.update((n) => n + 1)}
-        activeStyle={{ opacity: 0.5 }}
-        style={
-          wide()
-            ? { ...ui().accentFill, alignSelf: "center", borderRadius: 8, paddingHorizontal: 14, paddingVertical: 8, alignItems: "center" }
-            : { ...ui().accentFill, borderRadius: 12, padding: 16, alignItems: "center" }
-        }
+        {...button("accent", { align: "center" })}
       >
-        <Text style={{ color: ui().onAccent, fontSize: wide() ? 14 : 16, fontWeight: "600" }}>activeStyle opacity · pressed {presses()}×</Text>
+        <Text style={buttonText("accent")}>activeStyle opacity · pressed {presses()}×</Text>
       </View>
 
       <View

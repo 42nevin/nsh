@@ -1,6 +1,6 @@
 import { mount, signal, Text, View } from "nsh";
 import { Animated, createAnimatedValue, Easing, LayoutAnimation } from "nsh/animated";
-import { desktop, Inspector, Panel, size, Stage, ui, wide } from "./palette";
+import { button, buttonText, desktop, Inspector, Panel, size, Stage, ui, wide } from "./palette";
 
 const TRACK = 250;
 // Read when they render, so they follow the theme.
@@ -9,16 +9,8 @@ const SWATCHES = 5;
 
 function Chip(props: { label: string; onPress: () => void }) {
   return (
-    <View
-      onPress={props.onPress}
-      activeStyle={{ opacity: 0.6 }}
-      style={
-        desktop
-          ? { ...ui().raised, alignSelf: "flex-start", height: size.control, justifyContent: "center", paddingHorizontal: 12, borderRadius: 8 }
-          : { ...ui().raised, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 10 }
-      }
-    >
-      <Text style={{ color: ui().text, fontWeight: "600", fontSize: desktop ? 13 : undefined }}>{props.label}</Text>
+    <View onPress={props.onPress} {...button()}>
+      <Text style={buttonText()}>{props.label}</Text>
     </View>
   );
 }

@@ -1,7 +1,7 @@
 import { mount, signal, Text, View } from "nsh";
 import { createAnimatedValue } from "nsh/animated";
 import { PanResponder } from "nsh/gesture";
-import { desktop, Inspector, Log, Panel, size, tint, ui, wide } from "./palette";
+import { button, buttonText, desktop, Inspector, Log, tint, ui, wide } from "./palette";
 
 /** A card dragged on the UI thread: `pan` drives two animated values. */
 function DragCard() {
@@ -78,8 +78,7 @@ function App() {
   const dot = signal(0);
   const under = signal(0);
   // With a pointer the buttons are as wide as their labels; on a phone they share the row.
-  const pressable = desktop ? { height: size.control, justifyContent: "center" as const, paddingHorizontal: 12, borderRadius: 8 } : { flex: 1, padding: 14, borderRadius: 12 };
-  const label = desktop ? { fontSize: 13 } : {};
+  const share = desktop ? {} : { flex: 1 };
   const buttons = () => (
     <View style={{ flexDirection: "row", gap: desktop ? 8 : 10 }}>
       <View
@@ -87,21 +86,17 @@ function App() {
         onPressUp={() => add("pressOut")}
         onPress={() => add("press")}
         onLongPress={() => add("longPress")}
+        {...button("primary", { style: share })}
         activeStyle={{ opacity: 0.5 }}
-        style={{
-          ...pressable,
-          ...ui().primary,
-          alignItems: "center",
-        }}
       >
-        <Text style={{ color: ui().onPrimary, fontWeight: "600", ...label }}>activeStyle opacity</Text>
+        <Text style={buttonText("primary")}>activeStyle opacity</Text>
       </View>
       <View
         onPress={() => add("underlay")}
+        {...button("secondary", { style: share })}
         activeStyle={{ backgroundColor: ui().border, backgroundImage: "none" }}
-        style={{ ...ui().raised, ...pressable, alignItems: "center" }}
       >
-        <Text style={{ color: ui().text, fontWeight: "600", ...label }}>activeStyle background</Text>
+        <Text style={buttonText()}>activeStyle background</Text>
       </View>
       <View
         onPress={() => add("active:")}

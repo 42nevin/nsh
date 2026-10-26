@@ -1,5 +1,5 @@
 import { mount, signal, Text, View } from "nsh";
-import { ui } from "./palette";
+import { button, buttonText, ui } from "./palette";
 
 const LONG =
   "Text is typeset natively (CoreText on iOS, StaticLayout on Android) and measured on the engine thread, so the main thread only draws it.";
@@ -38,10 +38,9 @@ function App() {
         <View style={{ flexDirection: "row", gap: 8 }}>
           <View
             onPress={() => lines.set(lines() === 2 ? 0 : 2)}
-            activeStyle={{ opacity: 0.6 }}
-            style={{ ...ui().raised, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 }}
+            {...button()}
           >
-            <Text style={{ color: ui().text }}>{lines() === 2 ? "Show all" : "numberOfLines 2"}</Text>
+            <Text style={buttonText()}>{lines() === 2 ? "Show all" : "numberOfLines 2"}</Text>
           </View>
         </View>
 

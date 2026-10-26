@@ -2,18 +2,13 @@
 // wide window the inbox and the open message side by side (master–detail).
 import { type JSX, mount, signal, Text, View } from "nsh";
 import { createNavStack, NavPage, NavStack } from "nsh/base";
-import { desktop, size, tint, ui, wide } from "./palette";
+import { button, buttonText, size, tint, ui, wide } from "./palette";
 
 function Button(props: { title: string; variant?: "primary" | "secondary"; onPress: () => void }) {
-  const primary = () => props.variant !== "secondary";
+  const kind = () => (props.variant !== "secondary" ? "primary" : "secondary");
   return (
-    <View
-      role="button"
-      onPress={props.onPress}
-      style={desktop ? { ...(primary() ? ui().primary : ui().raised), height: size.control, alignSelf: "flex-start" } : primary() ? ui().primary : ui().raised}
-      class={desktop ? "justify-center rounded-lg px-3 active:opacity-75" : "items-center rounded-xl py-3 active:opacity-75"}
-    >
-      <Text style={{ fontWeight: "600", fontSize: desktop ? 13 : undefined, color: primary() ? ui().onPrimary : ui().text }}>{props.title}</Text>
+    <View role="button" onPress={props.onPress} {...button(kind())}>
+      <Text style={buttonText(kind())}>{props.title}</Text>
     </View>
   );
 }
