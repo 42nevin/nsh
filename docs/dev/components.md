@@ -17,7 +17,7 @@ come from two places:
   (`Toast`, `ToastStack` and the class `ToastManager`: "Toasts" below) and the
   modules `AlertDialog`, `Keyboard`, beside the navigation `nsh-js` makes for it (`NavStack`, `NavPage`, `Dialog`, `createNavStack`); controls
   (toggles, sliders, selects, popovers, sheets, ...) join as their behavior is written. It is a UI set
-  (`Registry::ui_set("nsh/base")`) every host serves by default (`set_ui_sets`' default; embedders with a list of their
+  (`Registry::ui_set("nsh/base")`), with the charts' parts `Plot`, `Line`, `Area` and `Grid` in its submodule `nsh/base/plot` (`Registry::submodule`, `js-modules.md`), every host serves by default (`set_ui_sets`' default; embedders with a list of their
   own add `nsh_base::registry()` to it); Rust apps use `nsh_base::{SafeAreaView, …}`, and make navigation and
   dialogs with `nsh_base::{nav_stack, nav_page, dialog}` (builders of the core's `Stack`, `Screen` and `Modal` host
   elements; the core's `stack()`, `screen()` and `modal()` are their deprecated old names), and show system
@@ -267,7 +267,9 @@ reasons: `reactive-components.md`.
   `.line_width_from_view()` and `.line_dash_from_view()` paint with the canvas view's `fill` / `stroke` /
   `strokeWidth` / `strokeDasharray` (inherited as CSS inherits them, `currentColor` its text color), which the core
   sets before the platform gets the drawing (`Drawing::view_paints`), so a component's shapes take the app's
-  `fill-*` / `stroke-*` classes and follow them and the appearance without being drawn again; operations built by hand take `painter.num(&v)` / `.paint(..)` and go
+  `fill-*` / `stroke-*` classes and follow them and the appearance without being drawn again;
+  `.fill_background_from_view(area)` fills the current path with the canvas view's background (`bg-*`,
+  `bg-linear-*`: a gradient under a chart's line), which the view then draws only there; operations built by hand take `painter.num(&v)` / `.paint(..)` and go
   in with `.op(..)`; `isPointInPath` / `isPointInStroke` are `painter.is_point_in_path(point, rule)` /
   `.is_point_in_stroke(point)` and, with a `Path2D`, `.path_contains(&path, point, rule)` /
   `.stroke_contains(&path, point)`, on a painter made by a function the drawing and the press handler both call, to
