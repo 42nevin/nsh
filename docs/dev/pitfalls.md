@@ -522,6 +522,11 @@ Things that were found the hard way. Read the section of the area you change bef
   to 40.5. A half-pixel stationary tolerance therefore ends the scroll early and duplicates `onScrollEnd`.
   `stopGlide` compares clamped offsets exactly; a quiet-period fallback covers targets rounded back to the
   current offset, for which the browser emits no `scrollend`.
+- **A blocking `wheel` listener holds the page's scrolling only over the box of the element that has it**: a
+  descendant shown in the top layer (a dialog over the window, `dialogs: "viewport"`) outside the root's box got
+  `wheel` events that were not cancelable, and the page scrolled under it although the root's listener prevented
+  them (headless Chrome 156: `cancelable: false`, `scrollY` 300 after a 300 px wheel). The layer has a blocking
+  listener of its own (`raise`).
 
 ## Testing on simulators and emulators
 
