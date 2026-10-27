@@ -341,6 +341,9 @@ its selection with the arrow keys) sets `focusable` and binds its keys while foc
 [`keymap`](../modules/nsh.md#keymap)); a press on it still reaches a pressable around it, such as a card that
 opens a page.
 
+A ref's `focus()` moves the keyboard focus to a stop as Tab does (its focus styles show and `onFocus` fires), say to
+give it back to the trigger of a popup that closed, and `blur()` takes it off.
+
 | Prop | Rust | Type | Default | Description |
 |---|---|---|---|---|
 | `focusable` | `.focusable(..)` | `boolean` | `true` for views that take presses | Whether the view is a stop of Tab. `true` makes any view one, whether it takes presses or leaves them to the views around it; `false` leaves a pressable to the pointer (a backdrop that closes a popover, rows the arrow keys move between). |

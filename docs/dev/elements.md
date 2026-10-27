@@ -153,9 +153,16 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   (`focusable={true}` on a view that takes no presses made nothing focusable before 2026-10-26; with no release
   recorded, it now means what React Native's `focusable` and the web's `tabIndex={0}` mean.) Windows, Linux and GPUI
   move the focus between fields and native components only so far; iOS and Android move it between inputs.
+  A ref's `focus()` on a stop moves the keyboard focus to it as Tab does (`focus:`, `onFocus`; a popup gives it back to
+  its trigger), and `blur()` takes it off: `Command::Focus` / `Blur` reach the platforms for any view, and AppKit makes
+  the view first responder (`input::focus_control`, past a field that edits), the browser focuses the element with
+  `focusVisible` and treats it as keyboard focus whatever its heuristics say after a click (`focusPressable`), the
+  headless driver moves its focus (`focus_calls`); on a view that is not a stop it does nothing. Windows, Linux and
+  GPUI leave `focus()` on views to them; iOS and Android focus inputs only.
 - **`onPanEnd` / `onPanStart`** carry `valueX` / `valueY`: the bound pan values at that moment (a drag may grab a value mid
   animation), for snapping.
-- **Imperative calls**: nodes have `focus()`, `blur()` and `scrollTo({ x, y, animated })` (use `ref`); lists also
+- **Imperative calls**: nodes have `focus()`, `blur()` (inputs, and views that take presses where they are stops of
+  the keyboard focus: "Keyboard focus" above) and `scrollTo({ x, y, animated })` (use `ref`); lists also
   `scrollToIndex({ index, viewPosition, viewOffset, animated })`, `scrollToEnd()`, `scrollToOffset()`; `Keyboard.dismiss()` (`nsh`).
   Commands run after the commit's other mount items; list scrolls are resolved by the core with the current item sizes.
 - **`measure()`** (on any node's ref) resolves, once the turn's changes are laid out, to `{ bounds, pagePosition }`
