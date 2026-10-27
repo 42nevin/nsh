@@ -1,8 +1,8 @@
 import { mount, signal, View, Scroll, Text, nativeComponent } from 'nsh';
 import { Input } from 'nsh/base';
 const NativeAction = nativeComponent('mixed.action', { props: ['id', 'title', 'enabled'], events: ['press'] });
-const Bridge = nativeComponent('mixed.bridge', { events: ['control'] });
-const caseName = '__CASE__';
+const Bridge = nativeComponent('mixed.bridge', { props: [], events: ['control'] });
+const caseName: string = '__CASE__';
 const phase = signal('__INITIAL_PHASE__');
 const merged = signal(false), hidden = signal(false), enabled = signal(true);
 const title = signal(false), listening = signal(true), assistiveOnly = signal(false), longOnly = signal(false), bothHandlers = signal(false), noise = signal('Unrelated initial text'), input = signal('Seed value');
@@ -25,14 +25,15 @@ function Action(props) {
     props.onInvoke({ id: props.id, appearance, phase: phase(), sequence, ref: refs[props.id], raw: raw || null });
   };
   if (appearance === 'native') return <NativeAction id={props.id} title={props.title} enabled={props.enabled}
-    pointerEvents={props.assistiveOnly ? 'none' : undefined} focusable={props.assistiveOnly ? false : undefined}
-    ref={node => { ref(props.id, node); node?.command('bind_ref', { id: props.id, ref: refs[props.id] }); }} onPress={deliver} style={{ width: 220, height: 32 }} />;
+    focusable={props.assistiveOnly ? false : undefined}
+    ref={node => { ref(props.id, node); node?.command('bind_ref', { id: props.id, ref: refs[props.id] }); }} onPress={deliver}
+    style={{ pointerEvents: props.assistiveOnly ? 'none' : undefined, width: 220, height: 32 }} />;
   return <View ref={node => ref(props.id, node)} testID={props.id}
     accessibilityLabel={props.title} role="button" accessibilityState={{ disabled: !props.enabled }}
-    pointerEvents={props.assistiveOnly ? 'none' : undefined} focusable={props.assistiveOnly ? false : undefined}
+    focusable={props.assistiveOnly ? false : undefined}
     disabled={!props.enabled} onPress={props.listening === false || props.longOnly ? undefined : () => deliver(null)}
     onLongPress={props.longOnly || props.bothHandlers ? () => deliver({ source: 'longPress' }) : undefined}
-    style={{ width: 220, height: 32 }}>
+    style={{ pointerEvents: props.assistiveOnly ? 'none' : undefined, width: 220, height: 32 }}>
       <Text>{props.title}</Text>
     </View>;
 }
@@ -59,8 +60,7 @@ function control(payload) {
 mount(() => <View style={{ flex: 1 }}><Scroll style={{ flex: 1 }}><View style={{ gap: 4 }}>
   <Action id="mixed.sibling" appearance="native" title="Live sibling" enabled={true} onInvoke={callback} />
   <View testID="mixed.group" accessible={merged()} accessibilityLabel="Mixed group"
-    pointerEvents={assistiveOnly() ? 'none' : undefined}
-    accessibilityElementsHidden={hidden()} style={{ gap: 4 }}>
+    accessibilityElementsHidden={hidden()} style={{ pointerEvents: assistiveOnly() ? 'none' : undefined, gap: 4 }}>
     <Text testID="mixed.text" accessibilityLabel="Mixed text">{noise()}</Text>
     <Input testID="mixed.input" accessibilityLabel="Mixed input" value={input()} style={{ width: 220, height: 32 }} />
     <Action id="mixed.native" appearance="native" title={title() ? 'Updated native' : 'Native action'} enabled={enabled()} assistiveOnly={assistiveOnly()} onInvoke={callback} />
