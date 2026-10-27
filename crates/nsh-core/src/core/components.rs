@@ -4262,7 +4262,7 @@ impl<M: TextEngine> Core<M> {
             return false;
         }
         // Hints follow the pointer on their anchors, whoever else listens.
-        if matches!(kind, EventKind::HoverIn | EventKind::HoverOut) {
+        if matches!(kind, EventKind::MouseEnter | EventKind::MouseLeave) {
             self.overlay_hover(id, kind);
         }
         if self.platform_event(id, kind, payload) {

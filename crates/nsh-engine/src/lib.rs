@@ -104,7 +104,7 @@ const IDLE_GC_LONGEST: Duration = Duration::from_secs(5);
 /// The shortest time between two deliveries of mouse motion: a frame at
 /// 120 Hz. Mice report moves far more often (up to 1000 Hz), and a handler
 /// that redraws a crosshair needs no more than one per frame.
-const HOVER_MOVE_INTERVAL: Duration = Duration::from_millis(8);
+const MOUSE_MOVE_INTERVAL: Duration = Duration::from_millis(8);
 
 /// The app an engine runs.
 #[derive(Debug, Clone)]
@@ -1500,8 +1500,8 @@ impl<M: TextEngine + 'static> Driver<M> {
             hot: Vec::new(),
             scroll_events: FxHashMap::default(),
             touch_move: None,
-            hover_moves: Vec::new(),
-            hover_moved: None,
+            mouse_moves: Vec::new(),
+            mouse_moved: None,
             sets_seen: FxHashMap::default(),
             resized: None,
             events_handled: 0,
@@ -1647,13 +1647,13 @@ impl<M: TextEngine + 'static> Driver<M> {
         [due, gc_deadline].into_iter().flatten().min()
     }
 
-    /// When the next timer, task timer or throttled scroll or hover event
+    /// When the next timer, task timer or throttled scroll or mouse move
     /// is due, on the engine's clock.
     fn due(&self) -> Option<Instant> {
         [
             self.script.as_ref().and_then(Script::next_timer),
             self.state.next_scroll_event(),
-            self.state.next_hover_move(),
+            self.state.next_mouse_move(),
             self.state.core.next_task_timer(),
         ]
         .into_iter()
@@ -1774,10 +1774,10 @@ impl<M: TextEngine + 'static> Driver<M> {
         let turn_start = state.trace.then(Instant::now);
         state.dispatch_touch_move(script);
         if state
-            .next_hover_move()
+            .next_mouse_move()
             .is_some_and(|due| due <= nsh_core::time::now())
         {
-            state.dispatch_hover_moves(script);
+            state.dispatch_mouse_moves(script);
         }
         state.dispatch_scroll_events(script);
         let hot = std::mem::take(&mut state.hot);
@@ -1901,12 +1901,12 @@ struct State<M: TextEngine> {
     scroll_events: FxHashMap<NodeId, ScrollEvent>,
     /// Touch moves not delivered yet: those queued in one frame become one.
     touch_move: Option<(NodeId, Box<nsh_core::TouchEvent>)>,
-    /// Hover and mouse moves not delivered yet: the latest per view, in the order
-    /// they came; sent once per [`HOVER_MOVE_INTERVAL`] at most, and before
+    /// Mouse moves not delivered yet: the latest per view, in the order they
+    /// came; sent once per [`MOUSE_MOVE_INTERVAL`] at most, and before
     /// any other event.
-    hover_moves: Vec<(NodeId, EventKind, EventPayload)>,
-    /// When `hover_moves` were last delivered.
-    hover_moved: Option<Instant>,
+    mouse_moves: Vec<(NodeId, EventPayload)>,
+    /// When `mouse_moves` were last delivered.
+    mouse_moved: Option<Instant>,
     /// [`keep_last_sets`]'s buffer, reused.
     sets_seen: FxHashMap<(u8, NodeId), usize>,
     /// The viewport size a resize set this turn ([`MountSink::resized`]).
@@ -2109,30 +2109,33 @@ impl<M: TextEngine> State<M> {
         }
     }
 
-    /// When the pending `onHoverMove`s are due.
-    fn next_hover_move(&self) -> Option<Instant> {
-        if self.hover_moves.is_empty() {
+    /// When the pending `onMouseMove`s are due.
+    fn next_mouse_move(&self) -> Option<Instant> {
+        if self.mouse_moves.is_empty() {
             return None;
         }
         Some(
-            self.hover_moved
-                .map_or_else(nsh_core::time::now, |t| t + HOVER_MOVE_INTERVAL),
+            self.mouse_moved
+                .map_or_else(nsh_core::time::now, |t| t + MOUSE_MOVE_INTERVAL),
         )
     }
 
-    /// Delivers the pending `onHoverMove`s: to the Rust components whose
+    /// Delivers the pending `onMouseMove`s: to the Rust components whose
     /// parts they are on, the others to JS.
-    fn dispatch_hover_moves(&mut self, script: Option<&Script>) {
-        if self.hover_moves.is_empty() {
+    fn dispatch_mouse_moves(&mut self, script: Option<&Script>) {
+        if self.mouse_moves.is_empty() {
             return;
         }
-        self.hover_moved = Some(nsh_core::time::now());
-        for (id, kind, payload) in std::mem::take(&mut self.hover_moves) {
-            if self.core.component_event(id, kind, &payload) {
+        self.mouse_moved = Some(nsh_core::time::now());
+        for (id, payload) in std::mem::take(&mut self.mouse_moves) {
+            if self
+                .core
+                .component_event(id, EventKind::MouseMove, &payload)
+            {
                 continue;
             }
             if let Some(script) = script {
-                script.dispatch_event(id, kind, &payload);
+                script.dispatch_event(id, EventKind::MouseMove, &payload);
             }
         }
     }
@@ -2459,23 +2462,17 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
             if state.trace {
                 log::info!(target: "nsh::perf", "event {event:?} on view {id}");
             }
-            // Hover moves wait for the frame, the latest per view; any other
+            // Mouse moves wait for the frame, the latest per view; any other
             // event comes after the moves before it (a view hears where the
             // mouse went before it hears it leave).
-            if event == EventKind::MouseMove
-                || (event == EventKind::HoverMove && matches!(payload, EventPayload::Hover(_)))
-            {
-                match state
-                    .hover_moves
-                    .iter_mut()
-                    .find(|(v, kind, _)| *v == id && *kind == event)
-                {
-                    Some((_, _, pending)) => *pending = payload,
-                    None => state.hover_moves.push((id, event, payload)),
+            if event == EventKind::MouseMove {
+                match state.mouse_moves.iter_mut().find(|(v, _)| *v == id) {
+                    Some((_, pending)) => *pending = payload,
+                    None => state.mouse_moves.push((id, payload)),
                 }
                 return true;
             }
-            state.dispatch_hover_moves(script);
+            state.dispatch_mouse_moves(script);
             // The core tracks input text for layout and to recognize stale
             // values (from JS and from Rust components alike).
             if let (EventKind::ChangeText, EventPayload::Text { text, count }) = (event, &payload) {

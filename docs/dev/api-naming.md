@@ -80,9 +80,12 @@ go elsewhere under these rules rather than into them.
   boolean (a constant, a payload's field) is `is<Adjective>` / `has<Noun>`, as `gpui-kit`'s readers (`isAvailable`,
   `isViewable`, `isBuffering`); props never are (*guides*: builders `disabled(bool)`, readers `is_disabled()`).
 - **Begin and end**: a phase is `<act>Start` / `<act>End` (`gpui-kit`'s `on_start` / `on_end`: `onPanStart`,
-  `onLoadStart`, `onScrollDragStart`, `onMomentumEnd`), never `Begin`. A pointer over a view is `onHoverIn` /
-  `onHoverOut` (decided by the user, 2026-10-21), a file drag over it `onFileDragEnter` / `onFileDragLeave` (the DOM's
-  `dragenter`).
+  `onLoadStart`, `onScrollDragStart`, `onMomentumEnd`), never `Begin`. The mouse coming over a view and leaving it is
+  `onMouseEnter` / `onMouseLeave`, its moves over it `onMouseMove` (the DOM's `mouseenter` / `mouseleave` /
+  `mousemove`, GPUI's `MouseMoveEvent`; decided by the user, 2026-10-27, replacing React Native's `onHoverIn` /
+  `onHoverOut` of 2026-10-21), as a file drag over it is `onFileDragEnter` / `onFileDragLeave` (the DOM's
+  `dragenter`). The `hover` state keeps CSS's name (`:hover`, `hoverStyle`, `hover:`): states are CSS's, events the
+  DOM's.
 - **Geometry**: shapes are GPUI's, the types Rust already has (`nsh_core::geometry`, `geometry.md`), exported by
   `nsh` with the same fields: `Point { x, y }`, `Size { width, height }`, `Bounds { origin: Point, size: Size }`,
   `Edges { top, right, bottom, left }` (decided by the user, 2026-10-21). A position and an extent together are a
@@ -92,8 +95,9 @@ go elsewhere under these rules rather than into them.
 - **Points**: a position is a `Point` (`{ x, y }`, GPUI's `Point<Pixels>`, Rust `Point<Points>`), never separate
   `<prefix>X` / `<prefix>Y` fields: `position` in the view, `pagePosition` in the root view (the surface or its dialog),
   and the keys held as `modifiers` (`{ control, alt, shift, platform }`, GPUI's `Modifiers`: `platform` is Command on
-  Apple platforms, the Windows / Super key elsewhere), as GPUI's `MouseMoveEvent { position, modifiers }` (decided by
-  the user, 2026-10-21). The frozen responder events keep React Native's `locationX` / `pageX`.
+  Apple platforms, the Windows / Super key elsewhere), as GPUI's `MouseMoveEvent { position, modifiers, pressed_button }`
+  (decided by the user, 2026-10-21; the mouse events' `MouseEvent` adds `pressedButton`, 2026-10-27). The frozen
+  responder events keep React Native's `locationX` / `pageX`.
 - **Units**: one unit per quantity, everywhere, React Native's modules included. A length is points, an image's or a
   video's own size pixels (`PixelSize`, never `Size`: `onLoad`, `Image.getSize`, the clipboard's and the picker's
   images), a time milliseconds (`duration`, `delay`, `timeout`, `keyboardFrame().duration`), a velocity points per
@@ -107,10 +111,14 @@ go elsewhere under these rules rather than into them.
   the start is the same act at the other end, `onLoadMoreAtStart` / `loadMoreAtStartThreshold` (React Native's
   `onStartReached`): the edge named as `Start` / `End` are, the act kept, and no `Newer` / `Older` that holds for a
   chat but not for every list.
-- **Payloads**: a value's change is `on<Value>Change(next, details?)`, the value first and anything else after it
-  (`onChange(text)`, `onOpenChange(open, reason)`); every other event passes one object, even with one field
-  (`onLinkPress({ url })`, `onSubmit({ text })`), so a later field is an addition. An event with nothing to report
-  passes nothing; it can gain an object later. Never several positional arguments outside the frozen modules.
+- **Payloads**: every event passes one object, even with one field and for a value's change too, its fields named
+  as the props they report (`onChange({ value })`, `onOpenChange({ open, reason })`, `onLinkPress({ url })`,
+  `onLayout({ bounds })`), so a later field is an addition (decided by the user, 2026-10-27, replacing the
+  value-first `on<Value>Change(next, details?)`). Never several positional arguments, a bare value, or a data type
+  of the API passed as the payload itself (`onImagePress({ image })`, not `onImagePress(image)`: an event's later
+  field must not land on `TextViewImage`). An event with nothing to report passes nothing; it can gain an object
+  later. Only the responder callbacks keep React Native's `(e, gestureState)`. Existing events are being brought to
+  this rule (item 3 of the API review).
 - **Listening**: a function that starts listening returns a function that stops it (`() => void`), and what is
   registered while a component renders goes away with the component (`keymap.bind`); never React Native's
   `{ remove() }`. An app reads a setting of the system through its accessor (`reduceMotion()`), which is also how it
@@ -155,12 +163,23 @@ every platform, as the user decided (2026-10-20) for `onSubmit` (a phone's retur
 ## Shapes that can grow
 
 Apps built once run on every later release (`compatibility.md`): types only widen and inputs only gain optional
-members, so a shape decides what can ever be added to it.
+members, so a shape decides what can ever be added to it. These rules are the targets the API is being brought to
+before the first recorded release (item 3 of the API review): where the code still differs (`AlertDialog.show`'s
+bare id, `Image.prefetch`'s `boolean`, the one `YNode` ref type), the rule wins and the code follows.
 
 - Options are one object (`scrollTo({ x, y, animated })`), never a third positional parameter.
 - A mode is a string union, which gains values; never a boolean that later needs a third state.
 - A value has one type: `version: string`, never `string | number`.
-- What a function returns is an object, never a tuple (beside `split`'s, Solid's) or a bare value that may need a second field.
+- What a function returns is an object, never a tuple (beside `split`'s, Solid's) or a bare value that may need a second field
+  (`AlertDialog.show` resolves `{ action }`, an animation `{ finished }`). A yes / no question returns a boolean
+  (`hasText()`, `canUndo()`).
+- A failure rejects (or throws) with the error, never resolves `false` or another sentinel (`Image.prefetch` and
+  `RichEditor.setDocJson` as `Image.getSize` and `fetch`; decided by the user, 2026-10-27).
+- An identifier the app matches on is the app's and required, never derived from what is shown
+  (`AlertDialogAction.id`: a label changes with the app's language; decided by the user, 2026-10-27).
+- Each element has a ref type of its own (`InputRef`, `ScrollRef`, `ListRef`, `WebViewRef`, `VideoRef` over a common
+  `ViewRef`), never one type carrying every element's methods (approved by the user, 2026-10-27): a method added
+  to one element must not appear on every ref, and splitting later would remove methods apps use.
 - Event payloads and listening follow the rules above (objects, `() => void`).
 
 ## Renames before the first compatible release
@@ -168,8 +187,8 @@ members, so a shape decides what can ever be added to it.
 Decided with the user (2026-10-21), before v0.1.2: these land without `@deprecated` aliases, as no release froze
 them yet (`compatibility.md`). The frozen RN-shaped modules keep their names. A name that already follows `gpui-kit` stays, even where another spelling would do
 (*guides*: "Preserve established public names when changing them would cause needless churn"): `pagingEnabled`,
-`javaScriptEnabled`, `screenReaderEnabled`, `headerBackVisible`, `isAvailable`, `selectable`, `disabled`,
-`onHoverIn` / `onHoverOut` and `onFileDrop({ uris })`; and
+`javaScriptEnabled`, `screenReaderEnabled`, `headerBackVisible`, `isAvailable`, `selectable`, `disabled` and
+`onFileDrop({ uris })`; and
 `StatusBar`'s `hidden`, as the user decided on 2026-10-20 after UIKit's `prefersStatusBarHidden`.
 
 | Now | New | Rule | Notes |
@@ -185,9 +204,13 @@ them yet (`compatibility.md`). The frozen RN-shaped modules keep their names. A 
 | `ViewabilityConfig` `itemVisiblePercentThreshold`, `viewAreaCoveragePercentThreshold` (0 to 100) | `itemVisibleThreshold`, `viewAreaCoverageThreshold` (0 to 1) | Units | IntersectionObserver's `threshold` |
 | **Every element** | | | |
 | Input `caretHidden` | `caret` (default `true`) | States | Decided by the user: the part's name, as `scrollbar`; replaces the 2026-10-20 row keeping it |
-| `HoverEvent` (`onHoverMove`) `locationX` / `locationY`, `pageX` / `pageY`, `altKey` / `ctrlKey` / `metaKey` / `shiftKey` | `{ position: Point; pagePosition: Point; modifiers: Modifiers }` | Points | GPUI `MouseMoveEvent`; new types `Point`, `Modifiers` in `nsh` |
+| `HoverEvent` (`onHoverMove`) `locationX` / `locationY`, `pageX` / `pageY`, `altKey` / `ctrlKey` / `metaKey` / `shiftKey` | `{ position: Point; pagePosition: Point; modifiers: Modifiers }` | Points | GPUI `MouseMoveEvent`; new types `Point`, `Modifiers` in `nsh`. Now `MouseEvent`, below |
+| `onHoverIn: () => void` | `onMouseEnter: (e: MouseEvent) => void` | Begin and end | Decided by the user (2026-10-27): the DOM's `mouseenter` and GPUI's names, as `onFileDragEnter`; replaces the 2026-10-21 decision keeping React Native's name. Rust `on_mouse_enter` |
+| `onHoverOut: () => void` | `onMouseLeave: (e: MouseEvent) => void` | Begin and end | As above, the DOM's `mouseleave`; `e` is where the mouse was last. Rust `on_mouse_leave` |
+| `onHoverMove(e: HoverEvent)` (no button down) and `onMouseMove(e: Point)` (button down too) | one `onMouseMove(e: MouseEvent)` | Payloads | The DOM's `mousemove`, GPUI's `on_mouse_move`: every move over the view, with or without a button down (`e.pressedButton`), and a modifier key changing while the mouse rests there; one object, as every event. Rust `on_mouse_move` |
+| `HoverEvent` (type) | `MouseEvent` `{ position; pagePosition; modifiers; pressedButton: MouseButton \| null }`, `MouseButton` `"left" \| "right" \| "middle" \| "back" \| "forward"` | Points | GPUI's `MouseMoveEvent` and `MouseButton`; the payload of all three mouse events. `hoverStyle` and `hover:` keep CSS's name |
 | `ContextMenuEvent` (`onContextMenu`), the same fields | the same shape | Points | `Menu.popup(items, e.pagePosition)` |
-| `onLayout(e: LayoutEvent)` `{ x, y, width, height }` | `onLayout(bounds: Bounds)` | Geometry | `LayoutEvent` dropped |
+| `onLayout(e: LayoutEvent)` `{ x, y, width, height }` | `onLayout(bounds: Bounds)` | Geometry | `LayoutEvent` dropped; next `onLayout({ bounds })` (Payloads, 2026-10-27) |
 | `ref.measure()` → `{ x, y, width, height, pageX, pageY }` | `{ bounds: Bounds; pagePosition: Point }` | Geometry | |
 | `ScrollEvent` (`onScroll`) `{ x, y, contentWidth, contentHeight, width, height, zoomScale }` | `{ offset: Point; contentSize: Size; size: Size; zoomScale }` | Geometry | The other scroll events' `{ x, y }` is the offset's `Point` already |
 | `OverlayPosition` `{ placement, x, y, width, height, availableWidth, availableHeight }` | `{ placement; bounds: Bounds; available: Size }` | Geometry | |

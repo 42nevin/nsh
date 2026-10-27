@@ -14064,20 +14064,21 @@ fn file_drop_callbacks_keep_urls_and_disabled_targets_unmount_their_events() {
 }
 
 #[test]
-fn hover_moves_reach_rust_listeners_with_their_positions_and_modifiers() {
+fn mouse_moves_reach_rust_listeners_with_their_positions_modifiers_and_buttons() {
     use crate::prelude::*;
     #[component]
     fn Crosshair() -> impl IntoElement {
         let at = signal(String::new());
         view()
-            .on_hover_move(move |e: &HoverEvent| {
+            .on_mouse_move(move |e: &MouseEvent| {
                 at.set(format!(
-                    "{} {} {} {} {}",
+                    "{} {} {} {} {} {:?}",
                     e.position.x.0,
                     e.position.y.0,
                     e.page_position.x.0,
                     e.page_position.y.0,
-                    e.modifiers.shift
+                    e.modifiers.shift,
+                    e.pressed_button
                 ))
             })
             .child(text(move || at.get()))
@@ -14089,28 +14090,29 @@ fn hover_moves_reach_rust_listeners_with_their_positions_and_modifiers() {
         .items
         .iter()
         .find_map(|item| match item {
-            MountItem::Events { id, events } if events.contains(EventKind::HoverMove) => Some(*id),
+            MountItem::Events { id, events } if events.contains(EventKind::MouseMove) => Some(*id),
             _ => None,
         })
-        .expect("the listening view mounts HoverMove in its event mask");
-    let event = crate::HoverEvent {
-        position: point(px(4.0), px(5.0)),
-        page_position: point(px(14.0), px(25.0)),
-        modifiers: crate::keymap::Modifiers {
+        .expect("the listening view mounts MouseMove in its event mask");
+    let event = crate::MouseEvent::new(
+        point(px(4.0), px(5.0)),
+        point(px(14.0), px(25.0)),
+        crate::keymap::Modifiers {
             shift: true,
             ..Default::default()
         },
-    };
-    assert!(c.component_event(host, EventKind::HoverMove, &EventPayload::Hover(event)));
+        Some(crate::MouseButton::Left),
+    );
+    assert!(c.component_event(host, EventKind::MouseMove, &EventPayload::Mouse(event)));
     let delivered = c.commit().unwrap();
     assert!(delivered.items.iter().any(|item| matches!(item,
-        MountItem::Text { text, .. } if text.text == "4 5 14 25 true")));
-    // Another payload is not a hover move.
-    assert!(c.component_event(host, EventKind::HoverMove, &EventPayload::None));
-    assert!(
-        c.commit()
-            .is_none_or(|b| !b.items.iter().any(|i| matches!(i, MountItem::Text { .. })))
-    );
+        MountItem::Text { text, .. } if text.text == "4 5 14 25 true Some(Left)")));
+    // One sent without a payload (an embedder's, a script's) still reaches
+    // the listener, at no known position.
+    assert!(c.component_event(host, EventKind::MouseMove, &EventPayload::None));
+    let delivered = c.commit().unwrap();
+    assert!(delivered.items.iter().any(|item| matches!(item,
+        MountItem::Text { text, .. } if text.text == "0 0 0 0 false None")));
 }
 
 #[test]
@@ -16044,10 +16046,17 @@ fn tooltips_show_after_the_pointer_rests_and_hide_when_it_leaves_or_presses() {
     );
     let batch = c.commit().unwrap();
     // The element follows the pointer; the tooltip waits out of the view.
-    assert_eq!(mounts_listening(&batch, 2, EventKind::HoverIn), Some(true));
+    assert_eq!(
+        mounts_listening(&batch, 2, EventKind::MouseEnter),
+        Some(true)
+    );
     assert!(texts_of(&batch).is_empty(), "{:?}", texts_of(&batch));
 
-    c.component_event(2, EventKind::HoverIn, &EventPayload::None);
+    c.component_event(
+        2,
+        EventKind::MouseEnter,
+        &EventPayload::Mouse(crate::MouseEvent::default()),
+    );
     c.run_component_tasks();
     assert!(c.commit().is_none());
     clock.advance_to(crate::time::now() + std::time::Duration::from_millis(499));
@@ -16067,7 +16076,11 @@ fn tooltips_show_after_the_pointer_rests_and_hide_when_it_leaves_or_presses() {
     assert_eq!(frame.bottom(), px(96.0));
 
     // Leaving hides it.
-    c.component_event(2, EventKind::HoverOut, &EventPayload::None);
+    c.component_event(
+        2,
+        EventKind::MouseLeave,
+        &EventPayload::Mouse(crate::MouseEvent::default()),
+    );
     let batch = c.commit().unwrap();
     assert!(
         batch
@@ -16077,7 +16090,11 @@ fn tooltips_show_after_the_pointer_rests_and_hide_when_it_leaves_or_presses() {
     );
 
     // A press hides it too, until the pointer comes again.
-    c.component_event(2, EventKind::HoverIn, &EventPayload::None);
+    c.component_event(
+        2,
+        EventKind::MouseEnter,
+        &EventPayload::Mouse(crate::MouseEvent::default()),
+    );
     clock.advance_to(crate::time::now() + std::time::Duration::from_millis(500));
     c.run_component_tasks();
     assert!(c.commit().is_some());
@@ -16102,7 +16119,10 @@ fn tooltips_show_after_the_pointer_rests_and_hide_when_it_leaves_or_presses() {
         }],
     );
     let batch = c.commit().unwrap();
-    assert_eq!(mounts_listening(&batch, 2, EventKind::HoverIn), Some(false));
+    assert_eq!(
+        mounts_listening(&batch, 2, EventKind::MouseEnter),
+        Some(false)
+    );
 }
 
 #[test]
@@ -16134,7 +16154,7 @@ fn tooltips_wait_for_nothing_on_touch_screens() {
         ],
     );
     let batch = c.commit().unwrap();
-    assert_eq!(mounts_listening(&batch, 2, EventKind::HoverIn), None);
+    assert_eq!(mounts_listening(&batch, 2, EventKind::MouseEnter), None);
 }
 
 #[test]

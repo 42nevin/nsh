@@ -11,8 +11,8 @@ use super::{
 };
 use crate::{
     AccessibilityProp, AccessibilityRole, AccessibilityState, AccessibilityValue, Bounds,
-    ContextMenuEvent, EdgeInsets, EventKind, EventPayload, HoverEvent, Hsla, ImageSource,
-    ListContentStyle, NativeProp, NodeId, PointerEvents, Points, Prop, Size, Tag, TouchEvent,
+    ContextMenuEvent, EdgeInsets, EventKind, EventPayload, Hsla, ImageSource, ListContentStyle,
+    MouseEvent, NativeProp, NodeId, PointerEvents, Points, Prop, Size, Tag, TouchEvent,
     geometry::{DevicePixels, Radians},
     style::Color,
 };
@@ -1197,37 +1197,32 @@ pub trait Interactive: Element {
         )
     }
 
-    /// The mouse came over it or an element inside it (never on touches).
-    fn on_hover_in<M>(self, listener: impl IntoListener<(), M>) -> Self {
+    /// The mouse came over it or an element inside it (never on touches):
+    /// where (the DOM's `mouseenter`).
+    fn on_mouse_enter<M>(self, listener: impl IntoListener<MouseEvent, M>) -> Self {
         self.on(
-            EventKind::HoverIn,
-            events::typed(listener.into_listener(), events::unit),
+            EventKind::MouseEnter,
+            events::typed(listener.into_listener(), events::mouse),
         )
     }
 
-    /// The mouse left it and the elements inside it, or the window.
-    fn on_hover_out<M>(self, listener: impl IntoListener<(), M>) -> Self {
+    /// The mouse left it and the elements inside it, or the window: where
+    /// it was last (the DOM's `mouseleave`).
+    fn on_mouse_leave<M>(self, listener: impl IntoListener<MouseEvent, M>) -> Self {
         self.on(
-            EventKind::HoverOut,
-            events::typed(listener.into_listener(), events::unit),
+            EventKind::MouseLeave,
+            events::typed(listener.into_listener(), events::mouse),
         )
     }
 
-    /// The mouse moved over it (or an element inside it) with no button
-    /// down: where, in it and in its root view, at most once per frame.
-    fn on_hover_move<M>(self, listener: impl IntoListener<HoverEvent, M>) -> Self {
-        self.on(
-            EventKind::HoverMove,
-            events::typed(listener.into_listener(), events::hover),
-        )
-    }
-
-    /// The mouse moved inside it, including while dragging: local coordinates
-    /// in points, at most once per frame (desktops and web).
-    fn on_mouse_move<M>(self, listener: impl IntoListener<crate::Point<crate::Points>, M>) -> Self {
+    /// The mouse moved over it (or an element inside it), with or without
+    /// a button down ([`MouseEvent::pressed_button`]), or a modifier key
+    /// changed while it rests there with none down: where, in it and in its
+    /// root view, at most once per frame.
+    fn on_mouse_move<M>(self, listener: impl IntoListener<MouseEvent, M>) -> Self {
         self.on(
             EventKind::MouseMove,
-            events::typed(listener.into_listener(), events::mouse_position),
+            events::typed(listener.into_listener(), events::mouse),
         )
     }
 

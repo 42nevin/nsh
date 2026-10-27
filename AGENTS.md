@@ -380,6 +380,30 @@ repository's `target/`; dependencies only it uses are declared in `crates/gpui/C
   type of their own where one is needed, as `LineHeight`), never to strings the core parses again; only a TSX
   `style`'s values are parsed from strings. Frozen with the first recorded release as `docs/dev/styles.md` writes it ("Principles",
   "Extensions").
+- **API shapes: one form per thing, shapes that can grow** (decided by the user before the freeze; details and
+  examples in `docs/dev/api-naming.md` "Conventions", "Shapes that can grow" and "Units"; the API is being brought to
+  them). Names come from `gpui-base` / GPUI and the DOM; React Native is a reference only.
+  - Units: one per quantity. Lengths are points; an image's or a video's own size is pixels, typed `PixelSize`
+    (never `Size`); times are milliseconds; velocities points per second; shares fractions from 0 to 1 (no `Percent`
+    in names). Only media time is seconds (HTML's `currentTime`) and a deceleration the velocity kept per
+    millisecond (UIKit's 0.998 / 0.99).
+  - Events: every handler gets one object, value changes included (`onChange({ value })`, `onOpenChange({ open,
+    reason })`, `onLayout({ bounds })`), its fields named as the props they report; never positional arguments, a
+    bare value or a shared data type passed as the payload itself. An event with nothing to report passes nothing.
+    Only the responder callbacks keep React Native's `(e, gestureState)`.
+  - Mouse events are the DOM's and GPUI's: `onMouseEnter` / `onMouseMove` / `onMouseLeave`, each with a
+    `MouseEvent { position, pagePosition, modifiers, pressedButton }`; `onMouseMove` fires with or without a button
+    down. State styles keep CSS's names (`hover:`, `hoverStyle`).
+  - Returns: an object, never a bare value that may need a second field (`AlertDialog.show` → `{ action }`,
+    animations → `{ finished }`). Failure rejects (or throws) with the error, never resolves `false` (`Image.prefetch`,
+    `getSize`, `fetch`); yes / no questions (`hasText()`, `canUndo()`) return booleans.
+  - Methods take their options as one object (`addPanel(panel, { placement, size })`, `net.connect({ host, port })`),
+    never a second or third positional option.
+  - Identifiers an app matches on are the app's and required, never derived from a label (`AlertDialogAction.id`).
+  - Refs: each element has a ref type of its own (`InputRef`, `ScrollRef`, `VideoRef`, ... over a common `ViewRef`),
+    never one type carrying every element's methods.
+  - Listening: a function that starts listening returns a function that stops it, and what is registered while a
+    component renders goes with the component.
 - **Components are Rust.** Rust components live in `crates/nsh-base` or in an app's own crate (its UI set,
   `#[native_module("…")]`), run in the core and render primitives with typed styles (GPUI-style `Styled` methods,
   never class strings); props and events are derived types, their JS face is made from the specs (`nsh-js`

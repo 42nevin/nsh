@@ -42,8 +42,10 @@ const PRESSED = 1;
 const HOVERED = 2;
 const FOCUSED = 4;
 const PRESS_EVENTS = ["onPress", "onLongPress", "onPressIn", "onPressOut"];
-const HOVER_EVENTS = ["onHoverIn", "onHoverOut", "onHoverMove"];
-/** The keys whose press or release is reported as a hover move. */
+const MOUSE_EVENTS = ["onMouseEnter", "onMouseLeave", "onMouseMove"];
+/** The DOM's `buttons` bits, in the order a held button is named by. */
+const MOUSE_BUTTONS = [[1, "left"], [2, "right"], [4, "middle"], [8, "back"], [16, "forward"]];
+/** The keys whose press or release is reported as a mouse move. */
 const MODIFIER_KEYS = new Set(["Control", "Alt", "Shift", "Meta"]);
 // What lays out a field's text, copied to the hidden copy that finds its
 // caret (`caretBounds`).
@@ -1841,37 +1843,52 @@ class Player {
     this.updateFocusable(el);
     this.updateTouchAction(el);
     if (el._kind === "scroll" && el._events.has("onRefresh")) this.installPull(el);
-    if (!el._hoverEvents && HOVER_EVENTS.some((e) => el._events.has(e))) this.installHover(el);
+    if (!el._mouseEvents && MOUSE_EVENTS.some((e) => el._events.has(e))) this.installMouse(el);
   }
 
   /**
-   * `onHoverIn` / `onHoverOut` / `onHoverMove` of `el`, from the mouse's
-   * pointer events (pointerenter and pointerleave reach the views around
-   * the one under the mouse too, as with `:hover`). Moves with a button
-   * down are not hovers.
+   * `onMouseEnter` / `onMouseLeave` of `el`, from the mouse's pointer
+   * events (pointerenter and pointerleave reach the views around the one
+   * under the mouse too, as with `:hover`), with or without a button down;
+   * leaving, from where the mouse went. Whether the mouse is over `el`
+   * (`_hoverIn`) also decides who hears a modifier key change
+   * (`modifiersChanged`). Moves are `mouseMoved`'s.
    */
-  installHover(el) {
-    el._hoverEvents = true;
+  installMouse(el) {
+    el._mouseEvents = true;
     el.addEventListener("pointerenter", (e) => {
       if (e.pointerType !== "mouse") return;
       el._hoverIn = true;
-      if (el._events.has("onHoverIn")) this.event(el._id, "onHoverIn");
+      if (el._events.has("onMouseEnter")) this.event(el._id, "onMouseEnter", this.mouseEvent(el, e, true));
     });
-    el.addEventListener("pointerleave", () => {
+    el.addEventListener("pointerleave", (e) => {
       if (!el._hoverIn) return;
       el._hoverIn = false;
-      if (el._events.has("onHoverOut")) this.event(el._id, "onHoverOut");
+      if (el._events.has("onMouseLeave")) this.event(el._id, "onMouseLeave", this.mouseEvent(el, e, true));
     });
-    el.addEventListener("pointermove", (e) => {
-      if (e.pointerType !== "mouse" || e.buttons || !el._events.has("onHoverMove")) return;
-      const [pageX, pageY] = this.point(e);
+  }
+
+  /**
+   * The `MouseEvent` payload of `el` for the mouse at `e`'s `clientX` /
+   * `clientY`, with `e`'s modifiers and held button: the position in `el`
+   * with its transforms undone, null when they leave no area, unless
+   * `always`, which takes its box's offset then.
+   */
+  mouseEvent(el, e, always = false) {
+    let position = this.mousePoint(el, e);
+    if (!position) {
+      if (!always) return null;
       const r = el.getBoundingClientRect();
-      this.event(el._id, "onHoverMove", {
-        position: { x: e.clientX - r.left, y: e.clientY - r.top },
-        pagePosition: { x: pageX, y: pageY },
-        modifiers: { control: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, platform: e.metaKey },
-      });
-    });
+      position = [e.clientX - r.left, e.clientY - r.top];
+    }
+    const [pageX, pageY] = this.point(e);
+    const held = MOUSE_BUTTONS.find(([bit]) => e.buttons & bit);
+    return {
+      position: { x: position[0], y: position[1] },
+      pagePosition: { x: pageX, y: pageY },
+      modifiers: { control: !!e.ctrlKey, alt: !!e.altKey, shift: !!e.shiftKey, platform: !!e.metaKey },
+      pressedButton: held ? held[1] : null,
+    };
   }
 
   op_ts([, id, states]) {
@@ -4787,15 +4804,20 @@ class Player {
     return [(d * x - c * y) / det, (a * y - b * x) / det];
   }
 
-  /** Mouse motion follows the hit view, even during pointer capture. */
+  /**
+   * `onMouseMove` of the views under the mouse and the views they are in
+   * (inside out), with or without a button down. Mouse motion follows the
+   * hit view, even during pointer capture. The engine keeps the latest
+   * per view for the frame.
+   */
   mouseMoved(e) {
     if (e.pointerType !== "mouse" || !this.mouseTracked.size) return;
     const target = document.elementFromPoint(e.clientX, e.clientY);
     if (!target || !this.root.contains(target)) return;
     for (const el of this.ancestors(this.viewOf(target))) {
       if (!el._events?.has("onMouseMove")) continue;
-      const point = this.mousePoint(el, e);
-      if (point) this.event(el._id, "onMouseMove", { x: point[0], y: point[1] });
+      const payload = this.mouseEvent(el, e);
+      if (payload) this.event(el._id, "onMouseMove", payload);
     }
   }
 
@@ -4925,24 +4947,21 @@ class Player {
   /**
    * A modifier key went down or up while the mouse rests over the page
    * with no button down: the hovered views that listen hear
-   * `onHoverMove` again where it is, with the modifiers as they are now
+   * `onMouseMove` again where it is, with the modifiers as they are now
    * (an editor underlines a definition while Mod is held), as they would
    * on the next move.
    */
   modifiersChanged(e) {
-    if (!MODIFIER_KEYS.has(e.key) || e.repeat || !this.hover || this.hoverButtons) return;
+    if (!MODIFIER_KEYS.has(e.key) || e.repeat || !this.hover || this.hoverButtons || !this.mouseTracked.size) return;
     const [x, y] = this.hover;
     const target = document.elementFromPoint(x, y);
     if (!target || !this.root.contains(target)) return;
-    const r = this.root.getBoundingClientRect();
+    // The mouse where it rests, with the keys as they are now.
+    const at = { clientX: x, clientY: y, buttons: 0, ctrlKey: e.ctrlKey, altKey: e.altKey, shiftKey: e.shiftKey, metaKey: e.metaKey };
     for (const el of this.ancestors(this.viewOf(target))) {
-      if (!el._hoverIn || !el._events?.has("onHoverMove")) continue;
-      const b = el.getBoundingClientRect();
-      this.event(el._id, "onHoverMove", {
-        position: { x: x - b.left, y: y - b.top },
-        pagePosition: { x: x - r.left, y: y - r.top },
-        modifiers: { control: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, platform: e.metaKey },
-      });
+      if (!el._hoverIn || !el._events?.has("onMouseMove")) continue;
+      const payload = this.mouseEvent(el, at);
+      if (payload) this.event(el._id, "onMouseMove", payload);
     }
   }
 
@@ -5347,6 +5366,9 @@ class Player {
 
   pointerDown(e) {
     this.lastPointer = e.pointerType;
+    // A press without a move still holds a button: a modifier key then
+    // fires no hover move (`modifiersChanged`).
+    if (e.pointerType === "mouse") this.hoverButtons = e.buttons;
     Player.active = this;
     if (e.button > 0) return;
     if (e.pointerType === "mouse" && this.desktopUI && this.grabBar(e)) return;
@@ -5556,6 +5578,7 @@ class Player {
   }
 
   pointerUp(e, cancelled) {
+    if (e.pointerType === "mouse") this.hoverButtons = e.buttons;
     const p = this.pointers.get(e.pointerId);
     if (!p) return;
     if (p.mode === "bar") {

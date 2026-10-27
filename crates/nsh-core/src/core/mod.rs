@@ -582,8 +582,8 @@ impl Node {
         }
         // A disabled view still shows its hint, as the desktops' do.
         if self.overlay_watched & overlay::watch::HINT != 0 {
-            events.set(EventKind::HoverIn, true);
-            events.set(EventKind::HoverOut, true);
+            events.set(EventKind::MouseEnter, true);
+            events.set(EventKind::MouseLeave, true);
         }
         events
     }

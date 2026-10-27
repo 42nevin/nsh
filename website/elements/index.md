@@ -212,21 +212,23 @@ desktop browsers, with an iPad's pointer or a Mac's mouse on iOS, and with a mou
 
 | Prop | Rust | Type | Description |
 |---|---|---|---|
-| `onHoverIn` | `.on_hover_in(..)` | `() => void` | The mouse came over the view or a view inside it. |
-| `onHoverMove` | `.on_hover_move(..)` | `(e: HoverEvent) => void` | The mouse moved over the view (or a view inside it) with no button down, or a modifier key was pressed or released while it rests there. |
-| `onHoverOut` | `.on_hover_out(..)` | `() => void` | The mouse left the view and the views inside it, or the window. |
+| `onMouseEnter` | `.on_mouse_enter(..)` | `(e: MouseEvent) => void` | The mouse came over the view or a view inside it (the DOM's `mouseenter`). |
+| `onMouseMove` | `.on_mouse_move(..)` | `(e: MouseEvent) => void` | The mouse moved over the view (or a view inside it), with or without a button down, or a modifier key was pressed or released while it rests there with none down (the DOM's `mousemove`). |
+| `onMouseLeave` | `.on_mouse_leave(..)` | `(e: MouseEvent) => void` | The mouse left the view and the views inside it, or the window; `e` is where it was last (the DOM's `mouseleave`). |
 
-Like CSS `:hover`, a view counts as hovered while the mouse is over it or over anything inside it, so the views around
-the one under the mouse hear `onHoverIn` too (from the outside in; `onHoverOut` from the inside out). The events come
-after the fact and never on touches; a move with a button down is a touch (`onTouchMove`, the responder). A view removed
-from under the mouse hears `onHoverOut`, on Linux and Windows at the next mouse move.
+Like CSS `:hover` and the DOM's `mouseenter`, a view counts as hovered while the mouse is over it or over anything
+inside it, so the views around the one under the mouse hear `onMouseEnter` too (from the outside in; `onMouseLeave`
+from the inside out). The events come after the fact and never on touches. A view removed from under the mouse hears
+`onMouseLeave`, on Linux and Windows at the next mouse move.
 
-`HoverEvent` says where the mouse is, as GPUI's `MouseMoveEvent` does: `position` in the view (a `Point` in points, its
-transforms undone), `pagePosition` in the root view it is in, as touches give it, and the `modifiers` held (`control`,
-`alt`, `shift`, `platform`: Command on Apple platforms, the Windows key elsewhere); in Rust `position`, `page_position`
-and `modifiers`. Moves
-come at most once a frame, the latest one, and always before the `onHoverOut` that follows them, so a handler can
-redraw on each move:
+`MouseEvent` says where the mouse is, as GPUI's `MouseMoveEvent` does: `position` in the view (a `Point` in points, its
+transforms undone), `pagePosition` in the root view it is in, as touches give it, the `modifiers` held (`control`,
+`alt`, `shift`, `platform`: Command on Apple platforms, the Windows key elsewhere), and `pressedButton`, the button held
+down (`"left"`, `"right"`, `"middle"`, `"back"` or `"forward"`, GPUI's `MouseButton`) or `null`; in Rust `position`,
+`page_position`, `modifiers` and `pressed_button`. On the desktops and the web a drag is also a touch (`onTouchMove`,
+the responder), and its moves reach `onMouseMove` with `pressedButton` set: feedback that only follows the hover skips
+those; on iOS and Android the hover reports the pointer with no button down. Moves come at most once a frame, the
+latest one, and always before the `onMouseLeave` that follows them, so a handler can redraw on each move:
 
 ```rust tabs
 // A crosshair over a chart.
@@ -234,8 +236,8 @@ let at = signal(None::<Points>);
 
 view()
     .h(px(200.0))
-    .on_hover_move(move |e: &HoverEvent| at.set(Some(e.position.x)))
-    .on_hover_out(move || at.set(None))
+    .on_mouse_move(move |e: &MouseEvent| at.set(Some(e.position.x)))
+    .on_mouse_leave(move |_: &MouseEvent| at.set(None))
     .child(when(move || at.get().is_some(), move || {
         view()
             .absolute()
@@ -251,7 +253,7 @@ view()
 // A crosshair over a chart.
 const at = signal<number | null>(null);
 
-<View onHoverMove={(e) => at.set(e.position.x)} onHoverOut={() => at.set(null)} style={{ height: 200 }}>
+<View onMouseMove={(e) => at.set(e.position.x)} onMouseLeave={() => at.set(null)} style={{ height: 200 }}>
   <If when={at() !== null}>
     <View style={{ position: "absolute", left: at()!, top: 0, bottom: 0, width: 1, backgroundColor: "#888" }} />
   </If>
