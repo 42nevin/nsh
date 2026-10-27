@@ -6,7 +6,8 @@
 use nsh_core::{
     Bounds, Points, Ripple, TouchPhase, TouchPoint,
     animation::{Curve, EaseMode},
-    ui::{Animation, BoxShadow, TouchEvent, prelude::*},
+    element::{Animation, BoxShadow, TouchEvent},
+    prelude::*,
 };
 
 use crate::ui::{
@@ -756,7 +757,7 @@ fn pointer_events() -> impl IntoElement {
                 "Taps on the hatched band reach the button",
                 "Clicks on the hatched band reach the button",
             ),
-            "pointerEvents=\"none\"",
+            "pointerEvents: \"none\"",
         ))
 }
 

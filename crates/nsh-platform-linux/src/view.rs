@@ -68,8 +68,8 @@ pub(crate) struct ViewState {
     pub(crate) scroll: Option<ScrollState>,
     /// Text content (text views).
     pub(crate) text: Option<crate::text::DrawnText>,
-    /// The part of its selection area's selection its text draws (UTF-16,
-    /// `start < end`; [`crate::selection_area`]).
+    /// The part of its selectable view's selection its text draws (UTF-16,
+    /// `start < end`; [`crate::selectable_view`]).
     pub(crate) area_selection: Option<(u32, u32)>,
     /// Image content (image views).
     pub(crate) image: Option<crate::image::ImageState>,
@@ -119,16 +119,6 @@ impl ViewState {
     pub(crate) fn opacity(&self) -> f32 {
         let live = self.live.as_ref().map_or(1.0, |l| l.opacity());
         self.anim.opacity.unwrap_or(self.style.opacity) * self.fade * live
-    }
-
-    /// Its shadow, with animated color, opacity and radius.
-    pub(crate) fn shadow(&self) -> nsh_core::Shadow {
-        let mut s = self.style.shadow;
-        let a = &self.anim;
-        s.color = a.shadow_color.unwrap_or(s.color);
-        s.opacity = a.shadow_opacity.unwrap_or(s.opacity);
-        s.radius = a.shadow_radius.unwrap_or(s.radius);
-        s
     }
 
     /// Its borders, with an animated color.
