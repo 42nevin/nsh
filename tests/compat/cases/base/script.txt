@@ -1918,7 +1918,7 @@ covers [nsh/base] Superscript
 covers [nsh/base] TaskItem
 covers [nsh/base] TaskList
 covers [nsh/base] TextAlign
-covers [nsh/base] TextStyle
+covers [nsh/base] RichTextStyle
 covers [nsh/base] TrailingNode
 covers [nsh/base] Typography
 covers [nsh/base] Underline

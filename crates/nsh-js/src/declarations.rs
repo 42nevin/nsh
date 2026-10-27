@@ -860,6 +860,40 @@ declare const text: "export default ignored";
         }
     }
 
+    /// No module declares a value (a class, function or constant) named as
+    /// a type `types.d.ts` declares: it would shadow the shared type
+    /// everywhere in that module (an extension class `TextStyle` made
+    /// `StyleProp<TextStyle>` mean the class). The same type alias
+    /// generated in both is the same type.
+    #[test]
+    fn no_module_shadows_a_shared_type() {
+        let files = bodies(&[nsh_base::registry().into()]);
+        let (_, types) = files
+            .iter()
+            .find(|(path, _)| path == "nsh/types.d.ts")
+            .expect("types.d.ts");
+        let shared = exported_names(types);
+        let mut clashes = Vec::new();
+        for (path, body) in files.iter().filter(|(path, _)| path != "nsh/types.d.ts") {
+            let (_, local) = references(body);
+            let value = |name: &str| {
+                ["class", "function", "const"].iter().any(|kind| {
+                    body.contains(&format!("declare {kind} {name}<"))
+                        || body.contains(&format!("declare {kind} {name} "))
+                        || body.contains(&format!("declare {kind} {name}("))
+                        || body.contains(&format!("declare {kind} {name}:"))
+                })
+            };
+            clashes.extend(
+                local
+                    .iter()
+                    .filter(|name| shared.contains(name) && value(name))
+                    .map(|name| format!("{path}: {name}")),
+            );
+        }
+        assert!(clashes.is_empty(), "{clashes:?}");
+    }
+
     /// Each web class declares the members its spec defines, and no others.
     #[test]
     fn web_classes_declare_their_members() {
