@@ -19,7 +19,7 @@ use nsh_platform_macos::{
     objc2_app_kit::{
         NSAccessibility, NSAccessibilityUnignoredChildren, NSApplication, NSApplicationDelegate,
         NSBackingStoreType, NSBezelStyle, NSButton, NSButtonType, NSEvent, NSEventModifierFlags,
-        NSEventType, NSView, NSWindow, NSWindowStyleMask,
+        NSEventType, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
     },
     objc2_foundation::{
         NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -104,6 +104,9 @@ fn make_window(
     unsafe {
         window.setReleasedWhenClosed(false);
     }
+    // Keep the owned AX target visible when the shared desktop changes Space.
+    // Explicit hide/close and subtree visibility still follow normal AppKit behavior.
+    window.setCollectionBehavior(NSWindowCollectionBehavior::CanJoinAllSpaces);
     window.setTitle(&NSString::from_str(title));
     let components = Components::default();
     mixed_tsx::register(&components, mtm, events, shared);
