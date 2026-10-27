@@ -8,6 +8,17 @@ API", "Use precise domain words" and "Callback and event wording" in `gpui-kit/w
 (cited below as *guides*). The table at the end lists the renames decided so far; until they land, the code still has
 the old names.
 
+## Features as well as names
+
+GPUI Kit's components are long proven in its apps, so a component of `nsh-base` takes its features from there too,
+not only its names (decided by the user, 2026-10-27). Before a component is written or reviewed, list the options of
+its counterpart: `gpui-base`'s builder (`gpui-kit/crates/base/src`), `gpui-component`'s builder and state
+(`gpui-kit/crates/component/src/<name>.rs`, its `pub fn`s) and the props `gpui-shell` materializes for scripts
+(`gpui-kit/crates/shell/src/materialize/components/`). The component covers each one: as a prop, as a part
+(`<part>Class` / `<part>Style`, a slot), or as the app's own markup where NSH leaves the look to the app (a trigger's
+placeholder, icon or title prefix in the app's `trigger` slot). An option it does not cover gets a row in the table
+at the end with the reason.
+
 ## Where names come from
 
 Each part of the API takes its names from one source, so an app's code never mixes vocabularies:
