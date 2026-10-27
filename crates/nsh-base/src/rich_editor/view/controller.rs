@@ -134,6 +134,9 @@ struct Sink {
     composing: bool,
     /// The composition whose commit is still to come (its id).
     composition: Option<i64>,
+    /// The sink's text last reported while composing, taken when the
+    /// composition ends.
+    held: Option<String>,
 }
 
 /// The view's controller. Cloned into the closures that need it.
@@ -581,6 +584,18 @@ impl Rv {
 
     /// The sink's text changed: what was deleted and typed since.
     pub(crate) fn sink_changed(&self, text: &str) {
+        // Platforms report the uncommitted text (pinyin, kana) as the sink's
+        // while it lasts; the document takes only the commit.
+        if self.sink.borrow().composing {
+            self.sink.borrow_mut().held = Some(text.to_owned());
+            self.sink_value.set(text.to_owned());
+            return;
+        }
+        self.sink_edited(text);
+    }
+
+    /// Applies the sink's `text`: what was deleted and typed since.
+    fn sink_edited(&self, text: &str) {
         let (deleted, inserted, composed) = {
             let mut sink = self.sink.borrow_mut();
             let base = match sink.emptied.take() {
@@ -633,7 +648,7 @@ impl Rv {
     /// shows at the caret, the document waits for the commit (one
     /// transaction, grouped in the history with the composition's).
     pub(crate) fn composition_changed(&self, composing: bool, text: &str) {
-        {
+        let held = {
             let mut sink = self.sink.borrow_mut();
             if composing && sink.composition.is_none() {
                 let id = self.next_composition.get();
@@ -641,8 +656,12 @@ impl Rv {
                 sink.composition = Some(id);
             }
             sink.composing = composing;
-        }
+            if composing { None } else { sink.held.take() }
+        };
         self.session.set_composing(composing);
+        if let Some(held) = held {
+            self.sink_edited(&held);
+        }
         self.composition
             .set((composing && !text.is_empty()).then(|| text.to_owned()));
     }
