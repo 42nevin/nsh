@@ -104,7 +104,8 @@ a source map and the app's id (for its storage); `nsh_bundle_harden` the hardeni
 
 ### What a published app downloads
 
-`examples/gallery` as `nsh package --target web` publishes it (2026-10; `gzip -9`, `brotli -q 11`). Each demo is a
+Historical measurement at `f94e17a` (#58, 2026-10-18), before the standard modules and TextView:
+`examples/gallery` as `nsh package --target web` published it (`gzip -9`, `brotli -q 11`). Each demo is a
 module the index loads with `import()` (the gallery's `lazy`), so it is a chunk of its own: the first load is the page,
 the runtime, the app's shell and the demo shown first (Stocks, in the desktop layout; none in the phone layout's
 index). The other demos, 18 chunks of 265 KB (72 KB gzipped) in all, and the fonts they register (Pacifico, with
@@ -146,18 +147,123 @@ Published apps' runtime has no QuickJS parser ("Two runtimes"): 0.17 MB, 40 KB w
 declaration text (the documentation and TypeScript of the specs, which only make
 `.nsh/types`: `docs/dev/tooling.md`): 69 KB, 20 KB with brotli.
 
-Where the rest goes (raw, before compression): QuickJS about 0.6 MB of code without its parser, the web APIs of `nsh-js` 0.36 MB (streams alone 0.14 MB), the core and Taffy about 0.65 MB, `url`'s IDNA with
-ICU4X's normalization data 0.16 MB, generic code of `core` / `alloc` / `hashbrown` 0.6 MB, data 0.43 MB. Tried and
-left out:
+### Current release size and attribution
 
-- `wasm-opt -Oz` (binaryen): 15% smaller raw, but no smaller (slightly larger) with brotli or gzip.
-- An ASCII-only IDNA (`idna_adapter` 1.0): 33 KB less with brotli, but non-ASCII host names would fail to parse;
-  `idna_adapter` 1.1 (the unicode-rs crates) is larger than ICU4X.
-- Rust at `opt-level = "s"`: larger.
+The figures above describe #58, not the current feature set. At `0d385b2a` (2026-10-27), release packages of both
+`examples/counter` and `examples/gallery` contain the same `nsh.<digest>.wasm`: the default runtime registers all
+of `nsh/base`, syntax highlighting and the portable standard modules. Splitting the app's JS does not remove Rust
+from that runtime. `nsh-dev.wasm` additionally supports development/testing; `nsh-playground.wasm` also compiles TSX.
+Neither is the artifact measured here.
 
-Measure with names kept (`CARGO_PROFILE_WEB_STRIP=false`) and `twiggy top` / `twiggy dominators`, or a linker map
-(`RUSTFLAGS="-C link-arg=--Map=map.txt"`, which also sizes the data segment by symbol). Compare raw, `gzip -9` and
-`brotli -q 11` sizes: pages are served compressed, and a change can shrink the raw module and not the compressed one.
+Measured on Linux x86_64 with Rust 1.99.1, clang/LLVM 19.1.7, the unchanged `web` profile and `bytecode-only` feature.
+Values are decimal **bytes**; gzip is level 9 without a timestamp, Brotli is CLI 1.1.0 quality 11.
+
+| Release Wasm, counter and gallery | Raw | gzip | Brotli |
+|---|---:|---:|---:|
+| `0d385b2a` | 15,062,914 | 5,149,366 | 3,906,836 |
+| Shared `JsObject` field decoder | 14,913,415 | 5,131,112 | 3,904,677 |
+| Reduction | 149,499 | 18,254 | 2,159 |
+
+The decoder shares field lookup, null/undefined checks and error formatting between fields of the same type.
+On Wasm it stays out of line: otherwise LTO repeats those operations in every generated style part decoder.
+Required fields, defaults, nullable fields, errors and supported APIs retain their behavior. The smaller transfer
+saving is expected: repeated machine code already compresses well.
+
+The baseline has **11,599,694 bytes of code**, **3,374,329 bytes of data**, and 88,891 bytes of other sections and
+headers. It contains no custom/debug sections. The 8 MiB stack is reserved linear memory, not downloaded data.
+A named build with a linker map gives this attribution (aliases counted once per code offset):
+
+| Code, by leading crate of the demangled symbol | Bytes |
+|---|---:|
+| `nsh_core` | 2,069,299 |
+| `nsh_base` | 1,811,942 |
+| `core`, `alloc`, `hashbrown` | 2,055,243 |
+| `nsh_js` | 681,672 |
+| `quickjs_jit_stdlib` | 623,188 |
+| `rquickjs_core` | 497,443 |
+| `regex_automata` | 280,050 |
+| `brotli` | 260,787 |
+| `taffy` | 242,633 |
+
+This is approximate ownership under fat LTO, not additive savings from disabling features: generic code can
+refer to several crates. The largest functions include regex strategy construction (53,978 bytes), QuickJS's
+`JS_CallInternal` (50,150), `TextViewStyles::from_js` (34,082), `TextViewClasses::from_js` (29,477), HTML tree
+builder `step` (28,730) and crypto `KeyAlgorithm::from_js` (28,257).
+
+Data attributed to input archives includes `two_face` 922,018 bytes (921,717 in its syntax blob), `brotli` 550,833
+(262,144 in its logarithm table), `regex_syntax` 313,620, `markup5ever` 255,431, `nsh_base` 219,078,
+`brotli_decompressor` 134,824, `markdown` 110,798, QuickJS 84,829, `icu_normalizer` 70,363 and `crypto_primes` 49,135.
+The syntax definitions, Unicode/HTML tables and compression/crypto code implement existing behavior.
+
+As a ranking aid, compressing each category independently with Brotli 11 gives: syntax data 801,381 bytes;
+core code 390,130; base code 385,464; C code (QuickJS, libc and compression) 250,204; Brotli tables 210,574;
+JS host code 187,541; Rust `core` code 157,527; standard-library wrapper code 129,344; Rust `alloc` code 111,287.
+These concatenate function bodies or data ranges in module order and compress them separately. They are **not
+additive shares of the whole-file transfer or measured savings from removing a feature**: dictionaries are shared
+when the complete module is compressed. A byte comparison using parsed data-segment addresses finds two duplicate ranges of at least 1 KiB:
+3,016 bytes shared by base/Unicode segmentation and 2,048 by Brotli encode/decode. These total only 5,064 raw
+bytes; the largest tables occur once. Linker-map file offsets alone are unsuitable for this comparison.
+
+The release symbol table contains no `JS_EvalInternal`, TSX compiler or rolldown; remaining `js_parse*` / `JS_Parse*`
+functions parse JSON and numbers. `oxc_sourcemap` supports error locations, not source compilation. Compression
+encoders are reachable through the standard `zlib` APIs, so deleting them would change the supported API.
+
+History explains why the old transfer estimate is no longer a budget for the full runtime: #145 (`3b19b22`)
+added portable buffer/crypto/compression APIs, #227 (`5a20cee`) added TextView and recorded +0.86 MB Brotli,
+and #452, #458 and #494 added Editor/DiffView, DataTable and RichEditor. These are historical reports and source
+changes, not historical binaries rebuilt with the current toolchain.
+
+Binaryen 120 `wasm-opt -Oz --all-features` on the baseline produces 12,221,585 raw / 5,253,410 gzip / 4,076,402
+Brotli bytes: it shrinks raw bytes but increases transfer, so it is not part of packaging. With the shared decoder,
+Rust `opt-level = "s"` also regresses all sizes: 16,754,854 / 5,621,073 / 4,192,241 bytes. QuickJS remains at `-O3`;
+a current `-Os` build saves another 49,426 Brotli bytes but slows the measured interpreter workload. An interleaved,
+otherwise idle Chromium comparison (five fresh pages per runtime, eight batches of 160,000 object allocations,
+sorts and numeric iterations; first batch omitted) gives median 158 ms baseline, 159 ms shared decoder,
+189 ms QuickJS `-Os`, 165 ms QuickJS `-O2`, and 162 ms C `-flto`. Every checksum agrees. This is one workload,
+not a comprehensive performance guarantee. C LTO saves only 4,346 Brotli bytes over the decoder and slightly
+grows gzip, while adding toolchain coupling; it is not selected. IDNA, syntax languages and standard modules remain
+available. A sub-1 MB raw or compressed default runtime needs a separate design decision, such as loading native
+modules/data on demand or an explicit app-specific runtime contract; removing defaults is not a size optimization.
+The present Rust-app generation still registers all of `nsh/base`; JS chunks do not split native code. Moving syntax
+data out first could defer roughly 0.8 MB, but alone would still leave several MB. Lazy native modules need an
+ABI/ownership boundary and loading rules for synchronous APIs; an opt-in app-specific build needs a registry
+that conservatively retains dynamic/namespace imports and a Rust build/distribution strategy. These are separate
+architecture decisions, not silent changes to the default runtime.
+
+### Reproducing and checking a budget
+
+Build the CLI, then use the supported packaging path with identical profiles for both workloads:
+
+```sh
+cargo build -p nsh-cli
+./target/debug/nsh package examples/counter --target web -o target/size/counter
+./target/debug/nsh package examples/gallery --target web -o target/size/gallery
+python3 scripts/wasm-size.py target/size/counter/Counter/nsh.*.wasm \
+  --max-raw 14950000 --max-gzip 5150000 --max-brotli 3950000
+python3 scripts/wasm-size.py target/size/gallery/Gallery/nsh.*.wasm \
+  --max-raw 14950000 --max-gzip 5150000 --max-brotli 3950000
+```
+
+The script requires `brotli`, prints the module's SHA-256 and each size, and fails if any supplied budget is
+exceeded. Without limits it reports only. These limits guard this full runtime on the measured toolchain; they
+are regression ceilings, not the original 1 MB product goal. Reassess them explicitly when features or toolchains
+change. Use fresh output directories so each glob selects exactly one module.
+
+For attribution, keep names and request a linker map without changing dependency flags from the CLI build:
+
+```sh
+cargo rustc -p nsh-platform-web --profile web --features bytecode-only \
+  --target wasm32-unknown-unknown \
+  --config 'target.wasm32-unknown-unknown.rustflags=["--cfg", "getrandom_backend=\"custom\""]' \
+  -- -C strip=none -C link-arg=--Map=target/web-size.map
+wasm-objdump -h target/wasm32-unknown-unknown/web/nsh_platform_web.wasm
+```
+
+Use `llvm-cxxfilt` to demangle the map's symbols; deduplicate aliases by code offset. The named module includes
+analysis-only sections and must not be used for transfer measurements. Measure the packaged file instead.
+Compressed sizes are potential transfer sizes: the host must actually negotiate `Content-Encoding: gzip` or `br`.
+The local `nsh package --run` static server sends raw bytes; a raw download does not become smaller just because a
+Brotli size was reported. Verify response headers and transferred bytes on the intended host.
 
 ### Apps with Rust components
 
