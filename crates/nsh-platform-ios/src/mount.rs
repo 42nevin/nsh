@@ -562,6 +562,8 @@ pub(crate) struct Mounter {
     hosts: rustc_hash::FxHashMap<NodeId, NodeId>,
     /// Stacks whose screens changed in the current batch.
     dirty_stacks: Vec<NodeId>,
+    /// A retained tab changed visibility; sync the newly visible stack.
+    bottom_bar_dirty: bool,
     /// Stacks whose screens changed during a push or pop transition: they
     /// catch up when it ends (UIKit breaks transitions that start while
     /// another one is running).
@@ -662,6 +664,7 @@ impl Mounter {
             shaders: crate::shader::Shaders::new(&target_for_link),
             hosts: Default::default(),
             dirty_stacks: Vec::new(),
+            bottom_bar_dirty: false,
             deferred_stacks: Vec::new(),
             dirty_headers: Vec::new(),
             dirty_modals: Vec::new(),
@@ -1390,7 +1393,11 @@ impl Mounter {
                     ..
                 }) = self.slot_mut(id)
                 {
+                    let hides = config.hides_bottom_bar_when_pushed;
                     screen.config = *config;
+                    // Before the push that shows it: `willShow` reads this the
+                    // moment the screen goes on the stack.
+                    screen.set_hides_bottom_bar(hides);
                     self.dirty_headers.push(id);
                     if let Some(&stack) = self.hosts.get(&id) {
                         self.dirty_stacks.push(stack);
@@ -2078,6 +2085,12 @@ impl Mounter {
     fn set_view_style(&mut self, id: NodeId, style: ViewStyle) {
         let mtm = self.mtm;
         let target = self.target.clone();
+        if self
+            .slot(id)
+            .is_some_and(|s| s.style.hidden != style.hidden)
+        {
+            self.bottom_bar_dirty = true;
+        }
         let Some(s) = self.slot_mut(id) else { return };
         let view = s.native.view().retain();
         let layer = view.layer();
@@ -3002,12 +3015,22 @@ impl Mounter {
                     _ => None,
                 });
             stack.reconcile(&screens, leaving);
+            // A page whose options arrive while it is already on screen: the
+            // stack itself does not change, and the bar still has to follow.
+            stack.sync_bottom_bar();
             if let Some(Slot {
                 native: Native::Stack(stack),
                 ..
             }) = self.slot_mut(id)
             {
                 stack.contain();
+            }
+        }
+        if std::mem::take(&mut self.bottom_bar_dirty) {
+            for slot in self.views.iter().flatten() {
+                if let Native::Stack(stack) = &slot.native {
+                    stack.sync_bottom_bar();
+                }
             }
         }
         let mut headers = std::mem::take(&mut self.dirty_headers);
