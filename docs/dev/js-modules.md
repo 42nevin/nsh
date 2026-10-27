@@ -144,7 +144,8 @@ the work runs as core tasks on the engine's tokio runtime (`fs/promises` on its 
 adds what needs the VM: the global `process` (the module's default object, one per VM) and `nextTick`, a JS job.
 `websocket`'s URL, options, grant (`Access::allows_websocket`) and limits are checked in the call, the handshake
 uses the configured `WebSocketTransport` (browser WebSocket on web, the native transport elsewhere). On native hosts a task spawned per connection drives the socket (answering pings, keeping up to eight unread
-messages); connections count under the VM's `Quotas` kind `runtime::WEBSOCKETS`, which the global `WebSocket`
+messages). Native TLS uses the host's installed crypto provider, or a connection-local ring provider, with
+WebPKI trust roots; opening a connection leaves the process-wide provider unchanged. Connections count under the VM's `Quotas` kind `runtime::WEBSOCKETS`, which the global `WebSocket`
 (`nsh-js` `standard/websocket.rs`, made on first use) shares. `os.homedir()` and `process.dataDir` are metadata
 and grant no file access. On WebAssembly, `os.homedir()` returns a typed error and `process.env` an empty object;
 both avoid `std::env`, whose accessors panic on `wasm32-unknown-unknown`.
