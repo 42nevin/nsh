@@ -1925,3 +1925,12 @@ covers [nsh/base] Underline
 covers [nsh/base] createRichEditor
 covers [nsh/base] defineExtension
 covers [nsh/base] richExtension
+
+# base-rich-editor-view
+tap id:case-base-rich-editor-view
+expect BubbleMenu
+tap text:ToggleMenu
+absent BubbleMenu
+tap text:ToggleMenu
+expect BubbleMenu
+covers [props] RichEditor.bubbleMenu
