@@ -17,9 +17,8 @@ use nsh_engine::{Engine, Environment};
 
 use super::components::start_with;
 
-const APP: &str = r#"import { mount, signal, Text } from "nsh";
+const APP: &str = r#"import { mount, signal, Text, keymap } from "nsh";
 import { Menu } from "nsh/desktop";
-import { keymap } from "nsh/keymap";
 
 const chosen = signal("");
 const phase = signal("ready");

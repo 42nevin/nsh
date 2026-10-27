@@ -141,7 +141,7 @@ fn editing(surface: &Surface, window: &NSWindow) -> Option<bool> {
 }
 
 /// Normalize an AppKit key-down or key-up event with the same rules as
-/// `nsh/keymap`. Non-key events and keys without a supported identity return
+/// NSH's shortcut monitor. Non-key events and keys without a supported identity return
 /// `None`. Shift remains a modifier; non-ASCII layouts use the US key fallback.
 ///
 /// Native embedding hosts can match the result with [`Keymap::find`] after

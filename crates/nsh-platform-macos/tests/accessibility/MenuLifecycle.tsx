@@ -1,5 +1,4 @@
-import { mount, View } from "nsh";
-import { nativeComponent } from "nsh/native";
+import { mount, View, nativeComponent } from "nsh";
 import { Menu } from "nsh/desktop";
 
 const Probe = nativeComponent("MenuLifecycleProbe", {

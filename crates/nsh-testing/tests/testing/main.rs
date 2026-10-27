@@ -128,7 +128,7 @@ fn headless_retires_every_application_menu_it_does_not_display() {
     let bundle = Bundle::source(
         r#"
         import { Menu } from 'nsh/desktop';
-        import { keymap } from 'nsh/keymap';
+        import { keymap } from 'nsh';
         for (let i = 0; i < 16; i++) {
             Menu.setApplicationMenu([{ label: 'Not displayed', onSelect() {
                 throw new Error('headless kept a discarded application menu callable');

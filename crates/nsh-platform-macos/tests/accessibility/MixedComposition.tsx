@@ -1,5 +1,5 @@
-import { mount, signal, View, Scroll, Text, Input } from 'nsh';
-import { nativeComponent } from 'nsh/native';
+import { mount, signal, View, Scroll, Text, nativeComponent } from 'nsh';
+import { Input } from 'nsh/base';
 const NativeAction = nativeComponent('mixed.action', { props: ['id', 'title', 'enabled'], events: ['press'] });
 const Bridge = nativeComponent('mixed.bridge', { events: ['control'] });
 const caseName = '__CASE__';

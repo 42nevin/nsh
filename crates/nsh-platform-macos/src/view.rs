@@ -729,7 +729,7 @@ define_class!(
                 .ivars()
                 .state
                 .try_borrow()
-                .map_or(true, |s| crate::access::hides_children(&s));
+                .is_ok_and(|s| crate::access::hides_children(&s));
             if hides {
                 Some(NSArray::new())
             } else {
