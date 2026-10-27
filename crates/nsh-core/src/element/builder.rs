@@ -19,9 +19,10 @@ use crate::{
 
 /// A handler of `E` on an element: a closure (`move |e: &E| ..`) that
 /// writes the signals it captured. It runs under the owner current when it
-/// was made (the component, region or row whose view made it), so what it
-/// makes (signals, animated values, element refs, tasks) is that owner's
-/// and goes with it; once that owner is disposed it no longer runs.
+/// was made (the component, the run of a region or the row whose view made
+/// it), so what it makes (signals, animated values, element refs, tasks) is
+/// that owner's and goes with it; once that owner is disposed it no longer
+/// runs, not even for an event already queued for its node.
 pub struct Listener<E: ?Sized> {
     f: Rc<dyn Fn(&E)>,
     owner: super::Owner,
@@ -38,6 +39,16 @@ impl<E: ?Sized + 'static> Listener<E> {
             f,
             owner: super::Owner::current_or_detached(),
         }
+    }
+
+    /// Whether both listeners belong to the same region run or component.
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        self.owner == other.owner
+    }
+
+    /// Whether this is the same installed callback (including its owner).
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        self.same_owner(other) && Rc::ptr_eq(&self.f, &other.f)
     }
 
     /// Calls it with `event`, under its owner; not once that owner is
