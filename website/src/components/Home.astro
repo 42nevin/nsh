@@ -59,9 +59,9 @@ const copy = zh
         ['gauge', 'Retained Mode', '只更新变化的视图，120 FPS，静止时几乎不占 CPU'],
         ['spark', 'AI-Friendly', '一套模型、一个 nsh 命令行；发布后还能下发 AI 生成的签名界面'],
       ],
-      start: '阅读简介',
+      start: '快速开始',
       try: '在线试用',
-      gallery: '打开示例应用',
+      gallery: '示例',
       meta: [
         ['scale', '开源 · Apache-2.0'],
         ['building', '由长桥（Longbridge）构建'],
@@ -115,9 +115,9 @@ const copy = zh
         ['gauge', 'Retained views', 'only what changed is updated: 120 FPS, near-idle CPU at rest'],
         ['spark', 'AI-friendly', 'one app model, one nsh command line, and signed AI-generated UI delivered after release'],
       ],
-      start: 'Read the introduction',
-      try: 'Try the playground',
-      gallery: 'Open the gallery',
+      start: 'Get started',
+      try: 'Playground',
+      gallery: 'Gallery',
       meta: [
         ['scale', 'Open source · Apache-2.0'],
         ['building', 'Built at Longbridge'],
@@ -267,7 +267,7 @@ const snippets: Record<string, string> = {
     `${cm('# ios · android · macos · windows · linux · gpui · web')}`,
   ].join('\n'),
 };
-const heroSnippet = `nsh init my-app ${k('--template')} ${st('rust')}`;
+const heroSnippet = 'nsh init my-app';
 
 // The same counter in both languages, Rust first.
 const langs = [
@@ -701,8 +701,8 @@ const icon = (name: string, size = 16) =>
   /* The accent's glow behind the device, as behind the app icon's mark. */
   .hero__inner { z-index: 1; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4rem; padding-top: 4.5rem; padding-bottom: 4.5rem; }
   .hero__copy { min-width: 0; max-width: 36rem; }
-  .eyebrow { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0.7rem; border: 1px solid color-mix(in srgb, var(--citrus) 28%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--citrus) 9%, transparent); color: var(--citrus); font-size: 0.78rem; font-weight: 600; }
-  .eyebrow__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--citrus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--citrus) 20%, transparent); }
+  .eyebrow { display: inline-flex; align-items: center; gap: 0.55rem; padding: 0.32rem 0.8rem 0.32rem 0.65rem; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in srgb, var(--foreground) 3%, transparent); color: var(--muted-foreground); font-size: 0.78rem; font-weight: 500; line-height: 1.2; letter-spacing: 0.01em; }
+  .eyebrow__dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--citrus); box-shadow: 0 0 8px color-mix(in srgb, var(--citrus) 70%, transparent); }
   h1 { margin: 1.25rem 0 0; font-size: clamp(2.6rem, 5.2vw, 4.1rem); line-height: 1.02; letter-spacing: -0.045em; font-weight: 750; }
   html[lang^="zh"] h1 { letter-spacing: -0.01em; line-height: 1.16; font-size: clamp(1.9rem, 4.2vw, 2.9rem); }
   .hero__lead { margin: 1.25rem 0 0; color: var(--muted-foreground); font-size: 1.1rem; line-height: 1.6; }
@@ -719,9 +719,13 @@ const icon = (name: string, size = 16) =>
   .hero__meta { display: flex; flex-wrap: wrap; column-gap: 1.25rem; row-gap: 0.45rem; margin: 1.25rem 0 0; padding: 0; list-style: none; color: var(--muted-foreground); font-size: 0.85rem; }
   .hero__meta li { display: flex; align-items: center; gap: 0.55rem; }
   .hero__meta :global(svg) { flex-shrink: 0; color: var(--faint); }
-  .hero__snippet { display: inline-flex; align-items: stretch; margin-top: 1.5rem; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--code-bg); box-shadow: var(--finish-inset); font: 0.78rem/1 var(--font-mono); overflow: hidden; max-width: 100%; }
-  .hero__snippet span { padding: 0.55rem 0.65rem; border-right: 1px solid var(--line); color: var(--faint); }
+  .hero__snippet { display: inline-flex; align-items: stretch; margin-top: 1.5rem; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--code-bg); box-shadow: var(--finish-inset); font: 0.78rem/1 var(--font-mono); overflow: hidden; max-width: 100%; }
+  .hero__snippet span { padding: 0.55rem 0.65rem; border-right: 1px solid var(--border); color: var(--faint); }
   .hero__snippet code { padding: 0.55rem 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--code-fg); }
+  /* On the light page a raised white field, as the chips above it, its
+     label on the muted surface. */
+  :global(html.light) .hero__snippet { background: var(--card); box-shadow: var(--shadow-raise); }
+  :global(html.light) .hero__snippet span { background: var(--muted); color: var(--muted-foreground); }
 
   /* The live chat in a card frame of the site's design (the card finish),
      a slim bar with the file and a live badge, the app on an inset surface;
@@ -729,7 +733,7 @@ const icon = (name: string, size = 16) =>
   .stage { --w: 392px; margin: 0; display: flex; flex-direction: column; align-items: center; gap: 1.1rem; }
   .device {
     width: var(--w); padding: 0 8px 8px; border: 1px solid var(--border); border-radius: 20px;
-    background: var(--card) var(--finish-card-bg); box-shadow: var(--finish-card), var(--shadow-window);
+    background: var(--card) var(--finish-card-bg); box-shadow: var(--finish-card);
   }
   .device__bar { display: flex; align-items: center; gap: 8px; height: 40px; margin: 0 -8px; padding: 0 14px; border-radius: 20px 20px 0 0; background: linear-gradient(180deg, color-mix(in srgb, var(--foreground) 3%, transparent), transparent); }
   .device__tile { display: grid; place-items: center; width: 22px; height: 22px; border: 1px solid var(--accent-border); border-radius: 7px; background: var(--finish-accent-bg); box-shadow: var(--finish-accent); color: var(--on-citrus); }
