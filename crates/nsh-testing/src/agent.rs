@@ -948,7 +948,7 @@ pub trait Native: Send + Sync {
         let _ = content;
         Err(
             "pasting in tests is not supported on this platform yet: run the test headless, \
-             or on macOS or iOS"
+             or on macOS, iOS or the web"
                 .into(),
         )
     }
