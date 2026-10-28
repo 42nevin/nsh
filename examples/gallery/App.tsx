@@ -2,7 +2,7 @@ import { computed, effect, type InputRef, mount, Scroll, signal, Text, untracked
 import { Animated, createAnimatedValue, Easing } from "nsh";
 import { platform, windowSize } from "nsh";
 import { isAvailable as hasWindow, titleBar, Window } from "nsh/desktop";
-import { Input, NavPage, NavStack } from "nsh/base";
+import { Input, NavPage, NavStack, Scrollbar } from "nsh/base";
 import { keymap } from "nsh";
 import { Storage } from "nsh";
 import { Icon } from "./icons";
@@ -10,7 +10,7 @@ import { TitleBar } from "./TitleBar";
 import { Toaster } from "./toast";
 import { type DemoEntry, nav, shownDemo } from "./nav";
 import { field } from "../nsh-gallery-ui/demo";
-import { Appear, colors, desktop, header, hovered, IconTile, lazy, Logo, PageHeader, Press, SIDEBAR, sidebarOpen, ThemeToggle, ToolButton } from "./ui";
+import { Appear, colors, desktop, header, hovered, IconTile, lazy, Logo, PageHeader, Press, scrollbarTheme, SIDEBAR, sidebarOpen, ThemeToggle, ToolButton } from "./ui";
 
 /** The demos: the apps built on NSH, then one demo per element in the
  * website's order (`nsh`'s primitives, then `nsh/base`'s components), styling,
@@ -448,6 +448,8 @@ function App() {
     Window.setTitleBar({ style: "hidden", height: 44 });
   }
   rememberDemo();
+  // Every scroll view and list draws the gallery's bar.
+  Scrollbar.setTheme(scrollbarTheme);
   return (
     <View style={{ flex: 1, backgroundColor: colors.background }}>
       <If when={!desktop()}>
