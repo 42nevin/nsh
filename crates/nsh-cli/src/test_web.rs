@@ -16,6 +16,7 @@ use std::{
 use nsh_core::{
     NodeId,
     geometry::{Bounds, Point, Points, Size, point},
+    keymap::shifted,
 };
 use nsh_dev::{
     DevServer,
@@ -205,7 +206,7 @@ fn dom_key(key: nsh_core::keymap::Key, shift: bool) -> Option<(String, String)> 
                 '\'' => "Quote".into(),
                 _ => return None,
             };
-            let typed = if shift { c.to_ascii_uppercase() } else { c };
+            let typed = if shift { shifted(c) } else { c };
             Some((typed.to_string(), code))
         }
     }
@@ -250,7 +251,15 @@ impl WebNative {
     /// A key's press and release. `commands` are the editing commands the
     /// key runs on macOS, where the browser leaves them to the system's
     /// key bindings (none reach it headless), as Playwright sends them.
-    fn press_key(&self, key: &str, code: &str, vk: u32, modifiers: u32, commands: &[&str]) {
+    fn press_key(
+        &self,
+        key: &str,
+        code: &str,
+        vk: u32,
+        modifiers: u32,
+        commands: &[&str],
+        text: Option<(&str, &str)>,
+    ) {
         let commands: &[&str] = if cfg!(target_os = "macos") {
             commands
         } else {
@@ -270,6 +279,11 @@ impl WebNative {
             down["type"] = "keyDown".into();
             down["text"] = "\r".into();
             down["unmodifiedText"] = "\r".into();
+        }
+        if let Some((typed, unmodified)) = text {
+            down["type"] = "keyDown".into();
+            down["text"] = typed.into();
+            down["unmodifiedText"] = unmodified.into();
         }
         if !commands.is_empty() {
             down["commands"] = json!(commands);
@@ -455,14 +469,6 @@ impl Native for WebNative {
         let stroke = nsh_core::keymap::Keystroke::parse_with(keys, cfg!(target_os = "macos"))
             .map_err(|e| e.to_string())?;
         let m = stroke.modifiers;
-        if !(m.ctrl || m.alt || m.cmd)
-            && let nsh_core::keymap::Key::Char(c) = stroke.key
-        {
-            // A character's key types it.
-            let typed = if m.shift { c.to_ascii_uppercase() } else { c };
-            self.type_text(&typed.to_string());
-            return Ok(());
-        }
         let (key, code) = dom_key(stroke.key, m.shift)
             .ok_or_else(|| format!("{keys:?} has no key on a browser's keyboard"))?;
         let vk = u32::from(stroke.key.virtual_key().unwrap_or(0));
@@ -477,7 +483,18 @@ impl Native for WebNative {
                 modifiers |= bit;
             }
         }
-        self.press_key(&key, &code, vk, modifiers, &[]);
+        let unmodified = match stroke.key {
+            nsh_core::keymap::Key::Char(c) if !(m.ctrl || m.alt || m.cmd) => Some(c.to_string()),
+            _ => None,
+        };
+        self.press_key(
+            &key,
+            &code,
+            vk,
+            modifiers,
+            &[],
+            unmodified.as_deref().map(|c| (key.as_str(), c)),
+        );
         Ok(())
     }
 
@@ -497,8 +514,10 @@ impl Native for WebNative {
 
     fn key(&self, key: Key) {
         match key {
-            Key::Return => self.press_key("Enter", "Enter", 13, 0, &[]),
-            Key::Backspace => self.press_key("Backspace", "Backspace", 8, 0, &["deleteBackward"]),
+            Key::Return => self.press_key("Enter", "Enter", 13, 0, &[], None),
+            Key::Backspace => {
+                self.press_key("Backspace", "Backspace", 8, 0, &["deleteBackward"], None)
+            }
             Key::SelectAll => {
                 // The platform's command key: Command on macOS, else Ctrl.
                 let (name, code, vk, bit) = if cfg!(target_os = "macos") {
@@ -516,7 +535,7 @@ impl Native for WebNative {
                     })
                 };
                 self.call("Input.dispatchKeyEvent", modifier("rawKeyDown"));
-                self.press_key("a", "KeyA", 65, bit, &["selectAll"]);
+                self.press_key("a", "KeyA", 65, bit, &["selectAll"], None);
                 self.call("Input.dispatchKeyEvent", modifier("keyUp"));
             }
         }
