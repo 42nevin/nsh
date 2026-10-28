@@ -4,11 +4,13 @@
 // the steps after it are that case's.
 import { type JSX, View, mount, signal } from "nsh";
 import BaseStatusBar from "./base-status-bar";
+import BaseAccordion from "./base-accordion";
 import BaseAlertDialog from "./base-alert-dialog";
 import BaseButton from "./base-button";
 import BaseCheckbox from "./base-checkbox";
 import BaseCollapsible from "./base-collapsible";
 import BaseColorPicker from "./base-color-picker";
+import BaseCollapsibleReveal from "./base-collapsible-reveal";
 import BaseDialog from "./base-dialog";
 import BaseDialogBackdrop from "./base-dialog-backdrop";
 import BaseDataTable from "./base-data-table";
@@ -46,6 +48,7 @@ import BaseToken from "./base-token";
 
 const cases: Record<string, () => JSX.Element> = {
   "base-status-bar": BaseStatusBar,
+  "base-accordion": BaseAccordion,
   "base-alert-dialog": BaseAlertDialog,
   "base-button": BaseButton,
   "base-dialog": BaseDialog,
@@ -75,6 +78,7 @@ const cases: Record<string, () => JSX.Element> = {
   "base-toggle": BaseToggle,
   "base-collapsible": BaseCollapsible,
   "base-color-picker": BaseColorPicker,
+  "base-collapsible-reveal": BaseCollapsibleReveal,
   "base-plot": BasePlot,
   "base-progress": BaseProgress,
   "base-combobox": BaseCombobox,
