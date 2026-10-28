@@ -6328,3 +6328,197 @@ fn base_plot_axis_moves_with_the_domain() {
     let end = moved(&mut animator, 0.25);
     assert!(end.iter().all(|&x| x.abs() < 0.01), "{end:?}");
 }
+
+const BASE_PLOT_KEYS: &str = r##"import { mount, signal, Text, View } from "nsh";
+import { Line, Pie, Plot } from "nsh/base/plot";
+
+function App() {
+  const hovered = signal<number | null>(null);
+  const slice = signal<number | null>(null);
+  return (
+    <View>
+      <Plot
+        testID="plot"
+        data={[{ v: 1 }, { v: 2 }, { v: 3 }, { v: 4 }]}
+        y="v"
+        accessibilityValue={{ text: hovered() == null ? undefined : `row ${hovered()}` }}
+        tooltipContent={<Text>tip</Text>}
+        tooltipPlacement="pointer"
+        onHoverChange={({ index }) => hovered.set(index)}
+        style={{ width: 300, height: 100 }}
+      >
+        <Line />
+      </Plot>
+      <Plot testID="spark" data={[{ v: 1 }, { v: 2 }]} y="v" interactive={false} style={{ width: 100, height: 20 }}>
+        <Line />
+      </Plot>
+      <Plot testID="pie" data={[{ v: 1 }, { v: 0 }, { v: 2 }]} onHoverChange={({ index }) => slice.set(index)} style={{ width: 100, height: 100 }}>
+        <Pie value="v" />
+      </Plot>
+      <Text>{`hover ${hovered()}`}</Text>
+      <Text>{`slice ${slice()}`}</Text>
+    </View>
+  );
+}
+
+mount(App);
+"##;
+
+/// `Plot`'s keyboard: an interactive plot is a stop of the keyboard focus
+/// that takes no presses and offers screen readers increment and
+/// decrement, a sparkline neither; its keys are bound only
+/// while it has the focus: Right / Left start at the first / last row and
+/// step through them, End / Home jump to the ends, Escape (bound only
+/// while a row is hovered) clears the hover, and the app's value for
+/// screen readers follows, as the pointer's hover does. Leaving the focus
+/// unbinds them and clears the hover. Over a pie the keys step through
+/// its slices, skipping a row with none.
+#[test]
+fn a_base_plot_moves_its_hover_with_the_keys_while_focused() {
+    use nsh_core::{
+        EventMask,
+        keymap::{KeyMatch, Keymap, Keystroke},
+        platform::Os,
+    };
+    let environment = Environment {
+        os: Os::MacOs,
+        ..Environment::default()
+    };
+    let (engine, rx) = start_in(BASE_PLOT_KEYS, environment);
+    let mut all = until(&rx, |b| shows(b, "hover null"));
+    all.extend(until(&rx, |_| false));
+    let (plot, spark) = (test_view(&all, "plot"), test_view(&all, "spark"));
+    let props = |all: &[MountBatch], id: u32| {
+        all.iter()
+            .flat_map(|b| b.items.iter())
+            .filter_map(|i| match i {
+                MountItem::ViewProps { id: v, props } if *v == id => Some(props.clone()),
+                _ => None,
+            })
+            .next_back()
+            .unwrap()
+    };
+    let listens = |all: &[MountBatch], id: u32, kind: EventKind| {
+        all.iter()
+            .flat_map(|b| b.items.iter())
+            .filter_map(|i| match i {
+                MountItem::Events { id: v, events } if *v == id => Some(*events),
+                _ => None,
+            })
+            .next_back()
+            .is_some_and(|events: EventMask| events.contains(kind))
+    };
+    assert!(!listens(&all, plot, EventKind::Press));
+    assert!(listens(&all, plot, EventKind::Focus));
+    assert_eq!(props(&all, plot).focusable, Some(true));
+    let actions = props(&all, plot)
+        .accessibility
+        .actions
+        .iter()
+        .map(|a| a.name.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(actions, ["increment", "decrement"]);
+    assert!(!listens(&all, spark, EventKind::Press));
+    assert_eq!(props(&all, spark).focusable, None);
+    assert!(props(&all, spark).accessibility.actions.is_empty());
+
+    let keymap = |all: &[MountBatch]| -> Option<std::sync::Arc<Keymap>> {
+        all.iter()
+            .flat_map(|b| b.items.iter())
+            .filter_map(|i| match i {
+                MountItem::Keymap(k) => Some(k.clone()),
+                _ => None,
+            })
+            .next_back()
+    };
+    let found = |all: &[MountBatch], key: &str| match keymap(all) {
+        Some(k) => k.find(Keystroke::parse(key, Os::MacOs).unwrap(), false, false),
+        None => KeyMatch::None,
+    };
+    let bound = |all: &[MountBatch], key: &str| matches!(found(all, key), KeyMatch::Fire(_));
+    let press = |all: &[MountBatch], key: &str| {
+        let KeyMatch::Fire(id) = found(all, key) else {
+            panic!("{key} is not bound")
+        };
+        engine.control().dispatch_event(
+            ROOT_ID,
+            EventKind::KeyCommand,
+            EventPayload::Value(PayloadValue::Number(f64::from(id))),
+        );
+    };
+    // Unfocused, the arrow keys are not the plot's.
+    assert!(!bound(&all, "right"));
+    engine
+        .control()
+        .dispatch_event(plot, EventKind::Focus, EventPayload::None);
+    all.extend(until(&rx, |b| {
+        b.items.iter().any(|i| matches!(i, MountItem::Keymap(_)))
+    }));
+    for key in ["left", "right", "home", "end"] {
+        assert!(bound(&all, key), "{key}");
+    }
+    assert!(!bound(&all, "escape"));
+
+    press(&all, "right");
+    all.extend(until(&rx, |b| shows(b, "hover 0")));
+    press(&all, "right");
+    all.extend(until(&rx, |b| shows(b, "hover 1")));
+    press(&all, "end");
+    all.extend(until(&rx, |b| shows(b, "hover 3")));
+    // At the last row, Right stays there.
+    press(&all, "right");
+    press(&all, "home");
+    all.extend(until(&rx, |b| shows(b, "hover 0")));
+    all.extend(until(&rx, |_| false));
+    assert_eq!(
+        props(&all, plot)
+            .accessibility
+            .value
+            .and_then(|v| v.text)
+            .as_deref(),
+        Some("row 0")
+    );
+    // A row hovered: Escape clears it, then Left starts at the last row.
+    press(&all, "escape");
+    all.extend(until(&rx, |b| shows(b, "hover null")));
+    all.extend(until(&rx, |_| false));
+    assert!(!bound(&all, "escape"));
+    press(&all, "left");
+    all.extend(until(&rx, |b| shows(b, "hover 3")));
+
+    // A screen reader's decrement and increment step as Left and Right do.
+    let action = |name: &str| {
+        engine.control().dispatch_event(
+            plot,
+            EventKind::AccessibilityAction,
+            EventPayload::Map(vec![("actionName", PayloadValue::Str(name.into()))]),
+        )
+    };
+    action("decrement");
+    all.extend(until(&rx, |b| shows(b, "hover 2")));
+    action("increment");
+    all.extend(until(&rx, |b| shows(b, "hover 3")));
+
+    // Leaving the focus: the keys are unbound and their hover goes.
+    engine
+        .control()
+        .dispatch_event(plot, EventKind::Blur, EventPayload::None);
+    all.extend(until(&rx, |b| shows(b, "hover null")));
+    all.extend(until(&rx, |_| false));
+    assert!(!bound(&all, "right"));
+
+    // A pie: its slices in the rows' order, the row without one skipped.
+    let pie = test_view(&all, "pie");
+    engine
+        .control()
+        .dispatch_event(pie, EventKind::Focus, EventPayload::None);
+    all.extend(until(&rx, |b| {
+        b.items.iter().any(|i| matches!(i, MountItem::Keymap(_)))
+    }));
+    press(&all, "right");
+    all.extend(until(&rx, |b| shows(b, "slice 0")));
+    press(&all, "right");
+    all.extend(until(&rx, |b| shows(b, "slice 2")));
+    press(&all, "left");
+    all.extend(until(&rx, |b| shows(b, "slice 0")));
+}

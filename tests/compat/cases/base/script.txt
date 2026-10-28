@@ -1487,11 +1487,33 @@ event id:plot onMouseMove position.x=60 position.y=10
 expect hovered 1
 event id:plot onMouseLeave
 expect hovered null
+# The keyboard: a stop of the focus that takes no presses, its ring the
+# app's `focusStyle`; its arrow keys are bound while it has the focus.
+# A screen reader's increment and decrement step through the rows as
+# Right and Left do, the first from the first row.
+prop id:plot focusable true
+listens id:plot onFocus
+listens id:plot onBlur
+state id:plot focused
+style id:plot opacity 0.9
+state id:plot none
+prop id:plot accessibilityActions increment, decrement
+event id:plot onAccessibilityAction actionName=increment
+expect hovered 0
+prop id:plot accessibilityValue text=row0
+event id:plot onAccessibilityAction actionName=increment
+expect hovered 1
+event id:plot onAccessibilityAction actionName=decrement
+expect hovered 0
+event id:plot onMouseLeave
+expect hovered null
 # A sparkline follows no pointer: it reports nothing, even once a press
 # that comes after the pointer has been handled. Its new row (35) widens
 # its y domain, which moves over `motion.update` (on the animator; the
 # layout and what it reports stay the same).
 prop id:spark accessibilityLabel Spark
+noprop id:spark focusable
+noprop id:spark accessibilityActions
 event id:spark onMouseMove position.x=90 position.y=10
 tap id:more
 expect rows 5
@@ -1503,6 +1525,13 @@ prop id:band accessibilityLabel Band
 # clockwise from 12 o'clock: from 3 o'clock (`startAngle`) to 9
 # (`endAngle`), the third row's share the half after 6 o'clock, the
 # second's the quarter before it.
+expect slice null
+# A screen reader steps through the slices in the rows' order.
+event id:pie onAccessibilityAction actionName=increment
+expect slice 0
+event id:pie onAccessibilityAction actionName=increment
+expect slice 1
+event id:pie onMouseLeave
 expect slice null
 event id:pie onMouseMove position.x=55 position.y=80
 expect slice 1

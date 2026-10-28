@@ -8,7 +8,9 @@
 // a function, `curve`, a gradient `background`, its own `hoverDot`) and
 // `Line` (`y` as a field and as a function, `data` / `x` of its own,
 // `curve`, `dot`, its own `hoverDot`),
-// painted with the paint style keys; and `Bar` on a `band` scale (`value`,
+// painted with the paint style keys, the plot a stop of the keyboard
+// focus (its ring the app's `focusStyle`) whose rows a screen reader's
+// increment and decrement step through; and `Bar` on a `band` scale (`value`,
 // `base`, `stack`, `label` as a field and as a function with its part,
 // `cornerRadii`, `stagger`, `inactiveOpacity`, a gradient `background`),
 // upright and across. A headless run paints nothing, so the script checks
@@ -17,10 +19,11 @@
 // cross line on a band, and what it reports. A `Pie` (`value`,
 // `startAngle`, `endAngle`, `innerRadius`, `outerRadius`, `cornerRadius`)
 // over an `Arc` reports the slice under the pointer, none in its hole,
-// outside its ring or past its last angle; its hole closes with
-// `motion.update`, the pointer finding the new ring at once. A gauge
-// `Arc` draws round corners (`cornerRadius`) and sweeps back to its new
-// end with `motion.update`.
+// outside its ring or past its last angle, and steps through its slices
+// with a screen reader's increment; its hole closes with `motion.update`,
+// the pointer finding the new ring at once. A gauge `Arc` draws round
+// corners (`cornerRadius`) and sweeps back to its new end with
+// `motion.update`.
 // `PlotAxis`es (`placement`, `labelPlacement`, `ticks`, `tickValues`,
 // `format`, the `label`, `tick` and `line` parts) lay their labels out
 // along a plot's edges.
@@ -71,6 +74,7 @@ function App() {
         onHoverChange={({ index }) => hovered.set(index)}
         class="h-[100px] w-[200px] stroke-current"
         style={{ color: "#3366ff" }}
+        focusStyle={{ opacity: 0.9 }}
       >
         <Grid x={[0, 10, 20]} y={[0, 20, 40]} class="stroke-[#cccccc] stroke-1" style={{ strokeDasharray: "2 2" }} />
         <Area

@@ -241,6 +241,17 @@ impl Ring {
             .find(|s| (s.start.min(s.end)..s.start.max(s.end)).contains(&angle))
             .map(|s| s.index)
     }
+
+    /// The middle of `slice`: halfway between the ring's radii at rest, at
+    /// the middle of its angles (0 at 12 o'clock, clockwise).
+    fn middle(&self, slice: &Slice) -> Point<Points> {
+        let radius = (self.inner + self.outer) / 2.0;
+        let angle = (slice.start + slice.end) / 2.0;
+        point(
+            px(self.center.x.0 + radius * angle.sin()),
+            px(self.center.y.0 - radius * angle.cos()),
+        )
+    }
 }
 
 /// A radial mark's shape at a moment: its radii, in points, and the angles
@@ -903,10 +914,18 @@ pub fn Pie(props: PieProps, _cx: Scope<NoEvent>) -> impl IntoElement {
     });
     let ring = computed(move || Ring::of(plot.size.get(), inner.get(), outer.get()));
     let update = Update::new(plot, move || (inner.get(), outer.get(), slices.get()));
-    plot.add_hit(move |at| {
-        let from = start.get_untracked().0.min(end.get_untracked().0);
-        slices.with_untracked(|all| ring.get_untracked().slice_at(all, from, at))
-    });
+    plot.add_hit(
+        move |at| {
+            let from = start.get_untracked().0.min(end.get_untracked().0);
+            slices.with_untracked(|all| ring.get_untracked().slice_at(all, from, at))
+        },
+        move |row| {
+            slices.with_untracked(|all| {
+                let slice = all.iter().find(|s| s.index == row)?;
+                Some(ring.get_untracked().middle(slice))
+            })
+        },
+    );
     let classes = slice_classes(move || plot.rows.get(), move || props.slice_class.get());
     let slice_style = props.slice_style;
     // Whether the hover moves the slices: their lift drawn, their

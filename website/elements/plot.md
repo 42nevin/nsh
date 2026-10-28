@@ -95,7 +95,7 @@ the marks take the typed paint methods (`.stroke_color(..)`, `.fill_color(..)`, 
 | `y` | `.y(..)` | `keyof T \| (d: T, index: number) => number` | none | What the marks draw unless they name their own. |
 | `xScale` | `.x_scale(..)` | `Scale` | `{ type: "point" }` | How the x axis places rows: `point` (in order, evenly from the left edge to the right one; one row in the middle), `linear` with an optional `domain`, or `band` (a band per row, for bars; [Bar](#bar)). With a `band` y scale it defaults to `linear`, for bars across. |
 | `yScale` | `.y_scale(..)` | `Scale` | `{ type: "linear" }` | How the y axis places values: the domain's smallest value at the bottom edge, its largest at the top. Without a `domain`, the extent of what the marks draw. `band` lays a band per row from the top edge down, for bars across. |
-| `interactive` | `.interactive(..)` | `boolean` | `true` | The plot follows the pointer: it reports the row under it and shows the hover's parts. `false` draws the marks only (a sparkline in a list). |
+| `interactive` | `.interactive(..)` | `boolean` | `true` | The plot follows the pointer and the keyboard: it reports the row under it and shows the hover's parts, and it is a stop of Tab whose arrow keys move the hover ([Keyboard](#keyboard)). `false` draws the marks only (a sparkline in a list), and presses on it go to the views around it. Whether the plot offers the keyboard at all is set when it is made. |
 | `motion` | `.motion(..)` | `PlotMotion` | none | The timing of the appear, the hover's fade in and out, and the spring the hover follows the pointer with (below). |
 | `appearGeneration` | `.appear_generation(..)` | `number` | none | Opts in to the appear: the marks draw in when the plot is first shown, and again whenever this changes (another symbol, another period). |
 | `accessibilityLabel` | `.accessibility_label(..)` | `string` | none | What screen readers say of the chart: what it shows and what stands out. |
@@ -103,10 +103,10 @@ the marks take the typed paint methods (`.stroke_color(..)`, `.fill_color(..)`, 
 | `crossLineClass`, `crossLineStyle` | `.cross_line_class(..)`, `.cross_line_style(..)` | `string`, `StyleProp<ViewStyle>` | none | The cross line: a view as tall as the plot, centered on the row under the pointer. On a band scale it sits in the row's band, as wide as the band (across the plot on a band y scale). |
 | `dotClass`, `dotStyle` | `.dot_class(..)`, `.dot_style(..)` | `string`, `StyleProp<ViewStyle>` | none | The hover's dots: a view per `Line` and `Area`, centered on its point at the row under the pointer. A mark's `hoverDotClass` / `hoverDotStyle` replace them for its own dot. |
 | `tooltipContent` | `.tooltip_content(..)` | `JSX.Element` | none | The app's tooltip, placed by `tooltipPlacement` and moved and faded with the cross line. |
-| `tooltipPlacement` | `.tooltip_placement(..)` | `"top" \| "pointer"` | `"top"` | Where the tooltip goes: at the top of the plot, centered on the cross line; or beside the pointer, on the side of the cross line toward the plot's middle and below the pointer in the upper half, above it in the lower one. At the top it stays between the plot's left and right edges (its offset from the top edge is the app's: a tag under the plot takes the plot's height and more); beside the pointer it stays inside the plot. |
+| `tooltipPlacement` | `.tooltip_placement(..)` | `"top" \| "pointer"` | `"top"` | Where the tooltip goes: at the top of the plot, centered on the cross line; or beside the pointer, on the side of the cross line toward the plot's middle and below the pointer in the upper half, above it in the lower one. At the top it stays between the plot's left and right edges (its offset from the top edge is the app's: a tag under the plot takes the plot's height and more); beside the pointer it stays inside the plot. With the keyboard, it goes beside the first line's or area's point at the row (the middle of a bar's band, the middle of a pie's slice). |
 | `tooltipOffset` | `.tooltip_offset(..)` | `number` | `0` | The distance between the tooltip and what places it: the top edge for `"top"`, the cross line and the pointer for `"pointer"`. |
 | `children` | `.child(..)` | `JSX.Element` | none | The marks, drawn in order over each other, and whatever the app lays over them. |
-| `class`, `style` | style methods | `string`, `StyleProp<ViewStyle>` | none | The plot's size and look; the marks inherit its paint properties, as CSS inherits them. |
+| `class`, `style` | style methods | `string`, `StyleProp<ViewStyle>` | none | The plot's size and look; the marks inherit its paint properties, as CSS inherits them. `focus:` / `focus-visible:` classes and `focusStyle` draw its focus ring. |
 
 | Event | Rust | Payload | When |
 |---|---|---|---|
@@ -422,6 +422,25 @@ It is the plot's own motion, the timings of what a chart moves: its marks' clip 
 entrances, exits and attention seekers are [`createMotion`](../modules/nsh.md#createmotion)'s presets and
 keyframes, which an app can still play on the plot's view or on the elements around it.
 
+## Keyboard
+
+An interactive plot is a stop of Tab (macOS, the web), and while it has the keyboard focus its keys move the same hover
+the pointer does: the cross line, the dots and the tooltip glide on the `pointer` spring, a pie's slice lifts,
+`onHoverChange` reports the row, and screen readers read the `accessibilityValue` the app gives for it. Its focus ring
+is the app's: a `focus-visible:` class or a `focusStyle` (`focus-visible:outline-2 focus-visible:outline-ring`).
+
+| Keys | What they do |
+|---|---|
+| Right, Left | Move to the next or the previous row (over a pie, its slices in the rows' order); with no row hovered, Right starts at the first row and Left at the last. |
+| Home, End | Move to the first or the last row. |
+| Escape | Clears the hover. |
+
+The plot answers its keys while it has the focus, and Escape while a row is hovered; the rest of the time they go to
+the app and the views around it. Moving the focus away clears a hover the keys made. The plot takes no presses, so a
+plot inside a pressable card leaves the card its presses. Screen readers step through the rows the same way: VoiceOver's
+swipe up and down, TalkBack's scroll forward and back, and every screen reader that offers an element's `increment` and
+`decrement` actions move to the next and the previous row.
+
 ## Building charts
 
 A chart is a plot, its marks, its axes and the app's own elements around them. Give the y scale a `domain` and its axis
@@ -570,7 +589,9 @@ A sparkline in a list row is a plot with `interactive={false}`: it draws its mar
   offer the rows as text or a list where the numbers matter.
 - Over a pie the row reported is the slice's under the pointer: give `accessibilityValue` its name, value and share
   (`"Team, 340 seats, 34.0%"`), and say the total and the largest share in the label.
-- A plot takes no presses and no keyboard focus.
+- An interactive plot is a stop of the keyboard focus whose arrow keys move the hover ([Keyboard](#keyboard)), and it
+  offers screen readers `increment` and `decrement` to step through the rows (VoiceOver reads it as adjustable); a plot
+  with `interactive={false}` is neither, and it takes no presses either way.
 
 See [Accessibility](../docs/accessibility.md) for labels and roles in general.
 

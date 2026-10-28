@@ -82,7 +82,7 @@ mount(App);
 | `y` | `.y(..)` | `keyof T \| (d: T, index: number) => number` | 无 | 图形没有指定自己的取值时绘制的内容。 |
 | `xScale` | `.x_scale(..)` | `Scale` | `{ type: "point" }` | x 轴如何放置各行：`point`（按顺序从左边缘到右边缘均匀分布；只有一行时放在中间）、带可选 `domain` 的 `linear`，或 `band`（每行一个条带，用于柱子；见 [Bar](#bar)）。y 轴为 `band` 时默认为 `linear`，用于横向柱子。 |
 | `yScale` | `.y_scale(..)` | `Scale` | `{ type: "linear" }` | y 轴如何放置数值：定义域的最小值在底边，最大值在顶边。没有 `domain` 时取各图形所绘制数值的范围。`band` 从顶边向下每行布置一个条带，用于横放的柱子。 |
-| `interactive` | `.interactive(..)` | `boolean` | `true` | plot 跟随指针：报告指针下的行并显示悬停部件。为 `false` 时只绘制图形（例如列表中的迷你图）。 |
+| `interactive` | `.interactive(..)` | `boolean` | `true` | plot 跟随指针和键盘：报告指针下的行并显示悬停部件；它也是 Tab 的一个停靠点，方向键移动悬停的行（[键盘](#键盘)）。为 `false` 时只绘制图形（例如列表中的迷你图），在它上面的点按交给周围的视图。plot 是否提供键盘操作，在创建时确定。 |
 | `motion` | `.motion(..)` | `PlotMotion` | 无 | 出现动效、悬停淡入淡出的时间，以及悬停跟随指针所用的弹簧（见下文）。 |
 | `appearGeneration` | `.appear_generation(..)` | `number` | 无 | 启用出现动效：plot 第一次显示时图形逐渐绘出，此值每次变化时再播放一次（换一支股票、换一个周期）。 |
 | `accessibilityLabel` | `.accessibility_label(..)` | `string` | 无 | 屏幕阅读器对图表读出的内容：图表显示了什么，以及值得注意的地方。 |
@@ -90,10 +90,10 @@ mount(App);
 | `crossLineClass`、`crossLineStyle` | `.cross_line_class(..)`、`.cross_line_style(..)` | `string`、`StyleProp<ViewStyle>` | 无 | 十字线：与 plot 等高的视图，以指针下的行为中心。在 band 比例尺上它位于该行的条带里，与条带等宽（band 在 y 轴时横跨 plot）。 |
 | `dotClass`、`dotStyle` | `.dot_class(..)`、`.dot_style(..)` | `string`、`StyleProp<ViewStyle>` | 无 | 悬停圆点：每个 `Line` 和 `Area` 一个视图，以该图形在指针下那一行的点为中心。图形自己的 `hoverDotClass` / `hoverDotStyle` 会替换它们，用于该图形的圆点。 |
 | `tooltipContent` | `.tooltip_content(..)` | `JSX.Element` | 无 | 应用的提示框，按 `tooltipPlacement` 放置，随十字线移动和淡入淡出。 |
-| `tooltipPlacement` | `.tooltip_placement(..)` | `"top" \| "pointer"` | `"top"` | 提示框的位置：在 plot 顶部、以十字线为中心；或在指针旁边，位于十字线朝 plot 中间的一侧，指针在上半部时在它下方，在下半部时在它上方。在顶部时，提示框留在 plot 的左右边缘之间（与顶边的距离由应用决定：放在 plot 下方的标签取 plot 的高度再多一些）；在指针旁边时，提示框留在 plot 内。 |
+| `tooltipPlacement` | `.tooltip_placement(..)` | `"top" \| "pointer"` | `"top"` | 提示框的位置：在 plot 顶部、以十字线为中心；或在指针旁边，位于十字线朝 plot 中间的一侧，指针在上半部时在它下方，在下半部时在它上方。在顶部时，提示框留在 plot 的左右边缘之间（与顶边的距离由应用决定：放在 plot 下方的标签取 plot 的高度再多一些）；在指针旁边时，提示框留在 plot 内。用键盘时，提示框在该行第一个折线或区域的点旁边（柱状图在柱带中间，饼图在扇区中间）。 |
 | `tooltipOffset` | `.tooltip_offset(..)` | `number` | `0` | 提示框与定位依据之间的距离：`"top"` 时是顶边，`"pointer"` 时是十字线和指针。 |
 | `children` | `.child(..)` | `JSX.Element` | 无 | 图形，按顺序叠加绘制，以及应用放在它们上面的内容。 |
-| `class`、`style` | 样式方法 | `string`、`StyleProp<ViewStyle>` | 无 | plot 的尺寸和外观；图形会像 CSS 那样继承它的绘制属性。 |
+| `class`、`style` | 样式方法 | `string`、`StyleProp<ViewStyle>` | 无 | plot 的尺寸和外观；图形会像 CSS 那样继承它的绘制属性。`focus:` / `focus-visible:` 类和 `focusStyle` 绘制它的焦点环。 |
 
 | 事件 | Rust | 参数 | 触发时机 |
 |---|---|---|---|
@@ -358,6 +358,18 @@ domain 的过渡与 d3 过渡比例尺 domain 的方式相同：每个数值都�
 
 这是 plot 自己的动效，用来设置图表里动的部分（图形的裁剪区域和悬停部件）的时间参数。视图的入场、离场和强调效果使用 [`createMotion`](../modules/nsh.md#createmotion) 的预设和关键帧，应用仍然可以把它们用在 plot 的视图或周围的元素上。
 
+## 键盘
+
+可交互的 plot 是 Tab 的一个停靠点（macOS、Web）；获得键盘焦点时，按键移动的就是指针驱动的同一个悬停：十字线、圆点和提示框按 `pointer` 弹簧滑动，饼图的扇区抬起，`onHoverChange` 报告这一行，屏幕阅读器读出应用为它给出的 `accessibilityValue`。焦点环由应用决定：`focus-visible:` 类或 `focusStyle`（`focus-visible:outline-2 focus-visible:outline-ring`）。
+
+| 按键 | 作用 |
+|---|---|
+| 右方向键、左方向键 | 移动到下一行或上一行（饼图按行的顺序移动到各扇区）；没有悬停的行时，右方向键从第一行开始，左方向键从最后一行开始。 |
+| Home、End | 移动到第一行或最后一行。 |
+| Escape | 清除悬停。 |
+
+plot 获得焦点时响应这些按键，有悬停的行时响应 Escape；其余时候按键交给应用和周围的视图。焦点移走时，按键产生的悬停随之清除。plot 不接收点按，所以放在可点按卡片里的 plot 会把点按留给卡片。屏幕阅读器也以同样的方式逐行浏览：VoiceOver 的上下轻扫、TalkBack 的向前滚动和向后滚动，以及提供元素 `increment` / `decrement` 操作的屏幕阅读器，都会移动到下一行和上一行。
+
 ## 构建图表
 
 一个图表由 plot、它的图形、它的坐标轴以及应用自己放在周围的元素组成。为 y 比例尺指定 `domain`，并把网格线的数值交给它的坐标轴（`tickValues`），每个标签就正好对齐自己的网格线。悬停的十字线、圆点和提示框是 plot 的部件，由应用设置样式和内容；该行的数值显示在应用想放的地方。
@@ -489,7 +501,7 @@ export function SalesChart(props: { rows: Sale[]; stacked: boolean }) {
 - plot 对屏幕阅读器是一个元素，角色为图像，读出应用的 `accessibilityLabel`；图形、坐标轴的标签和悬停部件是它的组成部分，自己不读出任何内容。在标签中说明图表显示了什么以及值得注意的地方（范围、最高值），并用 `accessibilityValue` 给出指针下那一行的描述，屏幕阅读器就会随之读出数值。
 - 在有指针的平台上（桌面、网页、配触控板的 iPad），指针下的行通过 `onHoverChange` 报告。触摸屏没有悬停：触摸用户需要的数值请用应用自己的元素显示；数字很重要时，再用文字或列表提供数据行。
 - 在饼图上，报告的行是指针下扇区所在的行：用 `accessibilityValue` 给出它的名称、数值和占比（`"团队版，340 个席位，34.0%"`），并在标签中说明总数和最大的份额。
-- plot 不接收点按，也不获得键盘焦点。
+- 可交互的 plot 是键盘焦点的一个停靠点，方向键移动悬停的行（[键盘](#键盘)）；它还向屏幕阅读器提供 `increment` 和 `decrement`，用于逐行浏览（VoiceOver 把它读作可调节）。`interactive={false}` 的 plot 两者都没有；无论哪种，plot 都不接收点按。
 
 关于标签和角色的一般说明，见 [无障碍](../docs/accessibility.md)。
 
