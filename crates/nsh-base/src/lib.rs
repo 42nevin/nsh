@@ -444,6 +444,7 @@ mod tests {
                 "Pie",
                 "Plot",
                 "PlotAxis",
+                "PlotLabel",
                 "RadialGrid",
                 "RadialLine"
             ]

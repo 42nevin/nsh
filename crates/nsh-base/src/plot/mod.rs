@@ -3,10 +3,11 @@
 //! data, the scales of its two axes, the pointer over it and its motion;
 //! its marks ([`Line`], [`Area`], [`Bar`], [`Grid`], and the radial
 //! [`Pie`], [`Arc`], [`RadialLine`] and [`RadialGrid`]) draw what it
-//! holds, each a canvas filling the plot (a pie one per slice), and its
-//! [`PlotAxis`]es label its edges with the
-//! ticks of its scales, natively: the rows are read once when the app
-//! sets them, scaled, recorded and drawn in Rust, so no JS runs per point,
+//! holds, each a canvas filling the plot (a pie one per slice), its
+//! [`PlotAxis`]es label its edges with the ticks of its scales and its
+//! [`PlotLabel`]s write texts at values of them, natively: the rows are
+//! read once when the app sets them, scaled, recorded and drawn in Rust,
+//! so no JS runs per point,
 //! and the pointer, the hover's glide and fade, the appear and the scales'
 //! moves to new domains (`tween.rs`) run in Rust and on the platform's
 //! animator (the app hears of a new index, nothing more). Marks paint with
@@ -25,6 +26,7 @@ mod axis;
 mod bar;
 mod grid;
 mod keys;
+mod label;
 mod line;
 mod pie;
 mod radial_line;
@@ -49,6 +51,7 @@ pub use self::{
     },
     bar::{Bar, BarCornerRadii, BarElement, BarLabelStyle, BarProps, bar},
     grid::{Grid, GridElement, GridProps, grid},
+    label::{PlotLabel, PlotLabelElement, PlotLabelProps, PlotText, PlotTextAlign, plot_label},
     line::{Curve, Line, LineElement, LineProps, line},
     pie::{
         Arc, ArcElement, ArcProps, Pie, PieElement, PieLabelStyle, PieProps, SliceClass, arc, pie,
@@ -83,7 +86,8 @@ pub fn registry() -> Registry {
         .register::<Arc>()
         .register::<RadialLine>()
         .register::<RadialGrid>()
-        .register::<PlotAxis>();
+        .register::<PlotAxis>()
+        .register::<PlotLabel>();
     registry
 }
 

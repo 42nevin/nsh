@@ -29,7 +29,8 @@
 // (`labelLineClass`, `labelLineStyle`).
 // `PlotAxis`es (`placement`, `labelPlacement`, `ticks`, `tickValues`,
 // `format`, the `label`, `tick` and `line` parts) lay their labels out
-// along a plot's edges.
+// along a plot's edges. A `PlotLabel` writes its `texts` at values of a
+// plot's scales, each starting at, centered on or ending at its point.
 // A sparkline's y domain, the extent of its rows, moves to a new one with
 // `motion.update` as rows come.
 // Bars take their colors from their rows' regions through the plot's
@@ -43,7 +44,7 @@
 // rows with a screen reader's increment; `RadialGrid`s draw circular
 // `rings` and `spokes` between their radii.
 import { Text, View, signal } from "nsh";
-import { Arc, Area, Bar, Grid, Line, Pie, Plot, PlotAxis, RadialGrid, RadialLine } from "nsh/base/plot";
+import { Arc, Area, Bar, Grid, Line, Pie, Plot, PlotAxis, PlotLabel, RadialGrid, RadialLine } from "nsh/base/plot";
 
 type Row = { t: number; price: number; avg: number };
 type Sale = { v: number; w: number };
@@ -155,6 +156,7 @@ function App() {
       <ColorCase />
       <ReverseCase />
       <RadarCase />
+      <LabelCase />
     </View>
   );
 }
@@ -331,6 +333,28 @@ function RadarCase() {
       </Plot>
       <Text>{`axis ${axis()}`}</Text>
     </View>
+  );
+}
+
+/** Texts at values of a plot of three rows by 0 to 100: each 20 by 10,
+ * its top on the middle row's point at 50, starting at it, centered on it
+ * and ending at it (a class or a style sizing it); one half a row from
+ * the first, at 100. */
+function LabelCase() {
+  const size = "h-[10px] w-[20px]";
+  return (
+    <Plot testID="labels" data={[{ v: 0 }, { v: 50 }, { v: 100 }]} y="v" style={{ width: 200, height: 100 }}>
+      <Line />
+      <PlotLabel
+        class="text-xs"
+        texts={[
+          { text: "lab-left", x: 1, y: 50, class: size },
+          { text: "lab-center", x: 1, y: 50, align: "center", class: size },
+          { text: "lab-right", x: 1, y: 50, align: "right", style: { width: 20, height: 10 } },
+          { text: "lab-top", x: 0.5, y: 100, class: size },
+        ]}
+      />
+    </Plot>
   );
 }
 
