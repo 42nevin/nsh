@@ -51,6 +51,7 @@ mod js;
 pub(crate) mod json_host;
 mod keyboard;
 pub(crate) mod keys;
+pub(crate) mod menus;
 pub(crate) mod module;
 mod once;
 pub mod palette;
@@ -182,7 +183,7 @@ pub(crate) use self::{
     back::BackListener,
     builder::{ElKind, PlaceFn},
     component::{AnyInstance, caught},
-    task::{Action, AnswerSlot, ClipboardRead, Executor},
+    task::{Action, AnswerSlot, ClipboardRead, Executor, FileAnswer},
 };
 /// The geometry Rust components style with (`crate::geometry`).
 pub use crate::geometry::{

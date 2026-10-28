@@ -21,10 +21,10 @@ use crate::{
     Tag, TextEngine,
     element::{
         Action, AnswerSlot, AnyInstance, AnyValue, Attrs, Child, ClipboardRead, ComponentError,
-        ComponentSpec, ElKind, ElNode, Environment, Executor, ImageSize, IntoElement, JsEvent,
-        JsResult, ListConfig, Listener, ModuleCx, ParentElement, PlaceFn, Position, Posts,
-        Reactive, Registry, Root, RustCall, RustOp, SharedString, StyleRefinement, Task, Tokens,
-        caught,
+        ComponentSpec, ElKind, ElNode, Environment, Executor, FileAnswer, ImageSize, IntoElement,
+        JsEvent, JsResult, ListConfig, Listener, ModuleCx, ParentElement, PlaceFn, Position,
+        Posts, Reactive, Registry, Root, RustCall, RustOp, SharedString, StyleRefinement, Task,
+        Tokens, caught,
         responder::ResponderEl,
         view,
         virtual_list::{self, RowFn, SeparatorFn, VirtualListEl},
@@ -513,6 +513,10 @@ pub(super) struct Components {
     /// Colors being picked on the screen, by request id: their answers.
     screen_colors: FxHashMap<u32, AnswerSlot<Option<crate::Hsla>>>,
     next_screen_color: u32,
+    /// Requests on local paths (`pick_paths`, `open_path`, ...), by
+    /// request id: their answers.
+    file_requests: FxHashMap<u32, FileAnswer>,
+    next_file_request: u32,
     /// HTTP requests of tasks (`ui::fetch`), by request id: what arrived
     /// so far and the answer.
     fetches: FxHashMap<u32, PendingFetch>,
@@ -605,6 +609,8 @@ impl Default for Components {
             next_url_open: 0,
             screen_colors: FxHashMap::default(),
             next_screen_color: 1,
+            file_requests: FxHashMap::default(),
+            next_file_request: 1,
             next_clipboard_read: 1,
             picks: FxHashMap::default(),
             next_pick: 1,
@@ -4737,6 +4743,36 @@ impl<M: TextEngine> Core<M> {
                     command: Command::PickScreenColor { id },
                 });
             }
+            Action::FileRequest(request, answer) => {
+                use crate::file_dialog::FileRequest;
+                if !self.components.environment.file_requests {
+                    answer.deliver(
+                        Vec::new(),
+                        Some("this platform has no file dialogs, file manager or trash".into()),
+                    );
+                    return;
+                }
+                if let FileRequest::OpenPath(path)
+                | FileRequest::RevealPath(path)
+                | FileRequest::MoveToTrash(path) = &request
+                    && !path.is_absolute()
+                {
+                    let refused = format!("`{}` is not an absolute path", path.display());
+                    log::warn!("{refused}");
+                    answer.deliver(Vec::new(), Some(refused));
+                    return;
+                }
+                let id = self.components.next_file_request;
+                self.components.next_file_request = id.wrapping_add(1);
+                self.components.file_requests.insert(id, answer);
+                let _ = self.apply_op(Op::Command {
+                    id: crate::ROOT_ID,
+                    command: Command::FileRequest {
+                        id,
+                        request: Box::new(request),
+                    },
+                });
+            }
         }
     }
 
@@ -4933,6 +4969,33 @@ impl<M: TextEngine> Core<M> {
                 }
                 true
             }
+            // A view's menu item runs here; JS's go to JS. A context menu
+            // closing settles the one either side showed, so both hear it.
+            EventKind::Menu if id == crate::ROOT_ID => {
+                let menus = self.components.executor.menus.clone();
+                let closed = matches!(payload, EventPayload::Map(entries)
+                    if entries.iter().any(|(k, v)| *k == "closed" && *v == crate::PayloadValue::Bool(true)));
+                if closed {
+                    menus.borrow_mut().settle_popup();
+                    return false;
+                }
+                let Some(item) = number("id").map(|n| n as u32) else {
+                    return false;
+                };
+                if item < crate::element::menus::FIRST_ID {
+                    return false;
+                }
+                let handler = menus.borrow().handler(item);
+                // An item of a menu replaced since the platform showed it.
+                if let Some(handler) = handler {
+                    let result = caught(|| handler());
+                    self.apply_actions();
+                    if let Err(message) = result {
+                        log::error!(target: "js", "a menu item failed: {message}");
+                    }
+                }
+                true
+            }
             EventKind::BackPress if id == crate::ROOT_ID => {
                 // The top overlay listening takes it first.
                 if self.overlay_cancel() {
@@ -5006,6 +5069,20 @@ impl<M: TextEngine> Core<M> {
                 let color = number("color").map(|packed| crate::Color(packed as u32).into());
                 if let Some(answer) = self.components.screen_colors.remove(&(request as u32)) {
                     answer.borrow_mut().deliver(color);
+                }
+                true
+            }
+            EventKind::FileRequest if id == crate::ROOT_ID => {
+                let EventPayload::FileRequest {
+                    id: request,
+                    paths,
+                    error,
+                } = payload
+                else {
+                    return false;
+                };
+                if let Some(answer) = self.components.file_requests.remove(request) {
+                    answer.deliver(paths.clone(), error.clone());
                 }
                 true
             }

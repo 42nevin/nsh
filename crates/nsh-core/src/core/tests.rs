@@ -9863,6 +9863,149 @@ mod components {
         assert_eq!(shown.last().unwrap(), "picked 0 []");
     }
 
+    /// Picks Markdown files, then trashes the first one picked and opens a
+    /// relative path, when pressed; shows what each answered.
+    #[component]
+    fn PathActions() -> impl IntoElement {
+        let shown = signal(String::new());
+        view()
+            .child(text(move || format!("paths {}", shown.get())))
+            .child(view().h(px(10.0)).on_press(move |_: &()| {
+                let picked = pick_paths(
+                    crate::file_dialog::OpenDialog::files()
+                        .multiple(true)
+                        .filter(crate::file_dialog::FileFilter::new(
+                            "Markdown",
+                            [".MD", "markdown"],
+                        )),
+                );
+                spawn(async move {
+                    let picked = picked.await;
+                    let paths = picked.as_ref().ok().cloned().flatten().unwrap_or_default();
+                    let trashed = match paths.first() {
+                        Some(first) => Some(move_to_trash(first.clone()).await),
+                        None => None,
+                    };
+                    let opened = open_path("notes.md").await;
+                    shown.set(format!("{picked:?} {trashed:?} {opened:?}"));
+                });
+            }))
+    }
+
+    fn press_path_actions(c: &mut Core<FakeEngine>) -> Vec<MountItem> {
+        c.mount_root(&crate::element::Root::new::<PathActions>(|| ()));
+        let batch = c.commit().unwrap();
+        let button = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Events { id, events } if events.contains(EventKind::Press) => Some(*id),
+                _ => None,
+            })
+            .expect("the button");
+        assert!(c.component_event(button, EventKind::Press, &EventPayload::None));
+        c.commit().map(|b| b.items).unwrap_or_default()
+    }
+
+    fn file_requests(items: Vec<MountItem>) -> Vec<(u32, crate::file_dialog::FileRequest)> {
+        items
+            .into_iter()
+            .filter_map(|i| match i {
+                MountItem::Command {
+                    id: ROOT_ID,
+                    command: Command::FileRequest { id, request },
+                } => Some((id, *request)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_platform_answers_file_requests() {
+        use crate::file_dialog::{FileFilter, FileRequest, OpenDialog};
+        let mut c = core();
+        c.set_environment(crate::element::Environment {
+            file_requests: true,
+            ..Default::default()
+        });
+        let requests = file_requests(press_path_actions(&mut c));
+        // The dialog gets the extensions as it takes them.
+        let expected = OpenDialog::files()
+            .multiple(true)
+            .filter(FileFilter::new("Markdown", ["md", "markdown"]));
+        assert_eq!(requests.len(), 1);
+        let (pick, request) = requests.into_iter().next().unwrap();
+        assert_eq!(request, FileRequest::OpenDialog(expected));
+        let picked = vec![
+            std::path::PathBuf::from("/notes/a.md"),
+            std::path::PathBuf::from("/notes/b.md"),
+        ];
+        assert!(c.component_event(
+            ROOT_ID,
+            EventKind::FileRequest,
+            &EventPayload::file_answer(pick, picked)
+        ));
+        // The task goes on to the trash.
+        let mut trash = None;
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while trash.is_none() && std::time::Instant::now() < end {
+            c.run_component_tasks();
+            let items = c.commit().map(|b| b.items).unwrap_or_default();
+            trash = file_requests(items).into_iter().next();
+        }
+        let (trash, request) = trash.expect("the trash request");
+        assert_eq!(request, FileRequest::MoveToTrash("/notes/a.md".into()));
+        assert!(c.component_event(
+            ROOT_ID,
+            EventKind::FileRequest,
+            &EventPayload::file_failed(trash, "no trash on this volume")
+        ));
+        // A relative path never reaches the platform.
+        let shown = run_until(&mut c, |s| s.iter().any(|t| t.starts_with("paths O")));
+        assert_eq!(
+            shown.last().unwrap(),
+            r#"paths Ok(Some(["/notes/a.md", "/notes/b.md"])) Some(Err("no trash on this volume")) Err("`notes.md` is not an absolute path")"#
+        );
+    }
+
+    #[test]
+    fn a_cancelled_dialog_is_no_error() {
+        let mut c = core();
+        c.set_environment(crate::element::Environment {
+            file_requests: true,
+            ..Default::default()
+        });
+        let (pick, _) = file_requests(press_path_actions(&mut c))
+            .into_iter()
+            .next()
+            .expect("the dialog");
+        assert!(c.component_event(
+            ROOT_ID,
+            EventKind::FileRequest,
+            &EventPayload::file_answer(pick, Vec::new())
+        ));
+        let shown = run_until(&mut c, |s| s.iter().any(|t| t.starts_with("paths O")));
+        assert_eq!(
+            shown.last().unwrap(),
+            r#"paths Ok(None) None Err("`notes.md` is not an absolute path")"#
+        );
+    }
+
+    #[test]
+    fn file_requests_fail_at_once_without_file_dialogs() {
+        let mut c = core();
+        let items = press_path_actions(&mut c);
+        assert!(
+            file_requests(items).is_empty(),
+            "nothing reaches the platform"
+        );
+        let shown = run_until(&mut c, |s| s.iter().any(|t| t.starts_with("paths E")));
+        assert_eq!(
+            shown.last().unwrap(),
+            r#"paths Err("this platform has no file dialogs, file manager or trash") None Err("this platform has no file dialogs, file manager or trash")"#
+        );
+    }
+
     /// Shows a fallback while a component below it failed; a press tries
     /// again.
     #[component]
@@ -14716,6 +14859,243 @@ mod rust_desktop {
     }
 }
 
+mod rust_menus {
+    use super::*;
+    use crate::{
+        PayloadValue, PressEvent,
+        desktop::{DesktopCommand, MenuItem as Item, MenuRole},
+        element::{
+            Root,
+            desktop::{MenuItem, popup_menu_at, set_application_menu, set_title},
+        },
+        keymap::Modifiers,
+        platform::Os,
+        prelude::*,
+    };
+
+    /// An application menu following a signal, and a context menu shown by
+    /// a press, which says whether Shift was held.
+    #[component]
+    fn Menus() -> impl IntoElement {
+        let wrap = signal(false);
+        let log = signal(String::from("ready"));
+        set_title("Notes");
+        effect(move || {
+            set_application_menu(vec![MenuItem::submenu(
+                "View",
+                [
+                    MenuItem::new("Word Wrap")
+                        .shortcut("mod+shift+w")
+                        .checked(wrap.get())
+                        .on_select(move || wrap.update(|w| *w = !*w)),
+                    MenuItem::separator(),
+                    MenuItem::role(MenuRole::ToggleFullScreen),
+                ],
+            )]);
+        });
+        view()
+            .child(text(move || format!("wrap {}", wrap.get())))
+            .child(text(move || log.get()))
+            .child(text("More").on_press(move |e: &PressEvent| {
+                let shift = e.modifiers.shift;
+                let closed = popup_menu_at(
+                    vec![
+                        MenuItem::new("Rename")
+                            .on_select(move || log.set(format!("rename {shift}"))),
+                    ],
+                    e.page_position,
+                );
+                spawn(async move {
+                    closed.await;
+                    log.update(|l| l.push_str(" closed"));
+                });
+            }))
+    }
+
+    fn desktop(command: &MountItem) -> Option<&DesktopCommand> {
+        match command {
+            MountItem::Command {
+                id: ROOT_ID,
+                command: Command::Desktop(command),
+            } => Some(command),
+            _ => None,
+        }
+    }
+
+    /// The id and checked state of the application menu's first item.
+    fn first_action(batch: &MountBatch) -> (u32, Option<bool>) {
+        let menu = batch
+            .items
+            .iter()
+            .filter_map(desktop)
+            .find_map(|c| match c {
+                DesktopCommand::SetMenu(Some(items)) => Some(items.clone()),
+                _ => None,
+            })
+            .expect("the application menu");
+        let Item::Submenu { label, items, .. } = &menu[0] else {
+            panic!("a submenu: {menu:?}");
+        };
+        assert_eq!(label, "View");
+        let Item::Action(wrap) = &items[0] else {
+            panic!("an action: {items:?}");
+        };
+        assert_eq!(wrap.label, "Word Wrap");
+        // `mod` is Control off macOS.
+        assert_eq!(
+            wrap.shortcut,
+            Some(crate::desktop::Shortcut::parse("ctrl+shift+w", false).unwrap())
+        );
+        let Item::Action(full) = &items[2] else {
+            panic!("an action: {items:?}");
+        };
+        // A role's item: the platform's shortcut, nothing for the app.
+        assert_eq!(
+            (full.id, full.shortcut),
+            (0, MenuRole::ToggleFullScreen.shortcut(false))
+        );
+        (wrap.id, wrap.checked)
+    }
+
+    fn menu_event(c: &mut Core<FakeEngine>, fields: Vec<(&'static str, PayloadValue)>) -> bool {
+        c.component_event(ROOT_ID, EventKind::Menu, &EventPayload::Map(fields))
+    }
+
+    #[test]
+    fn rust_menus_run_their_items_and_presses_report_modifiers() {
+        let mut c = core();
+        c.set_environment(crate::element::Environment {
+            os: Os::Linux,
+            ..Default::default()
+        });
+        c.mount_root(&Root::of::<Menus>());
+        let batch = c.commit().unwrap();
+        assert!(
+            batch
+                .items
+                .iter()
+                .filter_map(desktop)
+                .any(|c| *c == DesktopCommand::SetTitle("Notes".into()))
+        );
+        let (id, checked) = first_action(&batch);
+        assert!(id >= 1 << 31, "views' ids are above JS's: {id}");
+        assert_eq!(checked, Some(false));
+        let more = batch
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MountItem::Text { id, text, .. } if text.text == "More" => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+
+        // JS's ids are JS's.
+        assert!(!menu_event(&mut c, vec![("id", PayloadValue::Number(1.0))]));
+        // The chosen item runs; the effect sets the menu again, checked.
+        assert!(menu_event(
+            &mut c,
+            vec![("id", PayloadValue::Number(f64::from(id)))]
+        ));
+        let batch = c.commit().unwrap();
+        assert!(texts_of(&batch).contains(&"wrap true".to_owned()));
+        let (again, checked) = first_action(&batch);
+        assert_eq!(checked, Some(true));
+        // The replaced menu's item no longer runs.
+        assert!(menu_event(
+            &mut c,
+            vec![("id", PayloadValue::Number(f64::from(id)))]
+        ));
+        assert!(c.commit().is_none());
+        assert_ne!(again, id);
+
+        // A Shift-click shows a context menu where it was pressed.
+        let press = PressEvent {
+            page_position: point(px(30.0), px(40.0)),
+            modifiers: Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+            clicks: 1,
+            ..Default::default()
+        };
+        assert!(c.component_event(more, EventKind::Press, &EventPayload::Press(press)));
+        let batch = c.commit().unwrap();
+        let (rename, at) = batch
+            .items
+            .iter()
+            .filter_map(desktop)
+            .find_map(|c| match c {
+                DesktopCommand::PopupMenu { items, at } => match &items[0] {
+                    Item::Action(a) if a.label == "Rename" => Some((a.id, *at)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("the context menu");
+        assert_eq!(at, Some(point(px(30.0), px(40.0))));
+        assert!(menu_event(
+            &mut c,
+            vec![("id", PayloadValue::Number(f64::from(rename)))]
+        ));
+        // Its closing is JS's to hear too (it settles a menu JS showed).
+        assert!(!menu_event(
+            &mut c,
+            vec![
+                ("id", PayloadValue::Number(0.0)),
+                ("closed", PayloadValue::Bool(true)),
+            ],
+        ));
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut shown = Vec::new();
+        while !shown.contains(&"rename true closed".to_owned()) {
+            assert!(std::time::Instant::now() < end, "not closed: {shown:?}");
+            c.run_component_tasks();
+            if let Some(batch) = c.commit() {
+                shown.extend(texts_of(&batch));
+            }
+        }
+
+        // A press without Shift (or from the keyboard: no position).
+        assert!(c.component_event(more, EventKind::Press, &EventPayload::None));
+        let batch = c.commit().unwrap();
+        let rename = batch
+            .items
+            .iter()
+            .filter_map(desktop)
+            .find_map(|c| match c {
+                DesktopCommand::PopupMenu { items, at } => {
+                    assert_eq!(*at, Some(point(px(0.0), px(0.0))));
+                    match &items[0] {
+                        Item::Action(a) => Some(a.id),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(menu_event(
+            &mut c,
+            vec![("id", PayloadValue::Number(f64::from(rename)))]
+        ));
+        assert!(texts_of(&c.commit().unwrap()).contains(&"rename false".to_owned()));
+    }
+
+    #[test]
+    fn rust_menus_do_nothing_off_desktops() {
+        let mut c = core();
+        c.set_environment(crate::element::Environment {
+            os: Os::Ios,
+            ..Default::default()
+        });
+        c.mount_root(&Root::of::<Menus>());
+        let batch = c.commit().unwrap();
+        assert!(!batch.items.iter().filter_map(desktop).any(|c| matches!(
+            c,
+            DesktopCommand::SetMenu(_) | DesktopCommand::PopupMenu { .. }
+        )));
+    }
+}
+
 #[test]
 fn file_drop_callbacks_keep_urls_and_disabled_targets_unmount_their_events() {
     use crate::prelude::*;
@@ -15163,7 +15543,7 @@ mod builders {
     }
 
     /// A pressable text, through a helper that passes a listener on.
-    fn tap<M>(label: &'static str, on_press: impl IntoListener<(), M>) -> Text {
+    fn tap<M>(label: &'static str, on_press: impl IntoListener<crate::PressEvent, M>) -> Text {
         text(label).on_press(on_press)
     }
 
