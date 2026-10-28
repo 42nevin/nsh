@@ -189,6 +189,7 @@ jobs:
           done
           ./target/debug/nsh test examples/gallery/tests/environment.test.tsx --target web --filter appearance
           ./target/debug/nsh test examples/gallery/tests/overlays.test.tsx --target web --filter 'Escape cancels'
+          ./target/debug/nsh test examples/gallery/tests/rich-editor.test.tsx --target web --filter 'Backspace after the caret moves'
           # Apps with Rust crates, in their hosts' runtime: a TSX app and a
           # Rust app (its root).
           ./target/debug/nsh test examples/rust-exports --target web
