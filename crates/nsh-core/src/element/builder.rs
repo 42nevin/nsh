@@ -2262,10 +2262,11 @@ impl IntoElement for Children {
 /// Another component in a view ([`Component::element`]). Its styles go
 /// after the component's own, like an app's classes, and so do its inline
 /// style, animated values and insets ([`Element`]'s), on the component's
-/// root; its state styles ([`Self::active`], [`Self::hover`],
-/// [`Self::focus`], [`Self::disabled_style`], [`Styled::selected`],
-/// [`Styled::checked`]) follow the states of that root, as an app's
-/// `active:` / `hover:` classes on a TSX component do. It hears and is to
+/// root, which also takes its [`Self::test_id`] over its own; its state
+/// styles ([`Self::active`], [`Self::hover`], [`Self::focus`],
+/// [`Self::disabled_style`], [`Styled::selected`], [`Styled::checked`])
+/// follow the states of that root, as an app's `active:` / `hover:`
+/// classes on a TSX component do. It hears and is to
 /// assistive technologies what the component says (its events and props):
 /// it is not [`Interactive`] or [`Accessible`]. The element a
 /// `#[component]`'s constructor makes (`button()`) wraps one
@@ -2372,6 +2373,13 @@ impl<C: Component> ComponentElement<C> {
     pub fn disabled_style(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
         let s = f(StyleRefinement::default());
         self.node.style.extend_as(Variant::DISABLED, s);
+        self
+    }
+
+    /// The id UI tests find its root by (TS: `testID` given the component),
+    /// as [`Interactive::test_id`] names a view.
+    pub fn test_id(mut self, id: &str) -> Self {
+        super::host::set(&mut self.node, Prop::TestId(Some(id.into())));
         self
     }
 
