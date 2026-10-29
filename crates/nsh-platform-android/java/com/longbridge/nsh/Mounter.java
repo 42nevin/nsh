@@ -1736,6 +1736,15 @@ final class Mounter {
         return !shownModals.isEmpty();
     }
 
+    /** The window of the topmost dialog shown, or null. */
+    View topModalWindow() {
+        for (int i = shownModals.size() - 1; i >= 0; i--) {
+            View window = shownModals.get(i).window();
+            if (window != null) return window;
+        }
+        return null;
+    }
+
     /** The stack the back button acts on (pops, or asks to leave), if any. */
     StackBox backStack() {
         for (int i = stacks.size() - 1; i >= 0; i--) {
