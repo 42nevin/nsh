@@ -1110,7 +1110,8 @@ pub(crate) fn selectable(state: &crate::view::ViewState) -> bool {
     state.text.as_ref().is_some_and(|t| t.text.is_selectable())
 }
 
-/// Draws a text view's text (in `drawRect:`; the context is y down).
+/// Draws a text view's text (in its content layer's `drawLayer:inContext:`;
+/// the context is y down).
 pub(crate) fn draw(cx: &CGContext, state: &crate::view::ViewState) {
     use objc2_core_foundation::CGAffineTransform;
     let Some(drawn) = &state.text else { return };
