@@ -18,8 +18,13 @@
 //! with its prefix, which takes the rest as written (`text:tapped: solo`,
 //! `id:row:2`).
 //!
-//! A regex is JavaScript's: its flags `i`, `m`, `s` and `u` apply, `g` and
-//! `y` mean nothing for a match.
+//! A regex is written in the syntax of Rust's `regex` crate, which shares
+//! JavaScript's classes, groups, anchors and quantifiers and matches in
+//! linear time, without look-around or backreferences: a selector is a
+//! string the driver matches against the screen on its own thread (a real
+//! host's agent on the device), away from the test file's JS engine. Its
+//! flags `i`, `m` and `s` apply; `u`, `g`, `y` and `d` mean nothing for a
+//! match.
 
 use nsh_core::NodeId;
 use regex::Regex;
