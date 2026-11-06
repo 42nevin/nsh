@@ -2848,8 +2848,13 @@ impl<M: TextEngine> Core<M> {
                 }
             }
             Prop::Columns(columns) => {
-                if let Some(list) = node.list.as_mut() {
+                if let Some(list) = node.list.as_mut()
+                    && list.columns != columns.max(1)
+                {
                     list.set_columns(columns);
+                    // Cell content has its own layout root; remeasure it before
+                    // placing the slots with their new column widths.
+                    self.needs_layout = true;
                 }
             }
             Prop::Inverted(inverted) => {

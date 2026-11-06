@@ -1857,6 +1857,137 @@ fn list_renders_window_and_recycles_cells() {
 }
 
 #[test]
+fn list_relayouts_cell_content_when_columns_change() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::List,
+            },
+            style_op(
+                2,
+                &[
+                    ("height", StyleValue::Number(400.0)),
+                    ("width", StyleValue::Number(300.0)),
+                ],
+            ),
+            Op::SetProp {
+                id: 2,
+                prop: Prop::EstimatedItemSize(px(50.0)),
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Count(6),
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Columns(3),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    c.commit();
+    let (mut next_id, mut cells) = (100, Vec::new());
+    assert_eq!(render_binds(&mut c, &mut next_id, &mut cells, 100.0), 6);
+    let content = next_id;
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: content,
+                tag: Tag::View,
+            },
+            style_op(content, &[("flex", StyleValue::Number(1.0))]),
+            Op::Insert {
+                parent: cells[0],
+                child: content,
+                before: None,
+            },
+        ],
+    );
+    // A fill-width view inside cell 0: the list may re-place the outer slot
+    // while this nested content keeps a stale width, so its frame is the
+    // observable contract. The insert rides the same commit as the binds.
+    let batch = c.commit().unwrap();
+    // Three columns of 100 pt at the list's fixed 300 pt width.
+    assert_eq!(
+        frame_of(&batch, cells[0]),
+        Some(rect(0.0, 0.0, 100.0, 100.0))
+    );
+    assert_eq!(
+        frame_of(&batch, cells[1]),
+        Some(rect(100.0, 0.0, 100.0, 100.0))
+    );
+    assert_eq!(
+        frame_of(&batch, cells[2]),
+        Some(rect(200.0, 0.0, 100.0, 100.0))
+    );
+    assert_eq!(
+        frame_of(&batch, content),
+        Some(rect(0.0, 0.0, 100.0, 100.0))
+    );
+
+    // Two columns: the same mounted cells relayout their content width in
+    // the commit that carries Prop::Columns, without any later resize.
+    apply(
+        &mut c,
+        vec![Op::SetProp {
+            id: 2,
+            prop: Prop::Columns(2),
+        }],
+    );
+    let batch = c.commit().unwrap();
+    assert_eq!(
+        frame_of(&batch, cells[0]),
+        Some(rect(0.0, 0.0, 150.0, 100.0))
+    );
+    assert_eq!(
+        frame_of(&batch, cells[1]),
+        Some(rect(150.0, 0.0, 150.0, 100.0))
+    );
+    assert_eq!(
+        frame_of(&batch, cells[2]),
+        Some(rect(0.0, 100.0, 150.0, 100.0))
+    );
+    assert_eq!(
+        frame_of(&batch, content),
+        Some(rect(0.0, 0.0, 150.0, 100.0))
+    );
+
+    // And back to three columns.
+    apply(
+        &mut c,
+        vec![Op::SetProp {
+            id: 2,
+            prop: Prop::Columns(3),
+        }],
+    );
+    let batch = c.commit().unwrap();
+    assert_eq!(
+        frame_of(&batch, cells[0]),
+        Some(rect(0.0, 0.0, 100.0, 100.0))
+    );
+    assert_eq!(
+        frame_of(&batch, cells[1]),
+        Some(rect(100.0, 0.0, 100.0, 100.0))
+    );
+    assert_eq!(
+        frame_of(&batch, cells[2]),
+        Some(rect(200.0, 0.0, 100.0, 100.0))
+    );
+    assert_eq!(
+        frame_of(&batch, content),
+        Some(rect(0.0, 0.0, 100.0, 100.0))
+    );
+}
+
+#[test]
 fn list_keeps_visible_content_anchored() {
     let mut c = core();
     apply(
