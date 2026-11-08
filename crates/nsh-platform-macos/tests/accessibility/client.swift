@@ -88,7 +88,13 @@ final class Inspector {
         let result = AXUIElementCopyAttributeValue(element, name as CFString, &value)
         let row: [String: Any] = ["error":axResult(result), "value":decoded(value)]
         record("attribute_return", ["object":identity(element), "name":name, "result":row])
-        if result != .success && !(optional && optionalAbsence(result)) {
+        // AppKit's own NSTextView can advertise an unset description and
+        // return generic failure with nil. Only optional textual metadata has
+        // this absence contract; required geometry/state and transport errors
+        // remain failures, and scenario assertions still require control names.
+        let optionalNilText = optional && result == .failure && value == nil &&
+            ["AXTitle", "AXDescription", "AXIdentifier", "AXValue"].contains(name)
+        if result != .success && !(optional && optionalAbsence(result)) && !optionalNilText {
             throw ProbeFailure(message:"AX attribute \(name) failed with \(result.rawValue)", environment:result.rawValue == -25211 || result.rawValue == -25204)
         }
         if result == .success && value == nil { throw ProbeFailure(message:"AX success with missing value for \(name)", environment:false) }

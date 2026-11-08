@@ -777,12 +777,6 @@ define_class!(
                             &NshView(self.retain()),
                         )
                     })
-            } else if selector == sel!(accessibilityValue) {
-                // The getter also supplies folded content. Plain buttons have
-                // no value; advertising a nil getter makes AX return failure.
-                // SAFETY: this class implements the object-valued getter below.
-                let value: Option<Retained<AnyObject>> = unsafe { msg_send![self, accessibilityValue] };
-                value.is_some()
             } else if let Some(allowed) = crate::access::table::allows(&NshView(self.retain()), selector) {
                 allowed
             } else {
