@@ -93,8 +93,18 @@ fn with_node(mut op: AnimationOp, id: crate::animation::NodeId) -> AnimationOp {
 /// handles of each that owners keep: deriving a node again under an owner
 /// that has a handle of it returns that handle, so doing it over and over
 /// (in a listener, a binding run again) adds nothing.
+///
+/// Kept by a hash of their keys, so a derive looks at the few of the same
+/// hash, not at every derived node: deriving a graph's nodes one by one
+/// costs time that grows with their number, not with its square.
 #[derive(Default)]
-pub(crate) struct Derived(Vec<DerivedNode>);
+pub(crate) struct Derived {
+    by_hash: rustc_hash::FxHashMap<u64, Vec<DerivedNode>>,
+    /// Nodes added since dead ones were last swept out.
+    added: usize,
+    /// How many were live then.
+    live: usize,
+}
 
 /// What makes a derived node: its operation (node id 0) and, for colors
 /// that follow the appearance, the dark ones (the operation has the light
@@ -114,11 +124,75 @@ struct DerivedNode {
     handles: Vec<(Owner, AnimatedNode)>,
 }
 
+impl DerivedKey {
+    /// A hash of the key, alike for equal keys: the operation's kind, its
+    /// inputs and its numbers (by their bits, both zeros as one).
+    fn hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        fn number(h: &mut rustc_hash::FxHasher, v: f32) {
+            (if v == 0.0 { 0 } else { v.to_bits() }).hash(h);
+        }
+        fn operand(h: &mut rustc_hash::FxHasher, o: &Operand) {
+            match *o {
+                Operand::Node(n) => n.hash(h),
+                Operand::Const(c) => number(h, c),
+            }
+        }
+        let mut h = rustc_hash::FxHasher::default();
+        std::mem::discriminant(&self.op).hash(&mut h);
+        match &self.op {
+            AnimationOp::CreateInterpolate {
+                input,
+                input_range,
+                output,
+                ..
+            } => {
+                input.hash(&mut h);
+                input_range.iter().for_each(|&v| number(&mut h, v));
+                match output {
+                    Output::Numbers(v) => v.iter().for_each(|&v| number(&mut h, v)),
+                    Output::Colors(v) => v.hash(&mut h),
+                }
+            }
+            AnimationOp::CreateMath { a, b, .. } => {
+                operand(&mut h, a);
+                operand(&mut h, b);
+            }
+            AnimationOp::CreateDiffClamp {
+                input, min, max, ..
+            } => {
+                input.hash(&mut h);
+                number(&mut h, *min);
+                number(&mut h, *max);
+            }
+            _ => {}
+        }
+        h.finish()
+    }
+}
+
 impl Derived {
     /// The live node `key` made.
     fn entry(&mut self, key: &DerivedKey) -> Option<&mut DerivedNode> {
-        self.0.retain(|d| d.node.strong_count() > 0);
-        self.0.iter_mut().find(|d| d.key == *key)
+        let same = self.by_hash.get_mut(&key.hash())?;
+        same.retain(|d| d.node.strong_count() > 0);
+        same.iter_mut().find(|d| d.key == *key)
+    }
+
+    /// Adds `node`, newly made. Dead nodes are swept out once as many were
+    /// added as lived at the last sweep, so sweeping costs each addition a
+    /// share of one pass.
+    fn add(&mut self, node: DerivedNode) {
+        self.added += 1;
+        if self.added > self.live.max(64) {
+            self.by_hash.retain(|_, same| {
+                same.retain(|d| d.node.strong_count() > 0);
+                !same.is_empty()
+            });
+            self.live = self.by_hash.values().map(Vec::len).sum();
+            self.added = 0;
+        }
+        self.by_hash.entry(node.key.hash()).or_default().push(node);
     }
 }
 
@@ -261,7 +335,7 @@ impl AnimatedNode {
         let node = Node::new(&executor, |id| with_node(op, id), inputs);
         let weak = Rc::downgrade(&node);
         let handle = Self::keep(node);
-        executor.derived().0.push(DerivedNode {
+        executor.derived().add(DerivedNode {
             key,
             node: weak,
             handles: vec![(owner, handle)],
@@ -317,7 +391,7 @@ impl AnimatedNode {
         };
         let first = Cell::new(true);
         super::reactive::render_effect(move || {
-            let output = pick(super::ambient::dark());
+            let output = pick(super::dark());
             if !first.replace(false) {
                 held.act(AnimationOp::SetOutput {
                     node: held.id(),
@@ -362,7 +436,7 @@ impl AnimatedNode {
         };
         let now = dark
             .clone()
-            .filter(|_| super::untracked(super::ambient::dark))
+            .filter(|_| super::untracked(super::dark))
             .map(op);
         self.derive(
             DerivedKey {
@@ -525,7 +599,7 @@ impl Default for Interpolation {
 }
 
 /// A settable, animatable value (made with
-/// [`super::ambient::animated_value`]): set it, animate it, bind it, derive
+/// [`super::animated_value`]): set it, animate it, bind it, derive
 /// from it. A `Copy` handle, kept by the owner it was made under: copies
 /// are the same value, closures share it as they share a signal; used
 /// after the owner is gone, it does nothing (see the module's docs).
@@ -544,6 +618,9 @@ pub struct Spring {
     /// The velocity it starts with (per second); `None` keeps the current
     /// one.
     pub velocity: Option<f32>,
+    /// The highest frame rate it needs, in Hz (TS's `frameRate`); `None`:
+    /// the screen's highest ([`Driver::frame_rate`]).
+    pub frame_rate: Option<f32>,
 }
 
 impl Default for Spring {
@@ -553,6 +630,7 @@ impl Default for Spring {
             damping: 26.0,
             mass: 1.0,
             velocity: None,
+            frame_rate: None,
         }
     }
 }
@@ -567,6 +645,9 @@ pub struct Timing {
     pub easing: Easing,
     /// How long it waits before it starts, in milliseconds.
     pub delay_ms: f32,
+    /// The highest frame rate it needs, in Hz (TS's `frameRate`); `None`:
+    /// the screen's highest ([`Driver::frame_rate`]).
+    pub frame_rate: Option<f32>,
 }
 
 impl Timing {
@@ -576,7 +657,14 @@ impl Timing {
             duration_ms,
             easing,
             delay_ms: 0.0,
+            frame_rate: None,
         }
+    }
+
+    /// Needing at most `hz` frames per second (a slow fade: 30).
+    pub const fn frame_rate(mut self, hz: f32) -> Self {
+        self.frame_rate = Some(hz);
+        self
     }
 
     fn driver(self, to: f32) -> Driver {
@@ -585,6 +673,7 @@ impl Timing {
             duration_ms: self.duration_ms,
             easing: self.easing,
             delay_ms: self.delay_ms,
+            frame_rate: self.frame_rate,
         }
     }
 }
@@ -596,6 +685,12 @@ impl Default for Timing {
 }
 
 impl Spring {
+    /// Needing at most `hz` frames per second (a small, slow spring: 60).
+    pub const fn frame_rate(mut self, hz: f32) -> Self {
+        self.frame_rate = Some(hz);
+        self
+    }
+
     fn driver(self, to: f32) -> Driver {
         Driver::Spring {
             to,
@@ -603,6 +698,7 @@ impl Spring {
             damping: self.damping,
             mass: self.mass,
             velocity: self.velocity,
+            frame_rate: self.frame_rate,
         }
     }
 }
@@ -633,6 +729,7 @@ pub fn sample_decay(from: f32, velocity: f32, deceleration: f32, fps: f32) -> Ve
             deceleration,
             clamp: None,
             bounce: 0.0,
+            frame_rate: None,
         },
         from,
         fps,
@@ -655,6 +752,7 @@ pub fn sample_decay_within(
             deceleration,
             clamp: Some((min, max)),
             bounce,
+            frame_rate: None,
         },
         from,
         fps,
@@ -773,6 +871,7 @@ impl AnimatedValue {
             deceleration,
             clamp: None,
             bounce: 0.0,
+            frame_rate: None,
         })
     }
 
@@ -790,6 +889,7 @@ impl AnimatedValue {
             deceleration,
             clamp: Some((min, max)),
             bounce,
+            frame_rate: None,
         })
     }
 
@@ -977,6 +1077,7 @@ impl Animation {
                 deceleration,
                 clamp: None,
                 bounce: 0.0,
+                frame_rate: None,
             },
         )
     }
@@ -997,6 +1098,7 @@ impl Animation {
                 deceleration,
                 clamp: Some((min, max)),
                 bounce,
+                frame_rate: None,
             },
         )
     }
@@ -1244,9 +1346,9 @@ impl Motion {
 
     /// Plays `motion` on its channels (a new one interrupts the one
     /// playing). When the user asks for less motion
-    /// ([`super::ambient::reduce_motion`]), it lands where it ends without moving.
+    /// ([`super::reduce_motion`]), it lands where it ends without moving.
     pub fn play(&self, motion: impl Into<MotionSpec>) -> AnimationEnd {
-        self.run(motion.into(), super::ambient::reduce_motion())
+        self.run(motion.into(), super::reduce_motion())
     }
 
     /// Plays `motion` even when the user asks for less motion.
@@ -1260,7 +1362,7 @@ impl Motion {
     /// [`Self::play`], it lands at its end when the user asks for less
     /// motion (as things are when it is made).
     pub fn animation(&self, motion: impl Into<MotionSpec>) -> Animation {
-        self.composed(motion.into(), super::ambient::reduce_motion())
+        self.composed(motion.into(), super::reduce_motion())
     }
 
     fn composed(&self, motion: MotionSpec, reduced: bool) -> Animation {
@@ -1293,11 +1395,13 @@ impl Motion {
 }
 
 /// A timing a component's prop takes (TS `{ duration?: number; easing?:
-/// Easing; delay?: number }`): the options of `AnimatedValue.timing` in
-/// `nsh/animated`, with its defaults (300 ms, ease in-out, no delay).
+/// Easing; delay?: number; frameRate?: number }`): the options of
+/// `AnimatedValue.timing` in `nsh/animated`, with its defaults (300 ms,
+/// ease in-out, no delay, the screen's highest rate).
 impl super::JsValue for Timing {
     fn ts_type(_types: &mut super::TsTypes) -> String {
-        "{ duration?: number; easing?: import(\"nsh\").Easing; delay?: number }".into()
+        "{ duration?: number; easing?: import(\"nsh\").Easing; delay?: number; frameRate?: number }"
+            .into()
     }
 
     fn from_js(value: super::JsIn<'_>) -> Result<Self, super::PropError> {
@@ -1314,6 +1418,7 @@ impl super::JsValue for Timing {
                 .and_then(|e| crate::js::animation::easing(&JsonInput(Some(e))))
                 .unwrap_or(default.easing),
             delay_ms: num("delay").unwrap_or(default.delay_ms).max(0.0),
+            frame_rate: crate::style::frame_rate(num("frameRate")),
         })
     }
 
@@ -1321,17 +1426,21 @@ impl super::JsValue for Timing {
         &self,
         host: &'a dyn super::JsHost,
     ) -> Result<super::JsOwned<'a>, super::PropError> {
-        let json = serde_json::json!({ "duration": self.duration_ms, "delay": self.delay_ms });
+        let mut json = serde_json::json!({ "duration": self.duration_ms, "delay": self.delay_ms });
+        if let Some(hz) = self.frame_rate {
+            json["frameRate"] = hz.into();
+        }
         Ok(super::JsOwned::new(host, host.json(&json)?))
     }
 }
 
 /// A spring a component's prop takes (TS `{ stiffness?: number; damping?:
-/// number; mass?: number; velocity?: number }`): the options of
-/// `AnimatedValue.spring` in `nsh/animated`, with its defaults.
+/// number; mass?: number; velocity?: number; frameRate?: number }`): the
+/// options of `AnimatedValue.spring` in `nsh/animated`, with its defaults.
 impl super::JsValue for Spring {
     fn ts_type(_types: &mut super::TsTypes) -> String {
-        "{ stiffness?: number; damping?: number; mass?: number; velocity?: number }".into()
+        "{ stiffness?: number; damping?: number; mass?: number; velocity?: number; frameRate?: number }"
+            .into()
     }
 
     fn from_js(value: super::JsIn<'_>) -> Result<Self, super::PropError> {
@@ -1346,6 +1455,7 @@ impl super::JsValue for Spring {
             damping: num("damping").unwrap_or(default.damping),
             mass: num("mass").unwrap_or(default.mass),
             velocity: num("velocity"),
+            frame_rate: crate::style::frame_rate(num("frameRate")),
         })
     }
 
@@ -1353,20 +1463,24 @@ impl super::JsValue for Spring {
         &self,
         host: &'a dyn super::JsHost,
     ) -> Result<super::JsOwned<'a>, super::PropError> {
-        let json = serde_json::json!({
+        let mut json = serde_json::json!({
             "stiffness": self.stiffness,
             "damping": self.damping,
             "mass": self.mass,
         });
+        if let Some(hz) = self.frame_rate {
+            json["frameRate"] = hz.into();
+        }
         Ok(super::JsOwned::new(host, host.json(&json)?))
     }
 }
 
-/// A JSON value as the core's decoders read JS values (an easing).
-struct JsonInput<'a>(Option<&'a crate::JsonValue>);
+/// A JSON value as the core's decoders read JS values (an easing, an
+/// image source).
+pub(crate) struct JsonInput<'a>(pub(crate) Option<&'a crate::JsonValue>);
 
 /// A JSON array, read by index.
-struct JsonList<'a>(&'a [crate::JsonValue]);
+pub(crate) struct JsonList<'a>(&'a [crate::JsonValue]);
 
 impl<'a> crate::js::host::HostList for JsonList<'a> {
     type Item = JsonInput<'a>;
@@ -1540,6 +1654,83 @@ mod tests {
         let copy = half;
         assert_eq!(copy, half);
         assert_eq!(format!("{half:?}"), format!("AnimatedNode({})", half.id()));
+    }
+
+    #[test]
+    fn deriving_again_finds_the_node_among_many() {
+        let runtime = Runtime::default();
+        let _entered = runtime.enter();
+        let executor = Rc::new(Executor::default());
+        let (_owner, (v, first, again, zeros)) = create_root(|| {
+            let v = AnimatedValue::new(&executor, 0.0);
+            let derive = || -> Vec<AnimatedNode> {
+                (0..2_000)
+                    .map(|i| v.interpolate(&[0.0, 1.0], &[0.0, i as f32]))
+                    .collect()
+            };
+            let first = derive();
+            let again = derive();
+            // Zeros of either sign are one number: one node.
+            let zeros = [
+                v.interpolate(&[0.0, 1.0], &[0.0, 1.0]),
+                v.interpolate(&[-0.0, 1.0], &[-0.0, 1.0]),
+            ];
+            (v, first, again, zeros)
+        });
+        assert!(first.iter().zip(&again).all(|(a, b)| a == b));
+        let mut ids: Vec<_> = first.iter().map(AnimatedNode::id).collect();
+        ids.dedup();
+        assert_eq!(ids.len(), 2_000, "distinct keys, distinct nodes");
+        assert_eq!(zeros[0], zeros[1]);
+        assert_eq!(zeros[0], first[1]);
+        let _ = v;
+    }
+
+    #[test]
+    fn dead_derived_nodes_are_neither_found_nor_kept() {
+        let runtime = Runtime::default();
+        let _entered = runtime.enter();
+        let executor = Rc::new(Executor::default());
+        let (_value_owner, v) = create_root(|| AnimatedValue::new(&executor, 0.0));
+        let (owner, gone) = create_root(|| v.interpolate(&[0.0, 1.0], &[2.0, 3.0]));
+        let id = gone.id();
+        owner.dispose();
+        let (_owner, made) = create_root(|| v.interpolate(&[0.0, 1.0], &[2.0, 3.0]));
+        assert_ne!(made.id(), id, "a dead node is made again");
+        // Nodes made and dropped over and over are swept out as they go.
+        for round in 0..50 {
+            let (owner, _) = create_root(|| {
+                (0..200)
+                    .map(|i| v.interpolate(&[0.0, 1.0], &[round as f32, i as f32]))
+                    .collect::<Vec<_>>()
+            });
+            owner.dispose();
+        }
+        let kept: usize = executor.derived().by_hash.values().map(Vec::len).sum();
+        assert!(kept <= 2 * 200 + 64, "{kept} kept");
+    }
+
+    /// Deriving many distinct nodes, one by one, as a player's scene does:
+    /// `cargo test --release -p nsh-core bench_derive -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_derive_many_nodes() {
+        let runtime = Runtime::default();
+        let _entered = runtime.enter();
+        let executor = Rc::new(Executor::default());
+        for n in [5_000, 20_000] {
+            let start = std::time::Instant::now();
+            let (owner, _nodes) = create_root(|| {
+                let v = AnimatedValue::new(&executor, 0.0);
+                (0..n)
+                    .map(|i| v.interpolate(&[0.0, 0.5, 1.0], &[0.0, i as f32, 1.0]))
+                    .collect::<Vec<_>>()
+            });
+            println!("{n} derived nodes: {:?}", start.elapsed());
+            owner.dispose();
+            let _ = executor.take_actions();
+        }
     }
 
     /// The graph operations `executor` was asked for (animations' ends

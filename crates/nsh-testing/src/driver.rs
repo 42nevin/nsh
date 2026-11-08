@@ -8,12 +8,15 @@ use std::time::Duration;
 use nsh_core::{
     Dialog, ResolvedTextStyle,
     geometry::{Point, Points, Size},
-    platform::ColorScheme,
+    platform::{ColorScheme, Lifecycle},
 };
 use nsh_dev::protocol::{ClockChange, TestStep};
 use serde_json::Value;
 
-use crate::headless::{DialogAnswer, Headless};
+use crate::{
+    headless::{DialogAnswer, Headless},
+    module::LocaleSettingsOptions,
+};
 
 /// An app a test opened, driven by steps and read by queries.
 pub(crate) trait Driver: Send {
@@ -26,7 +29,26 @@ pub(crate) trait Driver: Send {
     fn clear(&mut self, selector: &str) -> Result<(), String>;
     fn scroll(&mut self, selector: &str, distance: Points) -> Result<(), String>;
     fn drag(&mut self, selector: &str, by: Point<Points>) -> Result<(), String>;
+    /// Drops local files (`file:` URLs) on what `selector` names.
+    fn drop_files(&mut self, selector: &str, uris: Vec<String>) -> Result<(), String> {
+        let _ = (selector, uris);
+        Err("`dropFiles` runs headless and on Linux for now".into())
+    }
+    /// Drags without lifting, until [`Driver::drop_held`].
+    fn drag_and_hold(&mut self, selector: &str, by: Point<Points>) -> Result<(), String> {
+        let _ = (selector, by);
+        Err("`dragAndHold` runs headless and on Linux for now".into())
+    }
+    /// Lifts the finger `drag_and_hold` left down.
+    fn drop_held(&mut self) -> Result<(), String> {
+        Err("`drop` runs headless and on Linux for now".into())
+    }
     fn press_key(&mut self, keys: &str) -> Result<(), String>;
+    /// Holds (`down`) or lets go of modifier keys for the pointer's steps.
+    fn hold_keys(&mut self, keys: &str, down: bool) -> Result<(), String> {
+        let _ = (keys, down);
+        Err("holding keys (`keyboard.down` / `keyboard.up`) runs headless only for now: run the test without `--target`".into())
+    }
     fn hover(&mut self, selector: &str) -> Result<(), String>;
     fn right_click(&mut self, selector: &str) -> Result<(), String>;
     /// Pastes `content` into the input `selector` names, as the user's
@@ -39,17 +61,38 @@ pub(crate) trait Driver: Send {
     fn wait_for_within(&mut self, selector: &str, timeout: Duration) -> Result<(), String>;
     fn wait_for_gone(&mut self, selector: &str, timeout: Duration) -> Result<(), String>;
     fn next_change(&mut self, timeout: Duration) -> Result<(), String>;
+    /// What `waitUntil` waits for between looks on a manual clock: moves it
+    /// by a display frame (`timeout` at most) and applies what came; how
+    /// far it moved (zero on the system's clock, where it is
+    /// [`Driver::next_change`]).
+    fn next_frame(&mut self, timeout: Duration) -> Result<Duration, String>;
     fn set_viewport(&mut self, size: Size<Points>) -> Result<(), String>;
     fn set_color_scheme(&mut self, scheme: ColorScheme) -> Result<(), String>;
+    /// Whether the app is in use, as the system reports it (`lifecycle()`).
+    fn set_lifecycle(&mut self, state: Lifecycle) -> Result<(), String> {
+        let _ = state;
+        Err(headless_only("setLifecycle"))
+    }
+    /// The user's locale settings that `settings` names, as the system
+    /// reports them (`localeSettings()`).
+    fn set_locale_settings(&mut self, settings: LocaleSettingsOptions) -> Result<(), String> {
+        let _ = settings;
+        Err(headless_only("setLocaleSettings"))
+    }
+    /// The system hands the app a link that opens it (`openWithUrl`).
+    fn open_with_url(&mut self, url: &str) -> Result<(), String> {
+        let _ = url;
+        Err(headless_only("openWithUrl"))
+    }
     fn run_for(&mut self, time: Duration) -> Result<(), String>;
     fn fast_forward(&mut self, time: Duration) -> Result<(), String>;
     fn set_system_time(&mut self, at: std::time::SystemTime) -> Result<(), String>;
     /// The oldest dialog not answered yet.
     fn pending_dialog(&mut self) -> Option<Dialog>;
     fn answer_dialog(&mut self, answer: DialogAnswer) -> Result<(), String>;
-    /// The oldest pick (`Picker.pickImages`) not answered yet; a real
+    /// The oldest pick (`Picker.pickImages`, `Picker.pickFiles`) not answered yet; a real
     /// platform shows its picker and has none to answer.
-    fn pending_pick(&mut self) -> Option<nsh_core::picker::PickRequest> {
+    fn pending_pick(&mut self) -> Option<nsh_core::picker::Pick> {
         None
     }
     /// Answers the oldest pick with `files`.
@@ -58,8 +101,30 @@ pub(crate) trait Driver: Send {
         Err(headless_only("answering a pick"))
     }
     /// The picks the app asked for, in order.
-    fn picks(&mut self) -> Result<Vec<nsh_core::picker::PickRequest>, String> {
+    fn picks(&mut self) -> Result<Vec<nsh_core::picker::Pick>, String> {
         Err(headless_only("`picks()`"))
+    }
+    /// What the app's speech sessions asked for, in order.
+    fn speech_requests(&mut self) -> Result<Vec<nsh_core::speech::SpeechRequest>, String> {
+        Err(headless_only("`speechRequests()`"))
+    }
+    /// The user says `text` to the session listening.
+    fn hear(&mut self, text: &str) -> Result<(), String> {
+        let _ = text;
+        Err(headless_only("speaking for the user"))
+    }
+    /// Ends the session listening, with `error` or as the user stops.
+    fn end_speech(&mut self, error: Option<nsh_core::speech::SpeechError>) -> Result<(), String> {
+        let _ = error;
+        Err(headless_only("ending a speech session"))
+    }
+    /// What the app asked of the speaker, in order.
+    fn audio_calls(&mut self) -> Result<Vec<crate::headless::AudioCall>, String> {
+        Err(headless_only("`audio()`"))
+    }
+    /// The players playing reach their end.
+    fn end_audio(&mut self) -> Result<(), String> {
+        Err(headless_only("ending a player"))
     }
     fn texts(&mut self) -> Result<Vec<String>, String>;
     fn count(&mut self, selector: &str) -> Result<usize, String>;
@@ -77,13 +142,21 @@ pub(crate) trait Driver: Send {
     /// The URLs the app opened, in order (`app.openedUrls`): recorded,
     /// never opened.
     fn opened_urls(&mut self) -> Result<Vec<String>, String>;
-    /// A picture of the app's window, as a PNG.
+    /// A picture of the app: PNG bytes, or UTF-8 Cell JSON on the terminal target.
     fn screenshot(&mut self) -> Result<Vec<u8>, String>;
     /// The app's storage's entries, as a host keeps them (a headless
     /// engine's `App` reads its storage itself).
     fn storage(&mut self) -> Result<std::collections::BTreeMap<String, String>, String> {
         Err(headless_only("reading the storage this way"))
     }
+    /// The state of the app's window `id` as the platform reports it;
+    /// `None` while it is not open.
+    fn window_state(&mut self, id: &str) -> Result<Option<nsh_core::desktop::WindowState>, String>;
+    /// The user presses the close button of the app's window `id`.
+    fn press_window_close(&mut self, id: &str) -> Result<(), String>;
+    /// A picture of the app's window `id`, as [`Driver::screenshot`] is of
+    /// the main window: PNG bytes of its content.
+    fn window_screenshot(&mut self, id: &str) -> Result<Vec<u8>, String>;
 }
 
 impl Driver for Headless {
@@ -110,6 +183,18 @@ impl Driver for Headless {
     }
     fn drag(&mut self, selector: &str, by: Point<Points>) -> Result<(), String> {
         Headless::drag(self, selector, by)
+    }
+    fn hold_keys(&mut self, keys: &str, down: bool) -> Result<(), String> {
+        Headless::hold_keys(self, keys, down)
+    }
+    fn drag_and_hold(&mut self, selector: &str, by: Point<Points>) -> Result<(), String> {
+        Headless::drag_and_hold(self, selector, by)
+    }
+    fn drop_files(&mut self, selector: &str, uris: Vec<String>) -> Result<(), String> {
+        Headless::drop_files(self, selector, uris)
+    }
+    fn drop_held(&mut self) -> Result<(), String> {
+        Headless::drop_held(self)
     }
     fn press_key(&mut self, keys: &str) -> Result<(), String> {
         Headless::press_key(self, keys)
@@ -144,6 +229,9 @@ impl Driver for Headless {
     fn next_change(&mut self, timeout: Duration) -> Result<(), String> {
         Headless::next_change(self, timeout)
     }
+    fn next_frame(&mut self, timeout: Duration) -> Result<Duration, String> {
+        Headless::next_frame(self, timeout)
+    }
     fn set_viewport(&mut self, size: Size<Points>) -> Result<(), String> {
         Headless::set_viewport(self, size)
     }
@@ -155,6 +243,19 @@ impl Driver for Headless {
         self.set_environment(&format!("setColorScheme({name})"), |e| {
             e.color_scheme = scheme;
         })
+    }
+    fn set_lifecycle(&mut self, state: Lifecycle) -> Result<(), String> {
+        self.set_environment(&format!("setLifecycle({})", state.name()), |e| {
+            e.lifecycle = state;
+        })
+    }
+    fn set_locale_settings(&mut self, settings: LocaleSettingsOptions) -> Result<(), String> {
+        let pins = settings.pins("setLocaleSettings")?;
+        let what = format!("setLocaleSettings({})", settings.label());
+        self.set_environment(&what, |e| pins.apply(e))
+    }
+    fn open_with_url(&mut self, url: &str) -> Result<(), String> {
+        Headless::open_with_url(self, url)
     }
     fn run_for(&mut self, time: Duration) -> Result<(), String> {
         Headless::run_for(self, time)
@@ -171,15 +272,32 @@ impl Driver for Headless {
     fn answer_dialog(&mut self, answer: DialogAnswer) -> Result<(), String> {
         Headless::answer_dialog(self, answer)
     }
-    fn pending_pick(&mut self) -> Option<nsh_core::picker::PickRequest> {
+    fn pending_pick(&mut self) -> Option<nsh_core::picker::Pick> {
         Headless::pending_pick(self)
     }
     fn answer_pick(&mut self, files: Vec<nsh_core::picker::PickedFile>) -> Result<(), String> {
         Headless::answer_pick(self, files)
     }
-    fn picks(&mut self) -> Result<Vec<nsh_core::picker::PickRequest>, String> {
+    fn picks(&mut self) -> Result<Vec<nsh_core::picker::Pick>, String> {
         self.catch_up();
         Ok(Headless::picks(self))
+    }
+    fn speech_requests(&mut self) -> Result<Vec<nsh_core::speech::SpeechRequest>, String> {
+        self.catch_up();
+        Ok(Headless::speech_requests(self))
+    }
+    fn hear(&mut self, text: &str) -> Result<(), String> {
+        Headless::hear(self, text)
+    }
+    fn end_speech(&mut self, error: Option<nsh_core::speech::SpeechError>) -> Result<(), String> {
+        Headless::end_speech(self, error)
+    }
+    fn audio_calls(&mut self) -> Result<Vec<crate::headless::AudioCall>, String> {
+        self.catch_up();
+        Ok(Headless::audio_calls(self))
+    }
+    fn end_audio(&mut self) -> Result<(), String> {
+        Headless::end_audio(self)
     }
     fn texts(&mut self) -> Result<Vec<String>, String> {
         self.catch_up();
@@ -235,6 +353,18 @@ impl Driver for Headless {
                 .into(),
         )
     }
+    fn window_state(&mut self, id: &str) -> Result<Option<nsh_core::desktop::WindowState>, String> {
+        Headless::window_state(self, id)
+    }
+    fn press_window_close(&mut self, id: &str) -> Result<(), String> {
+        Headless::press_window_close(self, id)
+    }
+    fn window_screenshot(&mut self, id: &str) -> Result<Vec<u8>, String> {
+        if Headless::window_state(self, id)?.is_none() {
+            return Err(format!("no window {id:?} is open"));
+        }
+        self.screenshot()
+    }
 }
 
 /// A real platform's host running an app for a test (`nsh test --target`):
@@ -252,6 +382,9 @@ pub trait Host: Send {
 const STEP_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a host may take to move the app's clock and settle.
 const CLOCK_STEP_TIMEOUT: Duration = Duration::from_secs(90);
+/// A display frame, which a wait moves a manual clock by between two looks
+/// (the agent's frame).
+const FRAME: Duration = Duration::from_millis(16);
 
 /// An app on a real platform's host.
 pub(crate) struct Remote {
@@ -282,7 +415,9 @@ impl Remote {
             *self.step.lock().unwrap_or_else(|e| e.into_inner()) = name;
         }
         let timeout = match &step {
-            TestStep::Wait { ms } => STEP_TIMEOUT + Duration::from_millis(*ms),
+            TestStep::Wait { ms } | TestStep::WaitFor { timeout_ms: ms, .. } => {
+                STEP_TIMEOUT + Duration::from_millis(*ms)
+            }
             // The timers due on the way run meanwhile.
             TestStep::Clock { .. } => CLOCK_STEP_TIMEOUT,
             _ => STEP_TIMEOUT,
@@ -334,6 +469,7 @@ fn step_name(step: &TestStep) -> Option<String> {
         TestStep::CloseMenu => "closeMenu".to_owned(),
         TestStep::HostSend { name, .. } => format!("host.send({name})"),
         TestStep::Back => "back".to_owned(),
+        TestStep::PressWindowClose { id } => format!("window({id}).pressClose"),
         TestStep::Wait { ms } => format!("wait({ms})"),
         TestStep::Clock {
             change: ClockChange::RunFor { ms },
@@ -412,6 +548,28 @@ impl Driver for Remote {
     fn press_key(&mut self, keys: &str) -> Result<(), String> {
         self.action(TestStep::PressKey { keys: keys.into() })
     }
+    fn drag_and_hold(&mut self, selector: &str, by: Point<Points>) -> Result<(), String> {
+        self.action(TestStep::DragAndHold {
+            selector: selector.into(),
+            x: by.x.0,
+            y: by.y.0,
+        })
+    }
+    fn drop_held(&mut self) -> Result<(), String> {
+        self.action(TestStep::Drop)
+    }
+    fn drop_files(&mut self, selector: &str, uris: Vec<String>) -> Result<(), String> {
+        self.action(TestStep::DropFiles {
+            selector: selector.into(),
+            uris,
+        })
+    }
+    fn hold_keys(&mut self, keys: &str, down: bool) -> Result<(), String> {
+        self.action(TestStep::HoldKeys {
+            keys: keys.into(),
+            down,
+        })
+    }
     fn hover(&mut self, selector: &str) -> Result<(), String> {
         self.action(TestStep::Hover {
             selector: selector.into(),
@@ -475,6 +633,15 @@ impl Driver for Remote {
             timeout_ms: ms(timeout),
         })
     }
+    fn next_frame(&mut self, timeout: Duration) -> Result<Duration, String> {
+        if !self.manual_clock {
+            return self.next_change(timeout).map(|()| Duration::ZERO);
+        }
+        // A whole millisecond at least: the wait's time runs out.
+        let by = ms(timeout.min(FRAME)).max(1);
+        self.action(TestStep::NextFrame { ms: by })?;
+        Ok(Duration::from_millis(by))
+    }
     fn set_viewport(&mut self, size: Size<Points>) -> Result<(), String> {
         self.action(TestStep::SetViewport {
             width: size.width.0,
@@ -532,8 +699,26 @@ impl Driver for Remote {
             selector: selector.into(),
         })
     }
-    fn span_style(&mut self, _: &str) -> Result<ResolvedTextStyle, String> {
-        Err(headless_only("Reading a span's style (`app.spanStyle`)"))
+    fn span_style(&mut self, selector: &str) -> Result<ResolvedTextStyle, String> {
+        let span: nsh_dev::protocol::SpanStyle = self.query(TestStep::SpanStyle {
+            selector: selector.into(),
+        })?;
+        Ok(ResolvedTextStyle {
+            color: nsh_core::Color(span.color),
+            font_size: nsh_core::Points(span.font_size),
+            font_weight: span.font_weight,
+            italic: span.italic,
+            decoration: nsh_core::TextDecoration {
+                underline: span.underline,
+                line_through: span.line_through,
+            },
+            background: span.background.map(|color| nsh_core::TextBackground {
+                color: nsh_core::Color(color),
+                radius: nsh_core::Points::ZERO,
+                node: 0,
+            }),
+            ..ResolvedTextStyle::default()
+        })
     }
     fn dialogs(&mut self) -> Result<Vec<Dialog>, String> {
         self.query(TestStep::Dialogs)
@@ -564,6 +749,20 @@ impl Driver for Remote {
         self.query(TestStep::Scene {
             query: nsh_dev::protocol::SceneQuery::Storage,
         })
+    }
+    fn window_state(&mut self, id: &str) -> Result<Option<nsh_core::desktop::WindowState>, String> {
+        let value = self.take(TestStep::WindowState { id: id.into() })?;
+        crate::window_json::from_json(value)
+    }
+    fn press_window_close(&mut self, id: &str) -> Result<(), String> {
+        self.action(TestStep::PressWindowClose { id: id.into() })
+    }
+    fn window_screenshot(&mut self, id: &str) -> Result<Vec<u8>, String> {
+        use base64::Engine as _;
+        let png: String = self.query(TestStep::WindowScreenshot { id: id.into() })?;
+        base64::engine::general_purpose::STANDARD
+            .decode(png)
+            .map_err(|e| format!("the host sent a broken picture: {e}"))
     }
 }
 

@@ -41,7 +41,7 @@
 //! a scroll view's offsets, the live region it is in, and the actions it
 //! takes: `Click` (its `activate` action, else a press), `Focus`,
 //! `Increment` / `Decrement`, `Expand` / `Collapse`, `ShowContextMenu`
-//! (`longpress`), `SetValue`, custom actions (the other
+//! (`onContextMenu` with no pointer, else `longpress`), `SetValue`, custom actions (the other
 //! `accessibilityActions`, by their labels), scrolling and
 //! `ScrollIntoView`. The listeners are registered as the surface paints
 //! ([`paint`]); each sends the action to the view's node by id, so a
@@ -88,12 +88,14 @@ use std::{
 use gpui::{
     A11ySubtreeBuilder, AnyElement, App, AvailableSpace, FocusHandle, InteractiveElement,
     IntoElement, StatefulInteractiveElement, Styled, Window,
-    accesskit::{self, Action, ActionData, CustomAction, Live, Node, Role, ScrollUnit, Toggled},
+    accesskit::{
+        self, Action, ActionData, AriaCurrent, CustomAction, Live, Node, Role, ScrollUnit, Toggled,
+    },
     div, point, px, size,
 };
 use nsh_core::{
-    Accessibility, AccessibilityRole as AxRole, Checked, Command, EventKind, EventMask, LiveRegion,
-    MountBatch, NodeId, ViewKind, geometry::Points,
+    Accessibility, AccessibilityCurrent, AccessibilityRole as AxRole, Checked, Command, EventKind,
+    EventMask, LiveRegion, MountBatch, NodeId, ROOT_ID, ViewKind, geometry::Points,
 };
 use rustc_hash::FxHashMap;
 
@@ -138,7 +140,10 @@ fn groups_role(role: Role) -> bool {
             | Role::Switch
             | Role::Tab
             | Role::MenuItem
+            | Role::MenuItemCheckBox
+            | Role::MenuItemRadio
             | Role::ListBoxOption
+            | Role::TreeItem
     )
 }
 
@@ -168,6 +173,9 @@ fn focusable(role: Role) -> bool {
             | Role::Switch
             | Role::Tab
             | Role::ListBoxOption
+            | Role::MenuItemCheckBox
+            | Role::MenuItemRadio
+            | Role::TreeItem
     )
 }
 
@@ -236,6 +244,13 @@ pub(crate) fn role_for(a: &Accessibility, kind: ViewKind, pressable: bool) -> Op
         AxRole::RowGroup => Role::RowGroup,
         AxRole::Listbox => Role::ListBox,
         AxRole::Option => Role::ListBoxOption,
+        AxRole::Group => Role::Group,
+        AxRole::Region => Role::Region,
+        AxRole::Navigation => Role::Navigation,
+        AxRole::Tree => Role::Tree,
+        AxRole::TreeItem => Role::TreeItem,
+        AxRole::MenuItemCheckbox => Role::MenuItemCheckBox,
+        AxRole::MenuItemRadio => Role::MenuItemRadio,
     })
 }
 
@@ -474,12 +489,27 @@ fn describe(
     if state.selected || matches!(role, Role::Tab | Role::ListBoxOption) {
         node.set_selected(state.selected);
     }
-    if let Some(checked) = state.checked {
+    // A button's pressed state makes it a toggle button (ARIA's
+    // `aria-pressed`), as AccessKit reads a toggled button.
+    if let Some(checked) = state.checked.or(state.pressed) {
         node.set_toggled(match checked {
             Checked::False => Toggled::False,
             Checked::True => Toggled::True,
             Checked::Mixed => Toggled::Mixed,
         });
+    }
+    if let Some(current) = state.current {
+        node.set_aria_current(match current {
+            AccessibilityCurrent::True => AriaCurrent::True,
+            AccessibilityCurrent::Page => AriaCurrent::Page,
+            AccessibilityCurrent::Step => AriaCurrent::Step,
+            AccessibilityCurrent::Location => AriaCurrent::Location,
+            AccessibilityCurrent::Date => AriaCurrent::Date,
+            AccessibilityCurrent::Time => AriaCurrent::Time,
+        });
+    }
+    if let Some(level) = a.level {
+        node.set_level(level as usize);
     }
     if let Some(expanded) = state.expanded {
         node.set_expanded(expanded);
@@ -543,7 +573,10 @@ fn describe(
         if state.expanded.is_some() && (pressable || declares(s, "collapse")) {
             actions.push(Action::Collapse);
         }
-        if declares(s, "longpress") || s.events.contains(EventKind::LongPress) {
+        if declares(s, "longpress")
+            || s.events.contains(EventKind::LongPress)
+            || s.events.contains(EventKind::ContextMenu)
+        {
             actions.push(Action::ShowContextMenu);
         }
         let stepped = range.is_some() && (declares(s, "increment") || declares(s, "decrement"));
@@ -658,7 +691,9 @@ fn walk(
     live: LiveRegion,
     kids: &mut Vec<accesskit::NodeId>,
 ) {
-    for child in &view.child_views() {
+    // A scroll view's content as it is on screen: a list's recycled cells
+    // are not in their rows' order.
+    for child in &view.with_children_in_reading_order(<[NshView]>::to_vec) {
         let Some(s) = child.try_state() else { continue };
         let part = part(&s);
         if part == Part::Hidden {
@@ -799,16 +834,38 @@ struct State {
 }
 
 thread_local! {
-    static STATES: RefCell<FxHashMap<u64, State>> = RefCell::default();
+    /// Per surface and window (its root node): each window has a tree of
+    /// its own.
+    static STATES: RefCell<FxHashMap<(u64, NodeId), State>> = RefCell::default();
+}
+
+/// The window whose tree is built, drawn or acted in now: the window of the
+/// app's own whose input is entered ([`crate::window::enter`]), else the
+/// main window.
+fn current(surface: &Surface) -> NodeId {
+    crate::window::entered(surface).unwrap_or(ROOT_ID)
+}
+
+fn with_window_state<R>(surface: &Surface, window: NodeId, f: impl FnOnce(&mut State) -> R) -> R {
+    STATES.with_borrow_mut(|states| f(states.entry((surface.key(), window)).or_default()))
 }
 
 fn with_state<R>(surface: &Surface, f: impl FnOnce(&mut State) -> R) -> R {
-    STATES.with_borrow_mut(|states| f(states.entry(surface.key()).or_default()))
+    with_window_state(surface, current(surface), f)
 }
 
-/// True when a client was attached when the surface last drew.
+/// True when a client was attached when one of the surface's windows last
+/// drew.
 fn active(surface: &Surface) -> bool {
-    STATES.with_borrow(|s| s.get(&surface.key()).is_some_and(|s| s.active))
+    let key = surface.key();
+    STATES.with_borrow(|s| s.iter().any(|(k, s)| k.0 == key && s.active))
+}
+
+/// Window `window` of the app's own closed: its tree goes.
+pub(crate) fn window_closed(surface: &Surface, window: NodeId) {
+    STATES.with_borrow_mut(|s| {
+        s.remove(&(surface.key(), window));
+    });
 }
 
 /// A view was made.
@@ -841,6 +898,7 @@ pub(crate) fn prepare(_batch: &MountBatch) {}
 pub(crate) fn batch_applied(surface: &Surface) {
     if active(surface) {
         surface.invalidate();
+        crate::window::invalidate_all(surface);
     }
 }
 
@@ -849,23 +907,32 @@ pub(crate) fn focus(surface: &Rc<Surface>, view: &NshView) {
     let Ok(Some(element)) = exposed(view) else {
         return;
     };
-    with_state(surface, |s| s.focus = Some(element.id()));
+    let window = crate::window::root_of(surface, &element);
+    with_window_state(surface, window, |s| s.focus = Some(element.id()));
     surface.invalidate();
+    crate::window::invalidate_all(surface);
 }
 
 /// The keyboard focus moved to `view` (a text field): it takes the
 /// accessibility focus. Called by the modules that move it.
-pub(crate) fn focus_changed(surface: &Rc<Surface>, _view: &NshView) {
-    with_state(surface, |s| s.focus = None);
+pub(crate) fn focus_changed(surface: &Rc<Surface>, view: &NshView) {
+    let window = crate::window::root_of(surface, view);
+    with_window_state(surface, window, |s| s.focus = None);
     surface.invalidate();
+    crate::window::invalidate_all(surface);
 }
 
-/// The element with the accessibility focus.
+/// The element with the accessibility focus in the current window
+/// ([`current`]): the focused text field when it is in that window.
 pub(crate) fn focused(surface: &Surface) -> Option<NshView> {
-    if let Some(field) = crate::text_input::focused(surface) {
+    let window = current(surface);
+    if let Some(field) = crate::text_input::focused(surface)
+        && crate::window::root_of(surface, &field) == window
+    {
         return Some(field);
     }
-    let id = STATES.with_borrow(|s| s.get(&surface.key()).and_then(|s| s.focus))?;
+    let key = (surface.key(), window);
+    let id = STATES.with_borrow(|s| s.get(&key).and_then(|s| s.focus))?;
     let view = surface.view(id)?;
     match exposed(&view) {
         Ok(Some(e)) => Some(e),
@@ -878,16 +945,20 @@ pub(crate) fn announce(surface: &Rc<Surface>, text: &str) {
     if text.is_empty() {
         return;
     }
-    with_state(surface, |s| {
+    // Read where the user is: the window with the keyboard focus.
+    let window = crate::window::focused_root(surface);
+    with_window_state(surface, window, |s| {
         let sequence = s.announcement.as_ref().map_or(0, |a| a.0 + 1);
         s.announcement = Some((sequence, text.to_owned()));
     });
     surface.invalidate();
+    crate::window::invalidate_all(surface);
 }
 
-/// The surface element prepaints (before it registers its focus handle):
-/// follows the client's attachment into the environment and, while one is
-/// attached, builds the nodes and prepaints the focus proxy.
+/// The surface element (or the element of a window of the app's own, its
+/// input entered) prepaints, before it registers its focus handle: follows
+/// the client's attachment into the environment and, while one is
+/// attached, builds the window's nodes and prepaints the focus proxy.
 pub(crate) fn prepaint(
     surface: &Rc<Surface>,
     focus_handle: &FocusHandle,
@@ -895,19 +966,21 @@ pub(crate) fn prepaint(
     cx: &mut App,
 ) {
     let active = window.is_a11y_active();
+    let key = surface.key();
+    with_state(surface, |s| s.active = active);
+    // A client attached to any of its windows.
+    let any = self::active(surface);
     let mut env = surface.environment.get();
-    if env.screen_reader != active {
-        env.screen_reader = active;
+    if env.screen_reader != any {
+        env.screen_reader = any;
         surface.set_environment(env);
     }
-    let key = surface.key();
     STATES.with_borrow_mut(|states| {
         // Surfaces that are gone.
-        states.retain(|k, _| *k == key || Surface::by_key(*k).is_some());
+        states.retain(|k, _| k.0 == key || Surface::by_key(k.0).is_some());
     });
     if !active {
         with_state(surface, |s| {
-            s.active = false;
             s.built = None;
             s.proxied = None;
             s.proxy = None;
@@ -917,7 +990,8 @@ pub(crate) fn prepaint(
     }
     let field = |v: &NshView| crate::text_input::accessible_value(v);
     let scale = window.scale_factor();
-    let mut built = build(key, &surface.root, surface.origin.get(), scale, &field);
+    let root = surface.input_root();
+    let mut built = build(key, &root, surface.origin.get(), scale, &field);
     let mut proxied = None;
     let mut proxy = None;
     if let Some(view) = focused(surface).map(|v| v.id())
@@ -956,7 +1030,6 @@ pub(crate) fn prepaint(
         proxy = Some(element);
     }
     with_state(surface, |s| {
-        s.active = true;
         s.built = Some(built);
         s.proxied = proxied;
         s.proxy = proxy;
@@ -1028,12 +1101,14 @@ pub(crate) fn paint(surface: &Surface, window: &mut Window, cx: &mut App) {
         proxy.paint(window, cx);
     }
     let key = surface.key();
+    let root = crate::window::entered(surface);
     for (node, view, actions) in listeners {
         for action in actions {
             window.on_a11y_action(node, action, move |data, window, cx| {
                 if let Some(surface) = Surface::by_key(key)
                     && let Some(view) = surface.view(view)
                 {
+                    let _in = crate::window::enter(&surface, root);
                     perform(&surface, &view, action, data, window.scale_factor());
                 }
                 crate::rt::flush(cx);
@@ -1127,7 +1202,11 @@ fn perform(
             }
         }
         Action::ShowContextMenu => {
-            if !action_or_press(surface, view, "longpress", false) {
+            // Its context menu (`onContextMenu`, no pointer), else its long
+            // press, as the mobile platforms map the action.
+            if crate::input::hears_show_menu(view) {
+                crate::input::show_context_menu(surface, view);
+            } else if !action_or_press(surface, view, "longpress", false) {
                 surface.event(
                     view.id(),
                     EventKind::LongPress,
@@ -1411,6 +1490,37 @@ mod tests {
             .node
     }
 
+    /// A list's recycled cells are read in the order they show, not in the
+    /// order they were made (bound to rows further down as the list
+    /// scrolled): a scroll view's content is read as it is on screen.
+    #[test]
+    fn a_scroll_views_content_is_read_in_screen_order() {
+        let root = view(0, ViewKind::View, Accessibility::default());
+        root.set_invalidate(Rc::new(|| {}));
+        let list = view(2, ViewKind::Scroll, Accessibility::default());
+        list.insert_before(&root, None);
+        for (id, y) in [(4, 160.0), (6, 200.0), (8, 80.0), (10, 120.0)] {
+            let cell = pressable(id, Accessibility::default());
+            cell.state_mut().frame = crate::geom::rect(0.0, y, 100.0, 40.0);
+            cell.insert_before(&list, None);
+        }
+        let b = built(&root);
+        assert_eq!(
+            node(&b, 2).children(),
+            [8, 10, 4, 6].map(|id| node_id(7, id))
+        );
+        // A list in its parent's viewport is a plain view, looked through:
+        // its cells are read in screen order too.
+        list.unparent();
+        let page = view(12, ViewKind::View, Accessibility::default());
+        page.state_mut().props.screen_order = Some(nsh_core::geometry::Axis::Vertical);
+        page.insert_before(&root, None);
+        for cell in list.child_views() {
+            cell.insert_before(&page, None);
+        }
+        assert_eq!(built(&root).top, [8, 10, 4, 6].map(|id| node_id(7, id)));
+    }
+
     #[test]
     fn hierarchy() {
         let (root, all) = tree();
@@ -1454,6 +1564,75 @@ mod tests {
         find(&all, 6).state_mut().props.accessibility.label = Some("Store".into());
         assert_eq!(name_of(&find(&all, 6)).as_deref(), Some("Store"));
         assert_eq!(node(&built(&root), 6).label(), Some("Store"));
+    }
+
+    /// The roles of gpui-base's structural components; a button's pressed
+    /// state, a level and a current item.
+    #[test]
+    fn structural_roles_pressed_level_and_current() {
+        let with_role = |role| Accessibility {
+            role,
+            ..Default::default()
+        };
+        for (role, expected) in [
+            (AxRole::Group, Role::Group),
+            (AxRole::Region, Role::Region),
+            (AxRole::Navigation, Role::Navigation),
+            (AxRole::Tree, Role::Tree),
+            (AxRole::TreeItem, Role::TreeItem),
+            (AxRole::MenuItemCheckbox, Role::MenuItemCheckBox),
+            (AxRole::MenuItemRadio, Role::MenuItemRadio),
+        ] {
+            assert_eq!(
+                role_for(&with_role(role), ViewKind::View, false),
+                Some(expected)
+            );
+        }
+        let root = view(0, ViewKind::View, Accessibility::default());
+        root.set_invalidate(Rc::new(|| {}));
+        let toggle = pressable(
+            2,
+            Accessibility {
+                role: AxRole::Button,
+                label: Some("Bold".into()),
+                state: AccessibilityState {
+                    pressed: Some(Checked::True),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let heading = view(
+            4,
+            ViewKind::View,
+            Accessibility {
+                role: AxRole::Header,
+                label: Some("Details".into()),
+                level: Some(3),
+                ..Default::default()
+            },
+        );
+        let page = pressable(
+            6,
+            Accessibility {
+                role: AxRole::Link,
+                label: Some("2".into()),
+                state: AccessibilityState {
+                    current: Some(AccessibilityCurrent::Page),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        toggle.insert_before(&root, None);
+        heading.insert_before(&root, None);
+        page.insert_before(&root, None);
+        let b = built(&root);
+        assert_eq!(node(&b, 2).role(), Role::Button);
+        assert_eq!(node(&b, 2).toggled(), Some(Toggled::True));
+        assert_eq!(node(&b, 4).role(), Role::Heading);
+        assert_eq!(node(&b, 4).level(), Some(3));
+        assert_eq!(node(&b, 6).aria_current(), Some(AriaCurrent::Page));
     }
 
     #[test]

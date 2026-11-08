@@ -1,9 +1,7 @@
 import { mount, signal, Text, View } from "nsh";
 import { Button, Dialog, Switch } from "nsh/base";
-import { button, buttonText, desktop, Inspector, Panel, Stage, tint, ui, wide } from "./palette";
+import { backdrop, button, buttonText, desktop, dialogCard, dialogText, dialogTitle, Inspector, Panel, Stage, switchLook, ui, wide } from "./palette";
 
-const track = `${desktop ? "w-9" : "w-12"} rounded-full p-0.5 transition-colors motion-reduce:transition-none`;
-const thumb = desktop ? "size-4 rounded-full transition-transform motion-reduce:transition-none checked:translate-x-4" : "size-5.5 rounded-full transition-transform motion-reduce:transition-none checked:translate-x-5";
 
 function App() {
   const card = signal(false);
@@ -18,19 +16,16 @@ function App() {
   );
   const openSheet = () => (
     <Button onPress={() => sheet.set(true)} {...button()}>
-      <Text style={buttonText()}>Open a sheet</Text>
+      <Text style={buttonText()}>Open as a page sheet</Text>
     </Button>
   );
-  const backdrop = () => (
+  const backdropRow = () => (
     <Switch
       checked={backdropCloses()}
-      onChange={(next) => backdropCloses.set(next)}
+      onChange={({ checked }) => backdropCloses.set(checked)}
       class={wide() ? "flex-row items-center gap-2 self-center active:opacity-70" : "flex-row items-center gap-3 rounded-xl p-3 active:opacity-70"}
       style={wide() ? undefined : ui().row}
-      trackClass={track}
-      trackStyle={backdropCloses() ? ui().accentFill : ui().inset}
-      thumbClass={thumb}
-      thumbStyle={backdropCloses() ? { backgroundColor: ui().onAccent } : ui().raised}
+      {...switchLook(() => backdropCloses())}
     >
       <Text style={{ color: ui().text, flex: wide() ? undefined : 1, fontSize: desktop ? 13 : undefined }}>closeOnBackdropPress {String(backdropCloses())}</Text>
     </Switch>
@@ -53,13 +48,13 @@ function App() {
                   {openCard()}
                   {openSheet()}
                 </View>
-                {backdrop()}
+                {backdropRow()}
               </Stage>
               <Inspector>
                 <Panel title="open · onCancel">
                   <Text style={{ fontSize: 13, color: ui().text }}>{state()}</Text>
                 </Panel>
-                <Panel title="onOpenChange(open, reason) · onOpen" grow>
+                <Panel title="onOpenChange({ open, reason }) · onOpen" grow>
                   <Text style={{ fontSize: 13, fontWeight: "600", color: ui().accent }}>{log()}</Text>
                 </Panel>
               </Inspector>
@@ -70,7 +65,7 @@ function App() {
             {openCard()}
             {openSheet()}
 
-            {backdrop()}
+            {backdropRow()}
 
             <View style={{ ...ui().inset, borderRadius: 12, padding: 14, gap: 4 }}>
               <Text style={{ color: ui().muted, fontSize: 13 }}>{state()}</Text>
@@ -85,23 +80,23 @@ function App() {
         open={card()}
         animation="fade"
         closeOnBackdropPress={backdropCloses()}
-        onOpenChange={(open, reason) => {
+        onOpenChange={({ open, reason }) => {
           card.set(open);
-          log.set(`onOpenChange(${open}, "${reason}")`);
+          log.set(`onOpenChange({ open: ${open}, reason: "${reason}" })`);
         }}
         onCancel={() => cancels.update((n) => n + 1)}
         onOpen={() => log.set("onOpen: card")}
         backdropTestID="card-backdrop"
-        backdropStyle={{ backgroundColor: tint("#000000", 0.45) }}
-        style={{ ...ui().card, margin: "auto", width: 320, maxWidth: "90%", borderRadius: 18, padding: 20, gap: 12 }}
+        backdropStyle={backdrop()}
+        style={dialogCard(desktop ? 360 : 320)}
       >
-        <Text style={{ color: ui().text, fontSize: 20, fontWeight: "700" }}>Delete this item?</Text>
-        <Text style={{ color: ui().muted }}>
+        <Text style={dialogTitle()}>Delete this item?</Text>
+        <Text style={dialogText()}>
           {backdropCloses()
             ? "A press on the dimmed backdrop closes it."
             : "The backdrop only calls onCancel: close with a button."}
         </Text>
-        <View style={{ flexDirection: "row", gap: 8, justifyContent: desktop ? "flex-end" : undefined }}>
+        <View style={{ flexDirection: "row", gap: 8, paddingTop: 4, justifyContent: desktop ? "flex-end" : undefined }}>
           <Button
             onPress={() => {
               card.set(false);
@@ -126,25 +121,31 @@ function App() {
       <Dialog
         open={sheet()}
         presentation="pageSheet"
-        onOpenChange={(open, reason) => {
+        onOpenChange={({ open, reason }) => {
           sheet.set(open);
-          log.set(`onOpenChange(${open}, "${reason}")`);
+          log.set(`onOpenChange({ open: ${open}, reason: "${reason}" })`);
         }}
         onCancel={() => cancels.update((n) => n + 1)}
         onOpen={() => log.set("onOpen: sheet")}
-        backdropStyle={{ backgroundColor: tint("#000000", 0.3) }}
-        style={{
-          backgroundColor: ui().page,
-          flex: 1,
-          marginTop: 40,
-          width: "100%",
-          maxWidth: 560,
-          alignSelf: "center",
-          borderTopLeftRadius: 16,
-          borderTopRightRadius: 16,
-        }}
+        backdropStyle={backdrop()}
+        // As tall as its content: a panel in the middle on the desktop, a
+        // sheet along the bottom edge on a phone.
+        style={
+          desktop
+            ? { backgroundColor: ui().page, margin: "auto", width: 480, maxWidth: "90%", maxHeight: "90%", borderRadius: 16 }
+            : {
+                backgroundColor: ui().page,
+                marginTop: "auto",
+                width: "100%",
+                maxWidth: 560,
+                maxHeight: "90%",
+                alignSelf: "center",
+                borderTopLeftRadius: 16,
+                borderTopRightRadius: 16,
+              }
+        }
       >
-        <View style={{ flex: 1, padding: 20, paddingTop: "calc(env(safe-area-inset-top) + 20px)", paddingRight: "calc(env(safe-area-inset-right) + 20px)", paddingBottom: "calc(env(safe-area-inset-bottom) + 20px)", paddingLeft: "calc(env(safe-area-inset-left) + 20px)", gap: 12 }}>
+        <View style={{ padding: 20, paddingTop: "calc(env(safe-area-inset-top) + 20px)", paddingRight: "calc(env(safe-area-inset-right) + 20px)", paddingBottom: "calc(env(safe-area-inset-bottom) + 20px)", paddingLeft: "calc(env(safe-area-inset-left) + 20px)", gap: 12 }}>
           <Text style={{ color: ui().text, fontSize: 22, fontWeight: "700" }}>A sheet</Text>
           <Text style={{ color: ui().muted }}>
             presentation="pageSheet": a system sheet on iOS that follows the finger when swiped down. Elsewhere the

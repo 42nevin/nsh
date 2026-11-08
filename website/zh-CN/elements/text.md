@@ -1,7 +1,7 @@
 ---
 title: Text
 description: 绘制文本的元素：嵌套片段、链接、行数限制、字体缩放、行内视图和文本布局事件。
-order: 3
+order: 20
 group: primitives
 demo: el-text
 ---
@@ -82,7 +82,7 @@ Tailwind 类同样适用：`<Text class="bg-gray-100 rounded">`。内边距和�
 
 ### 链接
 
-带按压处理函数的片段就是链接：按在它的字符上由该片段处理，按在其他位置则由段落处理。
+带按压处理函数的片段就是链接：按在它的字符上由该片段处理，按在其他位置则由段落处理。在终端里，每个链接也是一个键盘焦点停靠点：Tab 依次到达段落里的链接，Return 按下获得焦点的那一个。
 
 ```rust tabs
 text("继续即表示你同意")
@@ -190,8 +190,8 @@ import Inter from "./fonts/Inter-Regular.ttf";
 | 事件 | Rust | 载荷 | 触发时机 |
 |---|---|---|---|
 | `onTextLayout` | | `{ lines: TextLayoutLine[] }` | 段落每次布局之后。 |
-| `onPress`、`onLongPress` 等 | `.on_press`、`.on_long_press` 等 | 无 | 与 [view](./view.md#事件) 相同；在片段上时，指按在其字符上的按压。 |
-| `onLayout` | `.on_layout` | `Bounds` | 文本块的 frame 发生变化。 |
+| `onPress`、`onLongPress` 等 | `.on_press`、`.on_long_press` 等 | `PressEvent`（Rust 中无） | 与 [view](./view.md#事件) 相同；在片段上时，指按在其字符上的按压。 |
+| `onLayout` | `.on_layout` | `{ bounds }` | 文本块的 frame 发生变化。 |
 
 `TextLayoutLine` 为 `{ text, x, y, width, height, ascender, descender, capHeight, xHeight }`，坐标位于文本的内容盒中：
 

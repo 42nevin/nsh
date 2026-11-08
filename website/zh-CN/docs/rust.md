@@ -14,7 +14,7 @@ JavaScript 虚拟机。
 | | Rust | TSX | Rust + TSX |
 |---|---|---|---|
 | 你的 UI、状态和事件处理 | Rust | TSX，运行在 QuickJS 上 | Rust 组件和模块，TSX 页面使用它们 |
-| 应用运行的内容 | 只有引擎和你的 crate，所有平台和浏览器都一样 | QuickJS 和引擎 | QuickJS 和引擎，加上你的 crate |
+| 应用运行的内容 | 只有引擎和你的 crate，所有平台和浏览器都一样 | QuickJS 和引擎（浏览器里是它的 JavaScript 引擎） | QuickJS 和引擎，加上你的 crate（浏览器里是它的 JavaScript 引擎） |
 | 适合 | 业务复杂度高的中大型应用 | 运行时下发的应用和模块、快速迭代 | Rust 核心加上经常变化的部分 |
 | 修改代码 | 重新构建并重启 | 热更新 | TSX 热更新，Rust 重新构建并重启 |
 | 创建 | `nsh init my-app --template rust` | `nsh init my-app --template ts` | `nsh init my-app --template mixed` |
@@ -40,6 +40,8 @@ cd my-app
 nsh run                        # 本机的后端；--target ios、android、web、macos、linux 或 windows
 nsh package --target web       # 或 ios、ios-simulator、android、macos、linux、windows
 ```
+
+推荐用 [huacnlee/cargo](https://github.com/huacnlee/cargo) 构建，NSH 自己的开发也用它：一个可以直接替换官方 Cargo 的分支，每个依赖只为你所有的项目和 Git worktree 构建一次，构建目录自己控制在大小限制之内，不需要任何配置（[安装](./installation.md#从源码构建)）。
 
 `src/lib.rs` 包含整个应用：组件、状态、事件处理和任务。
 
@@ -129,8 +131,8 @@ iOS 的 `AppView` 上用 `AppSource::Rust` 挂载 Rust 根组件。
 
 ## 桌面标题栏
 
-Rust 应用通过 `nsh_core::element::desktop` 绘制自定义标题栏。调用
-`set_title_bar(TitleBarStyle::Hidden, Some(height))`，将背景设为
+Rust 应用通过 `nsh_core::element::desktop` 绘制自定义标题栏。用
+`current_window().set(..)` 把窗口的 `title_bar` 属性设为 `TitleBarStyle::Hidden`，将背景设为
 `.window_drag(true)`，并通过 `title_bar()` 为系统窗口按钮留出空间。
 返回值的 `top` 是标题栏高度，`left` 和 `right` 是两侧系统按钮占用的宽度。
 读取会订阅变化，包括进入和退出全屏。平台负责窗口拖动和用户设置的标题栏双击行为；
@@ -138,12 +140,18 @@ Rust 应用通过 `nsh_core::element::desktop` 绘制自定义标题栏。调用
 
 ```rust
 use nsh_core::{
-    desktop::TitleBarStyle,
-    element::{desktop::{close_window, set_title_bar, title_bar}}, prelude::*,
+    desktop::{TitleBarOptions, TitleBarStyle, WindowAttributes, WindowControl},
+    element::desktop::{current_window, title_bar},
+    prelude::*,
 };
 
 fn window_bar() -> impl IntoElement {
-    set_title_bar(TitleBarStyle::Hidden, Some(px(42.0)));
+    let mut bar = TitleBarOptions::default();
+    bar.style = TitleBarStyle::Hidden;
+    bar.height = Some(px(42.0));
+    let mut attributes = WindowAttributes::default();
+    attributes.title_bar = Some(bar);
+    current_window().set(attributes);
     view()
         .h(px(42.0))
         .flex_row()
@@ -152,12 +160,53 @@ fn window_bar() -> impl IntoElement {
         .pl(move || title_bar().left + px(12.0))
         .pr(move || title_bar().right + px(12.0))
         .child(text("My app").flex_1())
-        .child(text("Close").window_drag(false).on_press(close_window))
+        .child(text("Close").window_control(WindowControl::Close))
 }
 ```
 
-`set_title_bar(TitleBarStyle::Default, None)` 恢复系统标题栏。
-`close_window()` 遵循宿主的正常窗口关闭行为。
+`TitleBarStyle::Default` 的标题栏恢复系统标题栏。带 `.window_control(..)` 的视图就是窗口的最小化、
+最大化或关闭按钮：平台执行它的按下动作，关闭遵循窗口的 `close_on_press`。`WindowRef`
+有窗口的其他请求（`set_mode`、`minimize`、`set_bounds`、`close`……），`window()` 打开应用自己的窗口，
+这个模块还有菜单（`set_application_menu`、`popup_menu`）：见 [nsh/desktop](../modules/nsh-desktop.md)。
+
+## 文件和文件夹
+
+在桌面平台上，Rust 代码可以显示系统的文件对话框，并把本地路径交给系统处理，
+每个结果都在任务中等待：`pick_paths` 接受 `OpenDialog`
+（`OpenDialog::files()`、`::folders()` 或 `::files_and_folders()`），`pick_save_path`
+接受 `SaveDialog`，`open_path`（用文件的默认应用打开）、`reveal_path`
+（在访达、文件资源管理器或文件管理器中选中该项）和 `move_to_trash`
+（macOS 告知时返回该项移到的位置）。用户取消时对话框返回 `Ok(None)`，
+无法显示时返回错误（Linux 上没有文件选择 portal 时，以及 iOS、Android 和 Web 上；
+在这些平台上 `open_path`、`reveal_path` 和 `move_to_trash` 也返回错误）。
+请求失败时一律返回错误，不返回 `false`。
+
+```rust
+use nsh_core::{
+    file_dialog::{FileFilter, OpenDialog},
+    prelude::*,
+};
+
+fn open_notes() {
+    let picked = pick_paths(
+        OpenDialog::files()
+            .multiple(true)
+            .filter(FileFilter::new("Markdown", ["md", "markdown"]))
+            .button_label("打开"),
+    );
+    spawn(async move {
+        match picked.await {
+            Ok(Some(paths)) => {
+                for path in paths {
+                    let _ = reveal_path(path).await;
+                }
+            }
+            Ok(None) => {} // 用户取消。
+            Err(error) => log::warn!("no file dialog: {error}"),
+        }
+    });
+}
+```
 
 ## 用 TSX 扩展 Rust 应用
 
@@ -296,8 +345,11 @@ Rust 中；TSX 传入 props、接收事件。类型不对的 prop（`u32` 类型
 [未处理的 rejection](./dev-server-and-debugging.md#日志)）；返回值的得到 `Promise<T>`。参数和返回值的类型来自签名：数字、
 字符串、`Option`、`Vec`、你的 `#[derive(JsObject)]` 结构体和 `#[derive(PropEnum)]` 枚举、你的类的实例，以及 TSX 函数
 （`Callback<A, R>`：Rust 在调用中立即调用它，或之后用 `post` 和 `call_async` 调用；`Callback<f64>` 在 TS 中是
-`(value: number) => void`，`#[args(balance)] listener: Callback<f64>` 给参数命名，得到 `(balance: number) => void`）。事件处理函数的参数
-也叫 `value`，在事件的变体上写 `#[args(index)]` 可以给它命名。类型不对的参数在调用中抛出 `TypeError`，
+`(value: number) => void`，`#[args(balance)] listener: Callback<f64>` 给参数命名，得到 `(balance: number) => void`）。开始监听的函数命名为
+`on(event, listener)`，返回 `Stop`（`Stop::new(|| …)`），TSX 得到的是停止监听的函数（`() => void`）；它只运行一次，在 TSX 调用它时，
+或在调用 `on` 的一方（组件，或热重载下模块的这次运行）消失时。事件处理函数
+接收一个对象：变体的值是它的字段 `value`，在变体上写 `#[args(price)]` 可以给它命名（`onSelect({ price })`），
+有多个值的变体用 `#[args(open, reason)]` 给各个字段命名。类型不对的参数在调用中抛出 `TypeError`，
 返回 Promise 的调用则以它 reject；`Err` 以其消息抛出（或 reject）。类的对象拥有它的
 Rust 值：对象被回收时释放，或调用 `ledger.dispose()`（也可以 `using ledger = new Ledger()`）立即释放。指定 TSX 入口来运行它：`nsh run App.tsx` 或 `nsh package App.tsx --target …`。TSX 的修改是热更新，
 Rust 的修改会重新构建并重启应用。CLI 根据 crate 的描述知道它导出了什么，自己打包和编译 TSX；开发宿主和 `nsh test` 的

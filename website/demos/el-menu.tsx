@@ -1,76 +1,65 @@
 import { mount, signal, Text, View } from "nsh";
 import { ContextMenu, Menu, MenuItem, MenuSeparator, type OpenChangeReason, Submenu } from "nsh/base";
-import { button, buttonText, desktop, Inspector, Panel, Stage, tint, ui, wide } from "./palette";
+import { backdrop, button, buttonText, desktop, Inspector, MenuLabel, MenuMark, MenuPanel, menuIndicator, menuItemLabel, menuItemLook, menuItemSize, menuSeparator, menuSheet, Panel, Stage, SubmenuBack, SubmenuRow, ui, wide } from "./palette";
 
-/** A popup at the trigger on desktops, a sheet at the bottom on phones. */
-const surface = () =>
-  desktop
-    ? { ...ui().card, borderRadius: 12, padding: 5, minWidth: 210 }
-    : { ...ui().card, borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingHorizontal: 10, paddingTop: 10, paddingBottom: 30 };
-
-const backdrop = { backgroundColor: "rgba(0,0,0,0.45)" };
-const rowHeight = () => (desktop ? 32 : 46);
-const row = () => ({ flexDirection: "row" as const, alignItems: "center" as const, gap: 8, height: rowHeight(), paddingHorizontal: 10, borderRadius: 8 });
-
-function Item(props: { label: string; onSelect?: () => void; checked?: boolean; disabled?: boolean; keepOpen?: boolean; danger?: boolean }) {
+/**
+ * One row (`menuItemLook`: the hover and the keyboard's highlight alike).
+ * A checkable row (`checked`) leads with its mark: a check for a setting, a
+ * dot for one choice of a group (`radio`), which fades in as the app checks
+ * the item; rows of the same menu keep the mark's room so their labels line
+ * up (`inset`).
+ */
+function Item(props: { label: string; onSelect?: () => void; checked?: boolean; radio?: boolean; inset?: boolean; disabled?: boolean; keepOpen?: boolean; danger?: boolean }) {
   return (
     <MenuItem
       onSelect={props.onSelect}
       disabled={props.disabled}
+      checked={props.checked}
+      role={props.radio ? "menuitemradio" : undefined}
+      indicatorClass={menuIndicator}
+      indicator={props.checked === undefined ? undefined : <MenuMark kind={props.radio ? "dot" : "check"} size={menuItemSize.icon} tint={ui().accent} />}
       closeOnSelect={!props.keepOpen}
-      hoverStyle={{ backgroundColor: tint(ui().accent, 0.08), borderColor: tint(ui().accent, 0.24) }}
-      activeStyle={{ backgroundColor: tint(ui().accent, 0.14), borderColor: tint(ui().accent, 0.34) }}
-      disabledStyle={{ opacity: 0.35 }}
-      style={{ ...row(), borderWidth: 1, borderColor: "transparent" }}
+      {...menuItemLook()}
     >
-      <Text style={{ flex: 1, fontSize: 14, color: props.danger ? ui().down : ui().text }}>{props.label}</Text>
-      {/* The check at the trailing edge. */}
-      <If when={props.checked !== undefined}>
-        <Text style={{ width: 14, fontSize: 13, textAlign: "right", color: ui().accent }}>{props.checked ? "✓" : ""}</Text>
+      <If when={props.inset}>
+        <View style={{ width: menuItemSize.icon }} />
       </If>
+      <Text style={menuItemLabel({ danger: props.danger })}>{props.label}</Text>
     </MenuItem>
   );
 }
 
-function Separator() {
-  return <MenuSeparator style={{ height: 1, marginVertical: 4, marginHorizontal: 6, backgroundColor: ui().border }} />;
-}
-
 function Share(props: { onSelect: (what: string) => void }) {
   return (
-    <Submenu
-      trigger={
-        <View hoverStyle={{ backgroundColor: tint(ui().accent, 0.08), borderColor: tint(ui().accent, 0.24) }} activeStyle={{ backgroundColor: tint(ui().accent, 0.14), borderColor: tint(ui().accent, 0.34) }} style={{ ...row(), borderWidth: 1, borderColor: "transparent" }}>
-          <Text style={{ flex: 1, fontSize: 14, color: ui().text }}>Share</Text>
-          <Text style={{ fontSize: 14, color: ui().faint }}>›</Text>
-        </View>
-      }
-      back={
-        <View activeStyle={{ backgroundColor: tint(ui().accent, 0.14), borderColor: tint(ui().accent, 0.34) }} style={{ ...row(), borderWidth: 1, borderColor: "transparent" }}>
-          <Text style={{ fontSize: 14, fontWeight: "600", color: ui().accent }}>‹ Share</Text>
-        </View>
-      }
-    >
-      <Item label="Mail" onSelect={() => props.onSelect("Mail")} />
-      <Item label="Messages" onSelect={() => props.onSelect("Messages")} />
-      <Item label="Copy link" onSelect={() => props.onSelect("Copy link")} />
+    <Submenu offset={4} trigger={<SubmenuRow label="Share" />} back={<SubmenuBack label="Share" />}>
+      <MenuPanel side="right">
+        <Item label="Mail" onSelect={() => props.onSelect("Mail")} />
+        <Item label="Messages" onSelect={() => props.onSelect("Messages")} />
+        <Item label="Copy link" onSelect={() => props.onSelect("Copy link")} />
+      </MenuPanel>
     </Submenu>
   );
 }
+
+const SORTS = ["Name", "Date modified", "Size"];
 
 function App() {
   const last = signal("—");
   const reasons = signal<string[]>([]);
   const hidden = signal(false);
-  const changed = (name: string) => (open: boolean, reason: OpenChangeReason) =>
+  const sidebar = signal(true);
+  const minimap = signal(false);
+  const sort = signal("Name");
+  const pinned = signal(false);
+  const changed = (name: string) => ({ open, reason }: { open: boolean; reason: OpenChangeReason }) =>
     reasons.set([`${name} ${open ? "opened" : "closed"} · ${reason}`, ...reasons()].slice(0, 8));
   const choose = (what: string) => last.set(what);
   const menu = () => (
     <Menu
       offset={4}
       margin={8}
-      popupStyle={surface()}
-      backdropStyle={backdrop}
+      popupStyle={menuSheet()}
+      backdropStyle={backdrop()}
       onOpenChange={changed("File")}
       trigger={
         <View {...button("secondary", { align: "flex-start" })}>
@@ -78,21 +67,47 @@ function App() {
         </View>
       }
     >
-      <Item label="New" onSelect={() => choose("New")} />
-      <Item label="Open…" onSelect={() => choose("Open…")} />
-      <Item label="Paste" disabled />
-      <Separator />
-      <Share onSelect={(what) => choose(`Share › ${what}`)} />
-      <Item label="Show hidden files" checked={hidden()} keepOpen onSelect={() => hidden.set(!hidden())} />
-      <Separator />
-      <Item label="Delete" danger onSelect={() => choose("Delete")} />
+      <MenuPanel>
+        <Item label="New" onSelect={() => choose("New")} />
+        <Item label="Open…" onSelect={() => choose("Open…")} />
+        <Item label="Paste" disabled />
+        <MenuSeparator style={menuSeparator()} />
+        <Share onSelect={(what) => choose(`Share › ${what}`)} />
+        <MenuSeparator style={menuSeparator()} />
+        <Item label="Delete" danger onSelect={() => choose("Delete")} />
+      </MenuPanel>
+    </Menu>
+  );
+  const view = () => (
+    <Menu
+      offset={4}
+      margin={8}
+      popupStyle={menuSheet()}
+      backdropStyle={backdrop()}
+      onOpenChange={changed("View")}
+      trigger={
+        <View {...button("secondary", { align: "flex-start" })}>
+          <Text style={buttonText()}>View ▾</Text>
+        </View>
+      }
+    >
+      <MenuPanel>
+        {/* Settings keep the menu open: each shows its new value at once. */}
+        <Item label="Show sidebar" checked={sidebar()} keepOpen onSelect={() => sidebar.set(!sidebar())} />
+        <Item label="Show minimap" checked={minimap()} keepOpen onSelect={() => minimap.set(!minimap())} />
+        <Item label="Show hidden files" checked={hidden()} keepOpen onSelect={() => hidden.set(!hidden())} />
+        <MenuSeparator style={menuSeparator()} />
+        <MenuLabel text="Sort by" />
+        {/* One choice of a group: choosing closes the menu. */}
+        <Each of={SORTS}>{(by) => <Item label={by()} radio checked={sort() === by()} onSelect={() => sort.set(by())} />}</Each>
+      </MenuPanel>
     </Menu>
   );
   const context = () => (
     <ContextMenu
       margin={8}
-      popupStyle={surface()}
-      backdropStyle={backdrop}
+      popupStyle={menuSheet()}
+      backdropStyle={backdrop()}
       onOpenChange={changed("Context")}
       trigger={
         <View
@@ -107,26 +122,29 @@ function App() {
             gap: 4,
           }}
         >
-          <Text style={{ fontSize: 15, fontWeight: "600", color: ui().text }}>ContextMenu</Text>
+          <Text style={{ fontSize: 15, fontWeight: "600", color: ui().text }}>{pinned() ? "ContextMenu · pinned" : "ContextMenu"}</Text>
           <Text style={{ fontSize: 13, color: ui().muted }}>{desktop ? "Right click here" : "Hold a finger here"}</Text>
         </View>
       }
     >
-      <Item label="Copy" onSelect={() => choose("Copy")} />
-      <Item label="Rename" onSelect={() => choose("Rename")} />
-      <Share onSelect={(what) => choose(`Share › ${what}`)} />
-      <Separator />
-      <Item label="Delete" danger onSelect={() => choose("Delete")} />
+      <MenuPanel>
+        <Item label="Pinned" checked={pinned()} onSelect={() => pinned.set(!pinned())} />
+        <Item label="Copy" inset onSelect={() => choose("Copy")} />
+        <Item label="Rename" inset onSelect={() => choose("Rename")} />
+        <MenuSeparator style={menuSeparator()} />
+        <Item label="Delete" inset danger onSelect={() => choose("Delete")} />
+      </MenuPanel>
     </ContextMenu>
   );
   const panels = () => (
     <>
-      <Panel title="onSelect">
-        <Text style={{ fontSize: 13, color: ui().text }}>
-          {last()} · hidden files {hidden() ? "shown" : "hidden"}
+      <Panel title="onSelect · checked">
+        <Text style={{ fontSize: 13, color: ui().text }}>{last()}</Text>
+        <Text style={{ fontSize: 13, color: ui().muted }}>
+          sidebar {sidebar() ? "on" : "off"} · minimap {minimap() ? "on" : "off"} · hidden files {hidden() ? "shown" : "hidden"} · by {sort()} · {pinned() ? "pinned" : "not pinned"}
         </Text>
       </Panel>
-      <Panel title="onOpenChange(open, reason)" grow>
+      <Panel title="onOpenChange({ open, reason })" grow>
         <View style={{ gap: 2 }}>
           <Each of={reasons()}>{(e, i) => <Text style={{ fontSize: 12, color: i() === 0 ? ui().text : ui().faint }}>{e()}</Text>}</Each>
         </View>
@@ -137,21 +155,27 @@ function App() {
     <View style={{ flex: 1, backgroundColor: ui().page, padding: 20, paddingTop: 24, gap: 14 }}>
       <Text style={{ fontSize: 22, fontWeight: "700", color: ui().text }}>menu</Text>
       <Text style={{ color: ui().muted }}>
-        {desktop ? "Click File; hover Share to open its submenu. Right click the box below it" : "Tap File: a sheet; Share shows its items in place"}
+        {desktop ? "Click File; hover Share to open its submenu. View has settings and a choice of one. Right click the box below" : "Tap File: a sheet; Share shows its items in place. View has settings and a choice of one"}
       </Text>
 
       {() =>
         wide() ? (
           <View style={{ flex: 1, flexDirection: "row", gap: 16 }}>
             <Stage>
-              {menu()}
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                {menu()}
+                {view()}
+              </View>
               {context()}
             </Stage>
             <Inspector>{panels()}</Inspector>
           </View>
         ) : (
           <>
-            {menu()}
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              {menu()}
+              {view()}
+            </View>
             {context()}
             {panels()}
           </>

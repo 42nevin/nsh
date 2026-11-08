@@ -8,7 +8,7 @@
 //! Views form a tree of reference-counted nodes: a parent holds its
 //! children in drawing order (bottom to top), a child its parent weakly.
 //! A view draws itself in [`crate::render`]: shadows and background
-//! ([`crate::decor`]), its content (text, image, canvas), its children
+//! ([`crate::decor`]), its content (shader, text, image, canvas), its children
 //! (clipped to the rounded bounds when `overflow: hidden`), the items it
 //! hosts ([`ViewState::natives`]: text editors, headers, ...), then its
 //! border, as UIKit draws layer borders over the content.
@@ -106,9 +106,9 @@ pub(crate) struct ViewState {
     /// Touch, accessibility and test properties.
     pub(crate) props: Box<ViewProps>,
     /// States to report (`TrackStates`), and the current ones.
-    pub(crate) tracked: u8,
+    pub(crate) tracked: u16,
     /// Current interaction states (pressed, hovered, focused).
-    pub(crate) states: u8,
+    pub(crate) states: u16,
     /// Extra translation (sticky list cells, screen transitions).
     pub(crate) shift: (f32, f32),
     /// Extra opacity (press feedback, screen and modal transitions).
@@ -123,6 +123,8 @@ pub(crate) struct ViewState {
     pub(crate) image: Option<crate::image::ImageState>,
     /// Canvas content.
     pub(crate) canvas: Option<crate::canvas::CanvasState>,
+    /// What a shader draws under the children ([`crate::shader`]).
+    pub(crate) shader: Option<crate::shader::ShaderState>,
     /// Text field (input views).
     pub(crate) input: Option<Rc<crate::text_input::InputState>>,
     /// Hosted items, drawn above the children.
@@ -153,6 +155,7 @@ impl ViewState {
             text: None,
             image: None,
             canvas: None,
+            shader: None,
             input: None,
             natives: Vec::new(),
             overflow: None,
@@ -351,6 +354,11 @@ impl NshView {
         *self.0.invalidate.borrow_mut() = Some(invalidate);
     }
 
+    /// It is no longer a root of its own ([`NshView::set_invalidate`]).
+    pub(crate) fn clear_invalidate(&self) {
+        self.0.invalidate.borrow_mut().take();
+    }
+
     /// Something it draws changed: its surface draws again (if it is in
     /// one).
     pub(crate) fn changed(&self) {
@@ -400,6 +408,31 @@ impl NshView {
     /// (`f` must not change this view's children).
     pub(crate) fn with_children<R>(&self, f: impl FnOnce(&[NshView]) -> R) -> R {
         f(&self.0.children.borrow())
+    }
+
+    /// Calls `f` with its children in the order Tab and screen readers go
+    /// through them: a scroll view's, and a list's in its parent's viewport
+    /// (`ViewProps::screen_order`), as they are on screen (a list's
+    /// recycled cells are not in their rows' order in the tree:
+    /// [`nsh_core::scroll::reading_order`]), any other view's bottom to top.
+    pub(crate) fn with_children_in_reading_order<R>(&self, f: impl FnOnce(&[NshView]) -> R) -> R {
+        let sorted = self.try_state().and_then(|s| {
+            let axis = match &s.scroll {
+                Some(scroll) if scroll.horizontal => nsh_core::geometry::Axis::Horizontal,
+                Some(_) => nsh_core::geometry::Axis::Vertical,
+                None => s.props.screen_order?,
+            };
+            let mut kids = self.child_views();
+            nsh_core::scroll::reading_order(axis, &mut kids, |v| {
+                v.try_state()
+                    .map_or_else(Default::default, |s| s.frame.origin)
+            });
+            Some(kids)
+        });
+        match sorted {
+            Some(kids) => f(&kids),
+            None => self.with_children(f),
+        }
     }
 
     /// Inserts this view into `parent`, below `before` (on top when `None`
@@ -470,6 +503,60 @@ impl NshView {
             m = Mat4::mul(&m, &local);
             view = parent;
         }
+    }
+
+    /// The part of this view (its coordinates, an axis-aligned box) that
+    /// the views clipping around it leave in sight: where a scroll view
+    /// taller or wider than the scroll view it is in draws its indicator
+    /// ([`ScrollState::thumb_within`]), so its bar stays in view. Its own
+    /// bounds when nothing clips it.
+    pub(crate) fn visible_bounds(&self) -> Bounds<Points> {
+        let size = self.state().frame.size;
+        let full = Bounds::new(Default::default(), size);
+        let (mut left, mut top) = (0.0f32, 0.0f32);
+        let (mut right, mut bottom) = (size.width.0, size.height.0);
+        // This view's coordinates to `view`'s.
+        let mut m = Mat4::new();
+        let mut view = self.clone();
+        while let Some(parent) = view.parent_view() {
+            {
+                let s = view.state();
+                let (x, y) = parent.state().child_origin(s.frame, s.shift);
+                let mut local = Mat4::new().translate(x, y);
+                if let Some(t) = s.transform() {
+                    local = Mat4::mul(&t, &local);
+                }
+                m = Mat4::mul(&m, &local);
+            }
+            let clip = {
+                let p = parent.state();
+                p.clips()
+                    .then_some((p.frame.size.width.0, p.frame.size.height.0))
+            };
+            if let Some((w, h)) = clip {
+                let mut min = (f32::MAX, f32::MAX);
+                let mut max = (f32::MIN, f32::MIN);
+                for (cx, cy) in [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)] {
+                    let Some((x, y)) = m.unproject(cx, cy) else {
+                        return full;
+                    };
+                    min = (min.0.min(x), min.1.min(y));
+                    max = (max.0.max(x), max.1.max(y));
+                }
+                left = left.max(min.0);
+                top = top.max(min.1);
+                right = right.min(max.0);
+                bottom = bottom.min(max.1);
+            }
+            view = parent;
+        }
+        Bounds::new(
+            nsh_core::geometry::point(Points(left), Points(top)),
+            nsh_core::geometry::size(
+                Points((right - left).max(0.0)),
+                Points((bottom - top).max(0.0)),
+            ),
+        )
     }
 
     fn attached_root(&self, root: &NshView) -> bool {

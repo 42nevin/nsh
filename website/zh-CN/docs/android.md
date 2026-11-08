@@ -42,6 +42,22 @@ Rust 应用的 APK 带有它自己的 `libnsh.so`，用你的 crate 构建，其
 APK 用 SDK 的 build tools 构建，不需要 Gradle；除非传入发布用的 keystore，否则用调试密钥签名。发布签名和图标见[打包](./packaging.md#android)。
 
 NSH 以 16 KB ELF 对齐构建 `libnsh.so`，并将未压缩的原生库按 16 KB ZIP 边界打包。
+release APK 中的 `libnsh.so` 不带符号表和调试信息。完整的库位于运行时旁的 `symbols/<abi>/libnsh.so`（Rust 应用的在
+`.nsh/rust/android-rust-release/symbols/<abi>/`）：把它交给 `ndk-stack`，或作为原生调试符号上传到 Play Console，即可还原原生崩溃堆栈。
+
+## 上传到 Google Play
+
+`nsh publish android` 把 Android App Bundle（`.aab`）上传到 Google Play 的内部测试轨道（[CLI](./cli.md#nsh-publish-android)）：
+
+```sh
+export NSH_PLAY_CREDENTIALS=~/keys/play-service-account.json   # 不要提交到仓库
+nsh publish android .nsh/out/App.aab
+```
+
+每个应用做一次：在 Play Console 中创建应用；在 Google Cloud 中启用 Google Play Android Developer API 并创建服务账号，下载其
+JSON 密钥；在 Play Console 的**用户和权限**中邀请该服务账号的邮箱，并授予发布到测试轨道的权限。应用在 Play Console
+中完成首次发布之前，请加 `--draft`。Bundle 的 version code 必须高于此前上传过的所有版本。发布到内部测试之外的轨道仍在 Play
+Console 中操作。
 
 ## 嵌入 Android 应用
 
@@ -66,8 +82,10 @@ dist/nsh/embed/android/nsh.aar       release: bundles and signed packages
 dist/nsh/embed/android/nsh-dev.aar   also connects to a `nsh dev` server
 ```
 
-AAR 包含 Java 运行时以及适用于 `arm64-v8a`、`armeabi-v7a` 和 `x86_64` 的 `libnsh.so`。它声明了 `INTERNET`
-权限，要求 **API 28**（Android 9）或更高版本。
+AAR 包含 Java 运行时以及适用于 `arm64-v8a`、`armeabi-v7a` 和 `x86_64` 的 `libnsh.so`，库中带有符号：应用的 Gradle
+构建在打包时去除符号，并保留它们用于崩溃报告。它声明了 `INTERNET`
+权限，要求 **API 28**（Android 9）或更高版本。它自带 R8 规则（`proguard.txt`），开启混淆的构建会自动应用：原生库按名字
+查找运行时的类，因此 `com.longbridge.nsh` 保持原样。
 
 把它加入应用模块，例如从 `libs` 文件夹引入：
 
@@ -163,6 +181,7 @@ setContentView(column);
 | `setLocale(Locale locale)` | 代替用户设置的语言和地区：`Intl`、`locale()` 和组件立即跟随，此后加载的应用也从它开始。`null` 跟随系统。 |
 | `setFontScale(float scale)` | 代替系统字体大小的文字大小（1 为默认）：文字和输入框按它重新排版，`fontScale()` 读到它，立即生效，此后加载的应用也一样；长度保持原样。`0` 跟随系统。 |
 | `setThemeOverrides(String json)` | 把宿主的品牌加在应用的[主题](./tailwind.md#主题-token)之上：格式与 `nsh.json` 的 `"theme"` 相同的主题文件。其中的 token 在浅色和深色模式下都覆盖应用的同名 token，应用的其他 token 保持不变。立即生效，并作用于之后加载的应用；`null` 恢复应用自己的主题。文件无法解析时抛出 `IllegalArgumentException`。 |
+| `registerFont(byte[] data)` | 注册宿主自带的字体文件（TrueType、OpenType、WOFF 或 WOFF2）。应用在 `fontFamily` 里写它的字体族名，不必把文件打进 bundle。加载前注册的字体在该应用的第一帧就可用；应用运行中注册的，从下一次排版开始使用。`data` 不是字体时抛出 `IllegalArgumentException`。同一文件再注册一次不会重复加入。 |
 | `setStorageDirectory(File dir)` | 接下来加载的应用保存其[存储](../modules/nsh.md#storage)的目录；`null`：应用私有目录内的 `files/nsh/<app id>`，按应用自己的 id。 |
 | `setCacheOptions(NshCacheOptions options)` | 接下来加载的应用保存缓存（[下载的图片](./images-and-assets.md#磁盘缓存)）的位置和每种缓存的大小。用 `NshCacheOptions.builder()` 构建：`location(File)`、`systemLocation()`（默认：缓存目录中的 `nsh`，每个应用在 `<app id>`）或 `noDiskCache()`；`imagesMaxMegabytes(int)`（默认 256）或 `imagesOff()`。 |
 | `loadAssetBundle(String dir)` | 运行 APK assets 中的 `dir/bundle.nshc`；应用资源取自 `dir/assets/`。无法读取时返回 `false`（也会报告给错误监听器）。 |
@@ -348,7 +367,7 @@ adb reverse tcp:8790 tcp:8790
       android:windowSoftInputMode="adjustResize" />
   ```
 
-  `NshView` 会自行适应新的尺寸、配色方案、字体缩放和布局方向。
+  `NshView` 会自行适应新的尺寸、配色方案、字体缩放、显示密度和布局方向，应用状态保持不变。滚动位置会按逻辑坐标恢复，并限制在新的内容范围内；吸顶视图和已打开的模态窗口也会适应新的密度。
 - **生命周期。** 宿主 Activity 或 Fragment 销毁时调用 `destroy()`。
 
 ## 另请参阅

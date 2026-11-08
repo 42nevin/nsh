@@ -117,7 +117,8 @@ Commit subjects and pull request titles name the area first, then say what chang
 ```
 
 - The area is the part of NSH the change is about, in lower case: a crate without its `nsh-` prefix (`core`,
-  `animation`, `js`, `engine`, `package`, `bundler`, `dev`, `cli`, `xtask`, `base`), a platform (`ios`, `android`, `macos`,
+  `animation`, `js`, `engine`, `package`, `bundler`, `dev`, `cli`, `xtask`), a component of `nsh-base` by its name in snake case, never `base` (`rich_editor`,
+  `editor`, `input`, `data_table`), a platform (`ios`, `android`, `macos`,
   `windows`, `linux`), a JS layer or module (`runtime`, `list`, `animated`, `navigation`), or `tailwind`, `text`, `docs`, `examples`, `gallery`, `ci`. A change to all the desktop
   backends (macOS, Windows and Linux) is `desktop`, one to both mobile platforms (iOS and Android) is `mobile`. Name
   one area only, never several separated by commas: when a change spans several, look at it as a whole and name the
@@ -154,6 +155,11 @@ entries, then squash merges it. A failing check removes the entry; fix the failu
 
 - Rust through rustup: `rust-toolchain.toml` selects stable and installs the iOS and Android targets. A nightly
   toolchain for `cargo +nightly fmt`.
+- [huacnlee/cargo](https://github.com/huacnlee/cargo), recommended: a drop-in Cargo fork whose Git worktrees share one
+  build directory that stays under a size limit on its own, with nothing to configure. Install it with
+  `curl -fsSL https://huacnlee.github.io/cargo/install.sh | sh` (Windows:
+  `irm https://huacnlee.github.io/cargo/install.ps1 | iex`). It replaces `~/.cargo/bin/cargo`, updates itself, and its
+  README says how to put rustup's back.
 - Xcode, for the iOS, simulator and Mac Catalyst targets.
 - For Linux: the GTK 4 (4.14 or later) development packages (`libgtk-4-dev`, `gtk4`,
   `gtk4-devel`), WebKitGTK 6.0's for web views (`libwebkitgtk-6.0-dev`, `webkitgtk-6.0`,

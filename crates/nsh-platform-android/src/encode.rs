@@ -18,12 +18,13 @@
 
 use jni::objects::GlobalRef;
 use nsh_core::{
-    AccessibilityRole, AudioSession, AutoCapitalize, AutoFill, BorderStyle, Checked, Color,
-    Command, DialogButtonStyle, InputConfig, KeyboardDismissMode, KeyboardTaps, KeyboardType,
-    LayoutCurve, LayoutProperty, LayoutTransition, LiveRegion, ModalAnimation, ModalPresentation,
-    MountBatch, MountItem, NativeProps, PointerEvents, ResizeMode, ReturnKeyType, ScreenAnimation,
-    ScreenConfig, SnapAlignment, StatusBarStyle, SubmitBehavior, TextAlign, ViewKind, ViewProps,
-    ViewStyle, WebSource,
+    AccessibilityCurrent, AccessibilityRole, AudioSession, AutoCapitalize, AutoFill, BorderStyle,
+    Checked, Color, Command, DialogButtonStyle, InputConfig, KeyboardDismissMode, KeyboardTaps,
+    KeyboardType, LayoutCurve, LayoutProperty, LayoutTransition, LiveRegion, ModalAnimation,
+    ModalPresentation, MountBatch, MountItem, NativeProps, PointerEvents, ResizeMode,
+    ReturnKeyType, ScreenAnimation, ScreenConfig, SnapAlignment, StatusBarStyle, SubmitBehavior,
+    TextAlign, ViewKind, ViewProps, ViewStyle, WebSource,
+    audio::AudioCommand,
     geometry::{DefiniteLength, REM_SIZE},
 };
 
@@ -67,10 +68,16 @@ const OVERFLOW: i32 = 31;
 const ACCESSIBILITY_LABEL: i32 = 32;
 const APPEARANCE: i32 = 33;
 const COMPONENT_PROP_SLOTS: i32 = 34;
+const SHADER: i32 = 35;
+const SHADER_TRANSITION: i32 = 36;
+const SHADER_INPUT: i32 = 37;
+const NAV_SHADER: i32 = 38;
 
 /// An entry of the object table.
 pub(crate) enum Obj {
     Str(String),
+    /// A sound's bytes (`Audio.java`), a `byte[]` on the Java side.
+    Bytes(nsh_core::image::ImageData),
     Layout(GlobalRef),
 }
 
@@ -124,6 +131,7 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
     };
     for item in batch.items {
         match item {
+            MountItem::TreeOrder(_) | MountItem::ProjectStates { .. } => {}
             MountItem::Create { id, kind } => {
                 e.int(CREATE);
                 e.int(id as i32);
@@ -223,6 +231,9 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     None => 2,
                 });
                 opt_color(&mut e, text.selection_color);
+                // The one color all of it is drawn in, if there is one: a
+                // change of it transitions (`transition-colors`, `TextBox`).
+                opt_color(&mut e, text.uniform_color());
             }
             MountItem::Events { id, events } => {
                 e.int(EVENTS);
@@ -267,6 +278,7 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                 id,
                 horizontal,
                 scrollbar_visible,
+                replaced,
                 scroll_value,
                 pull_value,
                 keyboard_dismiss,
@@ -286,6 +298,7 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     id,
                     horizontal,
                     scrollbar_visible,
+                    replaced,
                     scroll_value,
                     pull_value,
                     keyboard_dismiss,
@@ -323,6 +336,41 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                 e.int(CANVAS);
                 e.int(id as i32);
                 canvas(&mut e, &drawing);
+            }
+            MountItem::Shader { id, layer } => {
+                // Java learns what the view shows (whether a shader, its
+                // role, how far it overflows, which pictures it reads); the
+                // layer goes to the UI-thread renderer (`crate::shader`).
+                e.int(SHADER);
+                e.int(id as i32);
+                e.bool(layer.is_some());
+                let l = layer.as_deref();
+                e.int(l.map_or(0, |l| l.role as i32));
+                e.float(l.map_or(0.0, |l| l.overflow.0));
+                e.int(l.map_or(0, |l| {
+                    l.shader
+                        .inputs()
+                        .iter()
+                        .fold(0, |bits, i| bits | 1 << i.index())
+                }));
+                e.animation.push(MountItem::Shader { id, layer });
+            }
+            MountItem::ShaderTransition { id, duration } => {
+                e.int(SHADER_TRANSITION);
+                e.int(id as i32);
+                e.float(duration.as_secs_f32() * 1000.0);
+            }
+            MountItem::ShaderInput { id } => {
+                e.int(SHADER_INPUT);
+                e.int(id as i32);
+            }
+            MountItem::NavShader { id, shader } => {
+                // Java learns whether the page or dialog has one; the layer
+                // waits in the renderer until it comes or goes.
+                e.int(NAV_SHADER);
+                e.int(id as i32);
+                e.bool(shader.is_some());
+                e.animation.push(MountItem::NavShader { id, shader });
             }
             MountItem::Overflow { id, extent } => {
                 e.int(OVERFLOW);
@@ -526,6 +574,17 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                         e.int(9);
                         e.string(data);
                     }
+                    // `WebBox.load`: the URL, then the headers' count and
+                    // each name and value.
+                    Command::Load(load) => {
+                        e.int(46);
+                        e.string(load.src);
+                        e.int(load.headers.len() as i32);
+                        for (name, value) in load.headers {
+                            e.string(name);
+                            e.string(value);
+                        }
+                    }
                     Command::Seek(seconds) => {
                         e.int(10);
                         e.float(seconds as f32);
@@ -624,6 +683,16 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                         e.float(request.quality.map_or(-1.0, |q| q.0));
                         e.bool(request.format == nsh_core::picker::PickFormat::Current);
                     }
+                    // `Picker.java`: the request, the limit, the extensions
+                    // offered (comma-separated; empty: any file) and the
+                    // largest file read.
+                    Command::PickFiles { id, request } => {
+                        e.int(45);
+                        e.int(id as i32);
+                        e.int(request.limit as i32);
+                        e.string(nsh_core::file_dialog::extensions(&request.filters).join(","));
+                        e.int(nsh_core::picker::MAX_PICKED_FILE_BYTES as i32);
+                    }
                     // Turned into a mount item / `ScrollTo` by the core.
                     Command::LayoutAnimation(_)
                     | Command::SetStatusBar(_)
@@ -634,12 +703,182 @@ pub(crate) fn encode(batch: MountBatch) -> Encoded {
                     | Command::Desktop(_)
                     // No host answers `nsh/host` here (`Environment::host`):
                     // the core rejects the calls first.
-                    | Command::HostCall { .. } => e.int(-1),
+                    | Command::HostCall { .. }
+                    // No eyedropper (`Environment::screen_color`): the core
+                    // answers no color first.
+                    | Command::PickScreenColor { .. } => e.int(-1),
+                    // `SystemUi.openPath`: the file at the path, a `content:`
+                    // URI the app's FilesProvider serves, to the system's
+                    // viewer (`ACTION_VIEW`). `OpenPath` alone; the dialogs
+                    // have no answer on Android.
+                    Command::FileRequest { id, request } => match *request {
+                        nsh_core::file_dialog::FileRequest::OpenPath(path) => {
+                            e.int(28);
+                            e.int(id as i32);
+                            e.string(path.to_string_lossy().into_owned());
+                        }
+                        // Every other file request has no Android
+                        // implementation. The environment says file
+                        // requests exist, so the core waits for an answer:
+                        // fail it now (op 30), or the call would hang.
+                        _ => {
+                            e.int(30);
+                            e.int(id as i32);
+                        }
+                    },
+                    // No speech recognizer (`Environment::speech`): the core
+                    // ends the sessions first.
+                    | Command::Speech(_)
+                    // Trusted web view input is macOS's for now.
+                    | Command::SendInput(_)
+                    // No performance monitor on Android yet.
+                    | Command::PerfMonitor(_) => e.int(-1),
+                    // `Audio.java`: the sub-opcode, then the command's
+                    // fields (see `audio_command`).
+                    Command::Audio(command) => {
+                        e.int(47);
+                        audio_command(&mut e, command);
+                    }
+                    Command::Notification(command) => {
+                        use nsh_core::notifications::NotificationCommand as N;
+                        e.int(44);
+                        match command {
+                            N::Permission { id, ask } => {
+                                e.int(0);
+                                e.int(id as i32);
+                                e.bool(ask);
+                            }
+                            N::Show { id, notification } => {
+                                e.int(1);
+                                e.int(id as i32);
+                                e.string(notification.id);
+                                e.string(notification.title);
+                                e.string(notification.body);
+                                e.bool(notification.silent);
+                            }
+                            N::Close(id) => {
+                                e.int(2);
+                                e.string(id);
+                            }
+                            N::Listen => e.int(3),
+                            N::SetBadge(count) => {
+                                e.int(4);
+                                e.int(count as i32);
+                            }
+                            _ => e.int(-1),
+                        }
+                    }
+                    // `SystemUi.dialog` draws alerts and action sheets in
+                    // them: each of `DIALOG_TOKENS`, light then dark (0: the
+                    // system's). An app without a theme of its own (its
+                    // tokens the default theme's) keeps the system's colors.
+                    Command::Tokens(tokens) => {
+                        e.int(27);
+                        let themed = nsh_base::tokens_of(None).is_ok_and(|d| *tokens != d);
+                        for name in DIALOG_TOKENS {
+                            let color = tokens.color(name).filter(|_| themed);
+                            for c in [color.map(|c| c.light), color.map(|c| c.dark)] {
+                                e.int(c.map_or(0, |c| argb(c.into())));
+                            }
+                        }
+                    }
                 }
             }
         }
     }
     e
+}
+
+/// The tokens alerts and action sheets are drawn in (`SystemUi.java`'s
+/// order): the dialog, its title, its message, its buttons and a
+/// destructive action.
+const DIALOG_TOKENS: [&str; 5] = [
+    "popover",
+    "popover-foreground",
+    "muted-foreground",
+    "primary",
+    "destructive",
+];
+
+/// An audio command after its opcode (47), as `Audio.command` reads it:
+/// 0 load (id, bytes, hint, max duration in ms), 1 load from a URL (id),
+/// 2 play (id, volume, rate), 3 stop (id), 4 unload (id), 5 open (id, src,
+/// volume, rate, loop), 6 preload (id), 7 resume (id), 8 pause (id), 9 seek
+/// (id, ms), 10 set (id, volume, rate, loop), 11 close (id).
+fn audio_command(e: &mut Encoded, command: AudioCommand) {
+    let ms = |d: std::time::Duration| d.as_millis().min(i32::MAX as u128) as i32;
+    match command {
+        AudioCommand::Load {
+            id,
+            bytes,
+            hint,
+            max_duration,
+        } => {
+            e.int(0);
+            e.int(id as i32);
+            let index = e.objects.len() as i32;
+            e.objects.push(Obj::Bytes(bytes));
+            e.int(index);
+            e.string(hint);
+            e.int(ms(max_duration));
+        }
+        AudioCommand::LoadUrl { id, .. } => {
+            e.int(1);
+            e.int(id as i32);
+        }
+        AudioCommand::Play { id, volume, rate } => {
+            e.int(2);
+            e.int(id as i32);
+            e.float(volume);
+            e.float(rate);
+        }
+        AudioCommand::Stop { id } => {
+            e.int(3);
+            e.int(id as i32);
+        }
+        AudioCommand::Unload { id } => {
+            e.int(4);
+            e.int(id as i32);
+        }
+        AudioCommand::Open { id, src, settings } => {
+            e.int(5);
+            e.int(id as i32);
+            e.string(src);
+            e.float(settings.volume);
+            e.float(settings.rate);
+            e.bool(settings.looped);
+        }
+        AudioCommand::Preload { id } => {
+            e.int(6);
+            e.int(id as i32);
+        }
+        AudioCommand::Resume { id } => {
+            e.int(7);
+            e.int(id as i32);
+        }
+        AudioCommand::Pause { id } => {
+            e.int(8);
+            e.int(id as i32);
+        }
+        AudioCommand::Seek { id, position } => {
+            e.int(9);
+            e.int(id as i32);
+            e.int(ms(position));
+        }
+        AudioCommand::Set { id, settings } => {
+            e.int(10);
+            e.int(id as i32);
+            e.float(settings.volume);
+            e.float(settings.rate);
+            e.bool(settings.looped);
+        }
+        AudioCommand::Close { id } => {
+            e.int(11);
+            e.int(id as i32);
+        }
+        // A command a newer core adds: nothing to do here.
+        _ => e.int(-1),
+    }
 }
 
 /// The event kind with index `index` (`EventKind as u8`, the order of the
@@ -701,24 +940,13 @@ fn degrees(a: nsh_core::geometry::Radians) -> f32 {
     (a.to_degrees() * 1e4).round() / 1e4
 }
 
-/// The effects of `Mounter.java` `style`: shadows, gradients, filters,
-/// blend mode, outline, visibility, cursor, transition, animation.
-fn effects(e: &mut Encoded, s: &ViewStyle) {
+/// A list of gradients, as `Effects.java`'s `gradients` reads it.
+fn gradients(e: &mut Encoded, gradients: &[nsh_core::Gradient]) {
     use nsh_core::{
-        BlendMode, Cursor, Filter, GradientKind, GradientSize, Keyframes,
+        GradientKind, GradientSize,
         geometry::{DefiniteLength, REM_SIZE, Size},
     };
-    let fx = s.effects.as_deref();
-    let shadows = fx.map_or(&[][..], |f| &f.box_shadows[..]);
-    e.int(shadows.len() as i32);
-    for sh in shadows {
-        for v in [sh.offset_x, sh.offset_y, sh.blur, sh.spread] {
-            e.float(v.0);
-        }
-        e.int(argb(sh.color));
-        e.bool(sh.inset);
-    }
-    let gradients = fx.map_or(&[][..], |f| &f.background_images[..]);
+
     e.int(gradients.len() as i32);
     for g in gradients {
         match g.kind {
@@ -753,11 +981,13 @@ fn effects(e: &mut Encoded, s: &ViewStyle) {
                 e.float(y.0);
             }
         }
+        // Repeated by `Decor.Gradient.place`, over the box it knows.
+        e.bool(g.repeating);
         if g.has_lengths() {
             // Stops placed in points depend on the box, which `Decor`
             // knows when it draws: they go as written, their count
             // negated, each with its unit (0 spread, 1 fraction, 2
-            // points), and `Decor.Gradient.resolve` places them.
+            // points), and `Decor.Gradient.place` places them.
             e.int(-(g.stops.len() as i32));
             for s in &g.stops {
                 e.int(argb(s.color));
@@ -779,6 +1009,24 @@ fn effects(e: &mut Encoded, s: &ViewStyle) {
             }
         }
     }
+}
+
+/// The effects of `Mounter.java` `style`: shadows, gradients, filters,
+/// blend mode, outline, visibility, cursor, transition, animation.
+fn effects(e: &mut Encoded, s: &ViewStyle) {
+    use nsh_core::{BlendMode, Cursor, Filter, Keyframes};
+    let fx = s.effects.as_deref();
+    let shadows = fx.map_or(&[][..], |f| &f.box_shadows[..]);
+    e.int(shadows.len() as i32);
+    for sh in shadows {
+        for v in [sh.offset_x, sh.offset_y, sh.blur, sh.spread] {
+            e.float(v.0);
+        }
+        e.int(argb(sh.color));
+        e.bool(sh.inset);
+    }
+    gradients(e, fx.map_or(&[][..], |f| &f.background_images[..]));
+    gradients(e, fx.map_or(&[][..], |f| &f.mask_images[..]));
     let filter_list = |e: &mut Encoded, list: &[Filter]| {
         // Color filters as one composed matrix, then blur, then the drop
         // shadow (what Android's render effects take): the widest of the
@@ -858,6 +1106,8 @@ fn effects(e: &mut Encoded, s: &ViewStyle) {
         Cursor::ColResize => 14,
         Cursor::RowResize => 15,
         Cursor::None => 16,
+        Cursor::NwseResize => 17,
+        Cursor::NeswResize => 18,
     });
     match s.transition.filter(|t| t.duration > 0.0) {
         Some(t) => {
@@ -936,6 +1186,7 @@ fn native_props(e: &mut Encoded, p: &NativeProps) {
             e.opt_string(w.user_agent.as_deref());
             e.bool(w.scrollable);
             e.bool(w.javascript_enabled);
+            e.bool(w.incognito);
         }
         NativeProps::Video(v) => {
             e.int(4);
@@ -1026,6 +1277,23 @@ fn view_props(e: &mut Encoded, p: &ViewProps) {
         Some(true) => flags |= 64 | 128,
         None => {}
     }
+    match s.pressed {
+        Some(Checked::False) => flags |= 256,
+        Some(Checked::True) => flags |= 256 | 512,
+        Some(Checked::Mixed) => flags |= 256 | 1024,
+        None => {}
+    }
+    // The current item's kind, in bits 11 to 13 (`A11y.java`
+    // `CURRENT_DESCRIPTIONS`).
+    flags |= match s.current {
+        None => 0,
+        Some(AccessibilityCurrent::True) => 1,
+        Some(AccessibilityCurrent::Page) => 2,
+        Some(AccessibilityCurrent::Step) => 3,
+        Some(AccessibilityCurrent::Location) => 4,
+        Some(AccessibilityCurrent::Date) => 5,
+        Some(AccessibilityCurrent::Time) => 6,
+    } << 11;
     e.int(flags);
     match &a.value {
         Some(v) => {
@@ -1073,6 +1341,7 @@ fn view_props(e: &mut Encoded, p: &ViewProps) {
         None => e.int(0),
     }
     e.bool(p.selectable_view);
+    e.bool(p.continues_text);
 }
 
 /// Index of `role` in `A11y.java`'s class name table.
@@ -1115,6 +1384,13 @@ fn role_index(role: AccessibilityRole) -> i32 {
         RowGroup => 33,
         Listbox => 34,
         Option => 35,
+        Group => 36,
+        Region => 37,
+        Navigation => 38,
+        Tree => 39,
+        TreeItem => 40,
+        MenuItemCheckbox => 41,
+        MenuItemRadio => 42,
     }
 }
 
@@ -1234,6 +1510,10 @@ fn input(e: &mut Encoded, c: &InputConfig) {
     e.bool(c.caret_hidden);
     // `pasteBehavior`: whether a paste inserts its text.
     e.bool(c.paste_behavior == nsh_core::PasteBehavior::Insert);
+    // A multiline input's own scroll bar shows; a built-in bar replaces it
+    // (the input then reports how far its text scrolled).
+    e.bool(c.scrollbar_visible);
+    e.bool(c.replaced);
 }
 
 // --- Canvas drawings (`CanvasBox.java`) -------------------------------------
@@ -1557,6 +1837,54 @@ fn paint(e: &mut Encoded, p: &nsh_core::canvas::Paint) {
                 e.float(offset.0);
                 e.int(argb(*color));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nsh_core::file_dialog::{self, FileRequest};
+
+    use super::*;
+
+    /// The ints a batch of one file request is encoded as.
+    fn ints(request: FileRequest) -> Vec<i32> {
+        let batch = MountBatch {
+            items: vec![MountItem::Command {
+                id: 3,
+                command: Command::FileRequest {
+                    id: 7,
+                    request: Box::new(request),
+                },
+            }],
+        };
+        encode(batch)
+            .bytes
+            .chunks_exact(4)
+            .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn open_path_is_sent_and_the_other_file_requests_fail() {
+        // `COMMAND`, the view id, op 28, the request id, the path's
+        // object index: `Mounter.java` opens the file and answers.
+        assert_eq!(
+            ints(FileRequest::OpenPath("/data/user/0/app/files/a.pdf".into())),
+            vec![COMMAND, 3, 28, 7, 0]
+        );
+
+        // `Environment::file_requests` is set, so the core waits for an
+        // answer to every request: op 30 fails the rest instead of leaving
+        // `pick_paths`, `pick_save_path`, `reveal_path` and `move_to_trash`
+        // pending forever.
+        for request in [
+            FileRequest::OpenDialog(file_dialog::OpenDialog::default()),
+            FileRequest::SaveDialog(file_dialog::SaveDialog::default()),
+            FileRequest::RevealPath("a".into()),
+            FileRequest::MoveToTrash("a".into()),
+        ] {
+            assert_eq!(ints(request), vec![COMMAND, 3, 30, 7]);
         }
     }
 }

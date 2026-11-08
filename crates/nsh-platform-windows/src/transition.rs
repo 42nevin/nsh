@@ -30,11 +30,15 @@ use std::rc::Rc;
 
 pub(crate) use nsh_core::transition::Live;
 use nsh_core::{
-    Bounds, LayoutAnimation, Points, ViewKind, ViewStyle,
+    AttributedText, Bounds, LayoutAnimation, Points, ViewKind, ViewStyle,
     transition::{self, Extra},
 };
 
-use crate::{geom::Mat4, surface::Surface, view::NshView};
+use crate::{
+    geom::Mat4,
+    surface::{Next, Surface},
+    view::NshView,
+};
 
 /// `m` followed by `extra` (in the view's local space: like `m`'s own
 /// entries, it applies to points before them).
@@ -185,6 +189,23 @@ pub(crate) fn style_changed(surface: &Rc<Surface>, view: &NshView, old: &ViewSty
     animate(surface, view, |live| live.restyle(restyle));
 }
 
+/// `view`'s text changed from `old` (the new one is in its state): its
+/// color transitions as its style's `transition` says, drawn over the new
+/// runs ([`Live::text_color`]) rather than typeset on every frame.
+pub(crate) fn text_changed(
+    surface: &Rc<Surface>,
+    view: &NshView,
+    old: &AttributedText,
+    text: &AttributedText,
+) {
+    let recolor = transition::recolor(old, text, &view.state().style, reduce_motion(surface));
+    if recolor.starts() {
+        animate(surface, view, |live| live.recolor(recolor));
+    } else if let Some(live) = view.state_mut().live.as_deref_mut() {
+        live.recolor(recolor);
+    }
+}
+
 /// True if an ancestor of `view` is animating out (and takes `view` with
 /// it).
 fn ancestor_dying(view: &NshView) -> bool {
@@ -198,9 +219,10 @@ fn ancestor_dying(view: &NshView) -> bool {
     false
 }
 
-/// One frame of `view`'s animations at `now` (ms): false once nothing is
-/// left to animate (the frame client is dropped).
-fn tick(surface: &Rc<Surface>, view: &NshView, now: f64) -> bool {
+/// One frame of `view`'s animations at `now` (ms): what it has left, its
+/// next end in seconds; done once nothing is left to animate (the frame
+/// client is dropped).
+fn tick(surface: &Rc<Surface>, view: &NshView, now: f64) -> Next {
     if !view.attached() {
         // Out of the tree: a deleted subtree stops for good (dropping the
         // client releases it); a view only moved out resumes when it is
@@ -216,7 +238,7 @@ fn tick(surface: &Rc<Surface>, view: &NshView, now: f64) -> bool {
             if let Some(live) = view.state_mut().live.as_deref_mut() {
                 live.set_ticking(false);
             }
-            return false;
+            return Next::Done;
         }
     }
     // A view deleted inside a deleted subtree leaves with its ancestor
@@ -225,22 +247,22 @@ fn tick(surface: &Rc<Surface>, view: &NshView, now: f64) -> bool {
     let starting_out = view.state().live.as_ref().is_some_and(|l| l.leaving());
     let inherited = starting_out && ancestor_dying(view);
 
-    let step = {
+    let (step, deadline) = {
         let mut s = view.state_mut();
         let s = &mut *s;
         let Some(mut live) = s.live.take() else {
-            return false;
+            return Next::Done;
         };
         if inherited {
             live.leave_with_ancestor();
         }
-        // Finishing clears `ticking`: returning false drops the frame
-        // client.
+        // Finishing clears `ticking`: being done drops the frame client.
         let step = live.step(now, &mut s.frame, &mut s.style);
+        let deadline = live.deadline(now);
         if !live.idle() {
             s.live = Some(live);
         }
-        step
+        (step, deadline)
     };
 
     if step.removed {
@@ -250,10 +272,15 @@ fn tick(surface: &Rc<Surface>, view: &NshView, now: f64) -> bool {
             Ok(mounter) => mounter.detach(surface, view),
             Err(_) => view.unparent(),
         }
-        return false;
+        return Next::Done;
     }
     view.moved();
-    !step.finished
+    match deadline {
+        _ if step.finished => Next::Done,
+        Some(ms) => Next::At(ms / 1000.0),
+        // Only keyframes repeating for good: they only draw.
+        None => Next::Frame,
+    }
 }
 
 #[cfg(test)]

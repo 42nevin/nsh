@@ -5,13 +5,14 @@ import {
   type RichCommand,
   type RichEditorSession,
   StarterKit,
+  TableKit,
   command,
   createRichEditor,
   redo,
   undo,
 } from "nsh/base";
-import { colors, mono, Segmented } from "../ui";
-import { IconButton, ToggleGroup, type ToggleItem, ToolbarSeparator } from "./RichEditorUi";
+import { colors, mono, richEditorClasses, Segmented } from "../ui";
+import { IconButton, type LucideIconName, TOOL_GAP, ToggleGroup, type ToggleItem, ToolbarSeparator } from "./RichEditorUi";
 import { createLinkMenu, LinkBubble, type LinkMenu } from "./RichEditorLink";
 
 // `nsh/base`'s `RichEditor` renders a session the app makes with
@@ -20,7 +21,9 @@ import { createLinkMenu, LinkBubble, type LinkMenu } from "./RichEditorLink";
 // never wait for JS. What is around it is the app's: the toolbar runs
 // Tiptap's commands and asks the session which apply and which are
 // active, the bubble menu edits the link under the caret, and the zoom
-// button gives the document the whole screen.
+// button gives the document the whole screen. Tables (`TableKit`) are
+// grids of their cells: drag a column's or row's border to resize it, and
+// the grips on the table's edges to select and move rows and columns.
 
 const DOC = `# Release notes
 
@@ -43,6 +46,11 @@ Drag to select past the editor's edge and the document scrolls along. The zoom b
 2. The document is Markdown when you switch to it below
 3. Code, quotes and rules are blocks of their own
 
+| Key | In a table |
+| --- | --- |
+| Tab | The next cell, a new row after the last |
+| Shift-Tab | The previous cell |
+
 ---
 
 \`\`\`
@@ -58,24 +66,24 @@ type Wrap = "bullet" | "ordered" | "task" | "quote";
 
 const BLOCKS: ToggleItem<Block>[] = [
   { value: "paragraph", icon: "pilcrow", label: "Text" },
-  { value: "h1", icon: "heading-1", label: "Heading 1" },
-  { value: "h2", icon: "heading-2", label: "Heading 2" },
-  { value: "h3", icon: "heading-3", label: "Heading 3" },
-  { value: "code", icon: "square-code", label: "Code block" },
+  { value: "h1", icon: "heading-1", label: "Heading 1", short: "H1" },
+  { value: "h2", icon: "heading-2", label: "Heading 2", short: "H2" },
+  { value: "h3", icon: "heading-3", label: "Heading 3", short: "H3" },
+  { value: "code", icon: "square-code", label: "Code block", short: "Code" },
 ];
 
 const MARKS: ToggleItem<Mark>[] = [
   { value: "bold", icon: "bold", label: "Bold" },
   { value: "italic", icon: "italic", label: "Italic" },
-  { value: "strike", icon: "strikethrough", label: "Strikethrough" },
-  { value: "code", icon: "code", label: "Inline code" },
+  { value: "strike", icon: "strikethrough", label: "Strikethrough", short: "Strike" },
+  { value: "code", icon: "code", label: "Inline code", short: "Inline" },
   { value: "link", icon: "link", label: "Link" },
 ];
 
 const WRAPS: ToggleItem<Wrap>[] = [
-  { value: "bullet", icon: "list", label: "Bulleted list" },
-  { value: "ordered", icon: "list-ordered", label: "Numbered list" },
-  { value: "task", icon: "list-todo", label: "Task list" },
+  { value: "bullet", icon: "list", label: "Bulleted list", short: "Bullets" },
+  { value: "ordered", icon: "list-ordered", label: "Numbered list", short: "Numbers" },
+  { value: "task", icon: "list-todo", label: "Task list", short: "Tasks" },
   { value: "quote", icon: "text-quote", label: "Quote" },
 ];
 
@@ -104,6 +112,22 @@ const WRAP_COMMANDS: Record<Wrap, string> = {
   task: "toggleTaskList",
   quote: "toggleBlockquote",
 };
+
+/** The table buttons shown while the selection is in a table: Tiptap's table commands. */
+const TABLE_ACTIONS: { icon: LucideIconName; label: string; command: string }[] = [
+  { icon: "row-insert-above", label: "Add row before", command: "addRowBefore" },
+  { icon: "row-insert-below", label: "Add row after", command: "addRowAfter" },
+  { icon: "column-insert-left", label: "Add column before", command: "addColumnBefore" },
+  { icon: "column-insert-right", label: "Add column after", command: "addColumnAfter" },
+  { icon: "row-delete", label: "Delete row", command: "deleteRow" },
+  { icon: "column-delete", label: "Delete column", command: "deleteColumn" },
+  { icon: "table-cells-merge", label: "Merge cells", command: "mergeCells" },
+  { icon: "table-cells-split", label: "Split cell", command: "splitCell" },
+  { icon: "panel-top", label: "Toggle header row", command: "toggleHeaderRow" },
+  { icon: "trash", label: "Delete table", command: "deleteTable" },
+];
+
+const INSERT_TABLE = command("insertTable", { rows: 3, cols: 3, withHeaderRow: true });
 
 const WRAP_TYPES: Record<Wrap, string> = { bullet: "bulletList", ordered: "orderedList", task: "taskList", quote: "blockquote" };
 
@@ -141,7 +165,7 @@ function Toolbar(props: { editor: RichEditorSession; revision: number; link: Lin
   const indent = command("sinkListItem", { name: "listItem" });
   const outdent = command("liftListItem", { name: "listItem" });
   return (
-    <View testID="toolbar" style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", rowGap: 6, columnGap: 4 }}>
+    <View testID="toolbar" style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", rowGap: 6, columnGap: Math.max(TOOL_GAP, 4) }}>
       <IconButton icon="undo-2" label="Undo" disabled={!can(undo())} onPress={() => run(undo())} />
       <IconButton icon="redo-2" label="Redo" disabled={!can(redo())} onPress={() => run(redo())} />
       <ToolbarSeparator />
@@ -165,54 +189,40 @@ function Toolbar(props: { editor: RichEditorSession; revision: number; link: Lin
         value={wraps()}
         onToggle={(value) => run(command(WRAP_COMMANDS[value]))}
       />
-      <IconButton icon="list-indent-decrease" label="Outdent" disabled={!can(outdent)} onPress={() => run(outdent)} />
-      <IconButton icon="list-indent-increase" label="Indent" disabled={!can(indent)} onPress={() => run(indent)} />
+      {/* The pair wraps as one, so a narrow bar never splits outdent from indent. */}
+      <View style={{ flexDirection: "row", columnGap: Math.max(TOOL_GAP, 4) }}>
+        <IconButton icon="list-indent-decrease" label="Outdent" disabled={!can(outdent)} onPress={() => run(outdent)} />
+        <IconButton icon="list-indent-increase" label="Indent" disabled={!can(indent)} onPress={() => run(indent)} />
+      </View>
       <IconButton icon="minus" label="Divider" disabled={!can(command("setHorizontalRule"))} onPress={() => run(command("setHorizontalRule"))} />
+      <ToolbarSeparator />
+      <IconButton icon="table" label="Insert table" short="Table" disabled={!can(INSERT_TABLE)} onPress={() => run(INSERT_TABLE)} />
+      <If when={on("table")}>
+        <Each of={TABLE_ACTIONS}>
+          {(action) => (
+            <IconButton
+              icon={action().icon}
+              label={action().label}
+              disabled={!can(command(action().command))}
+              onPress={() => run(command(action().command))}
+            />
+          )}
+        </Each>
+      </If>
       <View style={{ flex: 1 }} />
       <IconButton icon={props.zoomed ? "minimize-2" : "maximize-2"} label={props.zoomed ? "Exit zoom" : "Zoom"} onPress={props.onZoom} />
     </View>
   );
 }
 
-// --- The document ---------------------------------------------------------
-
-/** The document's look, by part, node type (and heading level) and mark. */
-const documentClasses = {
-  // The room around the text is the content's padding, inside the scroll
-  // view: its scroll bar runs along the editor's edge.
-  content: "gap-3 px-6 py-5",
-  placeholder: "text-muted-foreground",
-  listMarker: "text-muted-foreground",
-  taskCheckbox: "size-4 mr-2 mt-1 rounded border border-border",
-  nodes: {
-    paragraph: "leading-relaxed",
-    "heading[level=1]": "text-3xl font-bold tracking-tight",
-    "heading[level=2]": "text-2xl font-semibold tracking-tight",
-    "heading[level=3]": "text-xl font-semibold",
-    blockquote: "border-l-4 border-border pl-4 text-muted-foreground italic",
-    codeBlock: "font-mono text-sm bg-muted rounded-lg px-4 py-3",
-    bulletList: "gap-1.5 pl-6",
-    orderedList: "gap-1.5 pl-6",
-    taskList: "gap-1.5",
-    horizontalRule: "h-px bg-border my-3",
-  },
-  marks: {
-    bold: "font-bold",
-    italic: "italic",
-    code: "font-mono text-sm bg-muted rounded px-1",
-    link: "text-primary underline",
-    strike: "line-through",
-  },
-};
-
 export function RichEditorDemo() {
   // Mod-K opens the link field, as in most editors.
   const keys = new RichEditorPlugin("linkKey");
-  const editor = createRichEditor({ extensions: [StarterKit], plugins: [keys], content: DOC, format: "markdown" });
+  const editor = createRichEditor({ extensions: [StarterKit, TableKit], plugins: [keys], content: DOC, format: "markdown" });
   const revision = signal(editor.revision);
   const source = signal(editor.getMarkdown());
   const text = signal(editor.getText());
-  editor.subscribe((r) => {
+  editor.on("revision", ({ revision: r }) => {
     revision.set(r);
     source.set(editor.getMarkdown());
     text.set(editor.getText());
@@ -257,7 +267,7 @@ export function RichEditorDemo() {
           accessibilityLabel="Document"
           placeholder="Write something…"
           style={{ flex: 1 }}
-          classes={documentClasses}
+          classes={richEditorClasses}
           bubbleMenu={link.mode() === "closed" ? undefined : <LinkBubble menu={link} />}
           bubbleMenuPlacement="bottom"
         />
@@ -267,14 +277,16 @@ export function RichEditorDemo() {
           flexDirection: "row",
           alignItems: "center",
           justifyContent: "space-between",
+          gap: 12,
           paddingHorizontal: 12,
           paddingVertical: 8,
           borderTopWidth: 1,
           borderColor: colors.border,
         }}
       >
-        <Text style={{ fontSize: 12, color: colors.muted, fontVariant: ["tabular-nums"] }}>
-          {`${words()} words · ${text().length} characters`}
+        {/* No-break spaces keep each count whole: a narrow bar wraps between them. */}
+        <Text style={{ flexShrink: 1, fontSize: 12, color: colors.muted, fontVariant: ["tabular-nums"] }}>
+          {`${words()}\u00a0words · ${text().length}\u00a0characters`}
         </Text>
         <View style={{ width: 180 }}>
           <Segmented

@@ -1,7 +1,6 @@
 ---
 title: NavStack
 description: "Native navigation stacks: NavStack, NavPage and createNavStack, pushing and popping pages, header slots, leaving a page and how each platform shows a stack."
-order: 22
 group: base
 demo: ui-navigation
 ---
@@ -159,6 +158,9 @@ stack's state, dialogs, the Android back button and tabs.
 - When the user leaves a page natively (the back button, swipe back, Android back, the desktops' back keys, the
   browser's back), the page goes. In TSX the stack removes its route from the state, so `nav.routes()` always matches
   what the user sees. In Rust the page reports `on_dismiss`, where you drop its route (and the routes above it).
+- Android back, the desktops' back keys and the browser's back act on the stack that shows: a stack laid out at no
+  size, or inside a view laid out so (a tab that is not selected, `display: none`), keeps its pages until it shows
+  again.
 - In TSX, a child function that returns something other than a `<NavPage>` gets a page with default options. Return
   a `<NavPage>` to set its header and other options.
 
@@ -221,6 +223,7 @@ the props' snake-case names.
 | `title` | `.title(..)` | `string` | none | iOS and Android: the system header's title. |
 | `headerVisible` | `.header_visible(..)` | `boolean` | `true` | iOS and Android: the system header shows. |
 | `headerTransparent` | `.header_transparent(..)` | `boolean` | `false` | iOS and Android: the content extends under a transparent system header. |
+| `hidesBottomBarWhenPushed` | `.hides_bottom_bar_when_pushed(..)` | `boolean` | `false` | iOS: the system tab bar leaves while this page is on top, moving in the transition — the same animation as the page, and the bar is never rebuilt; it comes back when the page pops. |
 | `headerLargeTitle` | `.header_large_title(..)` | `boolean` | `false` | iOS: a large title that shrinks into the bar as the content scrolls; the content scrolls under the header. |
 | `headerBackTitle` | `.header_back_title(..)` | `string` | none | iOS and Android: the label of the back button that leads back to this page (on Android, its description for screen readers). |
 | `headerBackVisible` | `.header_back_visible(..)` | `boolean` | `true` | iOS and Android: the back button shows. |
@@ -232,6 +235,7 @@ the props' snake-case names.
 | `popOnBack` | `.pop_on_back(..)` | `boolean` | `true` | The back buttons and the swipe back pop the page. See [Leaving a page](#leaving-a-page). |
 | `popOnSwipe` | `.pop_on_swipe(..)` | `boolean` | `true` | The interactive back gesture pops the page: iOS swipe back, Android predictive back that follows the finger. The back buttons pop either way. |
 | `animation` | `.animation(..)` | `"default" \| "slide" \| "fade" \| "none"` | `"default"` | How the page enters and leaves. |
+| `transitionShader` | `.transition_shader(TransitionShader::new(program))` | `{ source: string; uniforms?: Record<string, ShaderUniform>; duration?: number }` | none | The page enters and leaves through a WGSL shader in place of its `animation`: `shade(uv)` reads the page below as `sample_from` and this page as `sample_to` while `nsh.progress` runs from 0 to 1 over `duration` milliseconds (350 by default), and from 1 back to 0 as the page leaves. When the system asks for less motion, the page takes its own `animation`. See [Shader](./shader.md). |
 | `statusBar` | `.status_bar(..)` | `{ foreground?, hidden?, animated? }` | none | iOS and Android: the status bar while the page is on top. See [Status bar](../modules/nsh-base.md#status-bar). |
 | `style`, `class` | style methods | | none | The page's style. |
 | `children` | `.child(..)` | `JSX.Element` | none | The content. |
@@ -312,11 +316,11 @@ fn edit_note(routes: Signal<Vec<u32>>) -> Screen {
         spawn(async move {
             let choice = alert_dialog()
                 .title("Discard your changes?")
-                .cancel("Keep editing")
-                .destructive("Discard")
+                .cancel("keep", "Keep editing")
+                .destructive("discard", "Discard")
                 .show()
                 .await;
-            if choice.ok().flatten().as_deref() == Some("Discard") {
+            if choice.is_ok_and(|r| r.action.as_deref() == Some("discard")) {
                 routes.update(|r| {
                     r.pop();
                 });
@@ -347,18 +351,18 @@ import { AlertDialog, NavPage, Input } from "nsh/base";
 function EditNote() {
   const text = signal("");
   const confirm = async () => {
-    const choice = await AlertDialog.show({
+    const { action } = await AlertDialog.show({
       title: "Discard your changes?",
       actions: [
-        { label: "Keep editing", role: "cancel" },
+        { label: "Keep editing", role: "cancel", id: "keep" },
         { label: "Discard", role: "destructive", id: "discard" },
       ],
     });
-    if (choice === "discard") nav.pop();
+    if (action === "discard") nav.pop();
   };
   return (
     <NavPage title="Edit" popOnBack={text().length === 0} onBackPress={() => text().length > 0 && confirm()}>
-      <Input value={text()} onChange={(v) => text.set(v)} placeholder="A note" />
+      <Input value={text()} onChange={({ value }) => text.set(value)} placeholder="A note" />
     </NavPage>
   );
 }

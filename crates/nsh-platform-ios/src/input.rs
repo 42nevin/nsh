@@ -2,12 +2,14 @@
 //! inside a container view that carries the decoration (background,
 //! border, corners, shadow) like any other view.
 
-use std::cell::Cell;
+use std::{cell::Cell, ffi::CStr};
 
 use nsh_core::{
     AutoCapitalize, AutoFill, Bounds, Color, InputConfig, KeyboardAppearance, KeyboardType, NodeId,
-    Points, ReturnKeyType, SubmitBehavior, TextAlign, geometry::px,
+    Points, ReturnKeyType, SubmitBehavior, TextAlign,
+    geometry::{point, px, size},
 };
+use nsh_engine::EngineControl;
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
     rc::Retained,
@@ -46,6 +48,12 @@ pub(crate) struct InputIvars {
     paste_listens: Cell<bool>,
     /// A paste inserts its text (`pasteBehavior`).
     paste_inserts: Cell<bool>,
+    /// A built-in bar of the app's takes the text area's scroll indicator's
+    /// place (`InputConfig::replaced`): its scrolling is reported.
+    scroll_replaced: Cell<bool>,
+    /// The scrolling last reported (offset y, content width and height,
+    /// viewport width and height): only changes are reported again.
+    scroll_reported: Cell<Option<[CGFloat; 5]>>,
 }
 
 impl Default for InputIvars {
@@ -64,6 +72,8 @@ impl Default for InputIvars {
             caret: Cell::new(Bounds::default()),
             paste_listens: Cell::new(false),
             paste_inserts: Cell::new(true),
+            scroll_replaced: Cell::new(false),
+            scroll_reported: Cell::new(None),
         }
     }
 }
@@ -168,6 +178,22 @@ define_class!(
 );
 
 impl Area {
+    /// Reports the scrolling through the delegate, the event target, which
+    /// holds the engine's control.
+    fn scroll_changed(&self) {
+        if !self.ivars().scroll_replaced.get() {
+            return;
+        }
+        // SAFETY: UITextView's `delegate`, set to the target.
+        let delegate: Option<Retained<AnyObject>> = unsafe { msg_send![self, delegate] };
+        if let Some(target) = delegate
+            .as_deref()
+            .and_then(|d| d.downcast_ref::<EventTarget>())
+        {
+            target.input_scrolled(self.as_ref());
+        }
+    }
+
     /// Adds the line break commands to `inherited` while return submits.
     fn with_line_breaks(
         &self,
@@ -260,6 +286,23 @@ define_class!(
             }
             // SAFETY: calling the superclass implementation.
             unsafe { msg_send![super(self), canPerformAction: action, withSender: sender] }
+        }
+
+        /// The text's size changes after edits and layout without a
+        /// scroll: a built-in bar's thumb follows it.
+        #[unsafe(method(setContentSize:))]
+        fn set_content_size(&self, size: CGSize) {
+            // SAFETY: calling the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), setContentSize: size] };
+            self.scroll_changed();
+        }
+
+        /// The viewport's size changes in layout.
+        #[unsafe(method(layoutSubviews))]
+        fn layout_subviews(&self) {
+            // SAFETY: calling the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), layoutSubviews] };
+            self.scroll_changed();
         }
 
         #[unsafe(method(deleteBackward))]
@@ -431,6 +474,35 @@ pub(crate) fn report_paste(view: &UIView, paste: nsh_core::PasteEvent) {
     {
         target.pasted(view.tag() as NodeId, paste);
     }
+}
+
+/// Reports how far text area `view` scrolled (`EngineControl::input_scroll`)
+/// while a built-in bar takes the place of its indicator, if the offset, the
+/// text's size or the viewport changed since the last report.
+pub(crate) fn report_scroll(view: &UIView, control: &EngineControl) {
+    let Some(area) = view.downcast_ref::<Area>() else {
+        return;
+    };
+    let ivars = area.ivars();
+    if !ivars.scroll_replaced.get() {
+        return;
+    }
+    let offset = area.contentOffset();
+    let content = area.contentSize();
+    let viewport = area.bounds().size;
+    // A short text still fills the viewport, so the bar has no room to move.
+    let height = content.height.max(viewport.height);
+    let width = content.width.max(viewport.width);
+    let now = [offset.y, width, height, viewport.width, viewport.height];
+    if ivars.scroll_reported.replace(Some(now)) == Some(now) {
+        return;
+    }
+    control.input_scroll(
+        view.tag() as NodeId,
+        point(Points::ZERO, px(offset.y as f32)),
+        size(px(width as f32), px(height as f32)),
+        size(px(viewport.width as f32), px(viewport.height as f32)),
+    );
 }
 
 /// The paste settings of input view `view` (`onPaste` listened,
@@ -798,6 +870,12 @@ impl Input {
                 view.ivars().max_length.set(config.max_length);
                 view.ivars().caret_hidden.set(config.caret_hidden);
                 view.ivars().submit.set(config.submit());
+                // A built-in bar of the app's takes the indicator's place;
+                // the text still scrolls.
+                view.setShowsVerticalScrollIndicator(config.scrollbar_visible);
+                view.ivars().scroll_replaced.set(config.replaced);
+                // Reported again once the configuration is applied.
+                view.ivars().scroll_reported.set(None);
             }
         }
         crate::mount::mirror(self.editor_view(), config.rtl);
@@ -808,11 +886,31 @@ impl Input {
         );
         let first = self.config.is_none();
         let auto_focus = config.auto_focus;
+        let replaced = config.replaced;
         self.config = Some(config);
         self.update_placeholder();
+        if replaced {
+            target.input_scrolled(self.editor_view());
+        }
         if first && auto_focus {
             self.editor_view().becomeFirstResponder();
         }
+    }
+
+    /// Scrolls a text area's text to `y` (`Command::ScrollTo`, a built-in
+    /// bar's drags), clamped to what it can scroll.
+    pub(crate) fn scroll_to(&self, y: Points, animated: bool) {
+        let Editor::Area { view, .. } = &self.editor else {
+            return;
+        };
+        let inset = view.adjustedContentInset();
+        let max =
+            (view.contentSize().height + inset.bottom - view.bounds().size.height).max(-inset.top);
+        let offset = CGPoint::new(
+            view.contentOffset().x,
+            (y.0 as CGFloat).clamp(-inset.top, max),
+        );
+        view.setContentOffset_animated(offset, animated);
     }
 
     /// The input accessory view this input names, if mounted.
@@ -1038,12 +1136,32 @@ fn content_type(fill: AutoFill) -> Option<&'static NSString> {
             AutoFill::PostalCode => UITextContentTypePostalCode,
             AutoFill::Country => UITextContentTypeCountryName,
             AutoFill::CreditCardNumber => UITextContentTypeCreditCardNumber,
-            AutoFill::CreditCardExpiration => UITextContentTypeCreditCardExpiration,
-            AutoFill::CreditCardSecurityCode => UITextContentTypeCreditCardSecurityCode,
-            AutoFill::CreditCardName => UITextContentTypeCreditCardName,
+            AutoFill::CreditCardExpiration => {
+                ios17_content_type(c"UITextContentTypeCreditCardExpiration")?
+            }
+            AutoFill::CreditCardSecurityCode => {
+                ios17_content_type(c"UITextContentTypeCreditCardSecurityCode")?
+            }
+            AutoFill::CreditCardName => ios17_content_type(c"UITextContentTypeCreditCardName")?,
             AutoFill::Url => UITextContentTypeURL,
-            AutoFill::Birthdate => UITextContentTypeBirthdate,
+            AutoFill::Birthdate => ios17_content_type(c"UITextContentTypeBirthdate")?,
         })
+    }
+}
+
+/// The UIKit constant `name`, which exists from iOS 17 on; `None` before.
+///
+/// Looked up at run time: naming the `objc2_ui_kit` static is a strong import,
+/// and dyld then refuses to start the app on iOS 15 and 16, whether or not an
+/// input uses it. See `docs/dev/pitfalls.md`.
+fn ios17_content_type(name: &CStr) -> Option<&'static NSString> {
+    // SAFETY: the symbol, when present, is UIKit's immutable
+    // `NSString *const`, set for the life of the process.
+    unsafe {
+        let symbol = libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr());
+        (symbol as *const *const NSString)
+            .as_ref()
+            .and_then(|constant| constant.as_ref())
     }
 }
 
@@ -1071,4 +1189,45 @@ fn placeholder(config: &InputConfig, font: &objc2_ui_kit::UIFont) -> Retained<NS
 fn ui_color(color: Color) -> Retained<UIColor> {
     let (r, g, b, a) = color.to_f64();
     UIColor::colorWithRed_green_blue_alpha(r, g, b, a)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// On iOS 17 and later, the kinds looked up at run time are UIKit's own
+    /// constants, as if named directly.
+    #[test]
+    fn ios_17_content_types_resolve_to_uikits_constants() {
+        use objc2_ui_kit::{
+            UITextContentTypeBirthdate, UITextContentTypeCreditCardExpiration,
+            UITextContentTypeCreditCardName, UITextContentTypeCreditCardSecurityCode,
+        };
+
+        // SAFETY: immutable UIKit constants.
+        let expected = unsafe {
+            [
+                (
+                    AutoFill::CreditCardExpiration,
+                    UITextContentTypeCreditCardExpiration,
+                ),
+                (
+                    AutoFill::CreditCardSecurityCode,
+                    UITextContentTypeCreditCardSecurityCode,
+                ),
+                (AutoFill::CreditCardName, UITextContentTypeCreditCardName),
+                (AutoFill::Birthdate, UITextContentTypeBirthdate),
+            ]
+        };
+        for (fill, constant) in expected {
+            let found = content_type(fill).unwrap_or_else(|| panic!("{fill:?} has no type"));
+            assert!(std::ptr::eq(found, constant), "{fill:?}");
+        }
+    }
+
+    /// A constant the running system does not have leaves the type unset.
+    #[test]
+    fn a_missing_content_type_is_none() {
+        assert!(ios17_content_type(c"UITextContentTypeThatDoesNotExist").is_none());
+    }
 }

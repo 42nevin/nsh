@@ -16,7 +16,7 @@
   (`nsh_core::animation::Easing::Curve`), never a JS function: the curves, their parameters and defaults are one table
   (`nsh_core::js::animation`), which decodes them, declares their types (`animation::declarations`) and gives `nsh`'s `Easing` its curves (`animation::tables`). `Animated.timing` / `spring` / `decay` / `sequence` / `parallel` / `stagger` /
   `delay` / `loop` build a `Composite` tree that runs entirely natively (`AnimationOp::StartComposite`): each step starts at the exact end
-  time of the previous one (no frame gaps), `stop()` / `reset()` (back to the values at start) / `start(cb)` report `finished` once
+  time of the previous one (no frame gaps), `stop()` / `reset()` (back to the values at start) / `start(cb)` report `{ finished }` once
   for the whole tree; leaf animations get internal ids (`LEAF_IDS`) that never reach JS. Composites are released when JS
   lets go of them (their finalizers queue `ReleaseComposite`); a run goes on after that. A run does not keep its
   composite (or the values it animates) alive: `nsh-js` remembers live composites by key (`Animations::composites`),
@@ -39,8 +39,22 @@
   component's own props (`AnimationProp::ComponentSlot(slot)`, `docs/dev/embedding.md`: the component is handed the value,
   a number or an ARGB color, on the frames it changes). iOS shapes the decoration with a bound
   border color (and the layers for it even while it is transparent: `bound_style`), then sets the colors on those
-  layers each frame; Android and web get them as properties (`Mounter.java` codes 11 and 12). Driven on the main thread by `CADisplayLink`,
-  paused while nothing animates. `scrollValue` writes the scroll offset into an animated value in the same frame; `pan` lets drags drive animated values
+  layers each frame; Android and web get them as properties. Driven on the main thread by `CADisplayLink`,
+  paused while nothing animates.
+- **Deadlines** (frames draw, time ends): every driver is a function of the time elapsed, so what an animation's end
+  does (its `{ finished }` to JS, a transition detaching a view, a screen transition settling and sending `Dismiss` /
+  `Show`, a scroll's `onScrollEnd`) needs the right time, not frames. While frames stop (a minimized or occluded
+  window, a locked screen, a hidden tab) the platforms must still get there. The core tells when the next end comes:
+  `Animator::deadline(now)` (the graph's: a timing's end; an unbounded decay's rest in closed form; a spring or a
+  bounded decay every `CHECK_SECONDS`; `now` for what has to be stepped to start; none for loops without an end,
+  which only frames move), `transition::Live::deadline` (a view's transitions and finite keyframes),
+  `navigation::Transitions::deadline` and `scroll::deadline` (a glide's or an eased move's end, a wheel's rest), each
+  a millisecond past the end so the step there finds it ended. A backend keeps the earliest with one timer a little
+  past it, which steps everything once if no frame ran since it came due, and does nothing while frames come: no
+  second clock beside the display's, and no work for a hidden window whose animations only draw. The one exception is
+  a test's app (`nsh test --target macos|windows`): it runs as on screen whatever covers its window (the test windows
+  do not come to the front, a test machine's screen may be locked), so while it wants frames and the display gives
+  none, it gets one a frame later, drawing included (JS frame requests, a list binding rows over frames). `scrollValue` writes the scroll offset into an animated value in the same frame; `pan` lets drags drive animated values
   directly, and JS receives the velocity when the drag ends. Animated values referenced by a view's style (or `pan`, `scrollValue`, ...) are kept by its node
   (`nsh-js` `dom.rs`) and derived nodes hold their inputs, so bindings do not break when JS objects are collected. In
   Rust components `AnimatedValue` / `AnimatedNode` are `Copy` handles their owner keeps; the element's bindings, a
@@ -75,14 +89,62 @@
 - **Layout animation**: `LayoutAnimation.configureNext(config)` (or the `easeInEaseOut` / `linear` / `spring` presets) animates
   the next commit's frames, insertions and removals natively. The presets are `LayoutAnimation::EASE_IN_EASE_OUT` /
   `LINEAR` / `SPRING` in Rust (what Rust components pass to `animate_layout`), handed to `nsh`'s `LayoutAnimation` as data; the config's
-  decoding and types come from the same module.
+  decoding and types come from the same module. That animates every frame of the commit, app-wide; a component that
+  sizes one region (a reveal) scopes it with `ElementRef::animate_layout(transition)`, `Command::LayoutAnimation`
+  sent to the region's node: only the frames its change moves animate (its subtree's, its ancestors' children, and
+  the content of those that changed size). The platforms know nothing of the scope: before handing out the batch,
+  the core leads each run of frames with the layout animation it takes, an empty one for the rest
+  (`core/layout_scope.rs`), as the platforms animate a frame with the last `MountItem::LayoutAnimation` before it.
+  Insertions and removals are not scoped (their animations are decided per batch on iOS, Android and the web).
+- **A view that follows another** (`View::follow(target)`, `core/follow.rs`; `nsh/base`'s `Tabs` indicator): its frame
+  along its parent's main axis is the target's, placed by the core after layout, with no layout of its own and no
+  JS. Following another element runs its `follow_transition` as a layout animation of its own frame alone (a scope of
+  the follower's node in `core/layout_scope.rs`, without its ancestors' children: what changes around it in that
+  commit changes at once); the first placement and a layout that moves the target place it at once, in the same
+  batch. The component decides the transition, `None` under reduced motion (`Tabs`: `spring_move`'s spring,
+  `LayoutCurve::Spring { damping: 0.85 }` over 362 ms). A follower hidden (`display: none`) forgets where it was, so
+  shown again it is placed at once. A target that changes size in the commit that makes it the target is followed
+  to its new frame, animated once; a resize sends no layout animation item. With no follower the pass returns at
+  once and `set_frame` notes nothing (`nothing_follows_while_no_view_follows_an_element`).
 - **Desktop backends** (Windows, GPUI, Linux, macOS): one platform-free copy of what they animate. `nsh_core::transition`
   holds a view's layout animation, style transition and keyframes (`Live`: curves, springs, interpolation of frames,
   colors, transforms, shadows and corner radii, timing), which each backend steps on its frame clock and applies to its
-  own views; `nsh_core::animation::Animator` holds the graph with its bindings to views, gestures and scroll views
+  own views; a text's color, which lives in its typeset runs rather than its style, transitions as a color the backend
+  draws the whole text in over its runs (`Live::text_color`, `transition::recolor`: when the text is one color before
+  and after), the way it draws an animated `color`, so no frame typesets the text again; `nsh_core::animation::Animator` holds the graph with its bindings to views, gestures and scroll views
   and hands each bound view its `AnimValues`.
+- **Mobile backends**: style transitions are the platform's (Core Animation on iOS, `ValueAnimator`s in
+  `Mounter.java` on Android), and a view's first style does not transition (the desktops' `transition::restyle` skips it,
+  iOS waits for a view it has styled before, Android for one with a style to transition from). A text's color follows the same rules as on the desktops and is drawn the same way,
+  over the laid-out lines in an in-between color, as an animated `color` is: iOS steps a `transition::TextColor` per
+  text (`transition::recolor` decides) on a display link that runs only while one moves (`interaction.rs`
+  `TextColors`); on Android the `TEXT` item carries the text's one color (`uniform_color`) and `TextBox.recolor`
+  runs a `ValueAnimator` on the view's transition (reduced motion: animators off, at once).
 - **Web**: animated values run in Rust as elsewhere; layout animations, transitions, keyframes and screen transitions
-  are Web Animations and CSS made to match the Linux backend (`web.md` "Animation").
+  are Web Animations and CSS made to match the Linux backend (`web.md` "Animation"); a text's color is a CSS
+  transition of its element's `color`, which its runs inherit.
+- **Frame rate**: an animation may say the highest rate it needs, in Hz: `frameRate` in the options of `timing`,
+  `spring`, `decay`, `Animated.*`, keyframes and motions (`Driver`'s `frame_rate`, `KeyframeTiming::frame_rate`, Rust's
+  `Timing::frame_rate` / `Spring::frame_rate`), and `animationFrameRate` beside a keyframe `animation`'s other keys
+  (`KeyframeAnimation::frame_rate`). Unset, it needs the screen's highest. `Graph::frame_rate` folds what runs (the
+  highest rate; `None` as soon as one runs uncapped; a composite asks for the highest of its steps while it runs),
+  `transition::Live::frame_rate` a view's keyframes while they run alone. Platforms that can lower their frame rate
+  honor it while nothing else wants frames (macOS: `macos.md` "Frames"; iOS: the graph's display link and Core
+  Animation's keyframes); the others run at the screen's rate.
+
+## Pointer-driven motion follows the pointer
+
+What the pointer drives follows it in the same frame: a hover's cross line, dots and tooltip, a dragged thumb, a
+scroll bar's thumb, a resize handle, a color area's knob, a dragged column, a dock's drag preview, a swiped toast or
+sheet. The component sets it (`AnimatedValue::set`, a style, `pan_values`) from the event, never eases or springs it
+toward the pointer: a position that trails the hand reads as dropped frames. Transitions and springs are for discrete
+changes: a step of the keys (a plot's hover glides to the next row on `motion.pointer`), snapping to a row or a slot
+as the pointer enters or leaves it, the app setting a value, a release (a swipe settles or flies off), entering and
+exiting (the hover's fade), and data changes. "Follows the hand and still animates" is that split: a plot's cross
+line snaps to the row under the pointer at once while its fade in and out animate. The app's transitions on a part
+the component moves (`transition-all` on a scroll bar's thumb) must not reach the moving property: the component
+moves a wrapper of its own (`scrollbar.rs`'s holder). Tests assert it: a pointer move starts no animation
+(`nsh-base/tests/base/plot.rs`).
 
 ## Compared with gpui-base's motion
 
@@ -102,7 +164,7 @@ maps to what:
 | `Sequence` | `Animated.sequence` / `Animation::sequence` (each step starts at the exact end of the one before) |
 | `Stagger` / `StaggerOrigin` (first, last, center, index) | `Animated.stagger(ms, list, { from })` / `Animation::stagger_from`, `StaggerFrom` |
 | `Presence` / `PresencePhase` (keeps content mounted while it exits) | `createMotion({ enter })` / `motion().entering(..)` for entrances, `await play(exit)` then removing the view for exits. Gap: no presence component that keeps a removed view mounted through its exit |
-| `MotionReveal` (measured vertical reveal, clipped) | Gap: not provided; buildable with an animated `maskImage`-style fade or `scaleY` on a clipped view, or a layout animation of the height (heights are not bindable to animated values) |
+| `MotionReveal` (measured vertical reveal, clipped) | `nsh/base`'s `Collapsible` `reveal`: a clip view between zero and the content's height whose change is a layout animation of the frames it moves (`ElementRef::animate_layout`; a critically damped spring of `spring_control`'s time), the content kept until it has closed (`docs/dev/components.md` "Children, slots and rows"). Heights are not bindable to animated values, so a reveal is a layout animation, not a progress the app drives; no reveal element of its own yet |
 | Reduced motion (transitions and springs snap) | Motions land at their end; the low-level `Animated` / `timing` / `keyframes` play as written and apps choose with `reduce_motion()` |
 | `MotionTransform` (translation, scale, rotation, opacity bundle) | A `Motion`'s channels (opacity, translate X / Y, rotate, rotate X / Y, scale, scale X / Y), bound with `style={m.style}` / `bind_motion` |
 
@@ -111,19 +173,13 @@ interpolation to numbers, colors and angles, arithmetic and `diffClamp`; `decay`
 (`pan`, `pinch`, `rotation`) and scroll offsets (`scrollValue`) writing values directly; layout animations of a
 commit's frames, insertions and removals; and a library of ready-made motions as data.
 
-## Shaders and generative fills (decision)
+## Shaders
 
-NSH does not take app-written shaders. There is no shading language common to its backends: Metal on iOS and macOS,
-AGSL `RuntimeShader` only on Android 13 and later, HLSL Direct2D effects on Windows, GTK 4's `GskGLShader` deprecated
-since 4.16, no user shaders in GPUI, WebGL / WebGPU on the web. Apps are sandboxed plugins whose limits are enforced
-natively, and an arbitrary GPU program escapes those limits (its cost, hangs of the GPU). And a shader is a look,
-which NSH leaves to apps.
+Apps draw generative fills (mesh gradients, noise, grain, plasma) with shader views: `<Shader source={wgsl}>`, a
+WGSL `fn shade(uv: vec2f) -> vec4f` that the core checks with naga and the platforms render on the GPU (wgpu on the
+native backends, WebGL 2 on the web) under the view's children. Animated values among its `uniforms` are value slots
+bound as `AnimationProp::CanvasArg`, as a canvas drawing's are, so they move it with no JS per frame; a shader reading
+`nsh.time` draws every frame while it is in sight. See [shaders.md](shaders.md).
 
-What apps use today for gradient-art surfaces (getgradients.com's style): layered `linear-gradient` /
-`radial-gradient` / `conic-gradient` backgrounds, `filter: blur()`, `maskImage`, `mixBlendMode`, moved by motions and
-animated values (the gallery's animated aurora background is built that way), and Canvas drawings bound to animated
-values.
-
-A possible direction (a design decision to take, not planned work): parameterized generative fills in the core
-(mesh gradients, noise / grain) that each backend draws, or a constrained shader subset compiled per platform (for
-example WGSL through naga to MSL, HLSL, GLSL and SPIR-V) with a fallback fill where a platform cannot run it.
+Layered CSS gradients, `filter: blur()`, `maskImage` and `mixBlendMode` moved by motions and animated values, and
+Canvas drawings bound to animated values, remain the tools for fills built from shapes.

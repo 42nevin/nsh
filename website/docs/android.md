@@ -46,6 +46,25 @@ The APK is built with the SDK's build tools, without Gradle, and signed with the
 keystore. Signing for release and icons: [Packaging](./packaging.md#android).
 
 NSH builds `libnsh.so` with 16 KB ELF alignment and packages the uncompressed native libraries on 16 KB ZIP boundaries.
+A release APK carries `libnsh.so` without its symbol tables and debug info. The complete library sits next to the
+runtime in `symbols/<abi>/libnsh.so` (a Rust app's in `.nsh/rust/android-rust-release/symbols/<abi>/`): give it to
+`ndk-stack` or upload it to Play Console as native debug symbols to read native crash stacks.
+
+## Upload to Google Play
+
+`nsh publish android` uploads an Android App Bundle (`.aab`) to Google Play's internal testing track
+([CLI](./cli.md#nsh-publish-android)):
+
+```sh
+export NSH_PLAY_CREDENTIALS=~/keys/play-service-account.json   # never commit it
+nsh publish android .nsh/out/App.aab
+```
+
+Once per app: create the app in Play Console, create a service account in Google Cloud with the Google Play Android
+Developer API enabled, download its JSON key, and invite the service account's email under **Users and permissions**
+with permission to release to testing tracks. Until the app's first release is made in Play Console, pass `--draft`.
+The bundle's version code must be higher than any uploaded before. Promoting a release beyond internal testing stays a
+step in Play Console.
 
 ## Embedding in an Android app
 
@@ -71,8 +90,11 @@ dist/nsh/embed/android/nsh.aar       release: bundles and signed packages
 dist/nsh/embed/android/nsh-dev.aar   also connects to a `nsh dev` server
 ```
 
-The AAR holds the Java runtime and `libnsh.so` for `arm64-v8a`, `armeabi-v7a` and `x86_64`. It declares the `INTERNET`
-permission and needs **API 28** (Android 9) or newer.
+The AAR holds the Java runtime and `libnsh.so` for `arm64-v8a`, `armeabi-v7a` and `x86_64`, with their symbols: the
+app's Gradle build strips them when it packages the app and keeps the symbols for its crash reports. It declares the
+`INTERNET` permission and needs **API 28** (Android 9) or newer. It carries its R8 rules (`proguard.txt`), which a
+minified build applies on its own: the native library finds the runtime's classes by name, so `com.longbridge.nsh`
+stays as it is.
 
 Add it to the app module, for example from a `libs` folder:
 
@@ -169,6 +191,7 @@ again replaces the running app. The complete sample is
 | `setLocale(Locale locale)` | The app's language and region in place of the user's: `Intl`, `locale()` and the components follow it at once, and the apps loaded later start in it. `null` follows the system's. |
 | `setFontScale(float scale)` | The text size in place of the system's font size (1 is the default): texts and inputs are laid out again at it and `fontScale()` reads it, at once and for the apps loaded later; lengths keep their size. `0` follows the system's. |
 | `setThemeOverrides(String json)` | The host's brand over the app's [theme](./tailwind.md#theme-tokens): a theme file in the format of `nsh.json`'s `"theme"`. Its tokens win over the app's of the same names, in light and dark mode, and the app's others stay. Applies at once and to the apps loaded later; `null` gives the app its own theme back. Throws `IllegalArgumentException` for a file that does not parse. |
+| `registerFont(byte[] data)` | Registers a font file (TrueType, OpenType, WOFF or WOFF2) the host ships. Apps name its family in `fontFamily` and do not bundle the file. A font registered before a load is in that app's first frame; one registered while an app runs is used from the next layout. Throws `IllegalArgumentException` when `data` is not a font. Registering the same file again does nothing. |
 | `setStorageDirectory(File dir)` | Where the apps loaded next keep their [storage](../modules/nsh.md#storage); `null`: `files/nsh/<app id>` in the app's private directory, by the app's own id. |
 | `setCacheOptions(NshCacheOptions options)` | Where the apps loaded next keep their caches, the [images they download](./images-and-assets.md#kept-on-disk), and how much each keeps. Build one with `NshCacheOptions.builder()`: `location(File)`, `systemLocation()` (the default: `nsh` in the cache directory, each app in `<app id>`) or `noDiskCache()`; `imagesMaxMegabytes(int)` (256 by default) or `imagesOff()`. |
 | `loadAssetBundle(String dir)` | Runs `dir/bundle.nshc` from the APK's assets; app assets come from `dir/assets/`. Returns `false` if it cannot be read (also reported to the error listener). |
@@ -372,7 +395,9 @@ config of the app may override it). The release `nsh.aar` does not.
       android:windowSoftInputMode="adjustResize" />
   ```
 
-  `NshView` follows the new size, color scheme, font scale and layout direction itself.
+  `NshView` follows the new size, color scheme, font scale, display density and layout direction itself; the app keeps
+  its state. Scroll positions are restored in logical coordinates within the new content bounds. Sticky views and
+  open modal windows follow the new density too.
 - **Lifecycle.** Call `destroy()` when the hosting activity or fragment goes away.
 
 ## See also

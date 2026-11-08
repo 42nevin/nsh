@@ -222,7 +222,7 @@ pub fn runner(ui_sets: Vec<Registry>, root: Option<fn() -> Root>) -> ExitCode {
                 Ok(Built::Js(Box::new(bundle), map))
             }
             Reply::Root => root
-                .map(|root| Built::Rust(root()))
+                .map(|root| Built::Rust(Box::new(root())))
                 .ok_or_else(|| "this app has no Rust root".to_owned()),
             Reply::Failed { message } => Err(message),
         }
@@ -238,6 +238,7 @@ pub fn runner(ui_sets: Vec<Registry>, root: Option<fn() -> Root>) -> ExitCode {
         // On a real platform, `nsh` runs the test files itself: the apps run
         // in hosts built with the app's crates.
         host: None,
+        target: None,
         page_host: request.page_host,
     };
     for file in &request.files {

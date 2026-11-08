@@ -13,23 +13,31 @@
 //!   value (`accessibilityValue`: a range for range roles, the text
 //!   otherwise; the checked state of checkable roles) and its states
 //!   (`accessibilityState`);
-//! - `accessible={true}` makes it one element: its children are hidden
-//!   from VoiceOver (the core labels it with their text);
+//! - buttons, links, tabs, checkboxes, radios, switches, menu items,
+//!   options and tree items fold their content into their name, and so
+//!   does `accessible={true}`: VoiceOver reaches only the controls inside
+//!   them, and one without a label is named by the texts and labels of
+//!   its content ([`content_label`]; static text's value,
+//!   [`content_value`]), as on Windows and GPUI;
 //!   `accessibilityElementsHidden` hides it and its subtree, and so does
 //!   `visibility: hidden`, as in a browser (only its layer is hidden, which
 //!   VoiceOver does not see);
 //! - its `testID` as its accessibility identifier (what UI tests find).
 //!
+//! Its screen frame follows the layer tree, including ancestor transforms
+//! and scroll containers, rather than AppKit's untransformed view frames.
+//!
 //! Live regions are emulated by announcing a changed label or text
 //! (`NSAccessibilityAnnouncementRequestedNotification`);
-//! `accessibilityActions` are not exposed. Public children are derived from
-//! the current AppKit hierarchy by `ViewObj`; grouping suppresses that query
-//! without freezing a child list. Press callbacks use the existing event
-//! channel after live accessibility admission on the same view.
+//! `AXPress` presses a view that takes presses, as Return does when it
+//! has the keyboard focus (`crate::input::accessibility_press`);
+//! `accessibilityActions` are not exposed.
 //!
 //! Every update is diffed against what was last given to AppKit
 //! ([`Applied`]): `ViewProps` also carries touch properties, and `Text`
 //! items come again on every relayout.
+
+pub(crate) mod table;
 
 use std::sync::Arc;
 
@@ -37,16 +45,35 @@ use nsh_core::{
     Accessibility, AccessibilityRole as Role, AttributedText, Checked, EventKind, EventMask,
     LiveRegion, MountBatch, ViewKind, ViewStyle,
 };
-use objc2::{MainThreadOnly, rc::Retained, runtime::AnyObject};
+use objc2::{MainThreadOnly, Message, rc::Retained, runtime::AnyObject};
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityAnnouncementKey,
     NSAccessibilityAnnouncementRequestedNotification, NSAccessibilityLayoutChangedNotification,
     NSAccessibilityPostNotificationWithUserInfo, NSAccessibilityPriorityKey,
     NSAccessibilityPriorityLevel, NSAccessibilityUIElementsKey, NSView,
 };
-use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSRect, NSString};
 
-use crate::view::{NshView, ViewState};
+use crate::view::{NshView, ViewState, superview};
+
+/// The drawn bounds in AppKit screen coordinates. Convert through the
+/// layer tree first: NSView's conversions omit layer transforms. The
+/// outermost layer-backed view bridges back to window coordinates, also
+/// when the surface is embedded in another view.
+pub(crate) fn frame(view: &NSView) -> Option<NSRect> {
+    let window = view.window()?;
+    let layer = view.layer()?;
+    let mut outer = view.retain();
+    let mut parent = superview(view);
+    while let Some(view) = parent {
+        parent = superview(&view);
+        if view.layer().is_some() {
+            outer = view;
+        }
+    }
+    let bounds = layer.convertRect_toLayer(layer.bounds(), outer.layer().as_deref());
+    Some(window.convertRectToScreen(outer.convertRect_toView(bounds, None)))
+}
 
 /// What was last given to AppKit for one view.
 #[derive(Debug, Default)]
@@ -62,17 +89,155 @@ pub(crate) struct Applied {
     /// all fifteen attributes per changed text is what a ticking table
     /// spends most of its main-thread time on.
     ax: AxState,
+    /// Stable, non-view columns, created only when an AX client asks.
+    columns: Vec<Retained<table::Column>>,
 }
 
-/// Whether the view hides its children from VoiceOver (`accessible={true}`,
-/// `accessibilityElementsHidden`, `visibility: hidden`): its
-/// `accessibilityChildren` are none then, AppKit's otherwise.
+/// Which of its children VoiceOver reaches through a view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reached {
+    /// AppKit's.
+    All,
+    /// The controls among AppKit's, inside its content too ([`controls`]):
+    /// the view folds its content into its name (a button, a tab,
+    /// `accessible={true}`).
+    Controls,
+    /// None (`accessibilityElementsHidden`, `visibility: hidden`).
+    None,
+}
+
+/// Which of its children VoiceOver reaches through the view of `s`.
 ///
 /// The view answers them itself: `setAccessibilityChildren:` cannot be
 /// undone, as `nil` leaves the view without children rather than with
 /// AppKit's again, so a subtree shown again stayed out of reach.
-pub(crate) fn hides_children(s: &ViewState) -> bool {
-    s.access.ax.grouped
+pub(crate) fn reached(s: &ViewState) -> Reached {
+    if s.access.ax.hidden {
+        Reached::None
+    } else if s.access.ax.grouped {
+        Reached::Controls
+    } else {
+        Reached::All
+    }
+}
+
+/// The controls among `children` (AppKit's of a view that folds its
+/// content): its content (texts, images, groups) is in its name instead,
+/// and the controls inside that content are reached in its place, as the
+/// Windows and GPUI backends fold it.
+pub(crate) fn controls(children: Option<Retained<NSArray>>) -> Retained<NSArray> {
+    let mut out: Vec<Retained<AnyObject>> = Vec::new();
+    fn gather(children: Option<Retained<NSArray>>, out: &mut Vec<Retained<AnyObject>>) {
+        for child in children.iter().flat_map(|c| c.iter()) {
+            let content = child.downcast_ref::<NSView>().filter(|view| {
+                NshView::from_ns(view)
+                    .is_some_and(|v| v.try_state().is_some_and(|s| is_content(&s)))
+            });
+            match content {
+                Some(view) => gather(view.accessibilityChildren(), out),
+                None => out.push(child),
+            }
+        }
+    }
+    gather(children, &mut out);
+    NSArray::from_retained_slice(&out)
+}
+
+/// True when the view of `s` is content an element folds into its name.
+fn is_content(s: &ViewState) -> bool {
+    s.access
+        .spec
+        .as_ref()
+        .is_some_and(|spec| !spec.hidden && spec.role.is_content())
+}
+
+/// The name of a view that folds its content and has no label of its own,
+/// as its label: the texts and labels inside it ([`gather_name`]). Static
+/// text (an option, a tree item) reads it as its value instead
+/// ([`content_value`]).
+pub(crate) fn content_label(view: &NshView) -> Option<String> {
+    folded_name(view, false)
+}
+
+/// [`content_label`] for the elements that read their name as their value
+/// ([`Ax::reads_value`]), as [`spec_for`] puts a label there: VoiceOver
+/// reads static text's value. A value the app gives comes after it, as
+/// after a label.
+pub(crate) fn content_value(view: &NshView) -> Option<String> {
+    folded_name(view, true)
+}
+
+/// The folded name of `view`, if it goes to its value (`as_value`) or else
+/// its label: none when the view does not fold its content, or has a label
+/// of its own (already its label or its value).
+fn folded_name(view: &NshView, as_value: bool) -> Option<String> {
+    let value_text = {
+        let s = view.try_state()?;
+        if reached(&s) != Reached::Controls || s.props.accessibility.label.is_some() {
+            return None;
+        }
+        if s.access.spec.as_deref()?.role.reads_value() != as_value {
+            return None;
+        }
+        s.props
+            .accessibility
+            .value
+            .as_ref()
+            .and_then(|v| v.text.as_deref())
+            .map(str::to_owned)
+    };
+    let mut name = String::new();
+    gather_name(view.ns(), &mut name);
+    if name.is_empty() {
+        return None;
+    }
+    Some(match value_text.filter(|_| as_value) {
+        Some(v) => format!("{name}, {v}"),
+        None => name,
+    })
+}
+
+/// The longest name gathered from content.
+const MAX_NAME: usize = 1000;
+
+/// Appends the texts and labels of `view`'s content to `out`.
+fn gather_name(view: &NSView, out: &mut String) {
+    for child in view.subviews().iter() {
+        if out.len() >= MAX_NAME {
+            return;
+        }
+        let Some(nsh) = NshView::from_ns(&child) else {
+            // A container of ours (a scroll view's content): what is in it.
+            gather_name(&child, out);
+            continue;
+        };
+        let Some(s) = nsh.try_state() else { continue };
+        let own = match s.access.spec.as_deref() {
+            Some(spec) if spec.hidden => continue,
+            // Controls inside are elements of their own.
+            Some(spec) if spec.role != Ax::Generic && !spec.role.is_content() => continue,
+            _ => s
+                .props
+                .accessibility
+                .label
+                .as_deref()
+                .or(s.text.as_ref().map(|t| t.text.text.as_str()))
+                .map(str::to_owned),
+        };
+        drop(s);
+        match own {
+            Some(text) => {
+                let text = text.trim();
+                if !text.is_empty() {
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    out.push_str(text);
+                }
+            }
+            None => gather_name(&child, out),
+        }
+    }
 }
 
 /// What `apply` last wrote, field by field.
@@ -94,8 +259,10 @@ struct AxState {
     enabled: bool,
     selected: bool,
     expanded: bool,
-    /// The children are hidden as a group (`grouped`, or the view is
-    /// hidden): the view answers none ([`hides_children`]).
+    /// A tree item's depth below the top (AppKit's disclosure level).
+    disclosure: Option<u32>,
+    /// Content is folded into this group, or the view is hidden;
+    /// [`reached`] selects whether controls or any children remain exposed.
     grouped: bool,
     /// The value's lower and upper bounds.
     range: (Option<u64>, Option<u64>),
@@ -114,6 +281,8 @@ enum Ax {
     /// No element.
     Generic,
     Button,
+    /// A button that stays on or off (`accessibilityState.pressed`).
+    Toggle,
     Link,
     Text,
     Image,
@@ -138,10 +307,63 @@ enum Ax {
     /// An option of a listbox.
     Option,
     Grid,
+    Row,
+    Cell,
     Search,
     Alert,
     Status,
     Timer,
+    /// A landmark of a section (ARIA's `region`).
+    Region,
+    /// A landmark of navigation (ARIA's `navigation`).
+    Navigation,
+    /// An item of a tree.
+    TreeItem,
+    /// A view standing for the window's close button (`windowControl`).
+    CloseButton,
+    /// ... its minimize button.
+    MinimizeButton,
+    /// ... its zoom (maximize) button.
+    ZoomButton,
+}
+
+impl Ax {
+    /// Elements that fold their content into their name, as a button reads
+    /// the text inside it (and as a browser makes these ARIA roles'
+    /// children presentational).
+    fn folds(self) -> bool {
+        matches!(
+            self,
+            Ax::Button
+                | Ax::CloseButton
+                | Ax::MinimizeButton
+                | Ax::ZoomButton
+                | Ax::Toggle
+                | Ax::Link
+                | Ax::CheckBox
+                | Ax::Radio
+                | Ax::Switch
+                | Ax::Tab
+                | Ax::MenuItem
+                | Ax::Option
+                | Ax::TreeItem
+        )
+    }
+
+    /// Elements that are static text for AppKit, which VoiceOver reads by
+    /// their value: their label is given as their value ([`spec_for`]).
+    fn reads_value(self) -> bool {
+        matches!(self, Ax::Text | Ax::Heading | Ax::Option | Ax::TreeItem)
+    }
+
+    /// Elements that are content: an element that folds its content
+    /// reads them in its name.
+    fn is_content(self) -> bool {
+        matches!(
+            self,
+            Ax::Text | Ax::Heading | Ax::Image | Ax::Group | Ax::Timer | Ax::Status
+        )
+    }
 }
 
 /// A view's value.
@@ -171,6 +393,8 @@ struct Spec {
     disabled: bool,
     selected: bool,
     expanded: Option<bool>,
+    /// A tree item's level (1 at the top).
+    level: Option<u32>,
     /// Hidden with its subtree.
     hidden: bool,
     /// One element: its children are not exposed.
@@ -304,7 +528,12 @@ fn update(view: &NshView) -> bool {
         let a = &s.props.accessibility;
         let pressable = is_pressable(s.events);
         let text = s.text.as_ref().map(|t| t.text.text.as_str());
-        let spec = spec_for(a, s.kind, pressable, text, s.style.hidden);
+        let mut spec = spec_for(a, s.kind, pressable, text, s.style.hidden);
+        if let Some(control) = s.props.window_control
+            && !spec.hidden
+        {
+            spec.role = window_button(control);
+        }
         if s.access.spec.as_deref() == Some(&spec) {
             return false;
         }
@@ -363,6 +592,10 @@ fn apply(view: &NSView, spec: &Spec, was: &AxState) -> AxState {
     let enabled = !spec.disabled;
     let selected = spec.selected;
     let expanded = spec.expanded.unwrap_or(false);
+    let disclosure = spec
+        .level
+        .filter(|_| spec.role == Ax::TreeItem)
+        .map(|l| l.saturating_sub(1));
     let grouped = spec.grouped || spec.hidden;
 
     // The role group: a different role is a different kind of element.
@@ -413,6 +646,9 @@ fn apply(view: &NSView, spec: &Spec, was: &AxState) -> AxState {
     if was.expanded != expanded {
         view.setAccessibilityExpanded(expanded);
     }
+    if was.disclosure != disclosure {
+        view.setAccessibilityDisclosureLevel(disclosure.unwrap_or(0) as isize);
+    }
     AxState {
         element,
         hidden: spec.hidden,
@@ -423,6 +659,7 @@ fn apply(view: &NSView, spec: &Spec, was: &AxState) -> AxState {
         enabled,
         selected,
         expanded,
+        disclosure,
         grouped,
         range: (min, max),
     }
@@ -465,6 +702,12 @@ fn ax_role(role: Ax) -> (Option<Retained<NSString>>, Option<Retained<NSString>>)
         match role {
             Ax::Generic => (None, None),
             Ax::Button => (constant(NSAccessibilityButtonRole), None),
+            // WebKit's toggle button (ARIA's `aria-pressed`): a checkbox
+            // whose value is on or off, read as "toggle button".
+            Ax::Toggle => (
+                constant(NSAccessibilityCheckBoxRole),
+                constant(NSAccessibilityToggleSubrole),
+            ),
             Ax::Link => (constant(NSAccessibilityLinkRole), None),
             Ax::Text => (constant(NSAccessibilityStaticTextRole), None),
             Ax::Image => (constant(NSAccessibilityImageRole), None),
@@ -498,7 +741,11 @@ fn ax_role(role: Ax) -> (Option<Retained<NSString>>, Option<Retained<NSString>>)
             // columns and row index), and its menu items a menu's; an option
             // of a list is static text that reports `AXSelected`.
             Ax::Option => (constant(NSAccessibilityStaticTextRole), None),
-            Ax::Grid => (constant(NSAccessibilityGridRole), None),
+            // VoiceOver navigates tables by row and column. Like WebKit,
+            // use AXTable for both table and grid semantics.
+            Ax::Grid => (constant(NSAccessibilityTableRole), None),
+            Ax::Row => (constant(NSAccessibilityRowRole), None),
+            Ax::Cell => (constant(NSAccessibilityCellRole), None),
             Ax::Search => (
                 constant(NSAccessibilityTextFieldRole),
                 constant(NSAccessibilitySearchFieldSubrole),
@@ -515,6 +762,31 @@ fn ax_role(role: Ax) -> (Option<Retained<NSString>>, Option<Retained<NSString>>)
             Ax::Timer => (
                 constant(NSAccessibilityGroupRole),
                 named("AXApplicationTimer"),
+            ),
+            Ax::Region => (
+                constant(NSAccessibilityGroupRole),
+                named("AXLandmarkRegion"),
+            ),
+            Ax::Navigation => (
+                constant(NSAccessibilityGroupRole),
+                named("AXLandmarkNavigation"),
+            ),
+            // As an option: AppKit's outline rows need the outline's rows
+            // and columns; an item of a tree is static text that reports
+            // its expanded state and its disclosure level.
+            Ax::TreeItem => (constant(NSAccessibilityStaticTextRole), None),
+            // As AppKit's own window buttons.
+            Ax::CloseButton => (
+                constant(NSAccessibilityButtonRole),
+                constant(NSAccessibilityCloseButtonSubrole),
+            ),
+            Ax::MinimizeButton => (
+                constant(NSAccessibilityButtonRole),
+                constant(NSAccessibilityMinimizeButtonSubrole),
+            ),
+            Ax::ZoomButton => (
+                constant(NSAccessibilityButtonRole),
+                constant(NSAccessibilityZoomButtonSubrole),
             ),
         }
     }
@@ -534,10 +806,15 @@ fn spec_for(
     let label = a.label.as_deref().or(text).map(str::to_owned);
     let checkable = matches!(
         role,
-        Ax::CheckBox | Ax::Switch | Ax::Radio | Ax::MenuItem | Ax::Button | Ax::Tab
+        Ax::CheckBox | Ax::Switch | Ax::Radio | Ax::MenuItem | Ax::Button | Ax::Tab | Ax::Toggle
     );
     let value_text = a.value.as_ref().and_then(|v| v.text.as_deref());
-    let (label, value) = match (role, &a.value, a.state.checked) {
+    // A toggle button's value is its pressed state.
+    let checked = match role {
+        Ax::Toggle => a.state.pressed,
+        _ => a.state.checked,
+    };
+    let (label, value) = match (role, &a.value, checked) {
         (r, Some(v), _) if is_range(r) => (
             label,
             Value::Range {
@@ -556,7 +833,7 @@ fn spec_for(
             }),
         ),
         // VoiceOver reads static text's value, not its label.
-        (Ax::Text | Ax::Heading | Ax::Option, _, _) => (
+        (r, _, _) if r.reads_value() => (
             None,
             label.map_or(Value::None, |l| match value_text {
                 Some(v) => Value::Text(format!("{l}, {v}")),
@@ -576,13 +853,36 @@ fn spec_for(
         disabled: a.state.disabled,
         selected: a.state.selected,
         expanded: a.state.expanded,
+        level: a.level,
         hidden: a.hidden || invisible,
-        grouped: a.accessible == Some(true) && kind != ViewKind::Text,
+        grouped: (a.accessible == Some(true) || role.folds()) && kind != ViewKind::Text,
+    }
+}
+
+/// The element a view standing for a window button (`windowControl`) is.
+fn window_button(control: nsh_core::desktop::WindowControl) -> Ax {
+    use nsh_core::desktop::WindowControl;
+    match control {
+        WindowControl::Close => Ax::CloseButton,
+        WindowControl::Minimize => Ax::MinimizeButton,
+        WindowControl::Maximize => Ax::ZoomButton,
     }
 }
 
 /// The element a view of `kind` is, with press handlers or not.
 fn role_for(a: &Accessibility, kind: ViewKind, pressable: bool) -> Ax {
+    let role = base_role(a, kind, pressable);
+    // A button with a pressed state is a toggle button, as browsers make
+    // ARIA's `aria-pressed`.
+    if role == Ax::Button && a.state.pressed.is_some() {
+        Ax::Toggle
+    } else {
+        role
+    }
+}
+
+/// [`role_for`], whatever the pressed state.
+fn base_role(a: &Accessibility, kind: ViewKind, pressable: bool) -> Ax {
     match a.role {
         Role::None => match kind {
             ViewKind::Text => Ax::Text,
@@ -605,7 +905,7 @@ fn role_for(a: &Accessibility, kind: ViewKind, pressable: bool) -> Ax {
         Role::Combobox => Ax::ComboBox,
         Role::Menu => Ax::Menu,
         Role::Menubar => Ax::MenuBar,
-        Role::Menuitem => Ax::MenuItem,
+        Role::Menuitem | Role::MenuItemCheckbox | Role::MenuItemRadio => Ax::MenuItem,
         Role::Progressbar => Ax::Progress,
         Role::Radio => Ax::Radio,
         Role::Radiogroup => Ax::RadioGroup,
@@ -620,8 +920,16 @@ fn role_for(a: &Accessibility, kind: ViewKind, pressable: bool) -> Ax {
         Role::List | Role::Listbox => Ax::List,
         Role::Option => Ax::Option,
         Role::Grid | Role::Table => Ax::Grid,
-        // Groups that read their children, a cell's text among them.
-        Role::Row | Role::Cell | Role::ColumnHeader | Role::RowGroup => Ax::Group,
+        Role::Row => Ax::Row,
+        // AppKit has no separate column-header role: a header is a cell
+        // referenced by the table's and column's header attributes.
+        Role::Cell | Role::ColumnHeader => Ax::Cell,
+        Role::RowGroup | Role::Group => Ax::Group,
+        Role::Region => Ax::Region,
+        Role::Navigation => Ax::Navigation,
+        // A tree is a list of its items, as a listbox is (see `TreeItem`).
+        Role::Tree => Ax::List,
+        Role::TreeItem => Ax::TreeItem,
     }
 }
 
@@ -777,6 +1085,73 @@ mod tests {
         assert_eq!(s.value, Value::Text("Apple".into()));
         assert!(s.selected);
     }
+    /// The roles of gpui-base's structural components, and a button with a
+    /// pressed state: a toggle button whose value is that state.
+    #[test]
+    fn structural_roles_and_toggle_buttons() {
+        for (role, ax) in [
+            (Role::Group, Ax::Group),
+            (Role::Region, Ax::Region),
+            (Role::Navigation, Ax::Navigation),
+            (Role::Tree, Ax::List),
+            (Role::TreeItem, Ax::TreeItem),
+            (Role::MenuItemCheckbox, Ax::MenuItem),
+            (Role::MenuItemRadio, Ax::MenuItem),
+        ] {
+            assert_eq!(role_for(&with_role(role), ViewKind::View, false), ax);
+        }
+        let toggle = |pressed| Accessibility {
+            role: Role::Button,
+            state: AccessibilityState {
+                pressed,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let s = spec_for(
+            &toggle(Some(Checked::True)),
+            ViewKind::View,
+            true,
+            None,
+            false,
+        );
+        assert_eq!(s.role, Ax::Toggle);
+        assert_eq!(s.value, Value::Checked(1));
+        let s = spec_for(
+            &toggle(Some(Checked::Mixed)),
+            ViewKind::View,
+            true,
+            None,
+            false,
+        );
+        assert_eq!(s.value, Value::Checked(2));
+        // Without a pressed state it stays a button.
+        let s = spec_for(&toggle(None), ViewKind::View, true, None, false);
+        assert_eq!(s.role, Ax::Button);
+        assert_eq!(s.value, Value::None);
+        // A view with press handlers and a pressed state is one too.
+        let pressable = Accessibility {
+            state: AccessibilityState {
+                pressed: Some(Checked::False),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let s = spec_for(&pressable, ViewKind::View, true, None, false);
+        assert_eq!(s.role, Ax::Toggle);
+        assert_eq!(s.value, Value::Checked(0));
+        // A tree item keeps its level for its disclosure level.
+        let item = Accessibility {
+            role: Role::TreeItem,
+            label: Some("src".into()),
+            level: Some(2),
+            ..Default::default()
+        };
+        let s = spec_for(&item, ViewKind::View, true, None, false);
+        assert_eq!(s.level, Some(2));
+        assert_eq!(s.value, Value::Text("src".into()));
+    }
+
     /// The reviewer's case: `accessibilityValue={{ text: "1" }}` on a view
     /// that later becomes checked. The contents are `1` both times; what
     /// AppKit must be handed changes from an NSString to an NSNumber.
@@ -792,6 +1167,48 @@ mod tests {
         // The same contents on the same kind is unchanged.
         assert_eq!(ValueKind::Text("1".into()), ValueKind::Text("1".into()));
         assert_eq!(ValueKind::Checked(1), ValueKind::Checked(1));
+    }
+
+    /// Controls fold their content into their name, as on Windows and GPUI:
+    /// a tab whose label is its text is one element, not the tab and the
+    /// text again. Content, containers and text do not.
+    #[test]
+    fn controls_fold_their_content() {
+        for (role, pressable) in [
+            (Role::Tab, true),
+            (Role::Button, false),
+            (Role::None, true),
+            (Role::Checkbox, false),
+            (Role::Link, false),
+            (Role::Switch, false),
+        ] {
+            let s = spec_for(&with_role(role), ViewKind::View, pressable, None, false);
+            assert!(s.grouped, "{role:?}");
+        }
+        for role in [
+            Role::None,
+            Role::Header,
+            Role::Tablist,
+            Role::Grid,
+            Role::Cell,
+        ] {
+            let s = spec_for(&with_role(role), ViewKind::View, false, None, false);
+            assert!(!s.grouped, "{role:?}");
+        }
+        let text = spec_for(
+            &with_role(Role::Button),
+            ViewKind::Text,
+            true,
+            Some("Go"),
+            false,
+        );
+        assert!(!text.grouped, "a text has no children to fold");
+        // `accessible={true}` folds any view.
+        let one = Accessibility {
+            accessible: Some(true),
+            ..Default::default()
+        };
+        assert!(spec_for(&one, ViewKind::View, false, None, false).grouped);
     }
 
     /// `visibility: hidden` hides the view and its subtree as

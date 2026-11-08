@@ -173,7 +173,12 @@ fn Transformable() -> impl IntoElement {
                         .bind_translate_y(&y)
                         .bind_scale(&scale)
                         .bind_rotate(&angle)
-                        .child(image("https://picsum.photos/seed/nsh-card/400/300").flex_1()),
+                        .child(
+                            image(
+                                "https://pbs.twimg.com/media/HS7_82eXsAAa-Hx?format=jpg&name=small",
+                            )
+                            .flex_1(),
+                        ),
                 ),
         )
         .child(
@@ -210,6 +215,7 @@ const fn spring(k: f32, c: f32) -> Spring {
         damping: c,
         mass: 1.0,
         velocity: None,
+        frame_rate: None,
     }
 }
 
@@ -259,7 +265,7 @@ fn Ball() -> impl IntoElement {
             .on_responder_release(move |e: &ResponderEvent| {
                 let g = e.gesture;
                 let _ = grab.spring(0.0, spring(300.0, 20.0));
-                state.set((format!("{:.2}, {:.2} pt/ms", g.vx, g.vy).into(), Tone::Info));
+                state.set((format!("{:.0}, {:.0} pt/s", g.vx, g.vy).into(), Tone::Info));
             })
             .on_responder_terminate(move |_: &ResponderEvent| {
                 let _ = grab.spring(0.0, Spring::default());
@@ -583,7 +589,13 @@ fn PressEvents() -> impl IntoElement {
                     .size(px(56.0))
                     .items_center()
                     .justify_center()
-                    .child(icon().name(IconName::Star).size(24.0).tint(colors::WARN)),
+                    .child(
+                        icon()
+                            .name(IconName::Star)
+                            .size(24.0)
+                            .tint(colors::WARN)
+                            .label(Some(SharedString::from("Star"))),
+                    ),
             ),
         )
         .child(

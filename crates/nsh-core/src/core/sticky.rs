@@ -57,6 +57,7 @@ impl<M: TextEngine> Core<M> {
                 ranges.push(found);
             }
         }
+        ranges.extend(self.scrollbar_ranges());
         let mut views: Vec<Key> = ranges.iter().map(|r| r.0).collect();
         views.extend_from_slice(&self.sticky_scrollers);
         views.sort_unstable();
@@ -138,6 +139,10 @@ impl<M: TextEngine> Core<M> {
                 }
                 return None;
             }
+            // `calc()` (taffy's `calc` feature, which another crate of the
+            // build may turn on): nsh's styles never make one.
+            #[allow(unreachable_patterns)]
+            _ => return None,
         };
         let at = self.offset_in(key, view)?;
         let node = &self.nodes[key as usize];

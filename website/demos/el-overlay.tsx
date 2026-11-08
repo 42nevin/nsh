@@ -1,5 +1,5 @@
-import { mount, Overlay, signal, Text, View, type YNode } from "nsh";
-import { button, buttonText, desktop, Inspector, Panel, Segmented, Stage, ui, wide } from "./palette";
+import { mount, Overlay, signal, Text, View, type ViewRef } from "nsh";
+import { button, buttonText, desktop, Inspector, Panel, Segmented, Stage, ui, wide, popupSurface } from "./palette";
 
 type Placement = "top" | "bottom" | "left" | "right";
 type Align = "start" | "center" | "end";
@@ -10,7 +10,7 @@ function App() {
   const align = signal<Align>("center");
   const position = signal("—");
   const closed = signal("—");
-  let anchor: YNode | undefined;
+  let anchor: ViewRef | undefined;
 
   const placements = () => (
     <Segmented
@@ -66,8 +66,7 @@ function App() {
               open.set(false);
             }}
             style={{
-              ...ui().card,
-              borderRadius: 12,
+              ...popupSurface(),
               padding: 14,
               gap: 4,
               // Narrow beside the button, so it fits on a phone's side.

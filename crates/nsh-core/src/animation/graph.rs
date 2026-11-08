@@ -1,10 +1,10 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use super::{
     driver::{Running, ease},
     ops::{
         AnimationId, AnimationOp, Composite, Driver, Easing, Extrapolate, MathOp, NodeId, Operand,
-        Output,
+        Output, highest_frame_rate,
     },
 };
 
@@ -14,6 +14,8 @@ const LEAF_IDS: AnimationId = 0x8000_0000;
 /// How long a snapping `diffClamp` takes to reach its bound (seconds), as
 /// Flutter's floating app bar.
 const SNAP_SECONDS: f64 = 0.2;
+/// How far past an animation's end [`Graph::deadline`] is.
+const PAST_SECONDS: f64 = 0.001;
 
 /// The evaluated value of a node.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,6 +74,9 @@ enum Node {
         output: Output,
         extrapolate: (Extrapolate, Extrapolate),
         easing: Easing,
+        /// Its breakpoints ascend (none below the one before, no NaN):
+        /// a segment is found by bisection.
+        ascending: bool,
     },
     DiffClamp {
         input: NodeId,
@@ -130,6 +135,16 @@ pub struct Graph {
     baselines: Vec<(u32, Vec<(NodeId, f32)>)>,
     /// `diffClamp` nodes settling at a bound.
     snaps: Vec<NodeId>,
+    /// Which state of the graph the values in `values` are of: a change to
+    /// the graph (an op, a value set, a frame) moves on to the next.
+    generation: u64,
+    /// Nodes' values as evaluated, by node id, each with the generation it
+    /// is of: a node read by many (the time, a shared track) is evaluated
+    /// once a frame, not once for each reader.
+    values: RefCell<Vec<(u64, AnimationValue)>>,
+    /// The evaluation under way reached a node deeper than `MAX_DEPTH`:
+    /// what it gave stands for a cycle, not for a value to keep.
+    cut: Cell<bool>,
 }
 
 /// A running composite animation.
@@ -140,6 +155,9 @@ struct Program {
     root: Step,
     /// When it started (its first frame).
     at: Option<f64>,
+    /// The highest frame rate its steps need ([`Composite::frame_rate`]),
+    /// asked for while it runs, delays included.
+    frame_rate: Option<f32>,
 }
 
 /// The state of one part of a composite animation.
@@ -353,6 +371,54 @@ impl Step {
         }
     }
 
+    /// When something in what runs now happens next (seconds; see
+    /// [`Graph::deadline`]): the end of the step that runs, `now` for one
+    /// that has to start or has ended.
+    fn deadline(&self, g: &Graph, now: f64) -> Option<f64> {
+        match self {
+            Step::Run { node, leaf, .. } => match *leaf {
+                Some(id) if g.running_id(*node) == Some(id) => {
+                    g.running(*node).map(|r| r.deadline(now))
+                }
+                _ => Some(now),
+            },
+            Step::Sequence { steps, index, .. } => {
+                steps.get(*index).map_or(Some(now), |s| s.deadline(g, now))
+            }
+            Step::Parallel { steps, ends, .. } => steps
+                .iter()
+                .zip(ends)
+                .filter(|(_, end)| end.is_none())
+                .filter_map(|(step, _)| step.deadline(g, now))
+                .reduce(f64::min),
+            Step::Delay { until, .. } => Some(until.unwrap_or(now)),
+            Step::Loop { current, .. } => current.deadline(g, now),
+        }
+    }
+
+    /// Whether what runs now never ends by itself: it runs in a loop
+    /// without a number of iterations (every unfinished part of a parallel
+    /// does).
+    fn endless(&self) -> bool {
+        match self {
+            Step::Run { .. } | Step::Delay { .. } => false,
+            Step::Sequence { steps, index, .. } => steps.get(*index).is_some_and(Step::endless),
+            Step::Parallel { steps, ends, .. } => {
+                let mut running = steps
+                    .iter()
+                    .zip(ends)
+                    .filter(|(_, end)| end.is_none())
+                    .peekable();
+                running.peek().is_some() && running.all(|(step, _)| step.endless())
+            }
+            Step::Loop {
+                iterations,
+                current,
+                ..
+            } => iterations.is_none() || current.endless(),
+        }
+    }
+
     /// Stops what runs (values stay where they are).
     fn stop(&mut self, g: &mut Graph, finished: &mut Vec<Finished>) {
         match self {
@@ -386,8 +452,15 @@ impl Step {
 impl Graph {
     /// Applies an op. Interrupted animations are pushed to `finished`.
     pub fn apply(&mut self, op: AnimationOp, finished: &mut Vec<Finished>) {
+        self.changed();
         self.apply_op(op, finished);
         self.route_leaf_ends(finished);
+        self.changed();
+    }
+
+    /// Values evaluated before now are of a graph that changed.
+    fn changed(&mut self) {
+        self.generation += 1;
     }
 
     /// Ends of composite steps go to their programs, not to JS.
@@ -427,6 +500,7 @@ impl Graph {
                 node,
                 Node::Interpolate {
                     input,
+                    ascending: input_range.windows(2).all(|w| w[0] <= w[1]),
                     input_range,
                     output,
                     extrapolate: (extrapolate_left, extrapolate_right),
@@ -492,6 +566,7 @@ impl Graph {
                     key,
                     root: Step::new(&spec),
                     at: None,
+                    frame_rate: spec.frame_rate(),
                 });
             }
             AnimationOp::ResetComposite { key } => {
@@ -612,6 +687,7 @@ impl Graph {
     /// Sets a value directly (gestures, scroll offsets, JS `set`), stopping
     /// its animation.
     pub fn set(&mut self, node: NodeId, new: f32, finished: &mut Vec<Finished>) {
+        self.changed();
         self.stop(node, finished);
         self.route_leaf_ends(finished);
         if let Some(Some(Node::Value {
@@ -652,12 +728,99 @@ impl Graph {
         !self.animating.is_empty() || !self.programs.is_empty() || !self.snaps.is_empty()
     }
 
+    /// The highest frame rate the running animations need, in Hz
+    /// ([`Driver::frame_rate`]): `None` as soon as one asks for the
+    /// screen's highest (or none runs). A composite asks for the highest
+    /// rate of its steps for as long as it runs; a snapping `diffClamp`
+    /// settling asks for the screen's highest. Platforms that can lower
+    /// their frame rate fold it with what else wants frames.
+    pub fn frame_rate(&self) -> Option<f32> {
+        if !self.snaps.is_empty() {
+            return None;
+        }
+        let drivers = self
+            .animating
+            .iter()
+            .map(|&node| match self.nodes.get(node as usize) {
+                Some(Some(Node::Value {
+                    running: Some(r), ..
+                })) => r.frame_rate(),
+                _ => None,
+            });
+        let programs = self.programs.iter().map(|p| p.frame_rate);
+        drivers.chain(programs).reduce(highest_frame_rate).flatten()
+    }
+
+    /// True while an animation that ends by itself runs: as
+    /// [`Graph::is_animating`], without the composite animations that run
+    /// a loop with no end now (a spinner), which only stopping them ends.
+    /// What waits for the animations to end (a test's step) waits for
+    /// these.
+    pub fn is_finishing(&self) -> bool {
+        !self.snaps.is_empty()
+            || self.programs.iter().any(|p| !p.root.endless())
+            // The steps of composite animations are their programs'.
+            || self
+                .animating
+                .iter()
+                .any(|&node| self.running_id(node).is_some_and(|id| id < LEAF_IDS))
+    }
+
+    /// When the next animation that ends by itself ends (seconds, on the
+    /// clock [`Graph::tick`] is given), or `now` when one has to be
+    /// stepped to start: what a surface that draws no frames (a hidden
+    /// window) ticks the graph at, so animations end on time and report
+    /// it without frames. `None` while none runs, or only ones that loop
+    /// forever ([`Graph::is_finishing`]), which only frames move.
+    pub fn deadline(&self, now: f64) -> Option<f64> {
+        let leaves = self
+            .animating
+            .iter()
+            // The steps of composite animations are their programs'.
+            .filter(|&&node| self.running_id(node).is_some_and(|id| id < LEAF_IDS))
+            .filter_map(|&node| self.running(node).map(|r| r.deadline(now)));
+        let programs = self
+            .programs
+            .iter()
+            .filter(|p| !p.root.endless())
+            .filter_map(|p| match p.at {
+                None => Some(now),
+                Some(_) => p.root.deadline(self, now),
+            });
+        let snaps = self
+            .snaps
+            .iter()
+            .filter_map(|&node| match self.nodes.get(node as usize) {
+                Some(Some(Node::DiffClamp { snapping, .. })) => {
+                    let snap = snapping.get()?;
+                    Some(snap.start.map_or(now, |start| start + SNAP_SECONDS))
+                }
+                _ => None,
+            });
+        // A millisecond past it: a step there finds it ended whatever the
+        // rounding of the time elapsed.
+        leaves
+            .chain(programs)
+            .chain(snaps)
+            .reduce(f64::min)
+            .map(|t| t + PAST_SECONDS)
+    }
+
+    /// The animation running on value `node`.
+    fn running(&self, node: NodeId) -> Option<&Running> {
+        match self.nodes.get(node as usize) {
+            Some(Some(Node::Value { running, .. })) => running.as_ref(),
+            _ => None,
+        }
+    }
+
     /// The scroll view whose scroll value is `source` came to rest (its
     /// drag and momentum ended): every snapping `diffClamp` that follows it
     /// and rests between its bounds settles at the nearer one, at `max`
     /// only once its input reached `max` (a page scrolled less than a
     /// bar's height shows the whole bar). True if one starts settling.
     pub fn settle(&mut self, source: NodeId) -> bool {
+        self.changed();
         let mut started = false;
         let at = self.eval(source).number();
         // Register moving nodes first, independent of their ids. Bound
@@ -709,6 +872,8 @@ impl Graph {
                         done: false,
                     }));
                 }
+                // Read from now on as settling.
+                self.changed();
                 if !self.snaps.contains(&(i as NodeId)) {
                     self.snaps.push(i as NodeId);
                 }
@@ -768,6 +933,7 @@ impl Graph {
     /// Advances all animations to `now` (seconds, monotonic). Completed
     /// animations are pushed to `finished`. Returns true if a value changed.
     pub fn tick(&mut self, now: f64, finished: &mut Vec<Finished>) -> bool {
+        self.changed();
         let mut changed = false;
         let mut i = 0;
         while i < self.animating.len() {
@@ -786,6 +952,7 @@ impl Graph {
         if !self.snaps.is_empty() {
             changed |= self.run_snaps(now);
         }
+        self.changed();
         changed
     }
 
@@ -870,10 +1037,37 @@ impl Graph {
         self.eval_depth(node, 0)
     }
 
+    /// The value of `node`, evaluated once for this generation of the
+    /// graph and kept (unless a cycle cut it short).
     fn eval_depth(&self, node: NodeId, depth: u32) -> AnimationValue {
         if depth > MAX_DEPTH {
+            self.cut.set(true);
             return AnimationValue::Number(0.0);
         }
+        let i = node as usize;
+        if let Some(&(generation, value)) = self.values.borrow().get(i)
+            && generation == self.generation
+        {
+            return value;
+        }
+        let outer = self.cut.replace(false);
+        let value = self.compute(node, depth);
+        if !self.cut.get() {
+            let mut values = self.values.borrow_mut();
+            if i >= values.len() {
+                values.resize(
+                    self.nodes.len().max(i + 1),
+                    (u64::MAX, AnimationValue::Number(0.0)),
+                );
+            }
+            values[i] = (self.generation, value);
+        }
+        self.cut.set(outer || self.cut.get());
+        value
+    }
+
+    /// `node`'s value from its inputs' (`eval_depth`'s).
+    fn compute(&self, node: NodeId, depth: u32) -> AnimationValue {
         match self.nodes.get(node as usize) {
             Some(Some(Node::Value { value, offset, .. })) => {
                 AnimationValue::Number(*value + *offset)
@@ -884,12 +1078,14 @@ impl Graph {
                 output,
                 extrapolate,
                 easing,
+                ascending,
             })) => interpolate(
                 self.eval_depth(*input, depth + 1).number(),
                 input_range,
                 output,
                 *extrapolate,
                 *easing,
+                *ascending,
             ),
             Some(Some(Node::DiffClamp {
                 input,
@@ -951,12 +1147,15 @@ fn output_len(output: &Output) -> usize {
     }
 }
 
+/// `x` through breakpoints `input` to `output`; `ascending` when the
+/// breakpoints ascend, so that the segment is found by bisection.
 fn interpolate(
     x: f32,
     input: &[f32],
     output: &Output,
     (left, right): (Extrapolate, Extrapolate),
     easing: Easing,
+    ascending: bool,
 ) -> AnimationValue {
     let n = input.len().min(output_len(output));
     if n == 0 {
@@ -975,10 +1174,16 @@ fn interpolate(
         };
     }
     // Segment containing x (or the edge segment when extending).
-    let seg = input[..n]
-        .windows(2)
-        .position(|w| x <= w[1])
-        .unwrap_or(n - 2);
+    // The first segment whose end is at or past `x`: by bisection where the
+    // breakpoints ascend (the same one), else one by one.
+    let seg = if ascending && !x.is_nan() {
+        input[1..n].partition_point(|&v| v < x).min(n - 2)
+    } else {
+        input[..n]
+            .windows(2)
+            .position(|w| x <= w[1])
+            .unwrap_or(n - 2)
+    };
     let (a, b) = (input[seg], input[seg + 1]);
     let t = if b == a { 0.0 } else { (x - a) / (b - a) };
     // The curve applies within the range (extended segments stay linear).
@@ -1008,7 +1213,22 @@ fn lerp_color(a: u32, b: u32, t: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::animation::ops::{Driver, Easing};
+    use crate::animation::{
+        driver::CHECK_SECONDS,
+        ops::{Driver, Easing},
+    };
+
+    /// [`super::interpolate`], its breakpoints' order found.
+    fn interpolate(
+        x: f32,
+        input: &[f32],
+        output: &Output,
+        extrapolate: (Extrapolate, Extrapolate),
+        easing: Easing,
+    ) -> AnimationValue {
+        let ascending = input.windows(2).all(|w| w[0] <= w[1]);
+        super::interpolate(x, input, output, extrapolate, easing, ascending)
+    }
 
     const CLAMP: (Extrapolate, Extrapolate) = (Extrapolate::Clamp, Extrapolate::Clamp);
 
@@ -1052,6 +1272,350 @@ mod tests {
         assert_eq!(
             interpolate(0.5, &[0.0, 1.0], &colors, CLAMP, Easing::Linear),
             AnimationValue::Color(0x8000_00ff)
+        );
+    }
+
+    /// A graph of value 1 and, from node 3 on, `ops` (each given its id).
+    fn graph_of(value: f32, ops: impl IntoIterator<Item = AnimationOp>) -> Graph {
+        let mut g = Graph::default();
+        let mut finished = Vec::new();
+        g.apply(AnimationOp::CreateValue { node: 1, value }, &mut finished);
+        for op in ops {
+            g.apply(op, &mut finished);
+        }
+        g
+    }
+
+    fn add(node: NodeId, a: NodeId, b: Operand) -> AnimationOp {
+        AnimationOp::CreateMath {
+            node,
+            op: MathOp::Add,
+            a: Operand::Node(a),
+            b,
+        }
+    }
+
+    /// A linear timing to `to` over a second, needing at most `hz`.
+    fn capped(to: f32, hz: Option<f32>) -> Driver {
+        Driver::Timing {
+            to,
+            duration_ms: 1000.0,
+            easing: Easing::Linear,
+            delay_ms: 0.0,
+            frame_rate: hz,
+        }
+    }
+
+    #[test]
+    fn frame_rates_fold_to_the_highest() {
+        let mut finished = Vec::new();
+        let values = (1..=5).map(|node| AnimationOp::CreateValue { node, value: 0.0 });
+        let mut g = graph_of(0.0, values);
+        // Nothing runs: no rate asked for.
+        assert_eq!(g.frame_rate(), None);
+        let start = |g: &mut Graph, node, hz, finished: &mut Vec<Finished>| {
+            g.apply(
+                AnimationOp::Start {
+                    node,
+                    animation: node,
+                    driver: capped(1.0, hz),
+                },
+                finished,
+            )
+        };
+        start(&mut g, 1, Some(30.0), &mut finished);
+        assert_eq!(g.frame_rate(), Some(30.0));
+        start(&mut g, 2, Some(60.0), &mut finished);
+        assert_eq!(g.frame_rate(), Some(60.0));
+        // One without a rate: the screen's highest.
+        start(&mut g, 3, None, &mut finished);
+        assert_eq!(g.frame_rate(), None);
+        g.apply(AnimationOp::Stop { node: 3 }, &mut finished);
+        g.apply(AnimationOp::Stop { node: 2 }, &mut finished);
+        assert_eq!(g.frame_rate(), Some(30.0));
+        // Not a rate: the screen's highest.
+        start(&mut g, 2, Some(0.0), &mut finished);
+        assert_eq!(g.frame_rate(), None);
+        g.apply(AnimationOp::Stop { node: 2 }, &mut finished);
+
+        // A composite asks for its steps' highest, through its delays too.
+        let run = |node, hz| Composite::Run {
+            node,
+            driver: capped(1.0, hz),
+        };
+        let spec = Composite::Loop {
+            child: Box::new(Composite::Sequence(vec![
+                run(4, Some(24.0)),
+                Composite::Delay(500.0),
+                run(5, Some(12.0)),
+            ])),
+            iterations: None,
+            reset: true,
+        };
+        assert_eq!(spec.frame_rate(), Some(24.0));
+        g.apply(AnimationOp::Stop { node: 1 }, &mut finished);
+        g.apply(
+            AnimationOp::StartComposite {
+                animation: 9,
+                key: 1,
+                spec,
+            },
+            &mut finished,
+        );
+        assert_eq!(g.frame_rate(), Some(24.0));
+        start(&mut g, 1, Some(30.0), &mut finished);
+        assert_eq!(g.frame_rate(), Some(30.0));
+        // A step without a rate makes the whole composite uncapped.
+        let uncapped = Composite::Parallel {
+            children: vec![run(4, Some(24.0)), run(5, None)],
+            stop_together: true,
+        };
+        assert_eq!(uncapped.frame_rate(), None);
+        assert_eq!(Composite::Delay(100.0).frame_rate(), None);
+    }
+
+    #[test]
+    fn shared_inputs_follow_every_change() {
+        // Three readers of one sum of the value: evaluated once for each
+        // state of the graph, and again after each change.
+        let mut g = graph_of(
+            1.0,
+            [
+                add(3, 1, Operand::Node(1)),
+                add(5, 3, Operand::Const(1.0)),
+                add(7, 3, Operand::Const(2.0)),
+                add(9, 5, Operand::Node(7)),
+            ],
+        );
+        let mut finished = Vec::new();
+        assert_eq!(g.eval(9), AnimationValue::Number(7.0));
+        assert_eq!(g.eval(5), AnimationValue::Number(3.0));
+        g.set(1, 2.0, &mut finished);
+        assert_eq!(g.eval(9), AnimationValue::Number(11.0));
+        g.apply(
+            AnimationOp::Start {
+                node: 1,
+                driver: Driver::Timing {
+                    to: 4.0,
+                    duration_ms: 1000.0,
+                    easing: Easing::Linear,
+                    delay_ms: 0.0,
+                    frame_rate: None,
+                },
+                animation: 1,
+            },
+            &mut finished,
+        );
+        g.tick(0.0, &mut finished);
+        g.tick(0.5, &mut finished);
+        assert_eq!(g.eval(3), AnimationValue::Number(6.0));
+        assert_eq!(g.eval(9), AnimationValue::Number(15.0));
+        // A node made after a value was read reads it anew.
+        g.apply(add(11, 9, Operand::Const(1.0)), &mut finished);
+        assert_eq!(g.eval(11), AnimationValue::Number(16.0));
+    }
+
+    #[test]
+    fn a_node_past_the_depth_limit_keeps_its_value_when_read_nearer() {
+        // A chain longer than `MAX_DEPTH`: its end stands for a cycle (0),
+        // and the nodes it read on the way still give their values.
+        let mut ops = Vec::new();
+        for k in 0..80u32 {
+            let input = if k == 0 { 1 } else { 1 + 2 * k };
+            ops.push(add(3 + 2 * k, input, Operand::Const(0.0)));
+        }
+        let g = graph_of(5.0, ops);
+        assert_eq!(g.eval(3 + 2 * 79), AnimationValue::Number(0.0));
+        assert_eq!(g.eval(3 + 2 * 10), AnimationValue::Number(5.0));
+        assert_eq!(g.eval(3 + 2 * 79), AnimationValue::Number(0.0));
+    }
+
+    /// A frame of many readers of shared inputs, as a vector animation's
+    /// canvases read its tracks: `cargo test --release -p nsh-core
+    /// bench_eval -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_eval_shared_inputs() {
+        // A time warp of 64 eased segments summed as a balanced tree, read
+        // by 2,000 interpolations of 50 breakpoints each.
+        let mut ops = Vec::new();
+        let mut parts = Vec::new();
+        let mut next = 3;
+        for s in 0..64 {
+            let a = s as f32 / 64.0;
+            ops.push(AnimationOp::CreateInterpolate {
+                node: next,
+                input: 1,
+                input_range: vec![a, a + 1.0 / 64.0],
+                output: Output::Numbers(vec![0.0, 1.0]),
+                extrapolate_left: Extrapolate::Clamp,
+                extrapolate_right: Extrapolate::Clamp,
+                easing: Easing::EaseInOut,
+            });
+            parts.push(next);
+            next += 2;
+        }
+        while parts.len() > 1 {
+            let mut sums = Vec::new();
+            for pair in parts.chunks(2) {
+                match pair {
+                    [a, b] => {
+                        ops.push(add(next, *a, Operand::Node(*b)));
+                        sums.push(next);
+                        next += 2;
+                    }
+                    [a] => sums.push(*a),
+                    _ => {}
+                }
+            }
+            parts = sums;
+        }
+        let warp = parts[0];
+        let readers: Vec<NodeId> = (0..2_000)
+            .map(|r| {
+                let node = next;
+                next += 2;
+                ops.push(AnimationOp::CreateInterpolate {
+                    node,
+                    input: warp,
+                    input_range: (0..50).map(|i| i as f32 * 64.0 / 49.0).collect(),
+                    output: Output::Numbers((0..50).map(|i| (i * r) as f32).collect()),
+                    extrapolate_left: Extrapolate::Clamp,
+                    extrapolate_right: Extrapolate::Clamp,
+                    easing: Easing::Linear,
+                });
+                node
+            })
+            .collect();
+        let mut g = graph_of(0.0, ops);
+        let mut finished = Vec::new();
+        let frames = 600;
+        let start = std::time::Instant::now();
+        let mut sum = 0.0;
+        for f in 0..frames {
+            g.set(1, f as f32 / frames as f32, &mut finished);
+            for &r in &readers {
+                sum += g.eval(r).number();
+            }
+        }
+        println!(
+            "{} readers of a shared warp: {:?} a frame ({sum})",
+            readers.len(),
+            start.elapsed() / frames
+        );
+    }
+
+    #[test]
+    fn bisection_finds_the_segment_a_scan_finds() {
+        // Ascending breakpoints with jumps (equal neighbours), read at and
+        // between each, past both ends and at no number, every way they
+        // extrapolate.
+        let input = [-3.0, -1.0, -1.0, 0.0, 0.5, 0.5, 0.5, 2.0, 7.0, 7.0];
+        let output = Output::Numbers((0..input.len()).map(|i| (i * i) as f32).collect());
+        let sides = [
+            Extrapolate::Clamp,
+            Extrapolate::Extend,
+            Extrapolate::Identity,
+        ];
+        let mut xs: Vec<f32> = input.to_vec();
+        xs.extend(input.windows(2).map(|w| (w[0] + w[1]) / 2.0));
+        xs.extend([
+            -10.0,
+            10.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -0.0,
+        ]);
+        for left in sides {
+            for right in sides {
+                for &x in &xs {
+                    for n in 2..=input.len() {
+                        let (input, output) = (&input[..n], &output);
+                        let [a, b] = [true, false].map(|ascending| {
+                            super::interpolate(
+                                x,
+                                input,
+                                output,
+                                (left, right),
+                                Easing::EaseInOut,
+                                ascending,
+                            )
+                        });
+                        assert!(
+                            format!("{a:?}") == format!("{b:?}"),
+                            "at {x} of {n}: {a:?} against {b:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn breakpoints_out_of_order_are_read_one_by_one() {
+        let mut finished = Vec::new();
+        let mut g = of_value(1.5);
+        g.apply(
+            AnimationOp::CreateInterpolate {
+                node: 3,
+                input: 1,
+                input_range: vec![0.0, 2.0, 1.0, 3.0],
+                output: Output::Numbers(vec![0.0, 20.0, 10.0, 30.0]),
+                extrapolate_left: Extrapolate::Clamp,
+                extrapolate_right: Extrapolate::Clamp,
+                easing: Easing::Linear,
+            },
+            &mut finished,
+        );
+        // The first segment reaching 1.5 is 0..2, as before.
+        assert_eq!(g.eval(3), AnimationValue::Number(15.0));
+    }
+
+    /// A graph of value 1 (`value`).
+    fn of_value(value: f32) -> Graph {
+        let mut g = Graph::default();
+        g.apply(AnimationOp::CreateValue { node: 1, value }, &mut Vec::new());
+        g
+    }
+
+    /// Interpolations of many breakpoints, as tracks of a long vector
+    /// animation: `cargo test --release -p nsh-core bench_interpolate --
+    /// --ignored --nocapture`.
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_interpolate_many_breakpoints() {
+        let mut finished = Vec::new();
+        let mut g = of_value(0.0);
+        let n = 2_000;
+        for k in 0..200u32 {
+            g.apply(
+                AnimationOp::CreateInterpolate {
+                    node: 3 + 2 * k,
+                    input: 1,
+                    input_range: (0..n).map(|i| i as f32 / n as f32).collect(),
+                    output: Output::Numbers(
+                        (0..n).map(|i| ((i + k as usize) % 7) as f32).collect(),
+                    ),
+                    extrapolate_left: Extrapolate::Clamp,
+                    extrapolate_right: Extrapolate::Clamp,
+                    easing: Easing::Linear,
+                },
+                &mut finished,
+            );
+        }
+        let frames = 600;
+        let start = std::time::Instant::now();
+        let mut sum = 0.0;
+        for f in 0..frames {
+            g.set(1, f as f32 / frames as f32, &mut finished);
+            for k in 0..200 {
+                sum += g.eval(3 + 2 * k).number();
+            }
+        }
+        println!(
+            "200 interpolations of {n} breakpoints: {:?} a frame ({sum})",
+            start.elapsed() / frames
         );
     }
 
@@ -1138,6 +1702,7 @@ mod tests {
                     duration_ms: 100.0,
                     easing: Easing::Linear,
                     delay_ms: 0.0,
+                    frame_rate: None,
                 },
             },
             &mut finished,
@@ -1177,6 +1742,7 @@ mod tests {
             damping: 10.0,
             mass: 1.0,
             velocity: None,
+            frame_rate: None,
         };
         g.apply(
             AnimationOp::Start {
@@ -1224,6 +1790,7 @@ mod tests {
             duration_ms: ms,
             easing: Easing::Linear,
             delay_ms: 0.0,
+            frame_rate: None,
         }
     }
 
@@ -1240,6 +1807,139 @@ mod tests {
             g.tick(t, f);
             t += 1.0 / 60.0;
         }
+    }
+
+    /// Ticks only at the graph's deadlines from `from` (a surface that
+    /// draws no frames): the times it ticked at, and the animations that
+    /// finished at each.
+    fn run_to_deadlines(
+        g: &mut Graph,
+        f: &mut Vec<Finished>,
+        from: f64,
+    ) -> Vec<(f64, Vec<AnimationId>)> {
+        let mut t = from;
+        let mut ticks = Vec::new();
+        for _ in 0..100 {
+            let before = f.len();
+            g.tick(t, f);
+            ticks.push((
+                t,
+                f[before..]
+                    .iter()
+                    .filter(|e| e.finished)
+                    .map(|e| e.animation)
+                    .collect(),
+            ));
+            match g.deadline(t) {
+                Some(next) => t = next.max(t),
+                None => return ticks,
+            }
+        }
+        panic!("deadlines did not come to an end: {ticks:?}");
+    }
+
+    #[test]
+    fn deadlines_end_animations_on_time_without_frames() {
+        let mut g = Graph::default();
+        let mut f = Vec::new();
+        values(&mut g, &mut f, &[1, 2, 3]);
+        g.apply(
+            AnimationOp::Start {
+                node: 1,
+                animation: 1,
+                driver: timing(100.0, 250.0),
+            },
+            &mut f,
+        );
+        g.apply(
+            AnimationOp::StartComposite {
+                animation: 5,
+                key: 1,
+                spec: Composite::Sequence(vec![
+                    Composite::Run {
+                        node: 2,
+                        driver: timing(100.0, 100.0),
+                    },
+                    Composite::Delay(50.0),
+                    Composite::Run {
+                        node: 2,
+                        driver: timing(0.0, 100.0),
+                    },
+                ]),
+            },
+            &mut f,
+        );
+        // A spinner: only frames move it, and it gives no deadline.
+        g.apply(
+            AnimationOp::StartComposite {
+                animation: 7,
+                key: 2,
+                spec: Composite::Loop {
+                    child: Box::new(Composite::Run {
+                        node: 3,
+                        driver: timing(360.0, 1000.0),
+                    }),
+                    iterations: None,
+                    reset: true,
+                },
+            },
+            &mut f,
+        );
+        // Not started: tick now, which starts them.
+        assert_eq!(g.deadline(1000.0), Some(1000.0 + PAST_SECONDS));
+        let ticks = run_to_deadlines(&mut g, &mut f, 1000.0);
+        let ended = |id| {
+            ticks
+                .iter()
+                .find(|(_, ids)| ids.contains(&id))
+                .map(|(t, _)| t - 1000.0)
+        };
+        let near = |t: Option<f64>, want: f64| t.is_some_and(|t| (t - want).abs() < 0.01);
+        assert!(near(ended(1), 0.25), "{ticks:?}");
+        assert!(near(ended(5), 0.25), "{ticks:?}");
+        // The start, the first step's end, the delay's, the last.
+        assert!(ticks.len() <= 5, "{ticks:?}");
+        assert_eq!(g.value(1), Some(100.0));
+        assert_eq!(g.value(2), Some(0.0));
+        assert!(ended(7).is_none());
+        assert!(g.is_animating());
+    }
+
+    #[test]
+    fn a_spring_is_checked_until_it_settles() {
+        let mut g = Graph::default();
+        let mut f = Vec::new();
+        values(&mut g, &mut f, &[1]);
+        g.apply(
+            AnimationOp::Start {
+                node: 1,
+                animation: 1,
+                driver: Driver::Spring {
+                    to: 100.0,
+                    stiffness: 100.0,
+                    damping: 10.0,
+                    mass: 1.0,
+                    velocity: None,
+                    frame_rate: None,
+                },
+            },
+            &mut f,
+        );
+        let ticks = run_to_deadlines(&mut g, &mut f, 50.0);
+        let (end, _) = ticks
+            .iter()
+            .find(|(_, ids)| ids.contains(&1))
+            .expect("it settled");
+        // Every check a tenth of a second apart.
+        assert!(
+            ticks
+                .windows(2)
+                .skip(1)
+                .all(|w| (w[1].0 - w[0].0 - (CHECK_SECONDS + PAST_SECONDS)).abs() < 1e-9)
+        );
+        assert!(end - 50.0 < 3.0, "{ticks:?}");
+        assert_eq!(g.value(1), Some(100.0));
+        assert_eq!(g.deadline(*end), None);
     }
 
     #[test]
@@ -1399,6 +2099,85 @@ mod tests {
         g.set(1, 7.0, &mut f);
         g.apply(AnimationOp::ResetComposite { key: 2 }, &mut f);
         assert_eq!(g.value(1), Some(10.0));
+    }
+
+    #[test]
+    fn endless_loops_do_not_finish() {
+        let forever = |node, ms| Composite::Loop {
+            child: Box::new(Composite::Run {
+                node,
+                driver: timing(360.0, ms),
+            }),
+            iterations: None,
+            reset: true,
+        };
+        let mut g = Graph::default();
+        let mut f = Vec::new();
+        values(&mut g, &mut f, &[1, 2, 3, 4]);
+        // A spinner alone animates, and never finishes.
+        g.apply(
+            AnimationOp::StartComposite {
+                animation: 1,
+                key: 1,
+                spec: forever(1, 900.0),
+            },
+            &mut f,
+        );
+        run(&mut g, &mut f, 0.0, 0.1);
+        assert!(g.is_animating() && !g.is_finishing());
+        // An animation of JS's beside it finishes.
+        g.apply(
+            AnimationOp::Start {
+                node: 2,
+                animation: 2,
+                driver: timing(1.0, 200.0),
+            },
+            &mut f,
+        );
+        assert!(g.is_finishing());
+        run(&mut g, &mut f, 0.1, 0.4);
+        assert!(g.is_animating() && !g.is_finishing());
+        // An entrance before a loop finishes, then the loop runs on; so
+        // does the part of a parallel that ends, beside one that loops.
+        for (animation, spec) in [
+            (
+                3,
+                Composite::Sequence(vec![
+                    Composite::Run {
+                        node: 3,
+                        driver: timing(1.0, 200.0),
+                    },
+                    forever(3, 500.0),
+                ]),
+            ),
+            (
+                4,
+                Composite::Parallel {
+                    children: vec![
+                        forever(4, 500.0),
+                        Composite::Run {
+                            node: 3,
+                            driver: timing(0.0, 200.0),
+                        },
+                    ],
+                    stop_together: true,
+                },
+            ),
+        ] {
+            g.apply(
+                AnimationOp::StartComposite {
+                    animation,
+                    key: animation,
+                    spec,
+                },
+                &mut f,
+            );
+            run(&mut g, &mut f, 1.0, 1.1);
+            assert!(g.is_finishing());
+            run(&mut g, &mut f, 1.1, 1.4);
+            assert!(g.is_animating() && !g.is_finishing());
+            g.apply(AnimationOp::StopAnimation { animation }, &mut f);
+        }
     }
 
     #[test]

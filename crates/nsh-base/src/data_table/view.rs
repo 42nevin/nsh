@@ -1,17 +1,20 @@
-//! The table's view, in layers:
+//! The table's view, in layers, from the bottom:
 //!
-//! - the *hit layer*: a vertical scroll view of a horizontal one of an empty
-//!   box of the content's size (scaled past a few million points: `axis.rs`).
-//!   The platforms scroll it, and its box takes presses, hovers and the
-//!   context menu;
-//! - the *body* over it, receiving no pointer: the cells of the rows and
-//!   columns in view (and a reach around them), placed where the table last
-//!   scrolled to. A scroll view moves its content at once, and the cells a
-//!   move needs come with the next commit, which moves the body with them,
-//!   so no frame shows the content without its cells. Its three regions are
-//!   the row headers, the fixed columns (which move with the rows only) and
-//!   the scrolling columns (which move both ways);
-//! - the *header* above it, interactive: group labels and titles, in the
+//! - the *body*, receiving no pointer: the cells of the rows and columns in
+//!   view (and a reach around them), placed where the table last scrolled
+//!   to. A scroll view moves its content at once, and the cells a move needs
+//!   come with the next commit, which moves the body with them, so no frame
+//!   shows the content without its cells. Its three regions are the row
+//!   headers, the fixed columns (which move with the rows only) and the
+//!   scrolling columns (which move both ways);
+//! - the *hit layer* over it: a vertical scroll view of a horizontal one of
+//!   an empty box of the content's size (scaled past a few million points:
+//!   `axis.rs`). The platforms scroll it, and its box takes presses, hovers
+//!   and the context menu. It draws nothing but its scroll bars (the
+//!   platform's indicator or the app's built-in `Scrollbar`, children of the
+//!   scroll view), which lie over the rows' backgrounds this way; under the
+//!   body, the rows would cover them;
+//! - the *header* above them, interactive: group labels and titles, in the
 //!   same three regions, the columns' resize handles and the drop line of a
 //!   column being moved;
 //! - on the desktops, a horizontal scroll bar over the body's bottom edge,
@@ -194,7 +197,6 @@ pub(crate) fn render(dt: Dt) -> impl IntoElement {
             .absolute()
             .inset_0()
             .on_layout(move |b: &Bounds<Points>| layout.viewport.set(b.size))
-            .child(hit_layer(hit_dt, strip_x.clone()))
             .child(
                 when(
                     move || custom_cell.get(),
@@ -202,6 +204,9 @@ pub(crate) fn render(dt: Dt) -> impl IntoElement {
                 )
                 .otherwise(move || body(body_dt2.clone(), false)),
             )
+            // Over the body, which takes no pointer: the scroll view's bars
+            // draw above the rows.
+            .child(hit_layer(hit_dt, strip_x.clone()))
             .child(
                 when(
                     move || custom_head.get(),
@@ -245,11 +250,23 @@ fn hit_layer(dt: Dt, lead: Lead) -> impl IntoElement {
         .on_scroll(move |e: &ScrollEvent| {
             scroll_dt.scroll_y.set(e.offset.y);
         })
+        .on_scroll_end({
+            let dt = dt.clone();
+            move |_: &Point<Points>| dt.rest()
+        })
         .child(
             view()
                 .flex_row()
                 .items_stretch()
                 .h(move || Length::from(px(height_dt.geo().y.extent() as f32)))
+                .on_layout({
+                    let dt = dt.clone();
+                    move |b: &Bounds<Points>| {
+                        if dt.rows_width.get_untracked() != Some(b.size.width) {
+                            dt.rows_width.set(Some(b.size.width));
+                        }
+                    }
+                })
                 .child(
                     scroll()
                         .horizontal()
@@ -285,8 +302,14 @@ fn hit_layer(dt: Dt, lead: Lead) -> impl IntoElement {
                                 // (a `tab_stop` focus handle): its keys follow.
                                 .on_focus(move || focus.set_focus(true))
                                 .on_blur(move || blur.set_focus(false))
-                                .on_hover_move(move |e: &HoverEvent| hover.hover_at(e.position))
-                                .on_hover_out(move || {
+                                // The hovered row stays put while a drag
+                                // selects or moves.
+                                .on_mouse_move(move |e: &MouseEvent| {
+                                    if e.pressed_button.is_none() {
+                                        hover.hover_at(e.position);
+                                    }
+                                })
+                                .on_mouse_leave(move |_: &MouseEvent| {
                                     if leave.hover.get_untracked().is_some() {
                                         leave.hover.set(None);
                                     }
@@ -488,10 +511,13 @@ fn body(dt: Dt, custom: bool) -> impl IntoElement {
     let w = windows(&dt);
     let top_dt = dt.clone();
     let (lead_dt, fixed_dt, scroll_dt) = (dt.clone(), dt.clone(), dt.clone());
+    let right_dt = dt.clone();
     view()
         .absolute()
         .left_0()
-        .right_0()
+        // Clear of a terminal's scroll bar column, whose bar is not drawn
+        // over content.
+        .right(move || Length::from(px(right_dt.geo().bar)))
         .bottom_0()
         .top(move || Length::from(px(top_dt.geo().header)))
         .overflow_hidden()
@@ -620,22 +646,22 @@ fn region(dt: Dt, which: Region, w: Windows, custom: bool) -> impl IntoElement {
             })
             .child(
                 // The rows' origin: the first row of its chunk, scrolled
-                // by the content offsets, in whole points as layout rounds
-                // frames: at a fraction the cells' texts would round to
-                // another point in their cells as it changes, and every
+                // by the content offsets, on the device pixels layout rounds
+                // frames to: at a fraction the cells' texts would round to
+                // another pixel in their cells as it changes, and every
                 // cell's frame would be sent again at each scroll frame.
                 view()
                     .absolute()
                     .top(move || {
                         let g = content_dt.geo();
                         let origin = w.row_origin.get() as f64 * g.row_height as f64;
-                        Length::from(px((origin - g.cy).round() as f32))
+                        on_pixel(origin - g.cy)
                     })
                     .left(move || match which {
                         Region::Scroll => {
                             let g = x_dt.geo();
                             let origin = x_dt.scroll_start(w.col_origin.get());
-                            Length::from(px((origin - g.cx).round() as f32))
+                            on_pixel(origin - g.cx)
                         }
                         _ => Length::from(px(0.0)),
                     })
@@ -881,6 +907,7 @@ fn cell(
     };
     let left_dt = dt.clone();
     let width_dt = dt.clone();
+    let height_dt = dt.clone();
     let col_dt = dt.clone();
     let el = column_parts(
         view()
@@ -889,9 +916,11 @@ fn cell(
                 selected: flags.get().selected || flags.get().column_selected,
                 ..AccessibilityState::default()
             })
+            // Out of flow at a size of fixed points, as the row is: a text
+            // that changes as the table scrolls lays out its cell alone.
             .absolute()
             .top_0()
-            .bottom_0()
+            .h(move || Length::from(px(height_dt.row_height())))
             .style_when(move || def.get().is_none(), |s| s.hidden())
             .left(move || {
                 left_dt.layout_rev.get();
@@ -959,14 +988,28 @@ fn cell(
         }))
     } else {
         let text_dt = dt;
-        el.child(
-            text(move || match (row.get(), def.get()) {
-                (Some(row), Some(def)) => text_dt.cell_text(row, def),
-                _ => SharedString::default(),
-            })
-            .number_of_lines(1)
-            .min_w(px(0.0)),
+        let line_dt = text_dt.clone();
+        let label = text(move || match (row.get(), def.get()) {
+            (Some(row), Some(def)) => text_dt.cell_text(row, def),
+            _ => SharedString::default(),
+        })
+        .number_of_lines(1)
+        // The cell's whole box, its one line as tall as the row: a text
+        // never resizes it, so a cell whose text changes as the table
+        // scrolls is neither measured nor laid out again, only drawn.
+        .w_full()
+        .h_full()
+        .min_w(px(0.0))
+        .line_height(move || nsh_core::LineHeight::from(px(line_dt.row_height())))
+        .style_when(
+            move || align.get() == DataTableAlign::Center,
+            |s| s.text_center(),
         )
+        .style_when(
+            move || align.get() == DataTableAlign::End,
+            |s| s.text_right(),
+        );
+        el.child(label)
     }
 }
 
@@ -1031,14 +1074,15 @@ fn group_cells(dt: &Dt, scroll: bool, window: &[usize], origin: usize) -> Vec<Gr
 fn header(dt: Dt, custom: bool) -> impl IntoElement {
     let props = dt.props;
     let w = windows(&dt);
-    let height_dt = dt.clone();
+    let (height_dt, right_dt) = (dt.clone(), dt.clone());
     let (corner_dt, fixed_dt, scroll_dt) = (dt.clone(), dt.clone(), dt.clone());
     part(
         view()
             .absolute()
             .top_0()
             .left_0()
-            .right_0()
+            // As wide as the body, its columns over the body's.
+            .right(move || Length::from(px(right_dt.geo().bar)))
             .h(move || Length::from(px(height_dt.geo().header)))
             .overflow_hidden(),
         props,
@@ -1127,7 +1171,7 @@ fn header_region(dt: Dt, which: Region, w: Windows, custom: bool) -> impl IntoEl
                         Region::Scroll => {
                             let g = x_dt.geo();
                             let origin = x_dt.scroll_start(w.col_origin.get());
-                            Length::from(px((origin - g.cx).round() as f32))
+                            on_pixel(origin - g.cx)
                         }
                         _ => Length::from(px(0.0)),
                     })
@@ -1441,10 +1485,32 @@ fn sort_button(
 
 /// The original pair of Lucide chevrons. Paint follows the app's inherited
 /// stroke/text color; each direction exposes its selected state for styling.
-fn sort_icon(
-    props: DataTableProps,
-    sorted: Memo<Option<DataTableSortDirection>>,
-) -> impl IntoElement {
+/// In a terminal, one glyph: `▲` ascending, `▼` descending, `↕` unsorted,
+/// each the part of its direction (an unsorted column's `↕` the ascending
+/// part's, not selected: as faint as an unsorted chevron).
+fn sort_icon(props: DataTableProps, sorted: Memo<Option<DataTableSortDirection>>) -> AnyElement {
+    // A terminal draws no chevrons: the direction is one Cell's glyph.
+    if crate::terminal::is_terminal() {
+        return dynamic(move || {
+            let (glyph, which) = match sorted.get() {
+                Some(DataTableSortDirection::Ascending) => ("▲", DataTablePart::SortAscending),
+                Some(DataTableSortDirection::Descending) => ("▼", DataTablePart::SortDescending),
+                None => ("↕", DataTablePart::SortAscending),
+            };
+            Some(part(
+                text(glyph)
+                    .number_of_lines(1)
+                    .accessible(false)
+                    .accessibility_state(move || AccessibilityState {
+                        selected: sorted.get().is_some(),
+                        ..AccessibilityState::default()
+                    }),
+                props,
+                which,
+            ))
+        })
+        .into_element();
+    }
     const K: f32 = 12.0 / 24.0;
     let chevron = move |points: [f32; 6], direction, which| {
         part(
@@ -1486,6 +1552,7 @@ fn sort_icon(
             DataTableSortDirection::Descending,
             DataTablePart::SortDescending,
         ))
+        .into_element()
 }
 
 /// The band at a title's trailing edge that a drag resizes the column
@@ -1505,6 +1572,9 @@ fn resize_handle(dt: Dt, def: usize) -> impl IntoElement {
 
 fn handle(props: DataTableProps, start: Dt, drag: Dt, end: Dt, def: usize) -> impl IntoElement {
     let id = format!("resize:{}", drag.st.borrow().defs[def].key);
+    // The mouse's alone, as `gpui-component`'s: a terminal's handle would
+    // be a stop of Tab per column after the table.
+    provide_context(crate::resizable::PointerOnly);
     resize_handle_component()
         .edge(HandleEdge::Trailing)
         .on_drag_start(move || start.resize_start(def))
@@ -1597,4 +1667,12 @@ fn overlays(dt: Dt) -> impl IntoElement {
                 .inset_0()
                 .child(props.loading_view.place(|slot| slot))
         }))
+}
+
+/// `points` on the nearest device pixel, as layout rounds frames
+/// ([`nsh_core::element::pixel_ratio`]); in `f64` up to there, for
+/// the extents of huge tables.
+fn on_pixel(points: f64) -> Length {
+    let ratio = f64::from(nsh_core::element::pixel_ratio().max(f32::MIN_POSITIVE));
+    Length::from(px(((points * ratio).round() / ratio) as f32))
 }

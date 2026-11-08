@@ -30,7 +30,7 @@ use std::{
 
 use nsh_core::{
     EventKind, EventPayload, PayloadValue, ROOT_ID,
-    keymap::{Key, KeyMatch, Keymap, Keystroke, Modifiers},
+    keymap::{Key, Keymap, Keystroke, Modifiers},
     platform::Os,
 };
 
@@ -63,8 +63,9 @@ pub(crate) fn clear(surface: &Surface) {
     surface.keymap.table.borrow_mut().take();
 }
 
-/// A key down: whether it fired (or, held, repeats) one of the bindings;
-/// then it is consumed. `editing`: a text field or a native component has
+/// A key down: whether one of the bindings consumes it (it fired one, or,
+/// held, repeats one). A binding passing the key through fires and leaves
+/// it to the window. `editing`: a text field or a native component has
 /// the keyboard focus.
 pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent, editing: bool) -> bool {
     let repeat = repeats(&surface.keymap, event);
@@ -79,12 +80,17 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent, editing: bool) -> boo
         return false;
     }
     let found = table.find(keystroke, editing, repeat);
-    if let KeyMatch::Fire(id) = found {
+    if let Some(id) = found.fired() {
         surface.event(
             ROOT_ID,
             EventKind::KeyCommand,
             EventPayload::Value(PayloadValue::Number(id as f64)),
         );
+        // Escape cancels text waiting for a field. Every other binding may
+        // move focus, so text typed straight after it waits for that field.
+        if event.vk != keys::VK_ESCAPE {
+            crate::text_input::arm(surface);
+        }
     }
     found.consumed()
 }
@@ -99,7 +105,7 @@ fn repeats(state: &KeymapState, event: &KeyEvent) -> bool {
 }
 
 /// A modifier key (which does not end another key's auto-repeat).
-fn modifier(vk: u16) -> bool {
+pub(crate) fn modifier(vk: u16) -> bool {
     matches!(
         vk,
         keys::VK_SHIFT | keys::VK_CONTROL | keys::VK_MENU | keys::VK_LWIN

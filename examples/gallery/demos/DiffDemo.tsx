@@ -1,6 +1,6 @@
 import { signal, Text, View } from "nsh";
-import { Button, DiffView, type DiffStats, type DiffViewRef } from "nsh/base";
-import { colors, finish, Segmented } from "../ui";
+import { DiffView, type DiffStats, type DiffViewRef } from "nsh/base";
+import { Button as GalleryButton, desktop, DiffHunkActions, Segmented } from "../ui";
 
 // `nsh/base`'s `DiffView` lays the two texts out, highlights what changed
 // within lines and collapses what did not; the texts are the app's: a
@@ -78,19 +78,9 @@ const PATCH = `diff --git a/src/layout.rs b/src/layout.rs
          }
 `;
 
-/** A small button in the gallery's look. */
+/** A small secondary button (the gallery's `Button`, `buttonLook`). */
 function Tool(props: { label: string; name: string; onPress: () => void; disabled?: boolean }) {
-  return (
-    <Button
-      onPress={props.onPress}
-      disabled={props.disabled}
-      accessibilityLabel={props.label}
-      class="h-8 items-center justify-center rounded-md border border-border px-3 active:opacity-70 disabled:opacity-40"
-      style={{ backgroundColor: colors.raised, ...finish.raised }}
-    >
-      <Text class="text-[13px] font-semibold text-foreground">{props.name}</Text>
-    </Button>
-  );
+  return <GalleryButton label={props.name} accessibilityLabel={props.label} variant="secondary" size="small" disabled={props.disabled} onPress={props.onPress} />;
 }
 
 /**
@@ -100,16 +90,18 @@ function Tool(props: { label: string; name: string; onPress: () => void; disable
  */
 export function DiffDemo() {
   const source = signal<"texts" | "patch">("texts");
-  const layout = signal<"split" | "unified">("split");
+  // Split while both sides have room; a narrow window starts unified, its
+  // lines as wide as the view, so a change's actions cover less of them.
+  const layout = signal<"split" | "unified">(desktop() ? "split" : "unified");
   const oldValue = signal(OLD);
   const newValue = signal(NEW);
   const stats = signal<DiffStats>({ added: 0, deleted: 0, hunks: 0 });
   const current = signal(0);
-  const last = signal("—");
+  const last = signal("");
   let diff: DiffViewRef | undefined;
 
   // The counts follow the texts: the view reports them as it diffs.
-  const counted = (s: DiffStats) => {
+  const counted = ({ stats: s }: { stats: DiffStats }) => {
     stats.set(s);
     current.set(Math.min(current(), Math.max(0, s.hunks - 1)));
   };
@@ -179,29 +171,19 @@ export function DiffDemo() {
               language="tsx"
               layout={layout()}
               renderHunkActions={(hunk) => (
-                <View class="flex-row gap-1">
-                  <Button
-                    onPress={() => diff?.revertHunk(hunk.index)}
-                    accessibilityLabel={`Revert change ${hunk.index + 1}`}
-                    class="rounded border border-border bg-background px-2 py-0.5 active:opacity-70"
-                  >
-                    <Text class="text-[11px] font-medium text-foreground">Revert</Text>
-                  </Button>
-                  <Button
-                    onPress={() => diff?.acceptHunk(hunk.index)}
-                    accessibilityLabel={`Keep change ${hunk.index + 1}`}
-                    class="rounded bg-primary px-2 py-0.5 active:opacity-70"
-                  >
-                    <Text class="text-[11px] font-medium text-primary-foreground">Keep</Text>
-                  </Button>
-                </View>
+                <DiffHunkActions
+                  index={hunk.index}
+                  iconOnly={!desktop()}
+                  onRevert={() => diff?.revertHunk(hunk.index)}
+                  onKeep={() => diff?.acceptHunk(hunk.index)}
+                />
               )}
-              onChange={(change) => {
+              onChange={({ change }) => {
                 oldValue.set(change.oldValue);
                 newValue.set(change.newValue);
                 last.set("Changed");
               }}
-              onLineNumberPress={(line) => last.set(`Comment on ${line.side} line ${line.line + 1}`)}
+              onLineNumberPress={({ line }) => last.set(`Comment on ${line.side} line ${line.line + 1}`)}
               class="flex-1"
             />
           ) : (
@@ -215,14 +197,17 @@ export function DiffDemo() {
                   <Text class="font-mono text-[11px] text-muted-foreground">{sep.header ? `@@ ${sep.header.trim()}` : `${sep.lines} lines`}</Text>
                 </View>
               )}
-              onLineNumberPress={(line) => last.set(`Comment on ${line.side} line ${line.line + 1}`)}
+              onLineNumberPress={({ line }) => last.set(`Comment on ${line.side} line ${line.line + 1}`)}
               class="flex-1"
             />
           )
         }
       </View>
 
-      <Text class="font-mono text-[11px] text-muted-foreground">{last()}</Text>
+      {/* What the last action did; nothing until there is one. */}
+      <If when={last()}>
+        <Text class="font-mono text-[11px] text-muted-foreground">{last()}</Text>
+      </If>
     </View>
   );
 }

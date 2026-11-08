@@ -34,7 +34,7 @@ final class SelectableView implements SelectionHandle.Owner {
 
     private static native void nativeDestroy(long handle);
 
-    private static native boolean nativeSetTexts(long handle, SelectableView area, String[] contents, int[] keys, float[] frames);
+    private static native boolean nativeSetTexts(long handle, SelectableView area, String[] contents, int[] keys, boolean[] continues, float[] frames);
 
     private static native boolean nativeGesture(long handle, SelectableView area, float[] frames, int kind, float x, float y);
 
@@ -44,9 +44,19 @@ final class SelectableView implements SelectionHandle.Owner {
 
     private static native String nativeText(long handle, SelectableView area);
 
+    private static native int[] nativeReadingOrder(int count, float[] runs);
+
+    private static native int[] nativeKept(long handle);
+
     private final Mounter mounter;
     /** The area's view. */
     final View view;
+    /** The area's node id. */
+    private final int id;
+    /** The selected text last reported to the area's {@code onSelectionChange}. */
+    private String reported = "";
+    /** The area's view is gone: clearing reports nothing. */
+    private boolean removed;
     /** The native model while there is a selection, else 0. */
     private long handle;
     /** The texts taking part, in document order (while there is a selection). */
@@ -75,9 +85,23 @@ final class SelectableView implements SelectionHandle.Owner {
         return true;
     };
 
-    SelectableView(Mounter mounter, View view) {
+    SelectableView(Mounter mounter, View view, int id) {
         this.mounter = mounter;
         this.view = view;
+        this.id = id;
+    }
+
+    /** The area's view is gone: ends the selection without reporting it. */
+    void remove() {
+        removed = true;
+        clear();
+    }
+
+    /** Reports {@code text}, the selected text, to {@code onSelectionChange} when it changed and JS listens. */
+    private void report(String text) {
+        if (text.equals(reported) || !mounter.wants(id, Native.SELECTION_CHANGE)) return;
+        reported = text;
+        mounter.eventMap(id, Native.SELECTION_CHANGE, new String[] {"text"}, new Object[] {text});
     }
 
     /** Whether the long press selected and the gesture goes on (presses are cancelled). */
@@ -142,7 +166,7 @@ final class SelectableView implements SelectionHandle.Owner {
         collect();
         if (texts.isEmpty()) return false;
         if (handle == 0) handle = nativeCreate();
-        nativeSetTexts(handle, this, contents(), keys(), frames());
+        nativeSetTexts(handle, this, contents(), keys(), continues(), frames());
         if (mounter.selectedText != null) mounter.selectedText.clearSelection();
         if (mounter.selectedArea != null && mounter.selectedArea != this) mounter.selectedArea.clear();
         mounter.selectedArea = this;
@@ -169,10 +193,13 @@ final class SelectableView implements SelectionHandle.Owner {
         if (observer != null && observer.isAlive()) observer.removeOnPreDrawListener(follow);
         observer = null;
         if (mounter.selectedArea == this) mounter.selectedArea = null;
+        Native.keepRendered(mounter.handle(), new int[0]);
         android.view.ActionMode m = mode;
         mode = null;
         if (m != null) m.finish();
         nativeDestroy(h);
+        if (removed) reported = "";
+        else report("");
     }
 
     /** Whether the screen point is on one of the handles (a touch there keeps the selection). */
@@ -208,15 +235,28 @@ final class SelectableView implements SelectionHandle.Owner {
             clear();
             return;
         }
-        nativeSetTexts(handle, this, contents(), keys(), frames());
+        nativeSetTexts(handle, this, contents(), keys(), continues(), frames());
         update();
         if (empty() && !extending) clear();
     }
 
-    /** The texts of the subtree that take part, depth first. */
+    /** Each view group's children, as {@code nativeReadingOrder} reads them. */
+    private float[] runs = new float[64];
+    private int runsLength;
+
+    /**
+     * The texts of the subtree that take part, depth first, in reading order: a virtual list's recycled
+     * cells are mounted in no particular order ({@code nativeReadingOrder} has the rule).
+     */
     private void collect() {
         texts.clear();
+        runsLength = 0;
         collect(view);
+        if (texts.size() < 2) return;
+        int[] order = nativeReadingOrder(texts.size(), java.util.Arrays.copyOf(runs, runsLength));
+        if (order == null || order.length != texts.size()) return;
+        java.util.ArrayList<TextBox> listed = new java.util.ArrayList<>(texts);
+        for (int i = 0; i < order.length; i++) texts.set(i, listed.get(order[i]));
     }
 
     private void collect(View v) {
@@ -226,14 +266,42 @@ final class SelectableView implements SelectionHandle.Owner {
         }
         if (v instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) v;
-            for (int i = 0, n = group.getChildCount(); i < n; i++) collect(group.getChildAt(i));
+            int n = group.getChildCount();
+            float[] children = new float[n * 6];
+            for (int i = 0; i < n; i++) {
+                View child = group.getChildAt(i);
+                int from = texts.size();
+                collect(child);
+                children[i * 6] = child.getLeft();
+                children[i * 6 + 1] = child.getTop();
+                children[i * 6 + 2] = child.getWidth();
+                children[i * 6 + 3] = child.getHeight();
+                children[i * 6 + 4] = from;
+                children[i * 6 + 5] = texts.size();
+            }
+            if (n > 1) {
+                appendRun(n);
+                for (float f : children) appendRun(f);
+            }
         }
+    }
+
+    private void appendRun(float value) {
+        if (runsLength == runs.length) runs = java.util.Arrays.copyOf(runs, runs.length * 2);
+        runs[runsLength++] = value;
     }
 
     /** The texts' view ids: the model keeps a selection on its texts as others come and go. */
     private int[] keys() {
         int[] out = new int[texts.size()];
         for (int i = 0; i < out.length; i++) out[i] = texts.get(i).id;
+        return out;
+    }
+
+    /** Which texts continue the one before them (a wrapped line's later parts): a copy joins them. */
+    private boolean[] continues() {
+        boolean[] out = new boolean[texts.size()];
+        for (int i = 0; i < out.length; i++) out[i] = texts.get(i).continuesText;
         return out;
     }
 
@@ -307,6 +375,13 @@ final class SelectableView implements SelectionHandle.Owner {
     /** Draws what the model selected: each text's highlight, the handles, the toolbar's place. */
     private void update() {
         if (handle == 0) return;
+        // Scrolled away, the ends' rows must not be recycled.
+        int[] kept = nativeKept(handle);
+        if (kept != null) Native.keepRendered(mounter.handle(), kept);
+        if (mounter.wants(id, Native.SELECTION_CHANGE)) {
+            String text = empty() ? "" : nativeText(handle, this);
+            report(text != null ? text : "");
+        }
         int[] ranges = nativeRanges(handle, this);
         java.util.ArrayList<TextBox> now = new java.util.ArrayList<>();
         if (ranges != null) {

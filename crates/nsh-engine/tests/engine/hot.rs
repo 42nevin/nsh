@@ -164,6 +164,7 @@ fn edits_replace_modules_and_keep_unrelated_state() {
         trace: false,
         network: None,
         websocket: None,
+        refuse_connections: None,
         filesystem: None,
         assets: None,
         environment: Default::default(),
@@ -180,6 +181,9 @@ fn edits_replace_modules_and_keep_unrelated_state() {
         clipboard: None,
         host: Default::default(),
         picker: None,
+        speech: None,
+        audio: None,
+        windows: None,
     };
     let engine = Engine::start(
         config,
@@ -322,6 +326,7 @@ fn entry_edits_keep_navigation_and_state() {
             trace: false,
             network: None,
             websocket: None,
+            refuse_connections: None,
             filesystem: None,
             assets: None,
             environment: Default::default(),
@@ -338,6 +343,9 @@ fn entry_edits_keep_navigation_and_state() {
             clipboard: None,
             host: Default::default(),
             picker: None,
+            speech: None,
+            audio: None,
+            windows: None,
         };
         let engine = Engine::start(
             config,

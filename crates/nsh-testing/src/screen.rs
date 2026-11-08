@@ -13,9 +13,9 @@ use std::{
 };
 
 use nsh_core::{
-    AccessibilityRole, Bounds, Command, Dialog, EventKind, EventMask, GestureValues, InputConfig,
-    MountBatch, MountItem, NodeId, PanActivation, Point, PointerEvents, Points, Size, ViewKind,
-    element::PropEnum,
+    AccessibilityRole, AccessibilityState, Bounds, Command, Dialog, EventKind, EventMask,
+    GestureValues, InputConfig, MountBatch, MountItem, NodeId, PanActivation, Point, PointerEvents,
+    Points, Size, ViewKind, element::PropEnum,
 };
 
 use crate::selector::{Matcher, Selector, TextMatch};
@@ -72,16 +72,6 @@ fn utf16_slice(text: &str, start: u32, end: u32) -> String {
         .collect()
 }
 
-/// Why a [`Pick::Disabled`] match takes no step on `what` (the kind of
-/// view the step looks for).
-pub(crate) fn disabled(what: &str) -> &'static str {
-    if what == "scroll view" {
-        "does not scroll: the user cannot scroll it (`scrollable` is false)"
-    } else {
-        "is disabled"
-    }
-}
-
 /// What a back does ([`Screen::back_target`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Back {
@@ -135,12 +125,19 @@ pub struct Screen {
     image_infos: Vec<u32>,
     /// The picks asked (`Picker.pickImages`), in order, and how many were
     /// answered.
-    picks: Vec<(u32, nsh_core::picker::PickRequest)>,
+    picks: Vec<(u32, nsh_core::picker::Pick)>,
     picks_answered: usize,
     /// The URLs the app had the system open (`openUrl`), in order.
     opened_urls: Vec<String>,
     /// The `openUrl` requests to answer.
     url_opens: Vec<u32>,
+    /// The screen colors asked for (`pick_screen_color`), to answer.
+    screen_colors: Vec<u32>,
+    /// The requests on local paths that reached the platform
+    /// (`pick_paths`, `open_path`, ...), in order.
+    file_requests: Vec<nsh_core::file_dialog::FileRequest>,
+    /// Those to answer.
+    file_answers: Vec<(u32, nsh_core::file_dialog::FileRequest)>,
     /// What the app asked that only a real platform answers, since the
     /// last call.
     unsupported: Vec<&'static str>,
@@ -165,6 +162,13 @@ pub struct Screen {
     viewport: Option<Size<Points>>,
     /// The nodes each canvas's drawing has, as views of the model.
     canvas_nodes: HashMap<NodeId, Vec<NodeId>>,
+    /// The app's windows of its own, in the order they opened: each one's
+    /// root (a modal the platform shows in a window of its own,
+    /// `DesktopCommand::OpenWindow`) and the app's id for it.
+    windows: Vec<(NodeId, String)>,
+    /// Those not on screen (minimized, hidden, closed by a policy of
+    /// theirs), as the driver keeps them: their views are not found.
+    hidden_windows: HashSet<NodeId>,
     /// The id the next canvas node gets.
     next_canvas_node: NodeId,
 }
@@ -194,6 +198,10 @@ struct View {
     /// It is selected (`selected`, its accessibility state; a canvas node's
     /// `selected`).
     selected: bool,
+    /// Its `accessibilityState`.
+    accessibility_state: AccessibilityState,
+    /// Its `accessibilityLevel`.
+    level: Option<u32>,
     /// How long a press must last to be a long one (`delayLongPress`), in
     /// milliseconds.
     long_press_delay: Option<f32>,
@@ -201,9 +209,9 @@ struct View {
     /// one selection.
     selectable_view: bool,
     /// The interaction states it tracks (`TrackStates`: pressed, hovered).
-    tracked: u8,
+    tracked: u16,
     /// The interaction states it is in (of those it tracks).
-    states: u8,
+    states: u16,
     /// The values its drags, pinches and rotations drive natively.
     gestures: GestureValues,
     /// When a drag on it activates its JS responder (`panActivation`).
@@ -223,6 +231,9 @@ struct View {
     attributed: Option<Arc<nsh_core::AttributedText>>,
     /// Which touches it and its subtree receive (`pointerEvents`).
     pointer_events: PointerEvents,
+    /// Its children are read in screen order along this axis (a list in
+    /// its parent's viewport, `ViewProps::screen_order`).
+    screen_order: Option<nsh_core::geometry::Axis>,
     /// A node of a canvas's drawing, not a view of its own.
     canvas_node: bool,
 }
@@ -347,6 +358,7 @@ impl Screen {
                 self.detach(*id);
                 self.popped.remove(id);
                 self.closed.remove(id);
+                self.forget_window(*id);
             }
             MountItem::Delete { id } => {
                 self.drop_spans(*id);
@@ -356,6 +368,7 @@ impl Screen {
                 self.children.remove(id);
                 self.popped.remove(id);
                 self.closed.remove(id);
+                self.forget_window(*id);
                 if self.focused == Some(*id) {
                     self.focused = None;
                 }
@@ -387,10 +400,13 @@ impl Screen {
                 view.disabled = props.accessibility.state.disabled;
                 view.focusable = props.focusable;
                 view.selected = props.accessibility.state.selected;
+                view.accessibility_state = props.accessibility.state;
+                view.level = props.accessibility.level;
                 view.long_press_delay = props.long_press_delay;
                 view.selectable_view = props.selectable_view;
                 view.pan_activation = props.pan_activation;
                 view.pointer_events = props.pointer_events;
+                view.screen_order = props.screen_order;
             }
             MountItem::Keymap(keymap) => self.keymap = Some(keymap.clone()),
             MountItem::TrackStates { id, states } => {
@@ -517,18 +533,36 @@ impl Screen {
             // Headless runs load no images: the size is answered as a
             // failed load (a `TextView` asks for its images' sizes).
             Command::ImageInfo { id, .. } => self.image_infos.push(*id),
-            Command::PickImages { id, request } => self.picks.push((*id, *request)),
+            Command::PickImages { id, request } => self
+                .picks
+                .push((*id, nsh_core::picker::Pick::Images(*request))),
+            Command::PickFiles { id, request } => self
+                .picks
+                .push((*id, nsh_core::picker::Pick::Files(request.clone()))),
             // Recorded, never opened: a test's machine opens nothing.
             Command::OpenUrl { id, url } => {
                 self.opened_urls.push(url.clone());
                 self.url_opens.push(*id);
             }
+            Command::PickScreenColor { id } => self.screen_colors.push(*id),
+            // Recorded, never carried out: a test's machine opens, shows
+            // and trashes nothing.
+            Command::FileRequest { id, request } => {
+                self.file_requests.push((**request).clone());
+                self.file_answers.push((*id, (**request).clone()));
+            }
             Command::Back => self.back_asked = true,
-            Command::Desktop(desktop) => {
-                if let nsh_core::desktop::DesktopCommand::PopupMenu { items, .. } = &**desktop {
+            Command::Desktop(desktop) => match &**desktop {
+                nsh_core::desktop::DesktopCommand::PopupMenu { items, .. } => {
                     self.menu = Some(items.clone());
                 }
-            }
+                nsh_core::desktop::DesktopCommand::OpenWindow(open)
+                    if !self.windows.iter().any(|(root, _)| *root == id) =>
+                {
+                    self.windows.push((id, open.options.id.clone()));
+                }
+                _ => {}
+            },
             Command::SetJsResponder { block } => {
                 self.js_block = *block;
                 self.js_grants.push(*block);
@@ -584,6 +618,7 @@ impl Screen {
                 View {
                     parent: Some(parent),
                     events: link.events,
+                    focusable: Some(link.focus_stop),
                     span: Some(Span {
                         view: id,
                         text: utf16_slice(&text.text, link.start, link.end),
@@ -689,7 +724,7 @@ impl Screen {
         let (id, start) = match hits.as_slice() {
             [(id, Some(start))] => (*id, *start),
             [(_, None)] => return Err(format!("span `{selector}` has no characters")),
-            [] => return Err(format!("no span matches `{selector}`")),
+            [] => return Err(crate::failure::not_found("span", selector)),
             many => {
                 return Err(format!(
                     "`{selector}` matches {} spans; add `nth=<n>` or name the text views to look in",
@@ -702,7 +737,7 @@ impl Screen {
             .and_then(|v| v.attributed.as_ref())
             .and_then(|text| text.span_at(start))
             .map(|span| span.style)
-            .ok_or_else(|| format!("no span matches `{selector}`"))
+            .ok_or_else(|| crate::failure::not_found("span", selector))
     }
 
     fn detach(&mut self, id: NodeId) {
@@ -720,7 +755,7 @@ impl Screen {
         let mut out = Vec::new();
         let mut stack = vec![ROOT];
         while let Some(id) = stack.pop() {
-            if self.closed.contains(&id) {
+            if self.closed.contains(&id) || self.hidden_windows.contains(&id) {
                 continue;
             }
             if id != ROOT {
@@ -753,7 +788,7 @@ impl Screen {
         // parent shows.
         let mut stack = vec![(ROOT, Point::default(), window, false, true)];
         while let Some((id, origin, clip, hidden, parent_shown)) = stack.pop() {
-            if self.closed.contains(&id) {
+            if self.closed.contains(&id) || self.hidden_windows.contains(&id) {
                 continue;
             }
             // The root is the platform's: no batch creates it.
@@ -765,7 +800,8 @@ impl Screen {
             };
             let hidden = hidden || view.hidden;
             // A modal is presented over the window, wherever it is in the
-            // tree.
+            // tree; a window of the app's own is a window of its own, as
+            // large as the main one (its root fills it).
             let (origin, clip) = if view.kind == Some(ViewKind::Modal) {
                 (Point::default(), window)
             } else {
@@ -824,11 +860,35 @@ impl Screen {
             } else if view.clips && id != ROOT {
                 inner = inner.within(bounds);
             }
-            let children: Vec<NodeId> = if self.kind(id) == Some(ViewKind::Stack) {
+            let mut children: Vec<NodeId> = if self.kind(id) == Some(ViewKind::Stack) {
                 self.screens(id).last().copied().into_iter().collect()
             } else {
                 self.children.get(&id).cloned().unwrap_or_default()
             };
+            // A scroll view's content, and a list's cells in its parent's
+            // viewport, in the order they are on screen, as macOS, iOS and
+            // Android order Tab and screen readers: a list's recycled cells
+            // are in the order they were made.
+            let horizontal = view.scroll.as_ref().map(|s| s.horizontal).or(view
+                .screen_order
+                .map(|a| a == nsh_core::geometry::Axis::Horizontal));
+            if let Some(horizontal) = horizontal
+                && children.len() > 1
+            {
+                let start = |child: &NodeId| {
+                    let frame = self.nodes.get(child).map(|v| v.frame).unwrap_or_default();
+                    let (main, cross) = if horizontal {
+                        (frame.origin.x, frame.origin.y)
+                    } else {
+                        (frame.origin.y, frame.origin.x)
+                    };
+                    (main.0, cross.0)
+                };
+                children.sort_by(|a, b| {
+                    let (a, b) = (start(a), start(b));
+                    a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
+                });
+            }
             stack.extend(
                 children
                     .into_iter()
@@ -860,7 +920,8 @@ impl Screen {
 
     /// What going back does now, as a platform's back does it: in the
     /// newest modal (else the whole screen) the innermost stack that can go
-    /// back pops its top screen, or asks it when it prevents going back;
+    /// back and is laid out with a size (`shown_in_layout`) pops its top
+    /// screen, or asks it when it prevents going back;
     /// without one, the newest modal asks to close.
     pub(crate) fn back_target(&self) -> Back {
         let attached = self.attached();
@@ -868,7 +929,7 @@ impl Screen {
             .iter()
             .rev()
             .copied()
-            .find(|id| self.kind(*id) == Some(ViewKind::Modal));
+            .find(|id| self.kind(*id) == Some(ViewKind::Modal) && !self.is_window(*id));
         let can_go_back = |stack: NodeId| {
             let screens = self.screens(stack);
             screens.len() >= 2
@@ -883,6 +944,11 @@ impl Screen {
                 self.kind(*id) == Some(ViewKind::Stack)
                     && modal.is_none_or(|m| self.is_inside(*id, m))
                     && can_go_back(*id)
+                    && nsh_core::navigation::shown_in_layout(
+                        std::iter::successors(Some(*id), |id| self.nodes.get(id)?.parent)
+                            .filter(|id| *id != ROOT)
+                            .filter_map(|id| Some(self.nodes.get(&id)?.frame)),
+                    )
             })
             .collect();
         let innermost = stacks
@@ -917,9 +983,60 @@ impl Screen {
         self.closed.insert(modal);
     }
 
-    /// The modals presented since the last call.
+    /// The modals presented since the last call (not the windows of the
+    /// app's own: the platform shows those in windows of their own).
     pub(crate) fn take_presented(&mut self) -> Vec<NodeId> {
-        std::mem::take(&mut self.presented)
+        let mut presented = std::mem::take(&mut self.presented);
+        presented.retain(|id| !self.is_window(*id));
+        presented
+    }
+
+    /// Whether `id` is the root of a window of the app's own.
+    pub(crate) fn is_window(&self, id: NodeId) -> bool {
+        self.windows.iter().any(|(root, _)| *root == id)
+    }
+
+    /// The root of the window view `id` is in: a window of the app's own,
+    /// else the main window's root.
+    pub(crate) fn window_of(&self, mut id: NodeId) -> NodeId {
+        loop {
+            if self.is_window(id) {
+                return id;
+            }
+            match self.nodes.get(&id).and_then(|v| v.parent) {
+                Some(parent) => id = parent,
+                None => return ROOT,
+            }
+        }
+    }
+
+    /// The root of the window the app calls `id` (`"main"`: the main
+    /// window's), while it is open.
+    pub(crate) fn window_root(&self, id: &str) -> Option<NodeId> {
+        if id == "main" {
+            return Some(ROOT);
+        }
+        self.windows
+            .iter()
+            .find(|(_, own)| own == id)
+            .map(|(root, _)| *root)
+    }
+
+    /// Window `root` of the app's own is on screen (`!hidden`) or not
+    /// (minimized, hidden, closed by a policy until the app removes it).
+    pub(crate) fn set_window_hidden(&mut self, root: NodeId, hidden: bool) {
+        if hidden {
+            self.hidden_windows.insert(root);
+        } else {
+            self.hidden_windows.remove(&root);
+        }
+    }
+
+    /// Node `id` left the tree: when it was a window's root, the window
+    /// closed.
+    fn forget_window(&mut self, id: NodeId) {
+        self.windows.retain(|(root, _)| *root != id);
+        self.hidden_windows.remove(&id);
     }
 
     /// Whether the app asked for a back since the last call.
@@ -942,15 +1059,19 @@ impl Screen {
         self.answered = (self.answered + 1).min(self.dialogs.len());
     }
 
-    /// The picks the app asked for so far, in order (`Picker.pickImages`).
-    pub fn picks(&self) -> Vec<nsh_core::picker::PickRequest> {
-        self.picks.iter().map(|(_, request)| *request).collect()
+    /// The picks the app asked for so far, in order (`Picker.pickImages`,
+    /// `Picker.pickFiles`).
+    pub fn picks(&self) -> Vec<nsh_core::picker::Pick> {
+        self.picks
+            .iter()
+            .map(|(_, request)| request.clone())
+            .collect()
     }
 
     /// The oldest pick not answered yet: its request's id and what it
     /// asks.
-    pub(crate) fn pending_pick(&self) -> Option<(u32, nsh_core::picker::PickRequest)> {
-        self.picks.get(self.picks_answered).copied()
+    pub(crate) fn pending_pick(&self) -> Option<(u32, nsh_core::picker::Pick)> {
+        self.picks.get(self.picks_answered).cloned()
     }
 
     /// The oldest pick was answered.
@@ -985,6 +1106,24 @@ impl Screen {
         &self.opened_urls
     }
 
+    /// The requests on local paths that reached the platform, in order
+    /// (`pick_paths`, `pick_save_path`, `open_path`, `reveal_path`,
+    /// `move_to_trash`; only once the environment has
+    /// [`nsh_core::platform::Environment::file_requests`]).
+    pub fn file_requests(&self) -> &[nsh_core::file_dialog::FileRequest] {
+        &self.file_requests
+    }
+
+    /// The requests on local paths to answer since the last call.
+    pub(crate) fn take_file_answers(&mut self) -> Vec<(u32, nsh_core::file_dialog::FileRequest)> {
+        std::mem::take(&mut self.file_answers)
+    }
+
+    /// The screen color requests to answer since the last call.
+    pub(crate) fn take_screen_colors(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.screen_colors)
+    }
+
     /// The `openUrl` requests to answer since the last call.
     pub(crate) fn take_url_opens(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.url_opens)
@@ -998,10 +1137,12 @@ impl Screen {
     /// topmost modal's first (the last presented), then the rest.
     fn by_layer(&self) -> Vec<NodeId> {
         let attached = self.shown();
+        // Windows of the app's own are side by side with the main one, not
+        // over it: their views are found in tree order.
         let modals: Vec<NodeId> = attached
             .iter()
             .copied()
-            .filter(|id| self.kind(*id) == Some(ViewKind::Modal))
+            .filter(|id| self.kind(*id) == Some(ViewKind::Modal) && !self.is_window(*id))
             .collect();
         let Some(top) = modals.last() else {
             return attached;
@@ -1047,7 +1188,8 @@ impl Screen {
         self.nodes.get(&id)?.kind
     }
 
-    /// The texts on screen, in tree order.
+    /// The texts on screen, in tree order (a scroll view's content in
+    /// screen order).
     pub fn texts(&self) -> Vec<&str> {
         self.shown()
             .into_iter()
@@ -1132,7 +1274,7 @@ impl Screen {
                 Ok(!self.disabled_from(id, None)
                     && self.input(id).is_none_or(|i| i.config.editable))
             }
-            [] => Err(format!("no view matches `{selector}`")),
+            [] => Err(crate::failure::not_found("view", selector)),
             ref all => Err(format!("`{selector}` matches {} views", all.len())),
         }
     }
@@ -1155,7 +1297,7 @@ impl Screen {
                     None => return Ok(false),
                 }
             },
-            [] => Err(format!("no view matches `{selector}`")),
+            [] => Err(crate::failure::not_found("view", selector)),
             ref all => Err(format!("`{selector}` matches {} views", all.len())),
         }
     }
@@ -1167,7 +1309,35 @@ impl Screen {
         let parsed = Selector::parse(selector)?;
         match self.resolve(&parsed)[..] {
             [id] => Ok(self.nodes.get(&id).is_some_and(|v| v.selected)),
-            [] => Err(format!("no view matches `{selector}`")),
+            [] => Err(crate::failure::not_found("view", selector)),
+            ref all => Err(format!("`{selector}` matches {} views", all.len())),
+        }
+    }
+
+    /// The accessibility state of the view `selector` names (its
+    /// `accessibilityState`: a toggle button's `pressed`, a page's
+    /// `current`, ...); an error when none or several match.
+    pub fn accessibility_state(&self, selector: &str) -> Result<AccessibilityState, String> {
+        let parsed = Selector::parse(selector)?;
+        match self.resolve(&parsed)[..] {
+            [id] => Ok(self
+                .nodes
+                .get(&id)
+                .map(|v| v.accessibility_state)
+                .unwrap_or_default()),
+            [] => Err(crate::failure::not_found("view", selector)),
+            ref all => Err(format!("`{selector}` matches {} views", all.len())),
+        }
+    }
+
+    /// The level of the view `selector` names (its `accessibilityLevel`:
+    /// a heading's, a tree item's depth); an error when none or several
+    /// match.
+    pub fn accessibility_level(&self, selector: &str) -> Result<Option<u32>, String> {
+        let parsed = Selector::parse(selector)?;
+        match self.resolve(&parsed)[..] {
+            [id] => Ok(self.nodes.get(&id).and_then(|v| v.level)),
+            [] => Err(crate::failure::not_found("view", selector)),
             ref all => Err(format!("`{selector}` matches {} views", all.len())),
         }
     }
@@ -1270,11 +1440,71 @@ impl Screen {
             .then_some((view.parent?, view.frame.center()))
     }
 
-    /// The view a pointer at `at` (in the root) reaches: the topmost,
-    /// innermost one there that receives touches. Canvas nodes are not views.
-    fn hit_pointer(&self, at: Point<Points>) -> NodeId {
-        let attached: HashSet<NodeId> = self.attached().into_iter().collect();
-        self.hit_in(ROOT, at, &attached).unwrap_or(ROOT)
+    /// The view that takes a pointer at `at` (in the root) instead of
+    /// `target`: one drawn over it there, neither in it nor around it.
+    /// `None` when the pointer reaches `target` (or a view in it), only
+    /// views around it (a target scrolled out of view or of no size, which
+    /// a press still reaches as before), or a view that handles presses or
+    /// touches itself.
+    pub(crate) fn covering(&self, target: NodeId, at: Point<Points>) -> Option<NodeId> {
+        let hit = self.hit_pointer(at, self.window_of(target));
+        let reaches = hit == target || self.is_inside(hit, target) || self.is_inside(target, hit);
+        if reaches {
+            return None;
+        }
+        // A view over the target that hears presses or touches itself (a
+        // data table's or an editor's input layer) takes the press and
+        // places it as the app wants; only one that hears neither swallows
+        // it.
+        let mut id = hit;
+        loop {
+            if id == target || self.is_inside(target, id) {
+                return Some(hit);
+            }
+            if self.hears(id, EventKind::Press) || self.hears(id, EventKind::Touch) {
+                return None;
+            }
+            id = self.nodes.get(&id).and_then(|v| v.parent)?;
+        }
+    }
+
+    /// `id` as a selector a test would write: its test id, else the first
+    /// text in it, else `view:<id>`.
+    pub(crate) fn selector_of(&self, id: NodeId) -> String {
+        if let Some(test_id) = self.nodes.get(&id).and_then(|v| v.test_id.as_deref()) {
+            return format!("`id:{test_id}`");
+        }
+        match self
+            .down_to(id, |v| v.text.is_some())
+            .and_then(|t| self.nodes.get(&t)?.text.as_deref())
+        {
+            Some(text) => format!("`{}`", text.trim()),
+            None => format!("`view:{id}`"),
+        }
+    }
+
+    /// The view a pointer at `at` (in the root of `window`, a window's
+    /// root) reaches in that window: the topmost, innermost one there that
+    /// receives touches. Canvas nodes are not views, and the windows of the
+    /// app's own are windows of their own.
+    fn hit_pointer(&self, at: Point<Points>, window: NodeId) -> NodeId {
+        let order = self.attached();
+        let attached: HashSet<NodeId> = order.iter().copied().collect();
+        // The dialogs presented over this window first, the last one on
+        // top: a dialog is over its window wherever its node is in the
+        // tree, so the views around that node (a card that clips) take no
+        // part in where it is hit.
+        let dialogs = order.iter().rev().copied().filter(|id| {
+            self.kind(*id) == Some(ViewKind::Modal)
+                && !self.is_window(*id)
+                && self.window_of(*id) == window
+        });
+        for dialog in dialogs {
+            if let Some(hit) = self.hit_in(dialog, at, &attached) {
+                return hit;
+            }
+        }
+        self.hit_in(window, at, &attached).unwrap_or(window)
     }
 
     fn hit_in(&self, id: NodeId, at: Point<Points>, attached: &HashSet<NodeId>) -> Option<NodeId> {
@@ -1283,7 +1513,9 @@ impl Screen {
         if receives == PointerEvents::None || view.is_some_and(|v| v.hidden) {
             return None;
         }
-        let inside = id == ROOT || self.bounds_in_root(id).is_some_and(|b| b.contains(&at));
+        let inside = id == ROOT
+            || self.is_window(id)
+            || self.bounds_in_root(id).is_some_and(|b| b.contains(&at));
         // Unclipped children can receive a pointer outside their parent's box.
         if !inside
             && (receives == PointerEvents::BoxOnly
@@ -1296,7 +1528,9 @@ impl Screen {
         {
             for &child in children.iter().rev() {
                 let node = self.nodes.get(&child).is_some_and(|v| v.canvas_node);
-                if node || !attached.contains(&child) {
+                // Windows are windows of their own; dialogs were tried
+                // first ([`Screen::hit_pointer`]).
+                if node || !attached.contains(&child) || self.kind(child) == Some(ViewKind::Modal) {
                     continue;
                 }
                 if let Some(hit) = self.hit_in(child, at, attached) {
@@ -1315,7 +1549,7 @@ impl Screen {
         if let [id] = matches[..]
             && let Some(at) = self.canvas_node_center(id)
         {
-            let Some(target) = self.up_to(self.hit_pointer(at), |v| {
+            let Some(target) = self.up_to(self.hit_pointer(at, self.window_of(id)), |v| {
                 v.events.contains(EventKind::Press)
             }) else {
                 return Pick::None;
@@ -1442,6 +1676,47 @@ impl Screen {
         out
     }
 
+    /// The views inside scroll view `id` that take a finger's drag
+    /// themselves: they hear touches (a responder, JS's or a component's,
+    /// which may keep them from the scroll view) or pan natively. A finger
+    /// that lands on one to scroll may move it instead, or the scroll view
+    /// only until the app's answer comes, so a step's scrolling lands
+    /// elsewhere. What one holds lands on it, and is not listed.
+    #[cfg(feature = "agent")]
+    pub(crate) fn drag_takers(&self, id: NodeId) -> Vec<NodeId> {
+        let attached: HashSet<NodeId> = self.attached().into_iter().collect();
+        let mut out = Vec::new();
+        let mut stack: Vec<NodeId> = self.children.get(&id).cloned().unwrap_or_default();
+        while let Some(id) = stack.pop() {
+            let Some(view) = self.nodes.get(&id) else {
+                continue;
+            };
+            let receives = view.pointer_events;
+            if !attached.contains(&id)
+                || view.canvas_node
+                || view.hidden
+                || receives == PointerEvents::None
+            {
+                continue;
+            }
+            let takes = view.events.contains(EventKind::Touch)
+                || view.events.contains(EventKind::PanStart)
+                || view.events.contains(EventKind::PanEnd)
+                || view.gestures.pan_x.is_some()
+                || view.gestures.pan_y.is_some();
+            if takes && receives != PointerEvents::BoxNone {
+                out.push(id);
+                continue;
+            }
+            if receives != PointerEvents::BoxOnly
+                && let Some(children) = self.children.get(&id)
+            {
+                stack.extend(children.iter().copied());
+            }
+        }
+        out
+    }
+
     fn up_to(&self, mut id: NodeId, test: impl Fn(&View) -> bool) -> Option<NodeId> {
         loop {
             let view = self.nodes.get(&id)?;
@@ -1537,7 +1812,12 @@ impl Screen {
         }
         let view = self.nodes.get(&id)?;
         let mut origin = view.frame.origin;
-        let mut at = view.parent;
+        // A modal (a window of the app's own too) is placed over its
+        // window, wherever it is in the tree: what it holds is where it
+        // is in it, in that window's points.
+        let mut at = (view.kind != Some(ViewKind::Modal))
+            .then_some(view.parent)
+            .flatten();
         while let Some(parent) = at {
             let Some(p) = self.nodes.get(&parent) else {
                 break;
@@ -1545,6 +1825,9 @@ impl Screen {
             origin += p.frame.origin;
             if let Some(scroll) = &p.scroll {
                 origin -= nsh_core::Point::new(scroll.x, scroll.y);
+            }
+            if p.kind == Some(ViewKind::Modal) {
+                break;
             }
             at = p.parent;
         }
@@ -1575,7 +1858,7 @@ impl Screen {
     /// View `id`'s interaction states with `bit` set (or cleared), when it
     /// tracks it and they change.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn set_state(&mut self, id: NodeId, bit: u8, on: bool) -> Option<u8> {
+    pub(crate) fn set_state(&mut self, id: NodeId, bit: u16, on: bool) -> Option<u16> {
         let view = self.nodes.get_mut(&id)?;
         let next = nsh_core::input::next_states(view.tracked, view.states, bit, on)?;
         view.states = next;
@@ -1700,7 +1983,8 @@ impl Screen {
         self.key_focus = id;
     }
 
-    /// Tab's stops, in tree order, as macOS and the web have them: the
+    /// Tab's stops, in tree order (a scroll view's content in screen
+    /// order), as macOS and the web have them: the
     /// inputs that edit and the views [`nsh_core::ViewProps::focus_stop`]
     /// takes (those that take presses unless `focusable={false}`, and
     /// `focusable={true}` ones whether or not they do), shown and enabled.
@@ -1714,16 +1998,40 @@ impl Screen {
                 if let Some(input) = &v.input {
                     return input.config.editable && !self.disabled_from(id, None);
                 }
+                // A link in a text view is a stop after it, in text order
+                // (`TextLink::focus_stop`).
+                if v.span.is_some() {
+                    return v.focusable == Some(true) && !self.disabled_from(id, None);
+                }
                 // Disabled is the ancestors' too here (`disabled_from`).
                 let props = nsh_core::ViewProps {
                     focusable: v.focusable,
                     ..Default::default()
                 };
-                v.span.is_none()
-                    && props.focus_stop(v.events.contains(EventKind::Press))
+                props.focus_stop(v.events.contains(EventKind::Press))
                     && !self.disabled_from(id, None)
             })
             .collect()
+    }
+
+    /// The stop a press on `id` gives the focus to in a terminal: `id` or
+    /// its nearest ancestor that Tab stops at (`tab_stops`), else the
+    /// topmost stop over the press's point (a table's hit layer over its
+    /// rows), as a terminal finds what is under the pointer.
+    pub(crate) fn stop_around(&self, id: NodeId) -> Option<NodeId> {
+        let stops = self.tab_stops();
+        let mut at = Some(id);
+        while let Some(id) = at {
+            if stops.contains(&id) {
+                return Some(id);
+            }
+            at = self.nodes.get(&id).and_then(|v| v.parent);
+        }
+        let point = self.bounds_in_root(id)?.center();
+        stops.iter().rev().copied().find(|&stop| {
+            self.bounds_in_root(stop)
+                .is_some_and(|bounds| bounds.contains(&point))
+        })
     }
 
     pub(crate) fn scroll(&self, id: NodeId) -> Option<&Scroll> {
@@ -1835,6 +2143,49 @@ mod tests {
         screen.nodes.get_mut(&2).unwrap().clips = false;
         screen.nodes.get_mut(&2).unwrap().pointer_events = PointerEvents::BoxOnly;
         assert_eq!(screen.pressable(&selector), Pick::None);
+    }
+
+    #[test]
+    #[cfg(feature = "agent")]
+    fn a_scroll_views_drag_takers_are_the_views_that_take_touches_or_pan() {
+        let mut screen = Screen::default();
+        let mut items = vec![create(2, ViewKind::Scroll), insert(1, 2)];
+        for id in [4, 6, 8, 10, 12, 14, 16] {
+            items.extend([create(id, ViewKind::View), insert(2, id)]);
+        }
+        // Inside the responder at 4, and inside the view at 12 that keeps
+        // touches from what it holds.
+        items.extend([
+            create(18, ViewKind::View),
+            insert(4, 18),
+            create(20, ViewKind::View),
+            insert(12, 20),
+        ]);
+        screen.apply(&batch(items));
+        let events = |screen: &mut Screen, id: NodeId, kind: EventKind| {
+            screen.nodes.get_mut(&id).unwrap().events.set(kind, true);
+        };
+        // A responder, a native pan, a button, a responder no touch
+        // reaches, a responder only what it holds hears, and a drag that
+        // moves a value.
+        for (id, kind) in [
+            (4, EventKind::Touch),
+            (6, EventKind::PanStart),
+            (8, EventKind::Press),
+            (10, EventKind::Touch),
+            (14, EventKind::Touch),
+            (18, EventKind::Touch),
+            (20, EventKind::Touch),
+        ] {
+            events(&mut screen, id, kind);
+        }
+        screen.nodes.get_mut(&10).unwrap().pointer_events = PointerEvents::None;
+        screen.nodes.get_mut(&12).unwrap().pointer_events = PointerEvents::BoxOnly;
+        screen.nodes.get_mut(&14).unwrap().pointer_events = PointerEvents::BoxNone;
+        screen.nodes.get_mut(&16).unwrap().gestures.pan_y = Some(1);
+        let mut takers = screen.drag_takers(2);
+        takers.sort_unstable();
+        assert_eq!(takers, [4, 6, 16]);
     }
 
     fn batch(items: Vec<MountItem>) -> MountBatch {
@@ -2035,6 +2386,7 @@ mod tests {
             end,
             node,
             events,
+            focus_stop: true,
         };
         let linked = |links: Vec<nsh_core::TextLink>| MountItem::Text {
             id: 4,

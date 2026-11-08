@@ -51,10 +51,14 @@ pub(crate) struct Shared {
     pub(crate) host_bridge: RefCell<Option<Rc<dyn nsh_core::host_channel::HostBridge>>>,
     pub(crate) system_websocket:
         RefCell<Option<std::sync::Arc<dyn nsh_core::websocket::WebSocketTransport>>>,
+    /// What the host refuses the app's sockets and WebSockets with (a
+    /// test's network); `None`: they connect.
+    pub(crate) system_refuse_connections: RefCell<Option<nsh_core::element::RefuseConnections>>,
     /// Permissions and host-selected app directory for native system operations.
     pub(crate) system_access: RefCell<nsh_core::access::Access>,
     pub(crate) system_filesystem:
         RefCell<Option<std::sync::Arc<dyn nsh_core::filesystem::FileSystem>>>,
+    pub(crate) system_updater: RefCell<Option<std::sync::Arc<dyn nsh_core::runtime::UpdaterHost>>>,
     pub(crate) system_data_dir: RefCell<Option<std::path::PathBuf>>,
     pub(crate) system_paths: RefCell<nsh_core::access::TrustedPaths>,
     /// The VM's counts of limited resources for Rust modules (`net`'s
@@ -119,50 +123,6 @@ pub struct Host {
     entry_depth: Cell<usize>,
 }
 
-/// A context with `JS_NewContext`'s intrinsics. With feature
-/// `bytecode-only` without the one that compiles source (`eval`, the
-/// function constructors, `Module::declare`): nothing then reaches QuickJS'
-/// parser and compiler, which the linker leaves out, and the VM runs
-/// bytecode only (the web runtime of published apps).
-fn new_context(rt: &AsyncRuntime, scheduler: Rc<Scheduler>) -> rquickjs::Result<Context> {
-    #[cfg(test)]
-    if tests::SOURCELESS.get() {
-        return sourceless_context(rt, scheduler);
-    }
-    #[cfg(not(feature = "bytecode-only"))]
-    {
-        Context::full(rt, scheduler)
-    }
-    #[cfg(feature = "bytecode-only")]
-    {
-        sourceless_context(rt, scheduler)
-    }
-}
-
-/// The context of `bytecode-only` runtimes, without the intrinsic that
-/// compiles source; tests make one in any build, so a VM setup that needs
-/// QuickJS' parser fails them, not only the web runtime.
-#[cfg(any(feature = "bytecode-only", test))]
-fn sourceless_context(rt: &AsyncRuntime, scheduler: Rc<Scheduler>) -> rquickjs::Result<Context> {
-    use rquickjs::context::intrinsic::{
-        Date, Json, MapSet, Performance, Promise, Proxy, RegExp, TypedArrays, WeakRef,
-    };
-    let cx = Context::custom::<(
-        Date,
-        RegExp,
-        Json,
-        Proxy,
-        MapSet,
-        TypedArrays,
-        Promise,
-        WeakRef,
-        Performance,
-    )>(rt, scheduler)?;
-    // SAFETY: a new, live context; rquickjs has no intrinsic for it.
-    cx.with(|cx| unsafe { rquickjs::qjs::JS_AddIntrinsicAToB(cx.as_raw().as_ptr()) });
-    Ok(cx)
-}
-
 /// How a VM is set up.
 #[derive(Debug, Clone, Default)]
 pub struct HostOptions {
@@ -171,11 +131,6 @@ pub struct HostOptions {
     /// Removes `eval` and the function constructors and freezes the shared
     /// prototypes (see `sandbox`). Off for development bundles.
     pub harden: bool,
-    /// The hardening as bytecode ([`crate::compile_harden`]), run instead
-    /// of compiling it: a runtime without QuickJS' parser
-    /// (`bytecode-only`) needs it to harden. Trusted input, like a bundle's
-    /// bytecode: only from the CLI that compiled the app.
-    pub harden_bytecode: Option<std::sync::Arc<Vec<u8>>>,
     /// The UI sets apps import as native modules
     /// (`nsh_base::registry()`, served as `nsh/base`, and an app's own).
     pub ui_sets: Vec<nsh_core::element::Registry>,
@@ -211,7 +166,7 @@ impl Host {
         scheduler.ready(rt.set_max_stack_size(limits.stack_bytes));
         let budget = Budget::new(limits);
         scheduler.ready(rt.set_interrupt_handler(Some(budget.interrupt_handler(None))));
-        let cx = new_context(&rt, scheduler.clone())?;
+        let cx = Context::full(&rt, scheduler.clone())?;
         let shared = Rc::new(Shared {
             limits,
             scheduler: Rc::downgrade(&scheduler),
@@ -237,11 +192,7 @@ impl Host {
             // Before hardening freezes the globals.
             crate::clock::install(&cx)?;
             if options.harden {
-                match &options.harden_bytecode {
-                    // SAFETY: trusted, per the option's contract.
-                    Some(bytecode) => unsafe { sandbox::harden_from(&cx, bytecode)? },
-                    None => sandbox::harden(&cx)?,
-                }
+                sandbox::harden(&cx)?;
             }
             Ok(())
         })
@@ -372,7 +323,6 @@ impl Host {
 
     /// Actual native module exports for declaration generation. This evaluates
     /// trusted module initializers only, without running user bundles or jobs.
-    #[cfg(not(feature = "bytecode-only"))]
     pub(crate) fn standard_exports(&self) -> Result<Vec<(String, Vec<String>)>, JsError> {
         self.guarded(Phase::Load, || {
             self.cx
@@ -403,11 +353,6 @@ impl Host {
                 .map_err(|error| self.classify(error))
         })
         .unwrap_or_else(|| Err(self.stopped()))
-    }
-
-    #[cfg(feature = "bytecode-only")]
-    pub(crate) fn standard_exports(&self) -> Result<Vec<(String, Vec<String>)>, JsError> {
-        Ok(Vec::new())
     }
 
     /// Sets the handler for unhandled promise rejections: promises still
@@ -614,12 +559,46 @@ impl Host {
                     }
                     return;
                 }
+                // Windows: their handles and listeners are native.
+                if let (EventKind::Window, EventPayload::Window(window)) = (event, payload) {
+                    crate::window::platform_event(cx.as_raw().as_ptr(), id, window);
+                    return;
+                }
                 let payload = match (event, payload) {
-                    // `onChange` receives the text itself, as in React Native.
+                    // `onChange({ value })`: the text, in one object as every
+                    // event (`api-naming.md` "Payloads").
                     (EventKind::ChangeText, EventPayload::Text { text, .. }) => {
-                        rquickjs::String::from_str(cx.clone(), text).map(|s| s.into_value())
+                        rquickjs::Object::new(cx.clone()).and_then(|o| {
+                            o.set("value", text.as_str())?;
+                            Ok(o.into_value())
+                        })
                     }
                     (_, EventPayload::Value(value)) => payload_value(&cx, value),
+                    // `onContentSizeChange({ size })`.
+                    (EventKind::ContentSizeChange, EventPayload::Map(fields)) => {
+                        rquickjs::Object::new(cx.clone()).and_then(|o| {
+                            o.set(
+                                "size",
+                                payload_object(&cx, &EventPayload::Map(fields.clone()))?,
+                            )?;
+                            Ok(o.into_value())
+                        })
+                    }
+                    // Presses always pass their event: where the backend
+                    // does not know the pointer, at the view's origin.
+                    (
+                        EventKind::Press
+                        | EventKind::LongPress
+                        | EventKind::PressDown
+                        | EventKind::PressUp,
+                        EventPayload::None,
+                    ) => payload_object(
+                        &cx,
+                        &EventPayload::Press(nsh_core::PressEvent {
+                            clicks: 1,
+                            ..Default::default()
+                        }),
+                    ),
                     // A video's `onLoad`: `{ duration, size }` of the
                     // platforms' `duration`, `width` and `height`.
                     (EventKind::Load, EventPayload::Map(fields))
@@ -733,12 +712,24 @@ impl Host {
         *self.shared.system_filesystem.borrow_mut() = filesystem;
     }
 
+    /// Installs what `nsh/updater` runs on.
+    pub fn set_updater(&self, updater: Option<std::sync::Arc<dyn nsh_core::runtime::UpdaterHost>>) {
+        *self.shared.system_updater.borrow_mut() = updater;
+    }
+
     /// Installs the host WebSocket transport.
     pub fn set_websocket_transport(
         &self,
         transport: Option<std::sync::Arc<dyn nsh_core::websocket::WebSocketTransport>>,
     ) {
         *self.shared.system_websocket.borrow_mut() = transport;
+    }
+
+    /// Refuses the app's connections (`net` sockets and both WebSocket
+    /// APIs) with what `refuse` gives, before they reach the network: a
+    /// test's (`nsh_core::element::System::refuse_connections`).
+    pub fn set_refuse_connections(&self, refuse: Option<nsh_core::element::RefuseConnections>) {
+        *self.shared.system_refuse_connections.borrow_mut() = refuse;
     }
 
     /// Connects `nsh/host` to the embedding app: its launch parameters, and
@@ -1041,6 +1032,40 @@ impl Host {
         });
     }
 
+    /// Publishes the displays to JS (`nsh/desktop`'s `displays()`). Call
+    /// before evaluating the bundle where there are displays, then on every
+    /// change; without a call they are none.
+    pub fn set_displays(&self, displays: &[nsh_core::desktop::Display]) {
+        self.guarded(Phase::Call, || {
+            self.cx.with(|cx| {
+                let raw = cx.as_raw().as_ptr();
+                let result = match crate::env::set_displays(raw, displays) {
+                    Ok(()) => Ok(()),
+                    Err(()) => Err(rquickjs::Error::Exception),
+                };
+                self.report(&cx, result);
+            });
+            self.run_jobs();
+        });
+    }
+
+    /// Publishes whether the platform's performance monitor measures to JS
+    /// (`nsh`'s `fpsEnabled()`). Call on every change; without a call it is
+    /// off.
+    pub fn set_fps_enabled(&self, enabled: bool) {
+        self.guarded(Phase::Call, || {
+            self.cx.with(|cx| {
+                let raw = cx.as_raw().as_ptr();
+                let result = match crate::env::set_fps_enabled(raw, enabled) {
+                    Ok(()) => Ok(()),
+                    Err(()) => Err(rquickjs::Error::Exception),
+                };
+                self.report(&cx, result);
+            });
+            self.run_jobs();
+        });
+    }
+
     /// Publishes the design tokens the app is drawn with to JS (`token()`
     /// of `nsh`). Call before evaluating the bundle, then on every change.
     pub fn set_tokens(&self, tokens: std::sync::Arc<nsh_core::element::Tokens>) {
@@ -1111,6 +1136,22 @@ impl Host {
         });
     }
 
+    /// Fails request `id`, which the app's capabilities do not grant:
+    /// `message` says why, `url` is the URL refused (the request's, or a
+    /// redirect's). `fetch` rejects with a `TypeError` whose `code` is
+    /// `ERR_ACCESS_DENIED`, `permission` `"network"` and `resource` `url`.
+    pub fn fetch_refused(&self, id: RequestId, message: &str, url: &str) {
+        self.guarded(Phase::Call, || {
+            self.cx.with(|cx| {
+                let raw = cx.as_raw().as_ptr();
+                let result = crate::web::fetch_refused(raw, id, message, url)
+                    .map_err(|_| rquickjs::Error::Exception);
+                self.report(&cx, result);
+            });
+            self.run_jobs();
+        });
+    }
+
     /// The number of live JS objects (diagnostics: leak checks).
     pub fn object_count(&self) -> i64 {
         self.rt
@@ -1125,6 +1166,13 @@ impl Host {
         self.guarded(Phase::Call, || {
             self.scheduler
                 .ready(self.rt.borrow().as_ref().expect("live VM").run_gc());
+            // What the collection released: the graph gives back the slots
+            // of nodes that are gone.
+            self.cx.with(|cx| {
+                // SAFETY: the state of this host's context; no other borrow
+                // of the graph is live between calls into JS.
+                unsafe { crate::reactive::graph(cx.as_raw().as_ptr()) }.compact();
+            });
             self.run_jobs();
         });
     }
@@ -1197,26 +1245,36 @@ fn payload_object<'js>(cx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resul
             obj.set("modifiers", modifiers_object(cx, modifiers)?)?;
             obj.set("clickCount", *clicks)?;
         }
-        EventPayload::Hover(nsh_core::HoverEvent {
-            position,
-            page_position,
-            modifiers,
-        })
-        | EventPayload::ContextMenu(nsh_core::ContextMenuEvent {
-            position,
-            page_position,
-            modifiers,
-        }) => {
-            obj.set("position", point_object(cx, *position)?)?;
-            obj.set("pagePosition", point_object(cx, *page_position)?)?;
-            obj.set("modifiers", modifiers_object(cx, modifiers)?)?;
+        EventPayload::Mouse(e) => {
+            obj.set("position", point_object(cx, e.position)?)?;
+            obj.set("pagePosition", point_object(cx, e.page_position)?)?;
+            obj.set("modifiers", modifiers_object(cx, &e.modifiers)?)?;
+            // `null` with no button down, as declared (an absent field
+            // would read `undefined`).
+            match e.pressed_button {
+                Some(button) => obj.set("pressedButton", button.name())?,
+                None => obj.set("pressedButton", Value::new_null(cx.clone()))?,
+            }
         }
-        EventPayload::FileDrop(uris) => {
+        EventPayload::ContextMenu(e) => {
+            obj.set("position", point_object(cx, e.position)?)?;
+            obj.set("pagePosition", point_object(cx, e.page_position)?)?;
+            obj.set("modifiers", modifiers_object(cx, &e.modifiers)?)?;
+            // `null` when no pointer asked, as declared.
+            match e.pointer_type {
+                Some(pointer) => obj.set("pointerType", pointer.name())?,
+                None => obj.set("pointerType", Value::new_null(cx.clone()))?,
+            }
+        }
+        EventPayload::FileDrop(uris) | EventPayload::FileDropAt { uris, .. } => {
             let list = rquickjs::Array::new(cx.clone())?;
             for (index, uri) in uris.iter().enumerate() {
                 list.set(index, uri.as_str())?;
             }
             obj.set("uris", list)?;
+            if let EventPayload::FileDropAt { page_position, .. } = payload {
+                obj.set("pagePosition", point_object(cx, *page_position)?)?;
+            }
         }
         // The bytes cross natively: each file is a `File` over them.
         EventPayload::Paste(paste) => {
@@ -1245,6 +1303,14 @@ fn payload_object<'js>(cx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resul
         }
         // The core answers picks; JS never gets their files this way.
         EventPayload::Picked { id, .. } => obj.set("id", *id)?,
+        // The core answers these too.
+        EventPayload::FileRequest { id, .. } => obj.set("id", *id)?,
+        // And speech sessions' events (`Speech`'s listeners get them).
+        EventPayload::Speech { id, .. } => obj.set("id", *id)?,
+        // And sounds' and players' events (their objects' listeners).
+        EventPayload::Audio { id, .. } => obj.set("id", *id)?,
+        // Handled natively (`crate::window`).
+        EventPayload::Window(_) => return Ok(Value::new_undefined(cx.clone())),
         EventPayload::Native { name, data } => {
             obj.set("name", &**name)?;
             obj.set("data", json_value(cx, data)?)?;
@@ -1268,7 +1334,7 @@ fn payload_object<'js>(cx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resul
             }
             obj.set("lines", list)?;
         }
-        EventPayload::Layout(frame) => return Ok(bounds_object(cx, *frame)?.into_value()),
+        EventPayload::Layout(frame) => obj.set("bounds", bounds_object(cx, *frame)?)?,
         EventPayload::Pan {
             translation,
             velocity_x,
@@ -1287,25 +1353,30 @@ fn payload_object<'js>(cx: &Ctx<'js>, payload: &EventPayload) -> rquickjs::Resul
                 "cancelled",
                 matches!(payload, EventPayload::PanCancelled { .. }),
             )?;
-            obj.set("translationX", translation.x.0)?;
-            obj.set("translationY", translation.y.0)?;
-            obj.set("velocityX", *velocity_x)?;
-            obj.set("velocityY", *velocity_y)?;
-            if let Some(v) = value_x {
-                obj.set("valueX", v.0)?;
-            }
-            if let Some(v) = value_y {
-                obj.set("valueY", v.0)?;
+            obj.set("translation", point_object(cx, *translation)?)?;
+            let velocity = rquickjs::Object::new(cx.clone())?;
+            velocity.set("x", *velocity_x)?;
+            velocity.set("y", *velocity_y)?;
+            obj.set("velocity", velocity)?;
+            // The bound values, those of the axes `pan` binds.
+            if value_x.is_some() || value_y.is_some() {
+                let value = rquickjs::Object::new(cx.clone())?;
+                if let Some(v) = value_x {
+                    value.set("x", v.0)?;
+                }
+                if let Some(v) = value_y {
+                    value.set("y", v.0)?;
+                }
+                obj.set("value", value)?;
             }
         }
-        EventPayload::Scroll(offset) => {
-            obj.set("x", offset.x.0)?;
-            obj.set("y", offset.y.0)?;
-        }
+        EventPayload::Scroll(offset) => obj.set("offset", point_object(cx, *offset)?)?,
         // The numbers JS always got (pixels are whole).
         EventPayload::Image(size) => {
-            obj.set("width", size.width.0 as f32)?;
-            obj.set("height", size.height.0 as f32)?;
+            let pixels = rquickjs::Object::new(cx.clone())?;
+            pixels.set("width", size.width.0 as f32)?;
+            pixels.set("height", size.height.0 as f32)?;
+            obj.set("size", pixels)?;
         }
         EventPayload::Error { message } => obj.set("message", message.as_str())?,
         EventPayload::Text { text, .. } => obj.set("text", text.as_str())?,
@@ -1604,59 +1675,6 @@ mod tests {
     };
 
     use super::*;
-
-    thread_local! {
-        /// Makes this thread's new VMs as `bytecode-only` runtimes make
-        /// theirs ([`sourceless_context`]).
-        pub(super) static SOURCELESS: Cell<bool> = const { Cell::new(false) };
-    }
-
-    /// A published web app's VM compiles no source: hardening comes as
-    /// bytecode and the standard modules and globals are native. Its
-    /// runtime cannot compile source at all (`bytecode-only`), so a setup
-    /// step or first use that needs QuickJS' parser would stop every
-    /// published app from starting.
-    #[test]
-    fn bytecode_only_vms_start_and_use_the_standard_apis_without_source() {
-        let imports: String = crate::standard::NAMES
-            .iter()
-            .enumerate()
-            .map(|(i, name)| format!("import * as m{i} from {name:?};\n"))
-            .collect();
-        let source = format!(
-            r#"{imports}
-            import {{ text }} from "nsh:rt";
-            for (const m of [{modules}]) if (typeof m !== "object") throw Error("module");
-            if (Buffer.from("nsh").toString("base64") !== "bnNo") throw Error("Buffer");
-            if (crypto.randomUUID().length !== 36 || typeof crypto.subtle !== "object") throw Error("crypto");
-            if (typeof process.platform !== "string" || typeof process.nextTick !== "function") throw Error("process");
-            if (typeof process.run !== "function" || typeof process.env !== "object") throw Error("process");
-            if (new URL("https://a.b/c").pathname !== "/c") throw Error("URL");
-            const socket = new WebSocket("ws://127.0.0.1:9/");
-            if (!(socket instanceof EventTarget) || socket.readyState !== WebSocket.CONNECTING) throw Error("WebSocket");
-            socket.close();
-            text("started");
-            "#,
-            modules = (0..crate::standard::NAMES.len())
-                .map(|i| format!("m{i}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let bytecode = crate::compile_bytecode(&source, true).unwrap();
-        let harden = crate::compile_harden().unwrap();
-        SOURCELESS.set(true);
-        let host = Host::with_options(HostOptions {
-            harden: true,
-            harden_bytecode: Some(Arc::new(harden)),
-            ..HostOptions::default()
-        });
-        SOURCELESS.set(false);
-        let host = host.unwrap();
-        let error = host.eval_source("export {};").unwrap_err();
-        assert!(error.message.contains("eval is not supported"), "{error}");
-        host.eval_bytecode(&bytecode).unwrap();
-        assert_eq!(reported(&host), ["started"]);
-    }
 
     #[test]
     fn strings_outside_a_text_are_reported_once_per_element() {
@@ -2093,19 +2111,20 @@ const report = (v) => text(String(v));
     }
 
     #[test]
-    fn hover_payload_has_both_positions_and_the_modifiers() {
+    fn mouse_payload_has_both_positions_the_modifiers_and_the_button() {
         let host = Host::new().unwrap();
-        let event = nsh_core::HoverEvent {
-            position: point(px(3.0), px(4.5)),
-            page_position: point(px(30.0), px(40.5)),
-            modifiers: nsh_core::keymap::Modifiers {
+        let event = nsh_core::MouseEvent::new(
+            point(px(3.0), px(4.5)),
+            point(px(30.0), px(40.5)),
+            nsh_core::keymap::Modifiers {
                 shift: true,
                 cmd: true,
                 ..Default::default()
             },
-        };
+            Some(nsh_core::MouseButton::Left),
+        );
         host.cx.with(|cx| {
-            let value = payload_object(&cx, &EventPayload::Hover(event)).unwrap();
+            let value = payload_object(&cx, &EventPayload::Mouse(event)).unwrap();
             let obj = value.as_object().unwrap();
             let num = |o: &str, k: &str| {
                 let o: rquickjs::Object = obj.get(o).unwrap();
@@ -2126,20 +2145,26 @@ const report = (v) => text(String(v));
             );
             assert!(flag("shift") && flag("platform"));
             assert!(!flag("alt") && !flag("control"));
+            assert_eq!(obj.get::<_, String>("pressedButton").unwrap(), "left");
+            let none = nsh_core::MouseEvent::default();
+            let value = payload_object(&cx, &EventPayload::Mouse(none)).unwrap();
+            let pressed: Value = value.as_object().unwrap().get("pressedButton").unwrap();
+            assert!(pressed.is_null());
         });
     }
 
     #[test]
     fn context_menu_payload_has_both_positions() {
         let host = Host::new().unwrap();
-        let event = nsh_core::ContextMenuEvent {
-            position: point(px(1.0), px(2.0)),
-            page_position: point(px(11.0), px(22.0)),
-            modifiers: nsh_core::keymap::Modifiers {
+        let event = nsh_core::ContextMenuEvent::new(
+            point(px(1.0), px(2.0)),
+            point(px(11.0), px(22.0)),
+            nsh_core::keymap::Modifiers {
                 ctrl: true,
                 ..Default::default()
             },
-        };
+            Some(nsh_core::PointerType::Mouse),
+        );
         host.cx.with(|cx| {
             let value = payload_object(&cx, &EventPayload::ContextMenu(event)).unwrap();
             let obj = value.as_object().unwrap();
@@ -2159,6 +2184,16 @@ const report = (v) => text(String(v));
             let m: rquickjs::Object = obj.get("modifiers").unwrap();
             assert!(m.get::<_, bool>("control").unwrap());
             assert!(!m.get::<_, bool>("platform").unwrap());
+            assert_eq!(obj.get::<_, String>("pointerType").unwrap(), "mouse");
+            let keyboard = nsh_core::ContextMenuEvent::new(
+                event.position,
+                event.page_position,
+                event.modifiers,
+                None,
+            );
+            let value = payload_object(&cx, &EventPayload::ContextMenu(keyboard)).unwrap();
+            let pointer: Value = value.as_object().unwrap().get("pointerType").unwrap();
+            assert!(pointer.is_null());
         });
     }
 
@@ -2257,11 +2292,55 @@ const report = (v) => text(String(v));
         assert_eq!(style.view.opacity, 0.5);
     }
 
+    /// `Intl` names local time by the zone it formats it in, whichever the
+    /// environment reports (a test's, which moves no local time): the
+    /// zone `resolvedOptions()` gives formats as local time does, at any
+    /// instant. On a machine outside UTC the reported `UTC` is not local
+    /// time; on one in UTC, `+08:00` is not. It holds under any `TZ`:
+    /// `Asia/Singapore` (+07:30 at epoch 0), `JST-9`, and
+    /// `CET-1CEST,M3.5.0,M10.5.0/3`, whose summer instant shows a zone
+    /// named by one offset.
+    #[test]
+    fn names_the_zone_it_formats_local_time_in() {
+        let host = Host::new().unwrap();
+        let script = format!(
+            r#"{REPORT}
+            const options = {{
+              year: "numeric", month: "2-digit", day: "2-digit",
+              hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+            }};
+            const local = new Intl.DateTimeFormat("en-US", options);
+            const zone = local.resolvedOptions().timeZone;
+            const named = new Intl.DateTimeFormat("en-US", {{ ...options, timeZone: zone }});
+            // 1970 (Singapore at +07:30), a northern summer and winter.
+            const instants = [0, 1720000000000, 1736000000000];
+            const differ = instants.filter((t) => named.format(t) !== local.format(t));
+            report(differ.length === 0 ? "agrees" : `${{zone}}: ${{differ.map((t) => named.format(t) + " vs " + local.format(t))}}`);
+            "#
+        );
+        for zone in ["UTC", "+08:00", "Asia/Tokyo"] {
+            let mut env = Environment::default();
+            env.locale_settings.time_zone = nsh_core::platform::TimeZone::parse(zone).unwrap();
+            host.set_environment(&env);
+            host.eval_source(&script).unwrap();
+        }
+        assert_eq!(reported(&host), ["agrees", "agrees", "agrees"]);
+    }
+
     /// `Intl` and the `toLocaleString`s format natively, in the device's
     /// locale by default.
     #[test]
-    fn intl_formats_numbers_and_dates() {
+    fn formats_numbers_and_dates() {
         let host = Host::new().unwrap();
+        // What a bundle listing these languages registers (`nsh:rt`'s
+        // `i18n`): the runtime has English only.
+        let mut languages = serde_json::Map::new();
+        for lang in ["de", "fr", "ja", "ko"] {
+            let data = nsh_i18n::language_data(lang).unwrap();
+            languages.insert(lang.into(), serde_json::from_str(data).unwrap());
+        }
+        host.cx
+            .with(|cx| crate::web::add_languages(cx.as_raw().as_ptr(), languages));
         host.eval_source(&format!(
             r#"{REPORT}
             report((1234567.891).toLocaleString());
@@ -2426,6 +2505,61 @@ const report = (v) => text(String(v));
     }
 
     #[test]
+    fn an_interrupt_inside_find_keeps_the_elements_alive() {
+        // An interrupt inside QuickJS's `find` family must not free the
+        // arrays' elements (quickjs-ng #1826), or a later call crashes the
+        // VM. `views[0]` and the second, offset run of each method make the
+        // interrupt land in the method itself.
+        let mut host = sandboxed(Limits {
+            call_budget: Duration::ZERO,
+            ..Limits::default()
+        });
+        let errors = Rc::new(RefCell::new(Vec::new()));
+        let seen = errors.clone();
+        host.set_error_handler(Box::new(move |e| seen.borrow_mut().push(e.message.clone())));
+        host.eval_source(
+            r#"import { element, prop } from "nsh:rt";
+            const methods = ["find", "findIndex", "findLast", "findLastIndex"];
+            globalThis.kept = methods.map(() => ({}));
+            globalThis.weak = kept.map((element) => new WeakRef(element));
+            globalThis.items = kept.map((element) => new Array(100000).fill(element));
+            const press = (handler) => {
+                const view = element("view");
+                prop(view, "onPress", handler);
+                return view;
+            };
+            const nothing = () => {};
+            globalThis.views = [press(() => { for (;;) {} })];
+            methods.forEach((method, i) => {
+                views.push(press(() => items[i][method](() => false)));
+                views.push(press(() => (nothing(), items[i][method](() => false))));
+            });"#,
+        )
+        .unwrap();
+        ops(&host);
+        // Views 2 (the loop), then 4 to 18: two per method.
+        for view in (4..=18).step_by(2) {
+            host.dispatch_event(2, EventKind::Press, &EventPayload::None);
+            host.dispatch_event(view, EventKind::Press, &EventPayload::None);
+        }
+        let errors = errors.borrow().clone();
+        assert_eq!(errors.len(), 16, "{errors:?}");
+        assert!(
+            errors.iter().all(|e| e.contains("budget of 0 ms")),
+            "{errors:?}"
+        );
+        // The arrays let their elements go; `kept` still holds them.
+        host.eval_source("items = null;").unwrap();
+        host.collect_garbage();
+        host.eval_source(&format!(
+            "{REPORT}report(weak.map((w, i) => w.deref() === kept[i]).join());"
+        ))
+        .unwrap();
+        assert_eq!(reported(&host), ["true,true,true,true"]);
+        assert!(host.fatal().is_none());
+    }
+
+    #[test]
     fn running_out_of_memory_stops_the_vm() {
         let host = sandboxed(Limits {
             memory_bytes: 16 << 20,
@@ -2519,17 +2653,7 @@ const report = (v) => text(String(v));
 
     #[test]
     fn hardened_vms_run_no_code_from_strings() {
-        // Hardened from source, and from the bytecode the CLI ships to
-        // runtimes without a parser.
-        let from_bytecode = Host::with_options(HostOptions {
-            harden: true,
-            harden_bytecode: Some(crate::compile_harden().unwrap().into()),
-            ..HostOptions::default()
-        })
-        .unwrap();
-        for host in [sandboxed(Limits::default()), from_bytecode] {
-            hardened_vm_runs_no_code_from_strings(&host);
-        }
+        hardened_vm_runs_no_code_from_strings(&sandboxed(Limits::default()));
     }
 
     fn hardened_vm_runs_no_code_from_strings(host: &Host) {
@@ -2764,6 +2888,36 @@ const report = (v) => text(String(v));
         assert!(err.message.contains("top level"), "{}", err.message);
         assert!(rejections(&logs::take()).is_empty());
         assert_eq!(host.pending_rejections(), 0);
+    }
+
+    #[test]
+    fn collecting_gives_back_the_graph_slots_of_a_tree_that_is_gone() {
+        let host = Host::new().unwrap();
+        let slots = |host: &Host| {
+            host.cx.with(|cx| {
+                // SAFETY: the host's state; no JS runs meanwhile.
+                unsafe { crate::reactive::graph(cx.as_raw().as_ptr()) }.slots()
+            })
+        };
+        host.collect_garbage();
+        let (_, before) = slots(&host);
+        host.eval_source(
+            r#"import { cond } from "nsh:rt";
+            import { computed, signal } from "nsh";
+            const shown = signal(true);
+            const branch = cond(() => shown(), () => {
+                for (let i = 0; i < 20000; i++) computed(() => i)();
+                return null;
+            });
+            branch();
+            globalThis.hide = () => { shown.set(false); branch(); };"#,
+        )
+        .unwrap();
+        assert!(slots(&host).1 >= before + 20000);
+        host.eval_script("hide.js", "hide();").unwrap();
+        host.collect_garbage();
+        let (_, after) = slots(&host);
+        assert!(after < before + 100, "{before} → {after} slots");
     }
 
     #[test]

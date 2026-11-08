@@ -1,11 +1,14 @@
 // A case of the API's test suite (docs/dev/compatibility.md): the
 // accessibility props of every element as the platform receives them on
 // iOS (the scripts' default platform): `accessible`, `accessibilityHint`,
-// `accessibilityState`, `accessibilityValue`, `accessibilityElementsHidden`,
+// `accessibilityState` (with `hasPopup`, a popup's trigger), `accessibilityValue`, `accessibilityElementsHidden`,
 // `accessibilityActions`, `importantForAccessibility`, which decides
 // `accessible` and hides the descendants for `"no-hide-descendants"`, and
 // the `"listbox"` and `"option"` roles of a select's popup, the chosen
-// option `selected`. Its script checks each.
+// option `selected`, and the structural roles of `nsh/base`'s accordions,
+// toolbars, paginations, trees and checkable menu items (`"group"`,
+// `"region"`, `"navigation"`, `"tree"`, `"treeitem"`, `"menuitemcheckbox"`,
+// `"menuitemradio"`). Its script checks each.
 import { Text, View } from "nsh";
 
 function App() {
@@ -18,6 +21,11 @@ function App() {
       <View
         testID="state"
         accessibilityState={{ disabled: true, checked: "mixed", expanded: false }}
+        style={{ height: 20 }}
+      />
+      <View
+        testID="popup-state"
+        accessibilityState={{ expanded: false, hasPopup: true }}
         style={{ height: 20 }}
       />
       <View
@@ -50,6 +58,14 @@ function App() {
           <Text>Banana</Text>
         </View>
       </View>
+      <View testID="role-group" role="group" style={{ height: 4 }} />
+      <View testID="role-region" role="region" style={{ height: 4 }} />
+      <View testID="role-navigation" role="navigation" style={{ height: 4 }} />
+      <View testID="role-tree" role="tree" style={{ height: 4 }}>
+        <View testID="role-treeitem" role="treeitem" accessibilityLevel={1} style={{ height: 4 }} />
+      </View>
+      <View testID="role-menuitemcheckbox" role="menuitemcheckbox" style={{ height: 4 }} />
+      <View testID="role-menuitemradio" role="menuitemradio" style={{ height: 4 }} />
       <View testID="plain" style={{ height: 20 }} />
     </View>
   );

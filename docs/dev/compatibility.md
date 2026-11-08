@@ -7,7 +7,7 @@ starting after an NSH update is a bug in NSH, never in the app.
 
 This page is the contract and how it is enforced. It holds from the first release recorded in
 `nsh-compat` ("Releasing") on, and for good, whatever the version number says; earlier versions made no promises.
-No release is recorded yet, 0.3.0 included: the first one recorded starts the contract.
+No release is recorded yet, 0.3.0 and 0.4.0 included: the first one recorded starts the contract.
 
 ## What apps depend on
 
@@ -19,6 +19,7 @@ No release is recorded yet, 0.3.0 included: the first one recorded starts the co
 | Host element props, events, style keys and their values | `crates/nsh-core/src/js/` (`Prop`, `host::EVENTS`, `style_keys!`) | bundles pass them by name; a prop renamed is silently ignored, so the app runs wrong |
 | Tailwind utilities and variants | `crates/nsh-core/src/tailwind/` | resolved at run time from the class strings in the bundle |
 | Behavior: defaults, units, event payloads, the order of callbacks | everywhere | an app relies on what it saw when it was written |
+| Failures: whether a call throws or rejects, the error's class and `code` (and `permission` / `resource` of `ERR_ACCESS_DENIED`) | `nsh_core::element::codes`, each call (`docs/dev/api-naming.md` "Failures") | an app catches and branches on them; error messages are for people and may change, so no app may depend on their text |
 | The TypeScript declarations (`.nsh/types`) | generated (`crates/nsh-js/src/declarations.rs`) | an old app's source must still type-check and build when its team fixes a bug |
 | The package format (`.nshpkg`) and its signatures | `crates/nsh-package` | a package signed for an earlier release still verifies; it carries its JS source, which runs when its bytecode is not this runtime's (`BYTECODE_VERSION` may change freely) |
 
@@ -45,7 +46,10 @@ good, whatever the version number says. Between releases, and before the first c
    pass in (props, styles, options, configs) gains optional members only. Parameter names are not part of a type:
    TypeScript compares function types by structure, so `(data: number) => void` and `(value: number) => void` are one
    type, and a function, method or callback may rename its parameters; their count, optionality and types may not
-   change.
+   change. A union gains members whichever way it goes: what apps read too (`platform.os`, a resource's state, the
+   reason a popup closed), as the DOM's types grow in TypeScript's own declarations. An app handles a value it does
+   not know (a `switch`'s `default`), and the checks count a member added to such a union as compatible. A new member
+   comes with a new case (a new platform, a new way to close); a case an app saw keeps the value it reported (rule 4).
 4. **Behavior is kept.** Defaults, units, coordinate spaces, the payload of an event and when it fires stay as they
    were. New behavior is opt-in, through a new prop, option or value. A bug fix that changes what a working app sees
    is a behavior change: fix it behind an opt-in, or make sure no app can rely on the old result.
@@ -56,6 +60,15 @@ good, whatever the version number says. Between releases, and before the first c
    ignores the header fields, files and capabilities a later release added (never granting what it does not know),
    unless the header's `critical` names them, so a package published with a lower minimum runtime
    (`nsh publish --min-runtime`) runs on the older runtimes it names ("Format evolution" in `nsh-package`).
+   `nsh.json` and what bundles carry from it hold both ways too: what a reader cannot read, a key it does not
+   know at any depth (`updater.channel`, a capability) or a value of a form it does not know (`"build": "7"`, a
+   tailwind color of a newer syntax), is a warning and is left out entry by entry, never an error, at build time
+   and at run time alike, and the rest applies: `nsh-cli`'s `package::parse_config` (unknown keys through
+   `serde_ignored`, values through `serde_path_to_error`, removed and read again), the
+   `from_json_lenient` of `tailwind::Theme`, `nsh_base::Theme` and `StatusBarSetting`,
+   `url_scheme::schemes_from_json_lenient`, the bundler's `resolve`, `Capabilities::from_json_lenient` (a capability or `http` grant it cannot read is not granted, so
+   nothing left out widens access). Only text that is no JSON object, a file `nsh.json` names that is missing,
+   NSH's own `Info.plist` keys and an Android `targetSdk` below the minimum are errors.
 7. **The only exception is security**: a capability that cannot be kept safe may be closed. A pull request of
    `nsh-compat` adds what it removes to that repository's `closed.txt`, each with its reason (`<entry> -- <reason>`,
    the entry as the checks report the break: `[<module>] <path>`, `<file>: <Name>`, `<file>: <Name>.<member>` or
@@ -115,7 +128,7 @@ The cases are grouped by domain (`base`, `core`, `events`, `layout`, `paint`, `p
 each. The domain's `App.tsx` imports every case and shows one at a time: the script taps `id:case-<case>` (one of the
 one-point views over the top left corner, out of the layout) and checks that case, then the next. What applies to a
 whole app has a domain of its own: the platform (`android`; `macos`, which also declares capabilities; `browser`, a
-desktop browser with the user's text size at 2) and `nsh.json`'s settings (the `layout` domain's theme spacing, the
+desktop browser with the user's text size at 2; `terminal`, the Terminal idiom on Linux) and `nsh.json`'s settings (the `layout` domain's theme spacing, the
 `base` domain's status bar). A case goes where its platform and settings are, and where they change nothing its
 neighbors check. An app whose `nsh.json` declares `capabilities` runs with the `capabilities.json` and `app.json` its
 build wrote and a new, empty data directory, so a script checks what a grant allows and what stays refused (the
@@ -160,10 +173,15 @@ screen, `absent <text>` checks one is gone, `tap id:<testID>` / `label:<label>` 
 nearest pressable ancestor; `span:<text>` the link or pressable span where `<text>` starts; `parent:<selector>` the
 view around the one it names, a component's popup by the app's content in it, and `below:<selector>` its sibling
 below it, a popup's backdrop), `wait <ms>` runs timers, and `viewport <w> <h>` and `platform <os>` (first) size the
-screen and pick the platform whose `ios={{…}}` / `android={{…}}` / `desktop={{…}}` / `web={{…}}` props apply, and
+screen and pick the platform whose `ios={{…}}` / `android={{…}}` / `macos={{…}}` / `desktop={{…}}` / `web={{…}}` props apply, and
 `fontscale <scale>` sets the user's text size. What a view looks like is checked as the platform receives it:
 `frame <selector> <x> <y> <width> <height>` (its layout, in points relative to its parent), `prop` / `noprop` (a host
-prop), `style` / `nostyle` (a paint or text style key), `listens` (an event the platform reports),
+prop), `style` / `nostyle` (a paint or text style key), `drawing` / `nodrawing` (an operation of a canvas's latest
+drawing, written as the canvas method or property apps use: `drawing id:chart strokeStyle #ff0000ff`; the SVG paint
+properties `fill`, `stroke`, `strokeWidth` and `strokeDasharray` show only there, in what a component draws),
+`animated` (what the animations bound to a view set on it now, the graph run as a platform runs it:
+`animated id:link opacity 0.4`; `opacity`, the colors, `transform.<i>` and a canvas's `slot.<i>`), `listens` (an
+event the platform reports),
 `statusbar <key>=<value>...` (the status bar the platform was last told to show: `foreground`, `hidden`, `animated`);
 `log <text>` checks a `console` line, and `covers <item>` is a claim, not a step. Other steps stand in for the
 platform's input: `event <selector> <onEvent> [<key>=<value>...]` reports an event with its payload keys as the

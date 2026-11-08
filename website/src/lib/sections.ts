@@ -1,4 +1,5 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
+import { isMachine } from './locales';
 import { url, type Lang } from './site';
 
 export type SectionId = 'docs' | 'elements' | 'modules';
@@ -41,7 +42,8 @@ export const SECTIONS: Section[] = [
  * Sidebar groups, by the `group` frontmatter key. A section's pages are
  * sorted by `order`, so a group is a run of consecutive pages; the Guide
  * uses them to give every platform its own entry next to the others. The
- * Elements' groups list their pages by name, in the order of this table.
+ * Elements' groups follow the order of this table: the primitives by
+ * `order`, from the simplest, the base components by name.
  */
 export const GROUPS: Record<string, Record<Lang, string>> = {
   start: { en: 'Start here', 'zh-CN': '入门' },
@@ -56,7 +58,9 @@ export const GROUPS: Record<string, Record<Lang, string>> = {
 
 export interface Page {
   section: SectionId;
-  lang: Lang;
+  lang: string;
+  /** Whether a machine locale's page has its translation; else it shows the English. */
+  translated: boolean;
   /** The file name without `.md`; `index` is the section's own page. */
   slug: string;
   title: string;
@@ -71,6 +75,8 @@ export interface Page {
   href: string;
   /** Source path relative to the website directory, e.g. `docs/index.md`. */
   filePath: string;
+  /** The file to edit: the page's own, or the English it was translated from. */
+  sourcePath: string;
   entry: CollectionEntry<any>;
 }
 
@@ -78,11 +84,34 @@ function collectionName(section: SectionId, lang: Lang) {
   return (lang === 'zh-CN' ? `zh-${section}` : section) as any;
 }
 
-export function routeOf(section: SectionId, slug: string, lang: Lang): string {
-  return `/${lang === 'zh-CN' ? 'zh-CN/' : ''}${section}${slug === 'index' ? '' : `/${slug}`}`;
+export function routeOf(section: SectionId, slug: string, lang: string): string {
+  return `/${lang === 'en' ? '' : `${lang}/`}${section}${slug === 'index' ? '' : `/${slug}`}`;
 }
 
-const cache = new Map<Lang, Promise<Page[]>>();
+const cache = new Map<string, Promise<Page[]>>();
+
+/** Every English page, in its translation where there is one. */
+async function loadMachine(locale: string): Promise<Page[]> {
+  const entries = new Map<string, CollectionEntry<any>>();
+  for (const section of SECTIONS) {
+    for (const entry of await getCollection(`${locale}-${section.id}` as any)) entries.set(`${section.id}/${entry.id}`, entry as CollectionEntry<any>);
+  }
+  return (await pages('en')).map((page) => {
+    const entry = entries.get(`${page.section}/${page.slug}`);
+    const route = routeOf(page.section, page.slug, locale);
+    return {
+      ...page,
+      lang: locale,
+      translated: !!entry,
+      route,
+      href: url(route),
+      title: entry?.data.title ?? page.title,
+      description: entry?.data.description ?? page.description,
+      filePath: (entry?.filePath ?? page.filePath).replace(/^\.\//, ''),
+      entry: entry ?? page.entry,
+    };
+  });
+}
 
 async function load(lang: Lang): Promise<Page[]> {
   const all: Page[] = [];
@@ -91,28 +120,31 @@ async function load(lang: Lang): Promise<Page[]> {
     // A Chinese page sorts by its English counterpart, so both locales list
     // the same pages in the same order whatever the translated titles are.
     const english = lang === 'en' ? entries : await getCollection(collectionName(section.id, 'en'));
-    // Elements list each group's pages by name (the primitives, then the
-    // base components); the other sections by `order`.
+    // Elements list their groups in the order of `GROUPS` (the primitives,
+    // then the base components); within a group, and in the other sections,
+    // pages sort by `order`, then by title. Base components have no `order`,
+    // so they list by name (`tests/elements.test.ts`).
     const groups = Object.keys(GROUPS);
     const key = (entry: CollectionEntry<any>) => {
       const source = english.find((e) => e.id === entry.id) ?? entry;
-      const order =
-        section.id === 'elements' && source.data.group
-          ? 1000 + groups.indexOf(source.data.group as string)
-          : (source.data.order ?? 999);
-      return { order, title: source.data.title as string };
+      return {
+        group: section.id === 'elements' ? groups.indexOf(source.data.group) : 0,
+        order: source.data.order ?? 999,
+        title: source.data.title as string,
+      };
     };
     const sorted = [...entries].sort((a, b) => {
       if (a.id === 'index' || b.id === 'index') return a.id === 'index' ? -1 : 1;
       const ka = key(a);
       const kb = key(b);
-      return ka.order - kb.order || ka.title.localeCompare(kb.title, 'en', { sensitivity: 'base' });
+      return ka.group - kb.group || ka.order - kb.order || ka.title.localeCompare(kb.title, 'en', { sensitivity: 'base' });
     });
     for (const entry of sorted) {
       const route = routeOf(section.id, entry.id, lang);
       all.push({
         section: section.id,
         lang,
+        translated: true,
         slug: entry.id,
         title: entry.data.title,
         description: entry.data.description,
@@ -122,6 +154,7 @@ async function load(lang: Lang): Promise<Page[]> {
         route,
         href: url(route),
         filePath: (entry.filePath ?? `${lang === 'zh-CN' ? 'zh-CN/' : ''}${section.id}/${entry.id}.md`).replace(/^\.\//, ''),
+        sourcePath: (entry.filePath ?? `${section.id}/${entry.id}.md`).replace(/^\.\//, ''),
         entry,
       });
     }
@@ -130,17 +163,17 @@ async function load(lang: Lang): Promise<Page[]> {
 }
 
 /** Every page of a locale: sections in navigation order, each sorted for its sidebar. */
-export function pages(lang: Lang): Promise<Page[]> {
+export function pages(lang: string): Promise<Page[]> {
   let pending = cache.get(lang);
   if (!pending) {
-    pending = load(lang);
+    pending = isMachine(lang) ? loadMachine(lang) : load(lang as Lang);
     cache.set(lang, pending);
   }
   return pending;
 }
 
 /** Where a section's link in the bar goes: its index page, else its first page. */
-export async function sectionHref(section: SectionId, lang: Lang): Promise<string> {
+export async function sectionHref(section: SectionId, lang: string): Promise<string> {
   const own = (await pages(lang)).find((page) => page.section === section);
   if (own) return own.href;
   // A section not translated yet falls back to the English one.
@@ -148,7 +181,7 @@ export async function sectionHref(section: SectionId, lang: Lang): Promise<strin
   return english?.href ?? url(`${lang === 'zh-CN' ? 'zh-CN/' : ''}${section}`);
 }
 
-export async function sectionHrefs(lang: Lang): Promise<Record<SectionId, string>> {
+export async function sectionHrefs(lang: string): Promise<Record<SectionId, string>> {
   const entries = await Promise.all(SECTIONS.map(async (s) => [s.id, await sectionHref(s.id, lang)] as const));
   return Object.fromEntries(entries) as Record<SectionId, string>;
 }

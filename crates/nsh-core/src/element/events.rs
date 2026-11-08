@@ -5,16 +5,20 @@ use std::{borrow::Cow, sync::Arc};
 
 use super::builder::Listener;
 use crate::{
-    Bounds, ContextMenuEvent, EventPayload, HoverEvent, JsonValue, PayloadValue, Point, Points,
-    Size, TouchEvent,
+    Bounds, ContextMenuEvent, EventPayload, JsonValue, MouseEvent, PayloadValue, Point, Points,
+    PressEvent, Size, TouchEvent,
     geometry::{DevicePixels, Radians},
 };
 
 /// Local files or directories dropped on an element (`on_file_drop`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub struct FileDropEvent {
     /// Absolute `file:` URLs in platform order; encoded filenames are preserved.
     pub uris: Vec<String>,
+    /// Where the files were let go, in the window's coordinates (TS:
+    /// `pagePosition`), on backends that know it (Linux).
+    pub page_position: Option<Point<Points>>,
 }
 
 /// A scroll view moved (`on_scroll`): the offset, and the sizes it moves in.
@@ -79,6 +83,19 @@ pub struct Selection {
     pub start: u32,
     /// End.
     pub end: u32,
+}
+
+/// The selection of a selectable view changed
+/// ([`Interactive::on_text_selection_change`](super::Interactive::on_text_selection_change)).
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct TextSelectionEvent {
+    /// The selected text, as a copy gives it; empty when nothing is
+    /// selected.
+    pub text: String,
+    /// Where it starts in the copy of the whole view (what a select all
+    /// would copy), in UTF-16 code units, when the platform knows it.
+    pub start: Option<u32>,
 }
 
 /// Where an input's caret is (`on_caret_move`): what opens at it (an `@`
@@ -170,6 +187,43 @@ pub struct OverlayPosition {
     pub bounds: Bounds<Points>,
     /// The room on that side, inside the safe area less the margin.
     pub available: Size<Points>,
+}
+
+/// Why a hint asks to show or hide (`Overlay::on_hint_show` /
+/// `on_hint_hide`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HintReason {
+    /// The pointer rested on its anchor, or left or pressed it.
+    #[default]
+    Pointer,
+    /// The keyboard focus came to its anchor, or left it.
+    Focus,
+    /// Escape was pressed while it was shown.
+    Escape,
+    /// It left the view.
+    View,
+}
+
+impl HintReason {
+    /// Its name in an event's payload.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Pointer => "pointer",
+            Self::Focus => "focus",
+            Self::Escape => "escape",
+            Self::View => "view",
+        }
+    }
+}
+
+pub(crate) fn hint_reason(p: &EventPayload) -> Option<Cow<'_, HintReason>> {
+    Some(Cow::Owned(match string(p, "reason") {
+        Some("focus") => HintReason::Focus,
+        Some("escape") => HintReason::Escape,
+        Some("view") => HintReason::View,
+        _ => HintReason::Pointer,
+    }))
 }
 
 /// A field of a map payload.
@@ -300,6 +354,18 @@ pub(crate) fn selection(p: &EventPayload) -> Option<Cow<'_, Selection>> {
     }))
 }
 
+/// The selection of a selectable view (`text`, `start`).
+pub(crate) fn selected_text(p: &EventPayload) -> Option<Cow<'_, TextSelectionEvent>> {
+    let start = match field(p, "start") {
+        Some(PayloadValue::Number(n)) if *n >= 0.0 => Some(*n as u32),
+        _ => None,
+    };
+    Some(Cow::Owned(TextSelectionEvent {
+        text: string(p, "text").unwrap_or_default().to_owned(),
+        start,
+    }))
+}
+
 pub(crate) fn paste(p: &EventPayload) -> Option<Cow<'_, crate::PasteEvent>> {
     match p {
         EventPayload::Paste(paste) => Some(Cow::Borrowed(paste)),
@@ -322,16 +388,21 @@ pub(crate) fn composition(p: &EventPayload) -> Option<Cow<'_, Composition>> {
 }
 
 pub(crate) fn size(p: &EventPayload) -> Option<Cow<'_, Size<Points>>> {
-    match *p {
-        EventPayload::Image(size) => Some(Cow::Owned(crate::geometry::size_pt(
-            size.width.0 as f32,
-            size.height.0 as f32,
-        ))),
-        _ => Some(Cow::Owned(crate::geometry::size_pt(
-            number(p, "width"),
-            number(p, "height"),
-        ))),
-    }
+    Some(Cow::Owned(crate::geometry::size_pt(
+        number(p, "width"),
+        number(p, "height"),
+    )))
+}
+
+/// An image's own size, in pixels.
+pub(crate) fn pixel_size(p: &EventPayload) -> Option<Cow<'_, Size<DevicePixels>>> {
+    Some(Cow::Owned(match *p {
+        EventPayload::Image(size) => size,
+        _ => Size::new(
+            DevicePixels(number(p, "width").round() as i32),
+            DevicePixels(number(p, "height").round() as i32),
+        ),
+    }))
 }
 
 pub(crate) fn scroll(p: &EventPayload) -> Option<Cow<'_, ScrollEvent>> {
@@ -356,14 +427,6 @@ pub(crate) fn offset(p: &EventPayload) -> Option<Cow<'_, Point<Points>>> {
     Some(Cow::Owned(match *p {
         EventPayload::Scroll(offset) => offset,
         _ => point_field(p, "offset"),
-    }))
-}
-
-/// `onMouseMove`'s payload: the mouse in the view, local `x` / `y`.
-pub(crate) fn mouse_position(p: &EventPayload) -> Option<Cow<'_, Point<Points>>> {
-    Some(Cow::Owned(Point {
-        x: Points(number(p, "x")),
-        y: Points(number(p, "y")),
     }))
 }
 
@@ -467,10 +530,22 @@ pub(crate) fn native(p: &EventPayload) -> Option<Cow<'_, NativeEvent>> {
     }
 }
 
-pub(crate) fn hover(p: &EventPayload) -> Option<Cow<'_, HoverEvent>> {
+/// `onMouseEnter`, `onMouseMove` and `onMouseLeave`'s payload; an event
+/// sent without one (an embedder's, a script's) still reaches the
+/// listener, at no known position.
+/// A press's (`on_press`, `on_long_press`, `on_press_down`,
+/// `on_press_up`): the default where the platform reported none.
+pub(crate) fn press(p: &EventPayload) -> Option<Cow<'_, PressEvent>> {
     match p {
-        EventPayload::Hover(e) => Some(Cow::Borrowed(e)),
-        _ => None,
+        EventPayload::Press(e) => Some(Cow::Borrowed(e)),
+        _ => Some(Cow::Owned(PressEvent::default())),
+    }
+}
+
+pub(crate) fn mouse(p: &EventPayload) -> Option<Cow<'_, MouseEvent>> {
+    match p {
+        EventPayload::Mouse(e) => Some(Cow::Borrowed(e)),
+        _ => Some(Cow::Owned(MouseEvent::default())),
     }
 }
 
@@ -483,7 +558,17 @@ pub(crate) fn context_menu(p: &EventPayload) -> Option<Cow<'_, ContextMenuEvent>
 
 pub(crate) fn file_drop(p: &EventPayload) -> Option<Cow<'_, FileDropEvent>> {
     match p {
-        EventPayload::FileDrop(uris) => Some(Cow::Owned(FileDropEvent { uris: uris.clone() })),
+        EventPayload::FileDrop(uris) => Some(Cow::Owned(FileDropEvent {
+            uris: uris.clone(),
+            page_position: None,
+        })),
+        EventPayload::FileDropAt {
+            uris,
+            page_position,
+        } => Some(Cow::Owned(FileDropEvent {
+            uris: uris.clone(),
+            page_position: Some(*page_position),
+        })),
         _ => None,
     }
 }

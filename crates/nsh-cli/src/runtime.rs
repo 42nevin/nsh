@@ -18,7 +18,9 @@
 //! runtime/android/release/             classes.dex + lib/<abi>/libnsh.so
 //! runtime/android/dev/                 the same with development support
 //! runtime/web/nsh.wasm                 the web runtime (`nsh-platform-web`)
+//!                                      (`nsh-browser.wasm`: linkable, `nsh package` links each app's from it)
 //! runtime/web/nsh.js                   the DOM runtime that loads it
+//! runtime/web/nsh-syntaxes.bin         the syntaxes it fetches to highlight code
 //! ```
 //!
 //! In a cargo checkout, the same files come from `target/<triple>/<profile>`
@@ -59,6 +61,8 @@ pub(crate) enum Platform {
     /// GPUI, on this machine (macOS, Windows or Linux): a development host
     /// only, as GPUI is the backend for embedding in GPUI apps.
     Gpui,
+    /// The terminal host on this machine.
+    Tui,
 }
 
 impl Platform {
@@ -71,6 +75,7 @@ impl Platform {
             Platform::MacOs => "macos",
             Platform::Windows => "windows",
             Platform::Gpui => "gpui",
+            Platform::Tui => "tui",
         }
     }
 
@@ -80,7 +85,13 @@ impl Platform {
             Platform::IphoneOs => Some("aarch64-apple-ios"),
             Platform::IphoneSimulator => Some("aarch64-apple-ios-sim"),
             Platform::MacCatalyst => Some("aarch64-apple-ios-macabi"),
-            Platform::Linux | Platform::MacOs | Platform::Windows | Platform::Gpui => None,
+            // Packaged off Windows: cross-built ([`cross_build`]).
+            Platform::Windows if !cfg!(windows) => Some(WINDOWS_TRIPLE),
+            Platform::Linux
+            | Platform::MacOs
+            | Platform::Windows
+            | Platform::Gpui
+            | Platform::Tui => None,
         }
     }
 
@@ -94,6 +105,8 @@ impl Platform {
             (Platform::MacOs, true) => "nsh-macos-app",
             (Platform::Windows, false) => "nsh-windows-host",
             (Platform::Windows, true) => "nsh-windows-app",
+            (Platform::Tui, false) => "nsh-tui-host",
+            (Platform::Tui, true) => "nsh-tui-app",
             (Platform::Gpui, false) => "nsh-gpui-host",
             (Platform::Gpui, true) => unreachable!("GPUI apps are embedded, never packaged"),
             (_, false) => "nsh-ios-host",
@@ -104,12 +117,7 @@ impl Platform {
     /// The file of [`Platform::binary`]: with this machine's executable
     /// suffix (`.exe`) when it is built for this machine.
     pub(crate) fn file_name(self, runner: bool) -> String {
-        let suffix = if self.triple().is_none() {
-            env::consts::EXE_SUFFIX
-        } else {
-            ""
-        };
-        format!("{}{suffix}", self.binary(runner))
+        format!("{}{}", self.binary(runner), exe_suffix(self.triple()))
     }
 
     /// The development host (`runner` false) or release runner for it, as
@@ -128,6 +136,7 @@ impl Platform {
             Platform::MacOs => "macOS",
             Platform::Windows => "Windows",
             Platform::Gpui => "GPUI",
+            Platform::Tui => "the terminal",
         };
         format!("the {what} for {platform}")
     }
@@ -147,12 +156,13 @@ pub(crate) fn cli_exe() -> std::io::Result<PathBuf> {
 }
 
 /// The Android runtime directory (`classes.dex`, `lib/<abi>/libnsh.so`),
-/// with development support or not.
-pub(crate) fn android(dev: bool) -> anyhow::Result<PathBuf> {
+/// with development support or not; a Rust app's library is built for
+/// `abis` (empty: every ABI of the prebuilt runtime).
+pub(crate) fn android(dev: bool, abis: &[String]) -> anyhow::Result<PathBuf> {
     let prebuilt = prebuilt_android(dev)?;
     match crate::rust_app::current() {
         // The app's own library with the prebuilt Java runtime.
-        Some(app) => app.android(&prebuilt, dev),
+        Some(app) => app.android(&prebuilt, dev, abis),
         None => Ok(prebuilt),
     }
 }
@@ -231,17 +241,99 @@ pub(crate) struct WebRuntime {
     /// through wasm-bindgen (`crate::bindgen`), served and packaged next to
     /// `nsh.js`.
     pub(crate) glue: Option<PathBuf>,
+    /// The syntaxes the module leaves out ([`SYNTAXES`]), which the page
+    /// fetches the first time code is highlighted.
+    pub(crate) syntaxes: Option<PathBuf>,
 }
 
-/// Which web runtime: the two differ in QuickJS only.
+/// The file of the syntaxes the web runtime leaves out of `nsh.wasm`:
+/// two-face's dump of bat's, which `nsh-base` embeds on the native
+/// platforms. It sits next to the module of the build that made it.
+pub(crate) const SYNTAXES: &str = "nsh-syntaxes.bin";
+
+/// The syntaxes file of the runtime in `dir`, if it has one.
+pub(crate) fn syntaxes_in(dir: &Path) -> Option<PathBuf> {
+    Some(dir.join(SYNTAXES)).filter(|path| path.exists())
+}
+
+/// Writes [`SYNTAXES`] into `dir`: two-face's dump as the workspace of
+/// `manifest` resolves it, so it matches the syntect the runtime built
+/// there reads it with. A copy written after the workspace's lock file last
+/// changed is kept: the resolution is the same, and `cargo metadata` takes
+/// longer than an incremental build of a development runtime.
+pub(crate) fn write_syntaxes(manifest: &Path, dir: &Path) -> anyhow::Result<PathBuf> {
+    let to = dir.join(SYNTAXES);
+    let modified = |path: &Path| fs::metadata(path).and_then(|m| m.modified()).ok();
+    if let (Some(copy), Some(lock)) = (
+        modified(&to),
+        modified(&manifest.with_file_name("Cargo.lock")),
+    ) && copy > lock
+    {
+        return Ok(to);
+    }
+    let package = package_dir(manifest, "two-face", None)?;
+    let dump = package.join("generated/syntaxes-fancy-newlines.bin");
+    // Written, not copied: a copy may keep the source's time, which is
+    // what tells this copy's age.
+    let bytes = fs::read(&dump).with_context(|| format!("read {}", dump.display()))?;
+    fs::write(&to, bytes).with_context(|| format!("write {}", to.display()))?;
+    Ok(to)
+}
+
+/// The directory of package `name` (at `version`, when given) in the
+/// workspace of `manifest`, as `cargo metadata` resolves it.
+pub(crate) fn package_dir(
+    manifest: &Path,
+    name: &str,
+    version: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .args(["metadata", "--format-version", "1", "--manifest-path"])
+        .arg(manifest)
+        .output()
+        .context("run cargo metadata")?;
+    if !output.status.success() {
+        bail!(
+            "cargo metadata of {}:\n{}",
+            manifest.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("cargo metadata's output")?;
+    let mut found = metadata["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["name"].as_str() == Some(name))
+        .filter(|p| version.is_none_or(|v| p["version"].as_str() == Some(v)));
+    let package = found.next();
+    if found.next().is_some() {
+        bail!("{} resolves several versions of {name}", manifest.display());
+    }
+    package
+        .and_then(|p| {
+            Path::new(p["manifest_path"].as_str()?)
+                .parent()
+                .map(Path::to_path_buf)
+        })
+        .with_context(|| match version {
+            Some(version) => format!("{} resolves no {name} {version}", manifest.display()),
+            None => format!("{} resolves no {name}", manifest.display()),
+        })
+}
+
+/// Which web runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebKind {
-    /// Published apps' (`nsh package --target web`): without QuickJS'
-    /// parser (feature `bytecode-only`), it runs the bytecode the CLI
-    /// compiled. `nsh.wasm`.
-    Release,
+    /// Published apps': every part of `nsh/base` and every standard
+    /// module, linkable (feature `linkable`): `nsh package` drops what the
+    /// app does not use (`web/prune.rs`). `nsh-browser.wasm`.
+    Browser,
     /// The development host's (`nsh dev`, `nsh run --target web`): it runs
-    /// JS source and hot updates. `nsh-dev.wasm`.
+    /// development bundles on the browser's JavaScript engine, with hot
+    /// updates. `nsh-dev.wasm`.
     Dev,
 }
 
@@ -250,10 +342,23 @@ impl WebKind {
     /// next to the build's output.
     pub(crate) fn file(self) -> &'static str {
         match self {
-            WebKind::Release => "nsh.wasm",
+            WebKind::Browser => "nsh-browser.wasm",
             WebKind::Dev => "nsh-dev.wasm",
         }
     }
+
+    /// The features `nsh-platform-web` is built with for it.
+    pub(crate) fn features(self) -> &'static [&'static str] {
+        match self {
+            WebKind::Browser => &["--no-default-features", "--features", "browser,linkable"],
+            WebKind::Dev => &["--no-default-features", "--features", "dev"],
+        }
+    }
+}
+
+/// The web runtime `nsh package` links an app's from ([`WebKind::Browser`]).
+pub(crate) fn package_web() -> anyhow::Result<WebRuntime> {
+    web(WebKind::Browser, true)?.context("no web runtime")
 }
 
 /// The web runtime ([`WebRuntime`]) of `kind`. In a checkout it is built
@@ -279,6 +384,7 @@ pub(crate) fn web(kind: WebKind, build: bool) -> anyhow::Result<Option<WebRuntim
             wasm: dir.join(kind.file()),
             js: dir.join("nsh.js"),
             glue: None,
+            syntaxes: syntaxes_in(&dir),
         };
         (runtime.wasm.exists() && runtime.js.exists()).then_some(runtime)
     };
@@ -309,10 +415,7 @@ pub(crate) fn web(kind: WebKind, build: bool) -> anyhow::Result<Option<WebRuntim
         .context("cli is not in a target directory")?
         .join(WASM)
         .join("web");
-    let features: &[&str] = match kind {
-        WebKind::Release => &["--features", "bytecode-only"],
-        WebKind::Dev => &["--features", "dev"],
-    };
+    let features = kind.features();
     if build {
         let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
         let mut command = Command::new(&cargo);
@@ -322,7 +425,8 @@ pub(crate) fn web(kind: WebKind, build: bool) -> anyhow::Result<Option<WebRuntim
             .args(["--target", WASM])
             .current_dir(&root);
         web_build_flags(&mut command);
-        // QuickJS' archive needs an `ar` that knows WebAssembly objects.
+        // The C code of the dependencies (zstd) needs an `ar` that knows
+        // WebAssembly objects.
         let ar = format!("AR_{}", WASM.replace('-', "_"));
         if env::var_os(&ar).is_none() && env::var_os("AR").is_none() {
             command.env(&ar, "llvm-ar");
@@ -332,11 +436,13 @@ pub(crate) fn web(kind: WebKind, build: bool) -> anyhow::Result<Option<WebRuntim
         let built = out.join("nsh_platform_web.wasm");
         fs::copy(&built, out.join(kind.file()))
             .with_context(|| format!("copy {}", built.display()))?;
+        write_syntaxes(&root.join("Cargo.toml"), &out)?;
     }
     let runtime = WebRuntime {
         wasm: out.join(kind.file()),
         js: root.join("crates/nsh-platform-web/web/nsh.js"),
         glue: None,
+        syntaxes: syntaxes_in(&out),
     };
     if runtime.wasm.exists() {
         return Ok(Some(runtime));
@@ -381,19 +487,17 @@ pub(crate) fn file(platform: Platform, runner: bool) -> anyhow::Result<PathBuf> 
     }
     // Cargo checkout: target/<profile>/nsh -> target/<triple>/<profile>/<name>.
     let profile = bin.file_name().context("cli profile dir")?;
+    let mut host_target = None;
     if let Some(root) = checkout(bin) {
         let mut args = vec!["build", "-p", name];
-        // The GPUI backend is a workspace of its own, built into the same
-        // `target/` (cargo reads `crates/gpui/.cargo/config.toml` only when
-        // run from there).
-        let manifest = root.join("crates/gpui/Cargo.toml");
-        let manifest = manifest.to_string_lossy();
-        let target_dir = root.join("target");
-        let target_dir = target_dir.to_string_lossy();
-        if matches!(platform, Platform::Gpui) {
-            args.extend(["--manifest-path", &manifest, "--target-dir", &target_dir]);
+        // GPUI has its own workspace. Run there so Cargo reads its config,
+        // and ask Cargo where it builds rather than imposing the CLI's target.
+        let workspace = if matches!(platform, Platform::Gpui) {
             args.extend(gpui_features());
-        }
+            root.join("crates/gpui")
+        } else {
+            root.clone()
+        };
         if let Some(triple) = platform.triple() {
             args.extend(["--target", triple]);
         }
@@ -410,18 +514,60 @@ pub(crate) fn file(platform: Platform, runner: bool) -> anyhow::Result<PathBuf> 
             Some(other) => format!("{} ({other} build)", platform.host(runner)),
             None => platform.host(runner),
         };
-        cargo(&root, &args, &what)?;
+        cargo(&workspace, &args, &what)?;
+        if matches!(platform, Platform::Gpui) {
+            host_target = Some(
+                crate::rust_app::cargo_target_directory(&workspace)
+                    .context("Cargo did not report the GPUI workspace's target directory")?,
+            );
+        }
     }
-    let mut built = bin
-        .parent()
-        .context("cli is not in a target directory")?
-        .to_path_buf();
+    let mut built = host_target.unwrap_or(
+        bin.parent()
+            .context("cli is not in a target directory")?
+            .to_path_buf(),
+    );
     if let Some(triple) = platform.triple() {
         built.push(triple);
     }
     built.push(profile);
-    built.push(file_name);
-    existing(built, platform, name)
+    built.push(&file_name);
+    let built = existing(built, platform, name)?;
+    match checkout(bin) {
+        Some(root) if cfg!(target_os = "macos") && platform.triple().is_none() => stable_copy(
+            &built,
+            &root.join(".nsh/hosts").join(profile).join(&file_name),
+        ),
+        _ => Ok(built),
+    }
+}
+
+/// A copy of the executable `built` at `copy` that changes only when the
+/// build does. Every `cargo build`, even one with nothing to do, links the
+/// binary into `target/<profile>/` again, and macOS checks an executable whose
+/// file changed again the first time it runs: a second or more for a debug
+/// host, on every `nsh run`. The copy keeps its file until the build is new
+/// (its modification time or size differ); on APFS the copy is a clone.
+fn stable_copy(built: &Path, copy: &Path) -> anyhow::Result<PathBuf> {
+    let source = fs::metadata(built).with_context(|| format!("read {}", built.display()))?;
+    let fresh = fs::metadata(copy).is_ok_and(|copied| {
+        copied.len() == source.len() && copied.modified().ok() == source.modified().ok()
+    });
+    if !fresh {
+        if let Some(dir) = copy.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        }
+        // A new file rather than one written over: a running host keeps its own.
+        let _ = fs::remove_file(copy);
+        fs::copy(built, copy).with_context(|| format!("copy {}", built.display()))?;
+        let modified = source.modified().context("modification time")?;
+        fs::File::options()
+            .write(true)
+            .open(copy)
+            .and_then(|file| file.set_modified(modified))
+            .with_context(|| format!("stamp {}", copy.display()))?;
+    }
+    Ok(copy.to_path_buf())
 }
 
 /// The cargo arguments a build of a GPUI host adds: on a Mac
@@ -490,11 +636,57 @@ fn append_web_flags(command: &mut Command, encoded: Option<OsString>, plain: Opt
     }
 }
 
+/// The Windows target a Windows runtime is cross-built for off Windows.
+pub(crate) const WINDOWS_TRIPLE: &str = "x86_64-pc-windows-msvc";
+
+/// The executable suffix of a build for `triple` (`None`: this machine).
+pub(crate) fn exe_suffix(triple: Option<&str>) -> &'static str {
+    match triple {
+        None => env::consts::EXE_SUFFIX,
+        Some(triple) if triple.contains("-windows-") => ".exe",
+        Some(_) => "",
+    }
+}
+
+/// Sets up `cmd` (`cargo` with no arguments yet) to build for `triple`.
+/// A Windows (MSVC) build off Windows links with cargo-xwin, whose
+/// `cargo xwin build` takes the same arguments as `cargo build`, and links
+/// the C runtime statically so the executable needs no Visual C++
+/// redistributable on the machine it runs on.
+pub(crate) fn cross_build(cmd: &mut Command, triple: Option<&str>) -> anyhow::Result<()> {
+    if cfg!(windows) || triple != Some(WINDOWS_TRIPLE) {
+        return Ok(());
+    }
+    let program = cmd.get_program().to_owned();
+    let found = Command::new(&program)
+        .args(["xwin", "--version"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !found {
+        bail!(
+            "building for Windows on this machine needs cargo-xwin and the {WINDOWS_TRIPLE} target:\n  cargo install --locked cargo-xwin\n  rustup target add {WINDOWS_TRIPLE}\nor set NSH_RUNTIME to a runtime with a Windows release runner"
+        );
+    }
+    cmd.arg("xwin").env(
+        "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS",
+        "-C target-feature=+crt-static",
+    );
+    Ok(())
+}
+
 /// Runs cargo in the checkout `root` (the one that runs this CLI under
 /// `cargo run`, else `cargo` from the path): the step "building <what>".
 fn cargo(root: &Path, args: &[&str], what: &str) -> anyhow::Result<()> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    crate::ui::cargo(Command::new(&cargo).args(args).current_dir(root), what)
+    let mut cmd = Command::new(&cargo);
+    let triple = args
+        .iter()
+        .position(|arg| *arg == "--target")
+        .and_then(|i| args.get(i + 1).copied());
+    cross_build(&mut cmd, triple)?;
+    crate::ui::cargo(cmd.args(args).current_dir(root), what)
 }
 
 fn existing(path: PathBuf, platform: Platform, name: &str) -> anyhow::Result<PathBuf> {
@@ -512,9 +704,60 @@ fn existing(path: PathBuf, platform: Platform, name: &str) -> anyhow::Result<Pat
     )
 }
 
+/// The browser facade ships with the runtime, including registry-built apps.
+pub(crate) fn copy_browser_host(source: &Path, target: &Path) -> anyhow::Result<()> {
+    let from = source.join("browser");
+    let to = target.join("browser");
+    fs::create_dir_all(&to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|ext| ext == "js" || ext == "txt")
+        {
+            fs::copy(entry.path(), to.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::Platform;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stable_copy_changes_only_with_the_build() {
+        use std::{fs, os::unix::fs::MetadataExt as _};
+        let dir = std::env::temp_dir().join(format!("nsh-stable-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let built = dir.join("host");
+        let copy = dir.join("copies/host");
+        fs::write(&built, b"one").unwrap();
+        super::stable_copy(&built, &copy).unwrap();
+        let first = fs::metadata(&copy).unwrap().ino();
+        // What cargo does with nothing to rebuild: the same file linked again.
+        fs::hard_link(&built, dir.join("again")).unwrap();
+        super::stable_copy(&built, &copy).unwrap();
+        assert_eq!(fs::metadata(&copy).unwrap().ino(), first);
+        fs::remove_file(&built).unwrap();
+        fs::write(&built, b"three").unwrap();
+        super::stable_copy(&built, &copy).unwrap();
+        assert_eq!(fs::read(&copy).unwrap(), b"three");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn published_runtime_variants_use_browser_execution() {
+        use super::WebKind;
+        assert_eq!(
+            WebKind::Browser.features(),
+            ["--no-default-features", "--features", "browser,linkable"]
+        );
+        assert_eq!(WebKind::Browser.file(), "nsh-browser.wasm");
+    }
 
     #[test]
     fn web_entropy_flags_preserve_existing_rustflags() {
@@ -568,5 +811,38 @@ mod tests {
             format!("nsh-gpui-host{}", std::env::consts::EXE_SUFFIX)
         );
         assert_eq!(Platform::Gpui.host(false), "the development host for GPUI");
+    }
+
+    /// A rebuild of a development runtime keeps the syntaxes it has rather
+    /// than asking `cargo metadata` again, until the lock file changes.
+    #[test]
+    fn syntaxes_newer_than_the_lock_file_are_kept() {
+        use std::{
+            fs,
+            time::{Duration, SystemTime},
+        };
+
+        let dir = std::env::temp_dir().join(format!("nsh-syntaxes-kept-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let touch = |name: &str, contents: &str, secs: u64| {
+            let path = dir.join(name);
+            fs::write(&path, contents).unwrap();
+            let time = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(time)
+                .unwrap();
+        };
+        // No workspace there: asking `cargo metadata` about it fails.
+        let manifest = dir.join("Cargo.toml");
+        touch("Cargo.lock", "", 1_000);
+        touch(super::SYNTAXES, "kept", 2_000);
+        let path = super::write_syntaxes(&manifest, &dir).unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "kept");
+        touch("Cargo.lock", "", 3_000);
+        assert!(super::write_syntaxes(&manifest, &dir).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

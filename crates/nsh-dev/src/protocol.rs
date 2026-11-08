@@ -117,6 +117,8 @@ pub enum HostPlatform {
     Web,
     /// The GPUI host (macOS, Windows, Linux).
     Gpui,
+    /// The terminal host (macOS, Windows, Linux).
+    Tui,
     /// A platform this version does not know.
     #[serde(other)]
     Other,
@@ -135,6 +137,24 @@ pub struct TestEnvironment {
     /// The locale, a BCP 47 tag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locale: Option<String>,
+    /// The time zone, an IANA name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
+    /// The preferred languages, BCP 47 tags, most preferred first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub languages: Option<Vec<String>>,
+    /// The hour cycle, as `Intl` names it (`h23`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hour_cycle: Option<String>,
+    /// The first day of the week: 1 for Monday to 7 for Sunday.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_day_of_week: Option<u8>,
+    /// The measurement system: `metric`, `us` or `uk`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement_system: Option<String>,
+    /// The temperature unit: `celsius` or `fahrenheit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature_unit: Option<String>,
     /// Whether the user asked for less motion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reduced_motion: Option<bool>,
@@ -159,6 +179,27 @@ pub struct TestEnvironment {
     /// the embedding app's, which the test plays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_params: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Whether the app's sockets and WebSockets reach the host's network
+    /// (`open`'s `network: "live"`); otherwise the host refuses them, as
+    /// the test fails requests no route answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_network: Option<bool>,
+    /// The idiom the app starts in, in place of the one the host measures:
+    /// `"desktop"` for `open`'s desktop `platform`. Only the web's page
+    /// measures one (`nsh.js`'s `idiom` option); the desktops are desktops
+    /// and iOS and Android their devices whatever this says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idiom: Option<TestIdiom>,
+}
+
+/// The idiom a test starts its app in ([`TestEnvironment::idiom`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TestIdiom {
+    /// A desktop: a mouse that hovers, keyboard shortcuts, desktop popups
+    /// and scroll bars.
+    Desktop,
 }
 
 /// How a test moves its app's manual clock ([`TestEnvironment::clock`];
@@ -287,6 +328,10 @@ pub enum ServerMessage {
         /// data.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         app_id: Option<String>,
+        /// The main window's launch-time options (`nsh.json` `"window"`,
+        /// JSON): `nsh_engine::Bundle::with_main_window` reads them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<String>,
         /// The VM limits to run the app with, as an embedding app would
         /// set them (`nsh run --limits`, in `nsh_core::js::HostLimits`'
         /// syntax: `memory=128MB,call=500ms`; empty: the embedding
@@ -317,6 +362,27 @@ impl TestFile {
             data,
         }
     }
+}
+
+/// A character's resolved style, as [`TestStep::SpanStyle`] answers it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[non_exhaustive]
+pub struct SpanStyle {
+    /// Its text color, `0xRRGGBBAA`.
+    pub color: u32,
+    /// The color of the background a nested text's `backgroundColor` gives
+    /// it.
+    pub background: Option<u32>,
+    /// Its font size, in points.
+    pub font_size: f32,
+    /// Its font weight (400 regular, 700 bold).
+    pub font_weight: u16,
+    /// Whether it is italic.
+    pub italic: bool,
+    /// Whether it is underlined.
+    pub underline: bool,
+    /// Whether it is struck through.
+    pub line_through: bool,
 }
 
 /// A step of a test on a host's app, named as `nsh/test` names them: views
@@ -433,6 +499,34 @@ pub enum TestStep {
         /// The keystroke: `"mod+k"`, `"escape"`.
         keys: String,
     },
+    /// Holds modifier keys down, or lets go of them, for the pointer's
+    /// steps until then (`app.keyboard.down` / `up`).
+    HoldKeys {
+        /// The modifiers: `"mod"`, `"shift"`, `"alt"`, `"ctrl"`, `"meta"`,
+        /// joined by `+`.
+        keys: String,
+        /// Whether they go down (else up).
+        down: bool,
+    },
+    /// Drags as `Drag` does and keeps the pointer down
+    /// (`app.dragAndHold`), until `Drop`.
+    DragAndHold {
+        /// What to drag.
+        selector: String,
+        /// Rightwards.
+        x: f32,
+        /// Downwards.
+        y: f32,
+    },
+    /// Lets go of the pointer `DragAndHold` left down (`app.drop`).
+    Drop,
+    /// Drops local files on a view (`app.dropFiles`).
+    DropFiles {
+        /// Where.
+        selector: String,
+        /// Their `file:` URLs.
+        uris: Vec<String>,
+    },
     /// Goes back as the user does (`app.back`).
     Back,
     /// Lets the app run (`app.wait`).
@@ -446,7 +540,10 @@ pub enum TestStep {
         /// How.
         change: ClockChange,
     },
-    /// Waits until a view matches, or none does (`app.waitFor`).
+    /// Waits until a view matches, or none does (`app.waitFor`). On a
+    /// manual clock ([`TestEnvironment::clock`]) the wait moves it, a
+    /// display frame at a time, looking after each frame, by `timeout_ms`
+    /// at most, and fails once as much real time passed too.
     WaitFor {
         /// The view.
         selector: String,
@@ -460,6 +557,14 @@ pub enum TestStep {
     NextChange {
         /// Milliseconds at most.
         timeout_ms: u64,
+    },
+    /// What polling a condition waits for between looks on a manual clock
+    /// (`app.waitUntil`): moves the clock by `ms` (a display frame), then
+    /// waits for the next batch a moment; as [`TestStep::NextChange`] on
+    /// the system's clock.
+    NextFrame {
+        /// Milliseconds the clock moves by.
+        ms: u64,
     },
     /// The texts on screen, in order: a list of strings.
     Texts,
@@ -483,6 +588,12 @@ pub enum TestStep {
         /// The selector.
         selector: String,
     },
+    /// The style of the first character `selector` names
+    /// (`app.spanStyle`): a [`SpanStyle`].
+    SpanStyle {
+        /// The selector.
+        selector: String,
+    },
     /// The dialogs the app showed, in order (`app.dialogs`): a list of
     /// `nsh_core::Dialog`s.
     Dialogs,
@@ -494,8 +605,8 @@ pub enum TestStep {
         /// The button's text (`None`: close it without one).
         button: Option<String>,
     },
-    /// A picture of the app's window: a PNG, base64-encoded (the test's
-    /// side saves it: the host may run on another machine).
+    /// A picture of the app, base64-encoded: PNG on graphical targets, UTF-8
+    /// Cell JSON on the terminal target. The test's side saves these bytes.
     Screenshot,
     /// Makes the window `width` × `height` points (`app.setViewport`).
     SetViewport {
@@ -514,6 +625,27 @@ pub enum TestStep {
     },
     /// Closes the app: the host exits.
     Quit,
+    /// The state of the app's window `id` as the platform reports it
+    /// (`app.window(id).state()`): a `WindowState` object, `null` while it
+    /// is not open. Desktops.
+    WindowState {
+        /// The app's id for the window (`"main"`: the main window).
+        id: String,
+    },
+    /// Presses the close button of the app's window `id` as the user does
+    /// (`app.window(id).pressClose()`): the platform reports the press and
+    /// closes the window when its `closeOnPress` lets it. Desktops.
+    PressWindowClose {
+        /// The app's id for the window (`"main"`: the main window).
+        id: String,
+    },
+    /// A picture of the app's window `id` (`app.window(id).screenshot()`):
+    /// PNG of its content, base64-encoded, as [`TestStep::Screenshot`] is
+    /// of the main window. Desktops.
+    WindowScreenshot {
+        /// The app's id for the window (`"main"`: the main window).
+        id: String,
+    },
     /// A question about the host's model of the app or about its views,
     /// from a test agent that runs elsewhere (the web: `nsh` acts through
     /// the browser, the page knows the app).
@@ -542,6 +674,13 @@ pub enum SceneQuery {
     /// The scroll views around view `id`, innermost first.
     ScrollAncestors {
         /// The view.
+        id: u32,
+    },
+    /// The views inside scroll view `id` that take a finger's drag
+    /// themselves (responders, pans), where a step's scrolling does not
+    /// land.
+    DragTakers {
+        /// The scroll view.
         id: u32,
     },
     /// View `id`'s long press delay in milliseconds, if it says.
@@ -600,6 +739,16 @@ pub enum SceneQuery {
         /// The view.
         id: u32,
     },
+    /// Where characters `start..end` (UTF-16 units) of text view `id` are
+    /// on screen, as [`SceneQuery::Bounds`]: their first box.
+    TextBounds {
+        /// The text view.
+        id: u32,
+        /// The first character.
+        start: u32,
+        /// After the last character.
+        end: u32,
+    },
     /// The viewport's size in points.
     Viewport,
     /// The text view showing span `id` (a nested text that takes presses)
@@ -630,7 +779,8 @@ pub enum SceneQuery {
         /// The view.
         id: u32,
     },
-    /// Whether a native animation runs.
+    /// Whether a native animation runs that ends by itself (not one
+    /// looping forever).
     Animating,
     /// Where to press to answer the dialog shown: its button `button`, or
     /// outside it (`None`).
@@ -888,6 +1038,7 @@ mod tests {
             source_map: true,
             capabilities: None,
             app_id: None,
+            window: None,
             limits: None,
         };
         // No declaration: the field is left out (older hosts read the same).

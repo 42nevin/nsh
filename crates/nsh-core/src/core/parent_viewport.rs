@@ -173,7 +173,8 @@ impl<M: TextEngine> Core<M> {
                 .as_ref()
                 .is_some_and(|s| s.refreshing);
             let flags = match (parent, refreshing) {
-                (true, _) => dirty::VIEW,
+                // Its children are read in screen order (`ViewProps::screen_order`).
+                (true, _) => dirty::VIEW | dirty::VIEW_PROPS,
                 (false, false) => dirty::VIEW | dirty::SCROLL,
                 (false, true) => dirty::VIEW | dirty::SCROLL | dirty::REFRESHING,
             };
@@ -350,6 +351,34 @@ impl<M: TextEngine> Core<M> {
         })
     }
 
+    /// The native scroll view's own and nested lists' ranges, plus CSS
+    /// sticky views. Remount replays the same data without restacking.
+    pub(super) fn sticky_ranges(&self, view: Key) -> Vec<StickyRange> {
+        let node = &self.nodes[view as usize];
+        // A parent-viewport list mounts as a plain view. Its scroll view
+        // receives these ranges through `dependents` below.
+        if node.list.as_ref().is_some_and(|list| list.parent) {
+            return Vec::new();
+        }
+        let Some(scroll) = node.scroll.as_ref() else {
+            return Vec::new();
+        };
+        let mut all: Vec<StickyRange> = node
+            .list
+            .as_ref()
+            .map(|l| l.sent_sticky.clone())
+            .unwrap_or_default();
+        for &d in &scroll.dependents {
+            if let Some(list) = self.nodes[d as usize].list.as_ref() {
+                all.extend_from_slice(&list.sent_sticky);
+            }
+        }
+        // And its `position: sticky` views'.
+        all.extend_from_slice(&scroll.view_sticky);
+        all.sort_by_key(|r| r.cell);
+        all
+    }
+
     /// Sends each view in `sticky_views` its sticky cells: its lists' in
     /// its viewport, its own when it is a list, and its sticky views'
     /// ([`super::sticky`]).
@@ -364,19 +393,7 @@ impl<M: TextEngine> Core<M> {
             let Some(scroll) = node.scroll.as_ref() else {
                 continue;
             };
-            let mut all: Vec<StickyRange> = node
-                .list
-                .as_ref()
-                .map(|l| l.sent_sticky.clone())
-                .unwrap_or_default();
-            for &d in &scroll.dependents {
-                if let Some(list) = self.nodes[d as usize].list.as_ref() {
-                    all.extend_from_slice(&list.sent_sticky);
-                }
-            }
-            // And its `position: sticky` views'.
-            all.extend_from_slice(&scroll.view_sticky);
-            all.sort_by_key(|r| r.cell);
+            let all = self.sticky_ranges(view);
             if all == scroll.page_sticky {
                 continue;
             }
@@ -666,7 +683,7 @@ impl<M: TextEngine> Core<M> {
             {
                 bits |= ignored::BEHAVIOR;
             }
-            if !scroll.scrollbar_visible {
+            if scroll.scrollbar != crate::ScrollbarSetting::Shown {
                 bits |= ignored::SCROLLBAR;
             }
         }
@@ -697,9 +714,10 @@ const AROUND: &str = "the scroll view around the list scrolls it";
 const OWN: &str = "it needs a scroll view of its own (viewport=\"own\")";
 
 /// What each [`ignored`] bit stands for, and why.
-const IGNORED: [(u16, &str, &str); 7] = [
+const IGNORED: [(u16, &str, &str); 8] = [
     (ignored::INVERTED, "`inverted`", OWN),
     (ignored::FOLLOW_END, "`maintainVisibleContentPosition`", OWN),
+    (ignored::ALIGNMENT, "`alignment`", OWN),
     (
         ignored::ON_SCROLL,
         "`onScroll` and the other scroll events",

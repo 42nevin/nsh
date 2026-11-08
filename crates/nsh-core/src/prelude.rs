@@ -2,8 +2,6 @@
 
 // Components that run once: signals, bindings, control flow; what they
 // read of the surface and ask of the platform.
-#[cfg(not(target_arch = "wasm32"))]
-pub use crate::element::ambient::{background, blocking};
 pub use crate::element::{
     AbsoluteLength,
     AccessibilityRole,
@@ -64,7 +62,7 @@ pub use crate::element::{
     FontAsset,
     FontWeight,
     GestureEvent,
-    HoverEvent,
+    HintReason,
     Hsla,
     // The network.
     HttpRequest,
@@ -94,9 +92,14 @@ pub use crate::element::{
     Later,
     LayoutDirection,
     Length,
+    ListAlignment,
     ListLayout,
     ListViewport,
     Listener,
+    MacOsBackdrop,
+    MacOsBackdropBlending,
+    MacOsBackdropMaterial,
+    MacOsBackdropState,
     Measurement,
     Method,
     Methods,
@@ -108,6 +111,8 @@ pub use crate::element::{
     MotionChannel,
     MotionPreset,
     MotionSpec,
+    MouseButton,
+    MouseEvent,
     NativeEvent,
     NativeView,
     NoEvent,
@@ -127,6 +132,7 @@ pub use crate::element::{
     PlaybackDirection,
     Point,
     PointerEvents,
+    PointerType,
     Points,
     Position,
     PressEvent,
@@ -147,6 +153,7 @@ pub use crate::element::{
     ScrollEvent,
     Scrollable,
     Selection,
+    ShaderView,
     SharedString,
     Size,
     Slot,
@@ -157,11 +164,14 @@ pub use crate::element::{
     StatusBarSetting,
     StatusBarStyle,
     StepPosition,
+    Stop,
     Styled,
     SubmitBehavior,
+    Svg,
     System,
     Task,
     Text,
+    TextSelectionEvent,
     TextShadow,
     Timing,
     Tokens,
@@ -191,6 +201,7 @@ pub use crate::element::{
     methods,
     module,
     native,
+    native_components,
     native_module,
     opaque_grey,
     overlay,
@@ -202,8 +213,14 @@ pub use crate::element::{
     rems,
     rgb,
     rgba,
+    screen_effect,
+    screen_transition,
     scroll,
+    shader,
+    shader_effect,
+    shader_transition,
     size,
+    svg,
     text,
     transparent_black,
     transparent_white,
@@ -214,21 +231,34 @@ pub use crate::element::{
     web_view_html,
     white,
 };
+/// Sound ([`crate::audio`]).
 pub use crate::element::{
-    Each, If, IntoElements, IntoReactive, Memo, Owner, Prop, Reactive, ReadSignal, Resource,
-    ResourceInfo, ResourceState, Scope, Signal, SignalEquals, Stored,
-    ambient::{
-        Delay, KeyOptions, Spawned, animate_layout, animated_value, announce_for_accessibility,
-        clipboard_files, clipboard_has_image, clipboard_has_string, clipboard_image,
-        clipboard_string, color, component_ref, dark, dismiss_keyboard, element_ref, fetch,
-        font_scale, global, idiom, image_size, is_desktop, key_label, keyboard_duration,
-        keyboard_height, locale, measure_text, motion, next_frame, on_back_press, on_key,
-        on_key_with, open_url, os, os_version, pick_images, pixel_ratio, prefetch_image,
-        reduce_motion, request_animation_frame, round_to_nearest_pixel, safe_area, screen_reader,
-        set_clipboard, set_clipboard_image, set_color_scheme, set_interval, set_timeout, spawn,
-        text_metrics, timer, timer_until, tokens, try_global, window,
-    },
-    batch, catch_error, cleanup, component, computed, dynamic, each, effect, engine_context,
-    provide_context, resource, resource_with_value, signal, signal_with, stored, untracked,
-    use_context, when,
+    AudioFailure, AudioPlayer, PlayerState, Sound, audio_available, audio_player, load_sound,
+};
+pub use crate::element::{
+    Delay, Each, If, IntoElements, IntoReactive, KeyOptions, Memo, Owner, Prop, Reactive,
+    ReadSignal, Resource, ResourceInfo, ResourceState, Scope, Signal, SignalEquals, Spawned,
+    Stored, after_answer, animate_layout, animated_value, announce_for_accessibility, apple_keys,
+    batch, can_pick_screen_color, catch_error, cleanup, clipboard_files, clipboard_has_image,
+    clipboard_has_string, clipboard_image, clipboard_string, close_notification, color, component,
+    component_ref, computed, dark, dismiss_keyboard, dynamic, each, effect, element_ref,
+    engine_context, fetch, font_scale, fps_enabled, global, idiom, image_size, is_catalyst,
+    is_desktop, key_label, keyboard_duration, keyboard_height, keystroke_label, lifecycle, locale,
+    locale_settings, measure_text, motion, move_to_trash, next_frame, next_notification_press,
+    next_url_scheme_open, notification_permission, on_back_press, on_key, on_key_with, open_path,
+    open_url, os, os_version, pick_files, pick_images, pick_paths, pick_save_path,
+    pick_screen_color, pixel_ratio, prefetch_image, provide_context, recognize_speech,
+    reduce_motion, register_font, request_animation_frame, request_notification_permission,
+    resource, resource_with_value, reveal_path, round_to_nearest_pixel, safe_area, screen_reader,
+    set_badge, set_clipboard, set_clipboard_image, set_color_scheme, set_fps_enabled, set_interval,
+    set_timeout, set_tokens, show_notification, signal, signal_with, spawn, speech_available,
+    stored, text_metrics, timer, timer_until, tokens, try_apple_keys, try_global, try_os,
+    untracked, use_context, watch_scroll, web_input_available, when, window,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use crate::element::{background, blocking};
+/// Translations ([`crate::i18n`]).
+pub use crate::{
+    i18n::{available_locales, set_locale},
+    t,
 };

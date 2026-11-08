@@ -11,6 +11,7 @@ use crossbeam_channel::Sender;
 use nsh_core::MountBatch;
 use nsh_engine::MountSink;
 
+mod assets;
 mod canvas;
 mod class_bench;
 mod clock;
@@ -39,6 +40,7 @@ mod logs;
 mod menu_lifetime;
 mod native;
 mod net;
+mod notifications;
 mod open_url;
 mod package;
 mod parity;
@@ -56,6 +58,7 @@ mod rust_renderers;
 mod rust_scrolling;
 mod rust_styles;
 mod rust_touch;
+mod shader;
 mod shutdown;
 mod split;
 mod storage;
@@ -63,6 +66,7 @@ mod storage;
 mod system;
 mod test_ui;
 mod theme;
+mod url_scheme;
 mod websocket;
 
 /// Hands the engine's batches to the test.

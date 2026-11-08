@@ -16,6 +16,39 @@ This is a normative guide. **Must** marks lifecycle, correctness, or ecosystem c
 architecture and requires a concrete reason to depart from it. Current source, the reference pages and the
 declarations in `.nsh/types` remain authoritative for exact signatures.
 
+## Build the app's UI foundations before pages
+
+For a new app, establish the design standards, theme tokens and app-owned styled components before implementing
+feature pages. For an existing app, locate and reuse these first. Keep the standards and shared UI code in the app's
+repository; the [Design Guides](./design-guides.md#establish-the-apps-design-system-first) describe their contents.
+
+Use this development order:
+
+1. Identify the app's Desktop, Mobile, Web and TUI targets and their input, navigation and density requirements.
+2. Define the app's semantic color roles and light/dark values in its theme file (`nsh.json` `"theme"`), together
+   with the typography, spacing, radius and size scales the components use.
+3. Wrap and compose `nsh/base` into the app's styled controls, including visible parts, variants and interaction
+   states. Verify a representative composition on the supported targets before replicating it across pages.
+4. Compose pages from that layer. Add a missing token or shared variant in its owning layer first, then use it in
+   pages; changes to a shared control should update all its consumers consistently.
+
+NSH provides the unstyled `nsh-base` crate (`nsh/base` in TSX), analogous to [`gpui-base`](https://gpui-kit.com/base). The app or a community
+library owns the styled layer analogous to [`gpui-component`](https://gpui-kit.com/component); `nsh-core` is the underlying GPUI counterpart. App code
+should import its own styled controls for ordinary UI, keeping base-component assembly and styling in the shared
+layer. Preserve base behavior, focus and accessibility while adapting presentation for each supported platform.
+
+Theme colors must be read through semantic tokens: `theme().primary` or `theme().color("warning")` in Rust,
+`bg-primary`, `text-warning` or `token("warning")` in TSX. Define raw hex, RGB/RGBA and HSL/HSLA values in the theme
+source, not in page or component styles, including state styles, gradients and shadows. A palette class such as
+`bg-blue-500` or an arbitrary color class also bypasses the app's semantic roles. Add the missing role instead.
+Token opacity such as `bg-primary/90` or `theme().primary.opacity(0.9)` keeps the semantic source of the color.
+User-authored colors and data values, such as an image's pixels or a color picker's selected value, remain data;
+the surrounding controls still use theme tokens.
+
+Before finishing, inspect new presentation code for raw color literals and palette classes, verify shared component
+use, and exercise the feature's states in both appearances and the platforms it targets. Record any unavailable
+platform verification rather than assuming one screenshot proves all targets.
+
 ## Make the common path inexpensive
 
 **Design principle: choose framework types and ownership so ordinary component use is inexpensive by default.**
@@ -246,7 +279,7 @@ pub fn Search(props: SearchProps) -> impl IntoElement {
 ```tsx tabs
 function Search(props: { placeholder: string }) {
   const query = signal("");
-  return <Input value={query()} onChange={(text) => query.set(text)} placeholder={props.placeholder} />;
+  return <Input value={query()} onChange={({ value }) => query.set(value)} placeholder={props.placeholder} />;
 }
 ```
 
@@ -307,7 +340,7 @@ switch()
 ```
 
 ```tsx tabs
-<Switch checked={showHidden()} onChange={(next) => showHidden.set(next)}>
+<Switch checked={showHidden()} onChange={({ checked }) => showHidden.set(checked)}>
   <Text>Show hidden files</Text>
 </Switch>
 ```
@@ -425,7 +458,7 @@ function CartRow() {
       max={10}
       decrementLabel="Fewer"
       incrementLabel="More"
-      onChange={(next) => quantity.set(next)}
+      onChange={({ value }) => quantity.set(value)}
     />
   );
 }
@@ -449,7 +482,7 @@ export interface QuantityStepperProps {
   /** What screen readers say for the button that adds one. */
   incrementLabel: string;
   /** The user asked for another quantity; the owner sets `value`. */
-  onChange?: (next: number) => void;
+  onChange?: (e: { value: number }) => void;
 }
 
 export function QuantityStepper(props: QuantityStepperProps) {
@@ -457,7 +490,7 @@ export function QuantityStepper(props: QuantityStepperProps) {
   const max = () => props.max ?? 99;
   const step = (delta: number) => {
     const next = Math.min(max(), Math.max(min(), props.value + delta));
-    if (next !== props.value) props.onChange?.(next);
+    if (next !== props.value) props.onChange?.({ value: next });
   };
   const buttonClass = "size-8 items-center justify-center rounded-(--radius) bg-muted active:opacity-60 disabled:opacity-40";
   return (
@@ -479,9 +512,10 @@ export function QuantityStepper(props: QuantityStepperProps) {
 A component owns what it creates, and everything it created goes away with it: when its `<If>` branch hides, its row
 is removed or its page is popped. In Rust, tasks, timers and intervals (`spawn`, `set_timeout`, `set_interval`) and key
 bindings (`on_key`) end with the owner they were made under; in TSX, register the stop with
-[`cleanup`](./reactivity.md#cleanup) or return it from the effect. A function that starts listening returns a
-function that stops it (`() => void`), and what is registered while a component renders goes away with the component,
-as `keymap.bind` does.
+[`cleanup`](./reactivity.md#cleanup) or return it from the effect. Listening is `on(event, listener)`
+(`host.on(name, listener)`, `BackHandler.on("press", listener)`), which returns a function that stops it
+(`() => void`, from Rust a `Stop`), and what is registered while a component renders goes away with the component, as
+`keymap.bind`'s bindings do.
 
 When something keeps running unexpectedly, first inspect effects and computed values created outside a component (in
 an event handler or a timer callback they have no owner and live forever), listeners registered without their stop,
@@ -761,6 +795,18 @@ Represent async operations with explicit states: a resource's `state()` is `unre
 again. Prevent duplicate destructive submissions and surface recoverable errors in the UI; do not rely on logs as user
 feedback.
 
+For ordinary, reversible settings (a radio choice, switch or stepper), update the locally owned value in the event
+handler before starting the save; bind the visible checked or selected state to that value. Submit asynchronously so
+network latency does not delay the control. Keep the last confirmed state and reconcile pending edits in order: an older
+load or response must not replace a newer choice, and a failed save must roll back only its own change without losing
+later edits. A server may acknowledge the requested configuration before its effective state catches up; distinguish
+those values and do not replace the accepted choice with a stale effective value. Show a useful error on failure.
+Use pessimistic confirmation instead when the action is consequential or the result cannot be safely predicted.
+
+Test the visible control state while a deliberately delayed request is still pending, then test failure, rapid changes
+and stale or reordered responses. A headless result alone does not establish touch-to-frame latency: inspect or measure
+the interaction on the requested native target when available.
+
 ```rust tabs
 let results = resource(
     move || {
@@ -842,7 +888,7 @@ padding and margin (read the values with their accessors), which follow rotation
 
 ## Lists, tables, and large data
 
-Use [`List`](./lists.md) (`virtual_list` in Rust) when data can grow beyond a small, bounded collection. Keep row
+Prefer [`List`](./lists.md) (`virtual_list` in Rust) for collections that can grow, including chat timelines, feeds and history. Reserve a scroll view with ordinary children for small, bounded content. Keep row
 identity separate from visible position and avoid copying the full data set on every update. Let the list own
 recycling, scroll coordination and the visible range while row functions own row presentation.
 
@@ -913,10 +959,13 @@ as they are. Apply the same discipline to what an app or a component library exp
 props and events, its crate's exports, the functions a host app's native components and modules receive):
 
 - inputs gain optional members only; types only widen; defaults and behavior stay (new behavior is opt-in);
-- options are one object (`scrollTo({ x, y, animated })`), never a third positional parameter;
+- a function whose parameters may grow takes its options as one object (`scrollTo({ x, y, animated })`), never a
+  further positional parameter; parameters that never will, such as a range's start and end, stay positional;
 - a mode is a string union, which can gain values, rather than a boolean that later needs a third state;
 - a value has one type: `version: string`, never `string | number`;
 - what a function returns is an object, which can gain a field, rather than a tuple or a bare value;
+- a function returning a Promise reports every failure by rejecting it, and a failure the caller can handle carries a
+  `code`, as NSH's own do: callers branch on codes, while messages are for people and may change;
 - a rename keeps the old name as a `@deprecated` alias of the same implementation.
 
 In Rust, private fields are the default for behavioral state that must evolve without breaking callers. Public fields
@@ -935,19 +984,23 @@ clipboard, haptics, scroll physics, fonts and timing can differ. One bundle runs
 ([Platform-specific code](./platform-specific.md)); put platform-specific code where NSH gives it a place and define
 the fallback behavior:
 
-- a prop two platforms have is a top-level prop; a prop of one platform goes in `ios={{…}}`, `android={{…}}`,
-  `desktop={{…}}` or `web={{…}}` (a builder method in Rust), and only the current platform's object is applied;
+- what an element means on every platform is a top-level prop; a platform's own system feature goes in
+  `ios={{…}}`, `android={{…}}`, `macos={{…}}`, `desktop={{…}}` or `web={{…}}` (a builder method in Rust), in each of the platforms
+  that have it, and only the current platform's object is applied;
 - APIs of mobile platforms come from `nsh/mobile`, those of the desktops from `nsh/desktop`;
 - styles per platform are `ios:`, `android:` and `web:` classes.
 
 A platform branch must preserve the semantic contract even if presentation differs. For example, a dialog is a sheet
 on iOS and a layer over the window on the desktops, but the app still needs a coherent open state. Test the shared
-behavior headless and the platform's part with `nsh test --target`.
+behavior headless and the platform's part with `nsh test --target`. Give every branch on a value NSH reports
+(`platform.os`, a state, a reason) a `default`: later releases add platforms and cases, and an app delivered
+today runs on them ([Compatibility](./compatibility.md)).
 
 An app declares what it reaches outside its VM in `nsh.json` `"capabilities"`: the hosts it fetches from, the pages a
 web view shows, the clipboard, the status bar ([Sandbox and Capabilities](./sandbox-and-capabilities.md)). An app
 that will be delivered into other apps lists exactly what it uses, and handles a refused request as it handles a
-failed one: a host app may grant less than the app declares.
+failed one: a host app may grant less than the app declares. A refused call fails with `code` `"ERR_ACCESS_DENIED"`,
+its `permission` naming the capability and its `resource` what was asked for.
 
 ## File and naming conventions
 
@@ -963,7 +1016,7 @@ failed one: a host app may grant less than the app declares.
 ### Vocabulary is part of the API
 
 Use the same word for the same concept across components. Before naming a prop or an event, look for the term in
-NSH's own API, then in GPUI Kit's `gpui-base`, GPUI and `gpui-component`, then in the platforms' controls. What a
+NSH's own API, then in GPUI Kit's [`gpui-base`](https://gpui-kit.com/base), GPUI and [`gpui-component`](https://gpui-kit.com/component), then in the platforms' controls. What a
 primitive shows and the global APIs take their names from HTML, the DOM and CSS (`src`, `html`, `placeholder`). Rust
 names are `snake_case` and translate to `camelCase` in TSX (`on_open_change` is `onOpenChange`); one word stays one
 word (`readonly`, `multiline`).
@@ -984,11 +1037,11 @@ word (`readonly`, `multiline`).
 | A slot | What it is | `header`, `footer`, `trigger`, `content`, `empty` |
 | Content of the app's | `render<Part>` | `renderCodeBlock` |
 | A dismissal flag | `closeOn<Trigger>`, default `true` | `closeOnEscape`, `closeOnBackdropPress` |
-| A value's change | `on<Value>Change(next, details?)` | `onChange(text)`, `onOpenChange(open, reason)` |
+| A value's change | `on<Value>Change({ <value>, ... })`, one object | `onChange({ value })`, `onOpenChange({ open, reason })` |
 | Any other event | `on<Event>`, present tense, one object | `onPress()`, `onSubmit({ text })` |
 | A phase | `<act>Start`, `<act>End` | `onPanStart`, `onLoadStart` |
-| The pointer over a view | `In` / `Out` | `onHoverIn`, `onHoverOut` |
-| Starting to listen | Returns `() => void` | `keymap.bind(..)` |
+| The mouse over a view | `Enter` / `Move` / `Leave`, the DOM's | `onMouseEnter`, `onMouseMove`, `onMouseLeave` |
+| Starting to listen | `on(event, listener)`, returns `() => void` | `host.on(name, l)`, `BackHandler.on("press", l)` |
 | A value of the environment | An accessor, `set<Value>` beside it | `colorScheme()`, `setColorScheme` |
 | A read-only boolean | `is<Adjective>`, `has<Noun>` | `isAvailable` |
 
@@ -1041,13 +1094,14 @@ domain term exists.
 
 ### Callback and event wording
 
-- A value's change passes the value first and anything else after it: `onChange(next)`, `onOpenChange(open, reason)`.
-  Every other event passes one object, even with one field (`onLinkPress({ url })`), so a later field is an addition;
-  an event with nothing to report passes nothing.
+- Every event passes one object, even with one field and for a value's change too, its fields named as the props they
+  report: `onChange({ value })`, `onOpenChange({ open, reason })`, `onLinkPress({ url })`. A later field is then an
+  addition. A data type of the API is a field, never the payload itself (`onImagePress({ image })`); an event with
+  nothing to report passes nothing.
 - Name the act, not past tense or a request: `onPress`, `onClose`, `onCancel`, `onBackPress`.
 - Name the intent rather than the geometry when the act has a name: `onLoadMore`, not "the end was reached".
-- Lifecycle pairs are `onOpen` / `onClose`; phases are `Start` / `End`, never `Begin`; the pointer over a view is
-  `onHoverIn` / `onHoverOut`, a file dragged over it `Enter` / `Leave`.
+- Lifecycle pairs are `onOpen` / `onClose`; phases are `Start` / `End`, never `Begin`; the mouse over a view is
+  `onMouseEnter` / `onMouseMove` / `onMouseLeave` (the DOM's names), a file dragged over it `Enter` / `Leave`.
 - Document whether a callback runs before or after the component's own state changes, and whether it may re-enter the
   component.
 

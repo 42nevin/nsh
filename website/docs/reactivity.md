@@ -62,7 +62,7 @@ function Counter() {
 }
 ```
 
-Tapping updates the one text node that reads `count`. `counter()` / `Counter` itself runs once. A Rust signal is a `Copy` handle, so closures take it with `move` and use it freely.
+Tapping updates the one text node that reads `count`. `counter()` / `Counter` itself runs once. A Rust signal is a `Copy` handle, so closures take it with `move` and use it freely. In TSX `set` and `update` are bound to their signal, so they can be passed on their own: `[1, 2].forEach(count.set)`, `attempt(busy.set, …)`.
 
 A signal can count every write as a change, and TSX can compare values its own way:
 
@@ -200,7 +200,7 @@ effect(move || {
 ```
 
 ```tsx tabs
-let input: YNode | undefined;
+let input: InputRef | undefined;
 effect(() => {
   if (editing()) input?.focus();
 });
@@ -489,7 +489,7 @@ function ProfileCard(props: { user: User | undefined }) {
 }
 ```
 
-A failure goes to the nearest boundary above where it happened, and one in a fallback to the boundary above that. Without a boundary, the failure is reported as an uncaught error (the development error overlay, the log). In TSX, a `fallback` that takes no arguments is shown as it is: `fallback={<Text>Unavailable</Text>}`.
+A failure goes to the nearest boundary above where it happened, and one in a fallback to the boundary above that. Without a boundary, the failure is reported as an uncaught error (the development error overlay, the log). In TSX, a `fallback` element is shown as it is (`fallback={<Text>Unavailable</Text>}`), and a function is called with the error and `reset`, whatever parameters it declares.
 
 ## What runs, and when
 

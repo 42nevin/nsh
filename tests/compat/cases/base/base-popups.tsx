@@ -2,7 +2,7 @@
 // `nsh/base` on a phone, on the core's overlays: a `Popover` anchored to its
 // trigger (controlled and not; its side, alignment, gap and margin; Escape
 // heard without closing), a `Menu` presented as a sheet whose `Submenu`
-// replaces its items, its `MenuItem`s (disabled, kept open, labelled) and a
+// replaces its items (and reports it), its `MenuItem`s (disabled, kept open, labelled) and a
 // `MenuSeparator`, a `ContextMenu` a held finger opens, `Tooltip`s given as
 // elements' `tooltip` the app opens (a touch screen shows none of its own, nor an
 // element's `tooltip`), a `Sheet` at an edge over a backdrop; every part
@@ -29,7 +29,7 @@ function App() {
       <Text>{log()}</Text>
       <Popover
         open={pop()}
-        onOpenChange={(open, reason) => {
+        onOpenChange={({ open, reason }) => {
           pop.set(open);
           log.set(`Log: popover ${open} ${reason}`);
         }}
@@ -52,7 +52,7 @@ function App() {
       </Popover>
       <Menu
         open={menu()}
-        onOpenChange={(open, reason) => {
+        onOpenChange={({ open, reason }) => {
           menu.set(open);
           log.set(`Log: menu ${open} ${reason}`);
         }}
@@ -74,6 +74,7 @@ function App() {
         <Submenu
           trigger={<View><Text>ShareItem</Text></View>}
           back={<View><Text>BackRow</Text></View>}
+          onOpenChange={({ open, reason }) => log.set(`Log: share ${open} ${reason}`)}
         >
           <MenuItem onSelect={() => log.set("Log: chose Mail")}><Text>MailItem</Text></MenuItem>
         </Submenu>
@@ -84,7 +85,7 @@ function App() {
       <ContextMenu
         open={ctx()}
         disabled={ctxOff()}
-        onOpenChange={(open, reason) => {
+        onOpenChange={({ open, reason }) => {
           ctx.set(open);
           log.set(`Log: context ${open} ${reason}`);
         }}
@@ -113,7 +114,7 @@ function App() {
             margin={30}
             class="bg-[#333333]"
             style={{ width: 60 }}
-            onOpenChange={(open, reason) => log.set(`Log: tooltip ${open} ${reason}`)}
+            onOpenChange={({ open, reason }) => log.set(`Log: tooltip ${open} ${reason}`)}
           >
             <Text>TipText</Text>
           </Tooltip>
@@ -133,7 +134,7 @@ function App() {
       <View onPress={() => sheet.set(true)}><Text>OpenSheet</Text></View>
       <Sheet
         open={sheet()}
-        onOpenChange={(open, reason) => {
+        onOpenChange={({ open, reason }) => {
           sheet.set(open);
           log.set(`Log: sheet ${open} ${reason}`);
         }}
@@ -150,7 +151,7 @@ function App() {
         <Text>SheetBody</Text>
       </Sheet>
       <View onPress={() => swipeSheet.set(true)}><Text>OpenSwipeSheet</Text></View>
-      <Sheet open={swipeSheet()} closeOnSwipe onOpenChange={(next) => swipeSheet.set(next)} popupStyle={{ paddingTop: 54 }}>
+      <Sheet open={swipeSheet()} closeOnSwipe onOpenChange={({ open }) => swipeSheet.set(open)} popupStyle={{ paddingTop: 54 }}>
         <Text style={{ height: 300 }}>SwipeSheetBody</Text>
       </Sheet>
       <Sheet defaultOpen closeOnBackdropPress={false} popupStyle={{ height: 20 }}>

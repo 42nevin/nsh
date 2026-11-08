@@ -1,4 +1,4 @@
-import { type JSX, signal, Text, View, type YNode } from "nsh";
+import { type InputRef, type JSX, signal, Text, View, type ViewRef } from "nsh";
 import { announce, reduceMotion, screenReaderEnabled, setAccessibilityFocus } from "nsh";
 import { LayoutAnimation } from "nsh";
 import { locale, pixelRatio, platform } from "nsh";
@@ -125,8 +125,8 @@ function PressableSheet() {
       <Caption label="Scales and darkens while pressed" note="active:scale-[0.97]" />
       <Sheet
         open={sheet()}
-        onOpenChange={(open) => sheet.set(open)}
-        backdropStyle={{ backgroundColor: "rgba(0,0,0,0.5)" }}
+        onOpenChange={({ open }) => sheet.set(open)}
+        backdropClass="bg-scrim"
         popupStyle={{
           gap: 16,
           padding: 20,
@@ -192,11 +192,17 @@ function PressFeedback() {
           <Badge label={disabled() ? "Off" : "On"} tone={disabled() ? "neutral" : "up"} />
         </Tile>
       </View>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: platform.idiom === "terminal" ? 24 : 12 }}>
         <View style={{ flex: 1 }}>
           <Caption label="Last pressed" note={last()} />
         </View>
-        <Toggle value={disabled()} onChange={(v) => disabled.set(v)} label="Disable the third tile" />
+        {/* The terminal's switch is a glyph: its label beside it says what it turns on. */}
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <If when={platform.idiom === "terminal"}>
+            <Text style={{ fontSize: 12, color: colors.muted }}>Disable</Text>
+          </If>
+          <Toggle value={disabled()} onChange={(v) => disabled.set(v)} label="Disable the third tile" />
+        </View>
       </View>
     </Card>
   );
@@ -204,18 +210,18 @@ function PressFeedback() {
 
 function Accessory() {
   const text = signal("");
-  let input: YNode | undefined;
+  let input: InputRef | undefined;
   return (
     <Card icon="text" title="Input accessory" subtitle="A bar over the iOS keyboard" right={<Badge label="nsh/ios" />}>
       <Field
         ref={(node) => (input = node)}
         value={text()}
-        onChange={(v) => text.set(v)}
+        onChange={({ value }) => text.set(value)}
         placeholder="Focus me"
         ios={{ inputAccessoryViewID: "counter" }}
       />
       <Caption
-        label={platform.idiom === "desktop" ? "Desktops have no input accessories" : platform.os === "android" ? "Android has no input accessories" : "The bar counts what you type"} note='inputAccessoryViewID="counter"' />
+        label={platform.desktop ? "Desktops have no input accessories" : platform.os === "android" ? "Android has no input accessories" : "The bar counts what you type"} note='inputAccessoryViewID="counter"' />
       <InputAccessoryView nativeID="counter" style={{ backgroundColor: colors.surface }}>
         <View
           style={{
@@ -283,7 +289,17 @@ function ModalOptions() {
       icon="system"
       title="Dialog options"
       subtitle="statusBarTranslucent, orientations"
-      right={<Toggle value={translucent()} onChange={(v) => translucent.set(v)} label="statusBarTranslucent" />}
+      right={
+          // The terminal's switch is a glyph: its label beside it says what it turns on.
+          platform.idiom === "terminal" ? (
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <Text style={{ fontSize: 12, color: colors.muted }}>Translucent</Text>
+              <Toggle value={translucent()} onChange={(v) => translucent.set(v)} label="statusBarTranslucent" />
+            </View>
+          ) : (
+            <Toggle value={translucent()} onChange={(v) => translucent.set(v)} label="statusBarTranslucent" />
+          )
+        }
     >
       <Text style={{ fontSize: 14, lineHeight: 20, color: colors.muted }}>
         Android: translucent content reaches under the status bar. iOS: this dialog allows portrait and landscape.
@@ -295,7 +311,7 @@ function ModalOptions() {
         animation="slide"
         android={{ statusBarTranslucent: translucent() }}
         ios={{ supportedOrientations: ["portrait", "landscape"] }}
-        onOpenChange={(open) => visible.set(open)}
+        onOpenChange={({ open }) => visible.set(open)}
         style={{ flex: 1 }}
       >
         <View style={{ flex: 1, backgroundColor: isDark() ? "#16200d" : "#eef5dc" }}>
@@ -331,8 +347,8 @@ function PlatformInfo() {
   const rows = (): [string, string][] => [
     ["platform.os", platform.os],
     ["platform.version", platform.version],
-    ["platform.idiom / catalyst", `${platform.idiom} / ${platform.catalyst}`],
-    ["platform.select", platform.select({ ios: "ios branch", android: "android branch" }) ?? ""],
+    ["platform.idiom / desktop / catalyst", `${platform.idiom} / ${platform.desktop} / ${platform.catalyst}`],
+    ["platform.select", platform.select({ ios: "ios branch", android: "android branch", default: "default branch" }) ?? ""],
     ["pixelRatio()", String(pixelRatio())],
     ["10.3 on whole pixels", String(Math.round(10.3 * pixelRatio()) / pixelRatio())],
     ["screenReaderEnabled()", String(screenReaderEnabled())],
@@ -340,7 +356,7 @@ function PlatformInfo() {
     ["locale()", locale()],
   ];
   const announced = signal(0);
-  let target: YNode | undefined;
+  let target: ViewRef | undefined;
   return (
     <Card icon="spark" title="Platform" subtitle="platform, pixelRatio, announce" right={<Badge label={platform.os} tone="accent" />}>
       <View>

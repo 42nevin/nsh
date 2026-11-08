@@ -156,10 +156,10 @@ impl Hash for Bits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) struct Variant {
     /// [`state`] bits of the element itself.
-    states: u8,
+    states: u16,
     /// [`state`] bits of the nearest ancestor group (none: no group
     /// condition).
-    group_states: u8,
+    group_states: u16,
     /// That group's name: 0 unnamed, else 1 + its index in
     /// [`StyleRefinement::names`].
     group: u8,
@@ -171,6 +171,8 @@ impl Variant {
     pub(crate) const HOVER: Self = Self::states(state::HOVERED);
     /// While focused.
     pub(crate) const FOCUS: Self = Self::states(state::FOCUSED);
+    /// While it or a view inside it is focused.
+    pub(crate) const FOCUS_WITHIN: Self = Self::states(state::FOCUS_WITHIN);
     /// While pressed.
     pub(crate) const ACTIVE: Self = Self::states(state::PRESSED);
     /// While disabled.
@@ -181,6 +183,11 @@ impl Variant {
     pub(crate) const CHECKED: Self = Self::states(state::CHECKED);
     /// While indeterminate (set by the core from the accessibility state).
     pub(crate) const INDETERMINATE: Self = Self::states(state::INDETERMINATE);
+    /// While expanded (set by the core from the accessibility state).
+    pub(crate) const EXPANDED: Self = Self::states(state::EXPANDED);
+    /// While a toggle button is on (set by the core from the
+    /// accessibility state).
+    pub(crate) const ARIA_PRESSED: Self = Self::states(state::ARIA_PRESSED);
     /// In dark appearance.
     const DARK: Self = Self {
         states: 0,
@@ -189,7 +196,7 @@ impl Variant {
         dark: true,
     };
 
-    const fn states(states: u8) -> Self {
+    const fn states(states: u16) -> Self {
         Self {
             states,
             group_states: 0,
@@ -220,11 +227,15 @@ impl Variant {
         let keys = [
             (state::HOVERED, rank::HOVER),
             (state::FOCUSED, rank::FOCUS),
+            (state::FOCUS_WITHIN, rank::FOCUS_WITHIN),
             (state::PRESSED, rank::ACTIVE),
             (state::DISABLED, rank::DISABLED),
             (state::SELECTED, rank::SELECTED),
             (state::CHECKED, rank::CHECKED),
             (state::INDETERMINATE, rank::INDETERMINATE),
+            (state::EXPANDED, rank::EXPANDED),
+            (state::ARIA_PRESSED, rank::ARIA_PRESSED),
+            (state::BUSY, rank::ARIA_BUSY),
         ];
         for (bit, key) in keys {
             if self.group_states & bit != 0 {
@@ -463,8 +474,9 @@ pub(crate) enum Declaration {
     /// A keyframe animation (`None`: none).
     Animate(Option<u8>),
     /// A keyframe animation with its own timing: the keyframes' index,
-    /// duration, delay, easing and iterations (`None`: forever).
-    Animation(u8, Bits, Bits, [Bits; 4], Option<u32>),
+    /// duration, delay, easing, iterations (`None`: forever) and the
+    /// highest frame rate it needs (`None`: the screen's highest).
+    Animation(u8, Bits, Bits, [Bits; 4], Option<u32>, Option<Bits>),
     /// `repeat(n, minmax(0, 1fr))` tracks.
     Tracks(StyleKey, u16),
     /// `span n / span n`.
@@ -701,7 +713,7 @@ impl Declaration {
                 }
             }
             Declaration::Animate(k) => part(out, Part::Animate(k.map(|i| KEYFRAMES[i as usize]))),
-            Declaration::Animation(k, duration, delay, easing, iterations) => part(
+            Declaration::Animation(k, duration, delay, easing, iterations, frame_rate) => part(
                 out,
                 Part::Animation(KeyframeAnimation {
                     keyframes: KEYFRAMES[*k as usize],
@@ -709,6 +721,7 @@ impl Declaration {
                     delay: delay.0,
                     easing: easing.map(|b| b.0),
                     iterations: *iterations,
+                    frame_rate: frame_rate.map(|b| b.0),
                 }),
             ),
             Declaration::Tracks(key, n) => out.push(Decl::Set(
@@ -725,9 +738,94 @@ impl Declaration {
     }
 }
 
-type Entries = Vec<(Variant, Declaration)>;
+/// The static declarations of a [`StyleRefinement`], in order. Shared by
+/// its copies, which a page keeps several of per element (what a view
+/// applied, and the record its bindings patch against), and copied on the
+/// first change to a shared one.
+#[derive(Clone, Default)]
+struct Entries(Option<Rc<Vec<(Variant, Declaration)>>>);
+
+impl Entries {
+    fn with_capacity(capacity: usize) -> Self {
+        Self(Some(Rc::new(Vec::with_capacity(capacity))))
+    }
+
+    fn as_slice(&self) -> &[(Variant, Declaration)] {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+
+    fn capacity(&self) -> usize {
+        self.0.as_ref().map_or(0, |v| v.capacity())
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        self.vec().reserve(additional);
+    }
+
+    fn push(&mut self, entry: (Variant, Declaration)) {
+        self.vec().push(entry);
+    }
+
+    fn extend_from_slice(&mut self, entries: &[(Variant, Declaration)]) {
+        self.vec().extend_from_slice(entries);
+    }
+
+    fn vec(&mut self) -> &mut Vec<(Variant, Declaration)> {
+        Rc::make_mut(self.0.get_or_insert_default())
+    }
+
+    fn into_vec(self) -> Vec<(Variant, Declaration)> {
+        self.0.map(Rc::unwrap_or_clone).unwrap_or_default()
+    }
+}
+
+impl std::ops::Deref for Entries {
+    type Target = [(Variant, Declaration)];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl PartialEq for Entries {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) if Rc::ptr_eq(a, b) => true,
+            _ => self.as_slice() == other.as_slice(),
+        }
+    }
+}
+
+impl Eq for Entries {}
+
+impl Hash for Entries {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
+    }
+}
+
+impl fmt::Debug for Entries {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_slice().fmt(f)
+    }
+}
 
 crate::static_reactive!(AdaptiveColor: AdaptiveColor, Hsla, Rgba, Color);
+
+// Static colors keep the same ergonomics where the native default is also
+// a value. Optional signals and closures use IntoReactive's existing path.
+macro_rules! optional_reactive_colors {
+    ($($source:ty),*) => {$(
+        impl IntoReactive<Option<AdaptiveColor>> for $source {
+            fn into_reactive(self) -> Reactive<Option<AdaptiveColor>> {
+                Reactive::Static(Some(self.into()))
+            }
+        }
+    )*};
+}
+
+optional_reactive_colors!(AdaptiveColor, Hsla, Rgba, Color);
+
 crate::static_reactive!(Length: Length, Points, Rems, AbsoluteLength, DefiniteLength, Percentage);
 crate::static_reactive!(DefiniteLength: Points, Rems, AbsoluteLength, DefiniteLength, Percentage);
 crate::static_reactive!(AbsoluteLength: Points, Rems, AbsoluteLength);
@@ -825,8 +923,18 @@ impl StyleRefinement {
     /// The style now: the static declarations, then the bound parts' (read
     /// in the running computation, which subscribes to them).
     pub(crate) fn resolved(&self) -> StyleRefinement {
+        // Without bound parts it is the static part, shared. With them, a
+        // copy with room for one declaration a part, the usual count: a
+        // style is kept as long as its element.
+        let entries = if self.bound.is_empty() {
+            self.entries.clone()
+        } else {
+            let mut entries = Entries::with_capacity(self.entries.len() + self.bound.len());
+            entries.extend_from_slice(&self.entries);
+            entries
+        };
         let mut out = StyleRefinement {
-            entries: self.entries.clone(),
+            entries,
             names: self.names.clone(),
             bound: Vec::new(),
         };
@@ -905,7 +1013,7 @@ impl StyleRefinement {
     /// `other`'s declarations, applying while in `variant` (and in their
     /// own).
     pub(crate) fn extend_as(&mut self, variant: Variant, other: StyleRefinement) {
-        for (mut v, d) in other.entries {
+        for (mut v, d) in other.entries.into_vec() {
             if v.group != 0 {
                 v.group = self.name(other.names[v.group as usize - 1]);
             }
@@ -936,6 +1044,23 @@ impl StyleRefinement {
         u8::try_from(at + 1).expect("fewer than 255 group names")
     }
 
+    /// The color its last static declaration of `key` in no state sets
+    /// (bound parts left out): `None` for none or `unset`.
+    pub(crate) fn static_color(&self, key: StyleKey) -> Option<AdaptiveColor> {
+        self.entries.iter().rev().find_map(|(variant, d)| {
+            if *variant != Variant::default() {
+                return None;
+            }
+            match d {
+                Declaration::Color(k, color) if *k == key => Some(Some(*color)),
+                Declaration::Value(k, PropertyValue::Color(color)) if *k == key => {
+                    Some(color.map(AdaptiveColor::from))
+                }
+                _ => None,
+            }
+        })?
+    }
+
     /// No declarations, and no bound parts.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty() && self.bound.is_empty()
@@ -946,7 +1071,7 @@ impl StyleRefinement {
     pub(crate) fn lower(&self) -> ClassList {
         let mut variants: Vec<Variant> = Vec::new();
         let mut groups: Vec<Box<str>> = Vec::new();
-        for (v, d) in &self.entries {
+        for (v, d) in self.entries.iter() {
             if let Declaration::Group(name) = d {
                 if !groups.iter().any(|g| **g == **name) {
                     groups.push((*name).into());
@@ -961,7 +1086,7 @@ impl StyleRefinement {
             // Decorations add up within a variant (`.underline()
             // .line_through()` draws both).
             let mut decoration = 0;
-            for (v, d) in &self.entries {
+            for (v, d) in self.entries.iter() {
                 if *v != variant {
                     continue;
                 }
@@ -1556,6 +1681,15 @@ pub trait Styled: Sized {
             StyleKey::Display,
             PropertyValue::Display(taffy::Display::None),
         );
+        self
+    }
+
+    /// Laid out but not shown, nor what is inside it (CSS's `visibility:
+    /// hidden`, Tailwind's `invisible`, GPUI's `Styled::invisible`): it
+    /// keeps its place and frame, and takes no presses or keyboard focus.
+    fn invisible(mut self) -> Self {
+        self.style()
+            .value(StyleKey::Visibility, PropertyValue::Bool(true));
         self
     }
 
@@ -2886,6 +3020,19 @@ pub trait Styled: Sized {
         self
     }
 
+    /// The tint of the glass material (`glassTintColor`). A color tints the
+    /// native glass; `None` restores its default. Bind an optional adaptive
+    /// color to set and clear the tint; static colors can be passed directly.
+    /// Has no effect without `glassEffect`.
+    fn glass_tint_color(mut self, color: impl IntoReactive<Option<AdaptiveColor>>) -> Self {
+        self.style()
+            .bind_value(color, |s, color: Option<AdaptiveColor>| match color {
+                Some(color) => s.color(&[StyleKey::GlassTintColor], color),
+                None => s.value(StyleKey::GlassTintColor, PropertyValue::Color(None)),
+            });
+        self
+    }
+
     /// The pointer's look over the element (`cursor`; desktops, and iPad
     /// and Android with a mouse).
     fn cursor(mut self, cursor: Cursor) -> Self {
@@ -3016,7 +3163,8 @@ pub trait Styled: Sized {
 
     /// A keyframe animation with its own timing (TS: `animationName`
     /// with `animationDuration`, `animationDelay`,
-    /// `animationTimingFunction`, `animationIterationCount`):
+    /// `animationTimingFunction`, `animationIterationCount`,
+    /// `animationFrameRate`):
     /// `.animation(KeyframeAnimation::new(Keyframes::Spin).duration(800.0))`.
     fn animation(mut self, animation: KeyframeAnimation) -> Self {
         let index = KEYFRAMES
@@ -3029,6 +3177,7 @@ pub trait Styled: Sized {
             Bits(animation.delay),
             animation.easing.map(Bits),
             animation.iterations,
+            crate::style::frame_rate(animation.frame_rate).map(Bits),
         ));
         self
     }
@@ -4031,6 +4180,25 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Styles while expanded (Tailwind's `aria-expanded:`): the element's
+    /// accessibility state says so (a `Popover`'s or `Menu`'s trigger
+    /// while its popup is open, a collapsible's header).
+    fn expanded(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        let s = f(StyleRefinement::default());
+        self.style().extend_as(Variant::EXPANDED, s);
+        self
+    }
+
+    /// Styles while a toggle button is on (Tailwind's `aria-pressed:`):
+    /// the element's accessibility state says it is pressed, not mixed
+    /// (`gpui-base`'s `Toggle` styled `pressed`). Not `.active(..)`, a
+    /// press in progress.
+    fn aria_pressed(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        let s = f(StyleRefinement::default());
+        self.style().extend_as(Variant::ARIA_PRESSED, s);
+        self
+    }
+
     /// Makes it a group: the `group_*` styles of the elements inside follow
     /// its press, hover and focus (Tailwind's `group`).
     fn group(mut self) -> Self {
@@ -4155,7 +4323,7 @@ fn transition<S: Styled>(mut s: S, props: u8) -> S {
 fn in_group<S: Styled>(
     mut s: S,
     name: &'static str,
-    states: u8,
+    states: u16,
     f: impl FnOnce(StyleRefinement) -> StyleRefinement,
 ) -> S {
     let styles = f(StyleRefinement::default());
@@ -4191,7 +4359,7 @@ mod tests {
 
     /// What `list` resolves to in `dark` appearance, in [`state`] `states`,
     /// inside a group in `group` (as text, to compare).
-    fn resolve(list: &ClassList, dark: bool, states: u8, group: u8) -> String {
+    fn resolve(list: &ClassList, dark: bool, states: u16, group: u16) -> String {
         resolve_with(list, dark, states, group, &|_| {})
     }
 
@@ -4199,8 +4367,8 @@ mod tests {
     fn resolve_with(
         list: &ClassList,
         dark: bool,
-        states: u8,
-        group: u8,
+        states: u16,
+        group: u16,
         inline: &dyn Fn(&mut Style),
     ) -> String {
         let cx = Context {
@@ -4580,6 +4748,37 @@ mod tests {
             "animate-none",
             &timed("spin", 800.0, "linear"),
         );
+    }
+
+    #[test]
+    fn keyframe_animations_take_their_frame_rate() {
+        // As TS's `animationFrameRate` with the animation's other keys.
+        let capped = |hz: f32| {
+            move |style: &mut Style| {
+                use crate::StyleValue;
+                for (key, value) in [
+                    (StyleKey::AnimationName, StyleValue::Str("spin")),
+                    (StyleKey::AnimationDuration, StyleValue::Number(800.0)),
+                    (StyleKey::AnimationTimingFunction, StyleValue::Str("linear")),
+                    (StyleKey::AnimationFrameRate, StyleValue::Number(hz)),
+                ] {
+                    style.set_key(key, value).unwrap();
+                }
+            }
+        };
+        same_with(
+            s().animation(
+                KeyframeAnimation::new(Keyframes::Spin)
+                    .duration(800.0)
+                    .frame_rate(30.0),
+            ),
+            "animate-none",
+            &capped(30.0),
+        );
+        let typed = s()
+            .animation(KeyframeAnimation::new(Keyframes::Spin).frame_rate(24.0))
+            .lower();
+        assert!(resolve(&typed, false, 0, 0).contains("frame_rate: Some(24.0)"));
     }
 
     #[test]

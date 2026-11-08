@@ -17,6 +17,7 @@ fn test_run(filter: Option<&str>) -> TestRun {
         filter: filter.map(str::to_owned),
         trace: None,
         host: None,
+        target: None,
         page_host: None,
     }
 }
@@ -181,7 +182,7 @@ fn headless_runs_play_the_platform_s_part() {
     let results = run_file(&run, &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
     let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
     assert!(failed.is_empty(), "{failed:#?}");
-    assert_eq!(results.len(), 10);
+    assert_eq!(results.len(), 11);
 }
 
 #[test]
@@ -195,7 +196,7 @@ fn selectors_find_one_view_and_steps_act_on_it() {
     let results = run_file(&run, &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
     let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
     assert!(failed.is_empty(), "{failed:#?}");
-    assert_eq!(results.len(), 7);
+    assert_eq!(results.len(), 10);
 }
 
 #[test]
@@ -209,7 +210,16 @@ fn open_sets_the_environment_and_routes_answer_requests() {
     let results = run_file(&run, &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
     let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
     assert!(failed.is_empty(), "{failed:#?}");
-    assert_eq!(results.len(), 7);
+    assert_eq!(results.len(), 13);
+}
+
+#[test]
+fn fonts_registered_while_the_app_runs_name_their_family() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/fonts");
+    let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
+    let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
+    assert!(failed.is_empty(), "{failed:#?}");
+    assert_eq!(results.len(), 3);
 }
 
 #[test]
@@ -285,7 +295,34 @@ fn a_manual_clock_moves_as_the_test_says() {
     let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
     let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
     assert!(failed.is_empty(), "{failed:#?}");
-    assert_eq!(results.len(), 7);
+    assert_eq!(results.len(), 10);
+}
+
+#[test]
+fn a_press_fails_on_a_view_another_covers() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/hit");
+    let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
+    let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
+    assert!(failed.is_empty(), "{failed:#?}");
+    assert_eq!(results.len(), 3);
+}
+
+#[test]
+fn animations_that_loop_forever_hold_no_step() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/loops");
+    let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
+    let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
+    assert!(failed.is_empty(), "{failed:#?}");
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn steps_on_a_manual_clock_return_once_the_app_is_idle() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/idle");
+    let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
+    let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
+    assert!(failed.is_empty(), "{failed:#?}");
+    assert_eq!(results.len(), 4);
 }
 
 #[test]
@@ -307,12 +344,30 @@ fn the_page_s_host_answers_the_apps_tests_open() {
 }
 
 #[test]
+fn headless_desktops_play_the_platform_s_windows() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/windows");
+    let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
+    let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
+    assert!(failed.is_empty(), "{failed:#?}");
+    assert_eq!(results.len(), 7);
+}
+
+#[test]
 fn apps_run_under_the_capabilities_their_nsh_json_declares() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/capabilities");
     let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
     let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
     assert!(failed.is_empty(), "{failed:#?}");
     assert_eq!(results.len(), 1);
+}
+
+#[test]
+fn sockets_and_websockets_reach_the_network_only_when_the_test_says() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/network");
+    let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
+    let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
+    assert!(failed.is_empty(), "{failed:#?}");
+    assert_eq!(results.len(), 3);
 }
 
 #[test]
@@ -335,4 +390,13 @@ fn span_styles_follow_id_updates_and_reject_empty_spans() {
     let results = run_file(&test_run(None), &file, &mut |_| {}).unwrap();
     assert_eq!(results.len(), 1);
     assert!(results[0].failure.is_none(), "{:?}", results[0]);
+}
+
+#[test]
+fn expect_compares_values_as_jest_does() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/expect");
+    let results = run_file(&test_run(None), &dir.join("Expect.test.ts"), &mut |_| {}).unwrap();
+    let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
+    assert!(failed.is_empty(), "{failed:#?}");
+    assert_eq!(results.len(), 8);
 }

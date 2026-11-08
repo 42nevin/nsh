@@ -72,7 +72,7 @@ mount(App);
 | `createMotion({ enter, delay, duration, ... })` | `motion().entering(spec)` | 从 `enter` 的起点开始并立即播放它；其余选项修改它的时间参数。`enter` 设置它所移动的通道，优先于 `initial`。 |
 | `style={m.style}`、`m.transform` | `.bind_motion(&m)` | 绑定各通道：`m.style` 是 `{ opacity, transform }`，其中 `transform` 是七个步骤的列表（`scale` 合并进 `scaleX` 和 `scaleY`）。它们作用在视图的 `translate`、`rotate` 和 `scale` 之后；在它们前面加上透视就能给 3D 翻转加上纵深：`transform: [{ perspective: 800 }, ...m.transform]`。Rust 中动效的变换作用在视图自身的变换之后。 |
 | `m.opacity`、`m.translateX`、... | `m.value(MotionChannel::Opacity)`、... | 单个通道的动画值，可用于插值或手动驱动。 |
-| `m.play(motion, options?)` | `m.play(spec)` | 播放预设或你自己的动效；新的动效会打断正在播放的那个。播放完成时以 `true` 兑现（Rust 中为 `AnimationEnd`）。 |
+| `m.play(motion, options?)` | `m.play(spec)` | 播放预设或你自己的动效；新的动效会打断正在播放的那个。以 `{ finished }` 兑现，播放完成时为 `true`（Rust 中为 `AnimationEnd`）。 |
 | `m.animation(motion, options?)` | `m.animation(spec)` | 同一个动效，作为尚未启动的[组合动画](#组合动画)，可与其他动画串联、错开或循环。 |
 | `play(motion, { ignoreReduceMotion: true })` | `m.play_ignoring_reduce_motion(spec)` | 即使用户要求减少动态效果也照常播放。 |
 | `m.stop()` | `m.stop()` | 停在当前位置。 |
@@ -363,6 +363,7 @@ view().h_4().w_40().rounded(px(4.0)).bg(ZINC.shade(200)).animate_pulse()
 | `animationDelay` | `KeyframeAnimation::delay(ms)` | `number \| "200ms" \| …` | 开始前的延迟。 |
 | `animationTimingFunction` | `KeyframeAnimation::easing([x1, y1, x2, y2])` | 同 `transitionTimingFunction` | 缓动曲线。 |
 | `animationIterationCount` | `KeyframeAnimation::iterations(n)` | `number \| "infinite"` | 默认 `"infinite"`。 |
+| `animationFrameRate` | `KeyframeAnimation::frame_rate(hz)` | `number` | 它需要的最高帧率，单位 Hz（见[帧率](#帧率)）。默认为屏幕的最高帧率。 |
 
 Tailwind：`animate-spin`、`animate-ping`、`animate-pulse`、`animate-bounce`、`animate-none`。
 
@@ -454,16 +455,16 @@ const color = flash.interpolate({ inputRange: [0, 1], outputRange: ["#1f2328", "
 | TSX | Rust | 说明 |
 |---|---|---|
 | `set(value)` | `set(value)` | 跳到 `value`，停止正在进行的动画。 |
-| `stop()` | `stop()` | 让正在运行的动画停在原处；在 TSX 中会以停下时的值 resolve。 |
+| `stop()` | `stop()` | 让正在运行的动画停在原处；在 TSX 中以 `{ value }`（停下时的值）resolve。 |
 | `getValue()` | `value()` | 当前值，在它运动所在的 UI 线程上读取（一帧之内给出结果）：TSX 中是 promise，Rust 中是可 await 的结果。 |
 | `setOffset(offset)` | `set_offset(offset)` | 在显示值上加上 `offset`：绑定看到的是值 + 偏移，而 `set`、动画和拖动改变的是值本身。 |
 | `flattenOffset()` | `flatten_offset()` | 把偏移加到值上，并把偏移设为 0。 |
 | `extractOffset()` | `extract_offset()` | 把值移入偏移并把值设为 0：下一次拖动就从 0 开始，叠加在上一次停下的位置上。 |
-| `timing(to, { duration?, easing?, delay? })` | `timing(to, ms, easing)`、`timing_with(to, Timing { .. })` | 在 `duration` 毫秒内动画到 `to`（默认 300 毫秒，缓动 `"easeInOut"`）。 |
-| `spring(to, { stiffness?, damping?, mass?, velocity? })` | `spring(to, Spring { .. })` | 以弹簧运动到 `to`（默认 stiffness 170、damping 26、mass 1）。 |
-| `decay({ velocity?, deceleration?, clamp?, bounce? })` | `decay(velocity, deceleration)`、`decay_within(velocity, deceleration, (min, max), bounce)` | 以 `velocity`（每秒单位数）开始滑行并逐渐减速（默认每毫秒 deceleration 0.998）。设置范围 `[min, max]` 时，它停在边界上，或以 `bounce`（0..1）保留的速度从边界反弹。 |
+| `timing(to, { duration?, easing?, delay?, frameRate? })` | `timing(to, ms, easing)`、`timing_with(to, Timing { .. })` | 在 `duration` 毫秒内动画到 `to`（默认 300 毫秒，缓动 `"easeInOut"`）。 |
+| `spring(to, { stiffness?, damping?, mass?, velocity?, frameRate? })` | `spring(to, Spring { .. })` | 以弹簧运动到 `to`（默认 stiffness 170、damping 26、mass 1）。 |
+| `decay({ velocity?, deceleration?, clamp?, bounce?, frameRate? })` | `decay(velocity, deceleration)`、`decay_within(velocity, deceleration, (min, max), bounce)` | 以 `velocity`（每秒单位数）开始滑行并逐渐减速（默认每毫秒 deceleration 0.998）。设置范围 `[min, max]` 时，它停在边界上，或以 `bounce`（0..1）保留的速度从边界反弹。 |
 
-每个动画都给出一个可以 await 的结果：完成时为 `true`，被打断时（`stop()`、`set()`，或同一个值上启动了新动画）为 `false`。在 TSX 中它是 `Promise<boolean>`，在 Rust 中是 `AnimationEnd`。在运动中的值上启动新动画会平滑地接替旧动画：没有指定速度的弹簧或衰减会沿用该值当前的速度。
+每个动画都给出一个可以 await 的结果，表示它是否完成：播放到终点时为 `true`，被打断时（`stop()`、`set()`，或同一个值上启动了新动画）为 `false`。在 TSX 中它是 `Promise<{ finished: boolean }>`，在 Rust 中是 `AnimationEnd`，任务 await 它得到这个 `bool`。在运动中的值上启动新动画会平滑地接替旧动画：没有指定速度的弹簧或衰减会沿用该值当前的速度。
 
 ```rust tabs
 // 弹簧参数：damping 越小越容易过冲，stiffness 越大越快。
@@ -488,10 +489,10 @@ x.spring(200, { stiffness: 180, damping: 8 });   // 晃动
 x.spring(200, { stiffness: 400, damping: 30 });  // 干脆，不过冲
 
 // 以拖动的松手速度滑行到停止。
-<View pan={{ x }} onPanEnd={(e) => x.decay({ velocity: e.velocityX })} />
+<View pan={{ x }} onPanEnd={(e) => x.decay({ velocity: e.velocity.x })} />
 
 // 留在轨道上、在两端柔和反弹的滑行。
-x.decay({ velocity: e.velocityX, clamp: [0, 300], bounce: 0.3 });
+x.decay({ velocity: e.velocity.x, clamp: [0, 300], bounce: 0.3 });
 
 // 值现在在哪里（它在 UI 线程上运动，所以结果是异步的）。
 const where = await x.getValue();
@@ -540,7 +541,7 @@ hand.keyframes([0, 360], { duration: 60_000, easing: Easing.steps(60), iteration
 - 每次迭代都先跳到它的第一个关键帧。没有 offset 为 0 的关键帧时，值从它当前的位置出发。
 - 在 `delay` 期间，值已经停在第一个关键帧上（CSS `animation-fill-mode: backwards`），因此延迟的入场显示的是它的第一帧，而不是静止状态的视图。动效同样如此。
 - `reverse` 以及 `alternate` 中反向的迭代会倒着播放各段，每段的曲线也随之反转。
-- 值停在最后一次迭代结束的位置。播放完成时结果为 `true`，被打断时为 `false`。
+- 值停在最后一次迭代结束的位置。结果表示它们是否完成：完成时为 `true`，被打断时为 `false`。
 
 ### 插值
 
@@ -687,9 +688,9 @@ hop.start(({ finished }) => console.log(finished ? "landed" : "stopped"));
 | `Animated.delay(ms)` | `Animation::delay(ms)` | 等待。 |
 | `Animated.loop(animation, { iterations?, resetBeforeIteration? })` | `.looped(iterations)`、`.reset_before_iteration(..)` | 重复（默认无限次；Rust 中为 `None`）。 |
 
-组合动画提供 `start()`（在 TSX 中也可以带回调，并返回表示是否完成的 promise；在 Rust 中返回可 await 的 `bool`；再次调用会重新运行）、`stop()`（停在原处）和 `reset()`（停止，并把各个值恢复到开始时的状态）。回调对整棵动画树只调用一次。
+组合动画提供 `start()`（在 TSX 中也可以带回调并返回 promise，两者都得到 `{ finished }`；在 Rust 中返回可 await 的 `bool`；再次调用会重新运行）、`stop()`（停在原处）和 `reset()`（停止，并把各个值恢复到开始时的状态）。回调对整棵动画树只调用一次。
 
-正在运行的动画不会让它的值保持存活：拥有这些值的组件（它的视图和变量）消失时，无限循环的动画随之停止，结果为 `false`。
+正在运行的动画不会让它的值保持存活：拥有这些值的组件（它的视图和变量）消失时，无限循环的动画随之停止，结果是未完成（`false`）。
 
 ## 缓动
 
@@ -810,6 +811,23 @@ LayoutAnimation.configureNext({
 });
 ```
 
+布局动画覆盖这次更新改变的所有帧，无论它们在屏幕上的什么位置：同一次更新中刷新的列表或到达的实时数据也会随之动画。在 Rust 组件中，用 `ElementRef::animate_layout(transition)` 只为一个元素的变化所移动的内容做动画：元素自己和其内容的帧，以及被它的尺寸推动的视图（它的兄弟视图，以及各级祖先的兄弟视图）的帧。这次更新的其他帧立即变化。`nsh/base` 的 `Collapsible` 和 `AccordionPanel` 就是这样展开内容的。
+
+```rust
+use nsh_core::element::{LayoutCurve, LayoutTransition};
+
+let region = element_ref();
+let open = signal(false);
+let toggle = move || {
+    region.animate_layout(LayoutTransition::new(LayoutCurve::Spring { damping: 1.0 }, 265.0));
+    open.update(|o| *o = !*o);
+};
+view()
+    .element_ref(&region)
+    .overflow_hidden()
+    .style_with(move |s| if open.get() { s } else { s.h(px(0.0)) })
+```
+
 ## 各部分运行在哪里
 
 | | 运行于 | 每帧运行你的代码 |
@@ -823,11 +841,41 @@ LayoutAnimation.configureNext({
 
 `requestAnimationFrame`（TSX 中跟随屏幕刷新的全局函数）只用于无法事先描述的情况，例如在你的代码中运行的物理模拟。凡是能用动画值表达的，都应该用动画值。
 
+## 帧率
+
+每个动画默认以屏幕的最高帧率运行：ProMotion 屏幕上是 120 Hz。小而慢的动效（如加载指示器、轻柔的脉动）在较低帧率下看起来一样，为它声明一个帧率，就能在只有它在动时让屏幕降低刷新频率，更省电。`frameRate` 是动画需要的最高帧率，单位 Hz：可写在 `timing`、`spring`、`decay` 的选项里，`Animated.*` 的步骤、关键帧和动效（`play`）的选项里，以及关键帧动画的样式键 `animationFrameRate` 里。
+
+```rust tabs
+// 每秒 30 帧就够的加载指示器。
+view().size(px(16.0)).animation(KeyframeAnimation::new(Keyframes::Spin).frame_rate(30.0))
+
+// 缓慢的淡入，最多 30 Hz。
+opacity.timing_with(1.0, Timing::new(600.0, Easing::Linear).frame_rate(30.0));
+// 以 24 Hz 循环的关键帧。
+glow.keyframes([Keyframe::new(0.4), Keyframe::new(1.0), Keyframe::new(0.4)], KeyframeTiming::new(1600.0).infinite().frame_rate(24.0));
+```
+
+```tsx tabs
+// 每秒 30 帧就够的加载指示器。
+<View style={{ width: 16, height: 16, animationName: "spin", animationFrameRate: 30 }} />
+
+// 缓慢的淡入，最多 30 Hz。
+opacity.timing(1, { duration: 600, easing: Easing.linear, frameRate: 30 });
+// 以 24 Hz 循环的关键帧。
+glow.keyframes([0.4, 1, 0.4], { duration: 1600, iterations: "infinite", frameRate: 24 });
+```
+
+屏幕以其上所有内容所需的最高帧率运行：没有 `frameRate` 的动画、过渡、滚动、手势或 `requestAnimationFrame` 循环运行时，屏幕回到最高帧率；组合动画以其步骤中最高的帧率运行。动画的时间与帧率无关：它在全帧率下结束的时刻结束。macOS 和 iOS 会按这些声明降低屏幕帧率；其他平台以屏幕的帧率运行所有动画。
+
 ## 减少动态效果
+
+在终端目标（`--target tui`）上，宿主逐帧推进动画值和组合动画，并调用完成回调。透明度、颜色和二维
+变换映射到 Cell 网格；文字保持直立的终端字形，画布路径使用盲文点阵。终端报告减少动态效果：动效、
+导航、模态框、布局和样式过渡立即落在终点，显式动画值驱动器和 `Animated` 组合动画按原样播放。
 
 当用户要求减少动态效果时（iOS 的"减弱动态效果"、Android 的"移除动画"），Rust 中的 `reduce_motion()` 和 TSX 中 `nsh` 的 `reduceMotion()` 为 `true`，Tailwind 的 `motion-reduce:` / `motion-safe:` 变体随之生效。
 
-[动效](#动效)会自动遵循这一设置：`play` 和 `enter` 会立即落在动效的终点，不产生移动，结果与正常播放完一样为 `true`。退场依然以隐藏结束，入场依然以静止结束。对承载用户所需信息的动效（例如表示进度的旋转指示器），传入 `ignoreReduceMotion: true`（Rust 中用 `play_ignoring_reduce_motion`）。
+[动效](#动效)会自动遵循这一设置：`play` 和 `enter` 会立即落在动效的终点，不产生移动，结果与正常播放完一样是已完成（`true`）。退场依然以隐藏结束，入场依然以静止结束。对承载用户所需信息的动效（例如表示进度的旋转指示器），传入 `ignoreReduceMotion: true`（Rust 中用 `play_ignoring_reduce_motion`）。
 
 过渡、关键帧动画、动画值、关键帧和组合动画按原样播放；用它们来选择更平和的替代方案：
 

@@ -274,6 +274,22 @@ public final class NshAppView: UIView {
         try check(nsh_app_set_theme_overrides(app, json))
     }
 
+    /// Registers a font file (TrueType, OpenType, WOFF or WOFF2) the host
+    /// ships, so every app this view loads can name its family in
+    /// `fontFamily` without bundling the file. Call it before or after
+    /// loading: a font registered before a load is in that app's first
+    /// frame, and one registered while an app runs is used from the next
+    /// layout. Throws when `data` is not a font.
+    public func registerFont(_ data: Data) throws {
+        try data.withUnsafeBytes { raw in
+            try check(nsh_app_register_font(
+                app,
+                raw.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                data.count
+            ))
+        }
+    }
+
     /// Grants the apps loaded from now on at most these capabilities: JSON in
     /// the form of `nsh.json`'s `capabilities` (`nil`: what each app
     /// declares). A request must be allowed by both.
@@ -577,6 +593,18 @@ extension NshAppView {
         }
     }
 
+    /// Hands `url`, one the embedding app was opened with (its scene's
+    /// `openURLContexts`, for example), to the running app: its
+    /// `UrlScheme.on("open")` listeners get it (`nsh`). While no app runs, the
+    /// next one loaded gets it.
+    public func openURL(_ url: URL) {
+        do {
+            try check(url.absoluteString.withCString { nsh_app_open_url(app, $0) })
+        } catch {
+            print("[nsh] open URL \(url): \(error)")
+        }
+    }
+
     /// Handles the app's calls (`await host.call(name, data)`) and posts
     /// (`host.post(name, data)`) of `name` on the main thread, replacing the
     /// handler it had: `handler` gets the data (JSON as Foundation objects,
@@ -623,7 +651,7 @@ extension NshAppView {
     /// Takes the URLs the app opens (`openUrl` of `nsh/device`, a
     /// `TextView`'s links when it opens them) before the system does, on the
     /// main thread: return `true` when the embedding app handled the URL (routed
-    /// it through its own router; the app's `openUrl` resolves `true`), `false`
+    /// it through its own router; the app's `openUrl` resolves `{ opened: true }`), `false`
     /// for the system to open it (`UIApplication.open`). `nil` (the default):
     /// the system opens every URL. URLs reach it checked and granted (the
     /// app's `openUrl` capability).

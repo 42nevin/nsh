@@ -62,7 +62,7 @@ function Counter() {
 }
 ```
 
-点击只会更新读取 `count` 的那一个文本节点。`counter()` / `Counter` 本身只运行一次。Rust 的 signal 是一个 `Copy` 句柄，闭包用 `move` 获取它即可随意使用。
+点击只会更新读取 `count` 的那一个文本节点。`counter()` / `Counter` 本身只运行一次。Rust 的 signal 是一个 `Copy` 句柄，闭包用 `move` 获取它即可随意使用。TSX 的 `set` 和 `update` 已绑定到所属的 signal，可以单独传递：`[1, 2].forEach(count.set)`、`attempt(busy.set, …)`。
 
 signal 可以把每次写入都算作变化，TSX 还可以用自己的方式比较值：
 
@@ -199,7 +199,7 @@ effect(move || {
 ```
 
 ```tsx tabs
-let input: YNode | undefined;
+let input: InputRef | undefined;
 effect(() => {
   if (editing()) input?.focus();
 });
@@ -488,7 +488,7 @@ function ProfileCard(props: { user: User | undefined }) {
 }
 ```
 
-失败交给发生处上方最近的错误边界，fallback 中的失败交给再上一层的错误边界。没有错误边界时，失败作为未捕获的错误报告（开发时的错误浮层、日志）。TSX 中不带参数的 `fallback` 按原样显示：`fallback={<Text>Unavailable</Text>}`。
+失败交给发生处上方最近的错误边界，fallback 中的失败交给再上一层的错误边界。没有错误边界时，失败作为未捕获的错误报告（开发时的错误浮层、日志）。TSX 中元素形式的 `fallback` 按原样显示（`fallback={<Text>Unavailable</Text>}`），函数形式的则以错误和 `reset` 调用，与它声明了几个参数无关。
 
 ## 什么会运行，何时运行
 

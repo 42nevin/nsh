@@ -108,7 +108,16 @@ final class Inspector {
     func inspect(_ element: AXUIElement, path: [Int]) throws -> ([String: Any], [AXUIElement]) {
         try bind(element)
         var attrs: [String: Any] = [:]
+        var names: CFArray?
+        let namesResult = AXUIElementCopyAttributeNames(element, &names)
+        record("attribute_names", ["object":identity(element), "error":axResult(namesResult), "names":names as? [String] ?? []])
+        guard namesResult == .success, let supported = names as? [String] else {
+            throw ProbeFailure(message:"public attribute-name query failed/type mismatch", environment:namesResult.rawValue == -25211 || namesResult.rawValue == -25204)
+        }
         for name in ["AXRole", "AXTitle", "AXDescription", "AXIdentifier", "AXEnabled", "AXPosition", "AXSize", "AXValue", "AXChildren"] {
+            // AppKit can return generic failure for a value the element does not expose.
+            // Advertised values still use the strict read/error checks below.
+            if name == "AXValue" && !supported.contains(name) { continue }
             let optional = ["AXTitle", "AXDescription", "AXIdentifier", "AXEnabled", "AXPosition", "AXSize", "AXValue", "AXChildren"].contains(name)
             attrs[name] = try attribute(element, name, optional: optional).1
         }
@@ -292,7 +301,7 @@ func runMixedCase(mode: String, target: URL, root: URL, state: URL) -> [String: 
             let core=["mixed.native","mixed.builtin","mixed.disabled-native","mixed.disabled-builtin"]
             for id in ["mixed.sibling"]+core {
                 let found=rows.filter{mixedAlias($0,id,phase)}
-                let absent=stopped || ((hidden || merged) && id != "mixed.sibling")
+                let absent=stopped || (hidden && id != "mixed.sibling")
                 if absent {
                     let aliases=rows.filter{mixedAlias($0,id,phase) || ownName($0)==mixedName(id,phase) || value($0,"AXValue") as? String == mixedName(id,phase)}
                     criterion("\(phase).\(id).absent",aliases.isEmpty,aliases); continue
@@ -314,10 +323,10 @@ func runMixedCase(mode: String, target: URL, root: URL, state: URL) -> [String: 
             }
             let fields=rows.filter{["AXTextField","AXTextArea"].contains(value($0,"AXRole") as? String ?? "")}
             let expectedValue=["updated","enabled","reordered","conditional-off","conditional-on","listener-off","listener-on","assistive-only","long-only","both-handlers"].contains(phase) ? "Updated value" : "Seed value"
-            criterion("\(phase).input_semantics_value",(hidden || merged || stopped) ? fields.isEmpty : fields.count==1 && value(fields[0],"AXValue") as? String == expectedValue,fields)
+            criterion("\(phase).input_semantics_value",(hidden || stopped) ? fields.isEmpty : fields.count==1 && value(fields[0],"AXValue") as? String == expectedValue,fields)
             let texts=rows.filter{value($0,"AXIdentifier") as? String == "mixed.text" || ownName($0)=="Mixed text"}
             criterion("\(phase).mixed_text_presence",(hidden || merged || stopped) ? texts.isEmpty : texts.count==1,texts)
-            if hidden || merged {
+            if hidden {
                 let valueAliases=rows.filter{["Mixed input","Mixed text","Seed value","Unrelated initial text"].contains(ownName($0) ?? "")
                     || ["Seed value","Unrelated initial text"].contains(value($0,"AXValue") as? String ?? "")}
                 criterion("\(phase).no_mixed_semantic_aliases",valueAliases.isEmpty,valueAliases)

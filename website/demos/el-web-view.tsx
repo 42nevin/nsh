@@ -1,6 +1,6 @@
-import { mount, signal, Text, View, WebView, type WebViewNavigation, type YNode } from "nsh";
+import { mount, signal, Text, View, WebView, type WebViewNavigation, type WebViewRef } from "nsh";
 import { platform, windowSize } from "nsh";
-import { button, buttonText, ui } from "./palette";
+import { button, buttonText, ui, sectionSurface } from "./palette";
 
 // The page: a button that posts to the app, and a line that shows what the
 // app posts back.
@@ -43,7 +43,7 @@ function App() {
   const nav = signal<WebViewNavigation | null>(null);
   const sent = signal(0);
   let painted = 0;
-  let web!: YNode;
+  let web!: WebViewRef;
   const wide = () => windowSize().width >= 700;
 
   return (
@@ -61,7 +61,7 @@ function App() {
         />
         <View style={{ gap: 12, width: wide() ? 320 : undefined }}>
           <Text style={{ color: ui().muted }}>
-            {platform.idiom === "desktop" ? "Click" : "Tap"} the button in the page to post to the app; these buttons call the ref's methods.
+            {platform.desktop ? "Click" : "Tap"} the button in the page to post to the app; these buttons call the ref's methods.
           </Text>
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
             <Button
@@ -80,7 +80,7 @@ function App() {
             />
             <Button label="reload" onPress={() => web.reload()} />
           </View>
-          <View style={{ ...ui().card, borderRadius: 12, padding: 12, gap: 4 }}>
+          <View style={{ ...sectionSurface({ padded: true }), gap: 4 }}>
             <Text style={{ color: ui().muted, fontSize: 12 }}>onLoad</Text>
             <Text style={{ numberOfLines: 1, color: ui().text, fontFamily: "monospace", fontSize: 13 }}>
               {nav() ? `title "${nav()!.title}"` : "…"}

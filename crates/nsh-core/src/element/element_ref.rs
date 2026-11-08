@@ -27,11 +27,11 @@ use super::{
     task::{Action, Executor},
 };
 use crate::{
-    Command, JsonValue, Measurement, NodeId,
+    Command, JsonValue, LayoutAnimation, LayoutTransition, Measurement, NodeId,
     geometry::{Percentage, Point, Points},
 };
 
-/// An element of a view: made with [`super::ambient::element_ref`], put on
+/// An element of a view: made with [`super::element_ref`], put on
 /// the element ([`super::Element::element_ref`]). Its commands go to
 /// whatever element carries it now, in order with the component's other
 /// changes; they do nothing while no rendered element carries it, and once
@@ -79,6 +79,29 @@ impl PartialEq for RefTarget {
     }
 }
 
+/// The element a view's frame follows ([`super::View::follow`]): whatever
+/// element carries the ref, looked up as the core lays out, so the
+/// element may be rendered after the view that follows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FollowTarget(pub(crate) RefTarget);
+
+impl FollowTarget {
+    /// The node carrying the ref now.
+    pub(crate) fn node(&self) -> Option<NodeId> {
+        Some(self.0.0.node.get()).filter(|&n| n != 0)
+    }
+
+    /// A target carried by `node`, with no ref behind it (the core's
+    /// tests).
+    #[cfg(test)]
+    pub(crate) fn of_node(node: NodeId) -> Self {
+        Self(RefTarget(Rc::new(Target {
+            node: Cell::new(node),
+            executor: Weak::new(),
+        })))
+    }
+}
+
 impl ElementRef {
     pub(crate) fn new(executor: &Rc<Executor>) -> Self {
         Self(Kept::new(Rc::new(Target {
@@ -112,7 +135,7 @@ impl ElementRef {
             .flatten()
     }
 
-    fn send(&self, command: Command) {
+    pub(crate) fn send(&self, command: Command) {
         self.reach(|node, executor| executor.act(Action::Command(node, command)));
     }
 
@@ -134,6 +157,21 @@ impl ElementRef {
     /// `setAccessibilityFocus(ref)`).
     pub fn set_accessibility_focus(&self) {
         self.send(Command::AccessibilityFocus);
+    }
+
+    /// Animates with `transition` the frames that the element's change
+    /// moves in the next commit: its own and its subtree's, its siblings'
+    /// and those of its ancestors' siblings, which its size pushes along
+    /// (and the content of those that change size). The commit's other
+    /// frames change at once, as do its insertions and removals: a region
+    /// that grows (a reveal) springs, while a list updating in the same
+    /// commit elsewhere does not. [`super::animate_layout`] animates the
+    /// whole commit instead, and wins when both are asked for.
+    pub fn animate_layout(&self, transition: LayoutTransition) {
+        self.send(Command::LayoutAnimation(LayoutAnimation {
+            update: Some(transition),
+            ..LayoutAnimation::default()
+        }));
     }
 
     /// Selects `start..end` of an input (UTF-16 units; a caret when equal).
@@ -221,6 +259,22 @@ impl ElementRef {
         self.send(Command::PostMessage(data.into()));
     }
 
+    /// Gives a web view's page `input` as the user's own: its events are
+    /// trusted. Needs the `webview.input` capability; macOS delivers it,
+    /// the other platforms ignore it for now
+    /// ([`web_input_available`](super::web_input_available) tells).
+    pub fn send_input(&self, input: crate::WebInput) {
+        self.send(Command::SendInput(input));
+    }
+
+    /// Loads `load.src` in a web view with `load.headers` on the document
+    /// request only (not its subresources, later navigations or reloads),
+    /// as an `Authorization` header for a signed-in page. Its host must be
+    /// one the `webview` capability allows.
+    pub fn load(&self, load: crate::WebLoad) {
+        self.send(Command::Load(load));
+    }
+
     /// Jumps a video to `seconds`.
     pub fn seek(&self, seconds: f64) {
         self.send(Command::Seek(seconds));
@@ -253,6 +307,27 @@ impl ElementRef {
     }
 }
 
+impl ElementRef {
+    /// How long the element's transitions run (`transition*`: the
+    /// longest duration plus its delay), with the styles of the commit
+    /// this call goes out with, so a class or style set before it counts;
+    /// zero when it has none or no rendered element carries the ref. The
+    /// platforms run transitions without reporting their end: a component
+    /// that keeps an element through its exit (a popup's ending style)
+    /// waits this long. Await it in a task.
+    pub fn transition_time(&self) -> Answer<std::time::Duration> {
+        let (answer, slot) = Answer::new();
+        let pending = slot.clone();
+        if self
+            .reach(|node, executor| executor.act(Action::TransitionTime(node, pending)))
+            .is_none()
+        {
+            slot.borrow_mut().deliver(std::time::Duration::ZERO);
+        }
+        answer
+    }
+}
+
 impl PartialEq for ElementRef {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
@@ -268,7 +343,7 @@ impl fmt::Debug for ElementRef {
 }
 
 /// A component of a view (TS: a `ref` to a component, its methods): made
-/// with [`super::ambient::component_ref`], put on the component's element
+/// with [`super::component_ref`], put on the component's element
 /// ([`super::ComponentElement::component_ref`]); [`Self::api`] reaches its
 /// methods, with no encoding. A `Copy` handle, as [`ElementRef`] is.
 pub struct ComponentRef<C: Component> {

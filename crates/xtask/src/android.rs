@@ -110,6 +110,11 @@ pub(crate) fn root() -> PathBuf {
 
 /// Builds `libnsh.so` for `abis` and `classes.dex` into
 /// `target/android/<profile>[-dev]`, returning that directory.
+///
+/// Release libraries go into `lib/<abi>` without their symbol tables and
+/// debug info, which APKs store uncompressed (a quarter of each library);
+/// `symbols/<abi>` keeps them whole, for `ndk-stack`, Play Console and the
+/// AAR (Gradle strips what it packages and keeps the symbols itself).
 pub(crate) fn build(release: bool, dev: bool, abis: &[String]) -> anyhow::Result<PathBuf> {
     let sdk = Sdk::find()?;
     let profile = if release { "release" } else { "debug" };
@@ -127,7 +132,16 @@ pub(crate) fn build(release: bool, dev: bool, abis: &[String]) -> anyhow::Result
         // Unchanged files keep their times: `nsh run` rebuilds and
         // reinstalls the development host when they change.
         let dest = dest.join("libnsh.so");
-        if !up_to_date(&dest, std::slice::from_ref(&so)) {
+        let symbols = out.join("symbols").join(abi).join("libnsh.so");
+        if up_to_date(&dest, std::slice::from_ref(&so)) && (!release || symbols.exists()) {
+            continue;
+        }
+        if release {
+            fs::create_dir_all(symbols.parent().context("symbols directory")?)?;
+            fs::copy(&so, &symbols)?;
+            strip(&sdk, &so, &dest)?;
+            check_alignment(&sdk, &dest)?;
+        } else {
             fs::copy(&so, &dest)?;
         }
     }
@@ -144,6 +158,18 @@ pub(crate) fn build(release: bool, dev: bool, abis: &[String]) -> anyhow::Result
     }
     term::note(out.strip_prefix(root()).unwrap_or(&out).display());
     Ok(out)
+}
+
+/// Writes `library` to `to` without the symbols nothing links against: the
+/// dynamic ones (`JNI_OnLoad`, the `Java_*` natives) stay.
+fn strip(sdk: &Sdk, library: &Path, to: &Path) -> anyhow::Result<()> {
+    term::run(
+        Command::new(sdk.toolchain().join("bin/llvm-strip"))
+            .arg("--strip-unneeded")
+            .arg("-o")
+            .arg(to)
+            .arg(library),
+    )
 }
 
 /// Check the linked ELF, before it is copied into a runtime or an AAR.
@@ -201,6 +227,34 @@ fn ndk_cargo(sdk: &Sdk, triple: &str) -> Command {
     let script = if cfg!(windows) { ".cmd" } else { "" };
     let clang = bin.join(format!("{}{MIN_SDK}-clang{script}", clang_target(triple)));
     let env_triple = triple.replace('-', "_");
+    // New NDKs keep the C standard headers their clang carries (stdbool.h
+    // &c.) out of the sysroot: whatever libclang bindgen of the C
+    // dependencies loads, give it that directory to search as well. Last
+    // (`-idirafter`), not first: ahead of the libclang's own headers, the
+    // NDK's `stdint.h` reaches the libclang's through `#include_next`, which
+    // its include guard empties, and the sysroot's `stdint.h` is never read
+    // (NDK 27 with a system libclang: `unknown type name 'uint32_t'`).
+    let clang_include = fs::read_dir(toolchain.join("lib/clang"))
+        .ok()
+        .and_then(|versions| {
+            versions
+                .filter_map(|version| version.ok().map(|version| version.path()))
+                .map(|version| version.join("include"))
+                .find(|include| include.is_dir())
+        });
+    let mut extra = format!(
+        "--target={}{MIN_SDK} --sysroot=\"{}\"",
+        clang_target(triple),
+        toolchain
+            .join("sysroot")
+            .display()
+            .to_string()
+            .replace('\\', "/")
+    );
+    if let Some(include) = clang_include {
+        let include = include.display().to_string().replace('\\', "/");
+        extra.push_str(format!(" -idirafter \"{include}\"").as_str());
+    }
     let mut cmd = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cmd.current_dir(root())
         .env(format!("CC_{env_triple}"), &clang)
@@ -208,20 +262,23 @@ fn ndk_cargo(sdk: &Sdk, triple: &str) -> Command {
         .env(
             format!("CARGO_TARGET_{}_LINKER", env_triple.to_uppercase()),
             &clang,
-        )
-        // bindgen splits this variable like a shell: quoted, with forward slashes,
-        // so that the backslashes and spaces of a Windows path survive.
-        .env(
-            format!("BINDGEN_EXTRA_CLANG_ARGS_{env_triple}"),
-            format!(
-                "--sysroot=\"{}\"",
-                toolchain
-                    .join("sysroot")
-                    .display()
-                    .to_string()
-                    .replace('\\', "/")
-            ),
         );
+    // The C dependencies' bindgen runs against the NDK's own libclang,
+    // rather than against whichever libclang the machine answers with
+    // first — but newer NDKs ship no libclang at all (r27 dropped it),
+    // and setting LIBCLANG_PATH cuts clang-sys's own discovery off. Only
+    // point it here when this NDK actually carries the library.
+    let ndk_libclang = bin.join(if cfg!(windows) {
+        "libclang.dll"
+    } else {
+        "libclang.so"
+    });
+    if ndk_libclang.exists() {
+        cmd.env("LIBCLANG_PATH", &bin);
+    }
+    // bindgen splits this variable like a shell: quoted, with forward slashes,
+    // so that the backslashes and spaces of a Windows path survive.
+    cmd.env(format!("BINDGEN_EXTRA_CLANG_ARGS_{env_triple}"), extra);
     cmd
 }
 
@@ -294,7 +351,7 @@ fn java(sdk: &Sdk, out: &Path, sources: &[PathBuf]) -> anyhow::Result<()> {
     fs::create_dir_all(&classes)?;
     // Java 17 bytecode: d8 desugars it for every supported API level.
     term::run(
-        Command::new("javac")
+        jdk("javac")
             .args([
                 "--release",
                 "17",
@@ -314,24 +371,46 @@ fn java(sdk: &Sdk, out: &Path, sources: &[PathBuf]) -> anyhow::Result<()> {
     let jar = out.join("classes.jar");
     let _ = fs::remove_file(&jar);
     term::run(
-        Command::new("jar")
+        jdk("jar")
             .arg("cf")
             .arg(&jar)
             .arg("-C")
             .arg(&classes)
             .arg("."),
     )?;
-    term::run(
-        Command::new(
-            sdk.build_tools
-                .join(if cfg!(windows) { "d8.bat" } else { "d8" }),
-        )
-        .args(["--min-api", &MIN_SDK.to_string(), "--lib"])
+    let mut d8 = Command::new(
+        sdk.build_tools
+            .join(if cfg!(windows) { "d8.bat" } else { "d8" }),
+    );
+    d8.args(["--min-api", &MIN_SDK.to_string(), "--lib"])
         .arg(sdk.android_jar())
         .arg("--output")
         .arg(out)
-        .arg(&jar),
-    )
+        .arg(&jar);
+    // `d8.bat` runs the `java` it finds on the PATH: the JDK's bin first.
+    if let Some(home) = env::var_os("JAVA_HOME").map(PathBuf::from) {
+        let mut paths = vec![home.join("bin")];
+        paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+        if let Ok(path) = env::join_paths(paths) {
+            d8.env("PATH", path);
+        }
+    }
+    term::run(&mut d8)
+}
+
+/// A JDK tool (`javac`, `jar`): JAVA_HOME's rather than the PATH's, where a
+/// machine that builds Android apps usually keeps a JDK.
+fn jdk(command: &str) -> Command {
+    let exe = if cfg!(windows) {
+        format!("{command}.exe")
+    } else {
+        command.to_owned()
+    };
+    let from_home = env::var_os("JAVA_HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("bin").join(&exe))
+        .filter(|tool| tool.exists());
+    Command::new(from_home.unwrap_or_else(|| PathBuf::from(&exe)))
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {

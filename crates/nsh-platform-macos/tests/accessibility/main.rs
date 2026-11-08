@@ -1,7 +1,7 @@
 //! Opt-in public AppKit accessibility regression fixture.
 //!
 //! Build with `cargo test -p nsh-platform-macos --features accessibility-tests
-//! --test accessibility --no-run`, then drive the produced executable with the
+//! --test embedding-accessibility --no-run`, then drive the produced executable with the
 //! adjacent external SDK client in a trusted, isolated macOS test environment.
 //! The external client supplies fresh owned IPC/state paths and finite budgets.
 //! Ordinary package tests do not enable this target or start AppKit.

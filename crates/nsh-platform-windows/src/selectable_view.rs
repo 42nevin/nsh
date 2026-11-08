@@ -23,9 +23,11 @@ use std::{
 };
 
 use nsh_core::{
-    AttributedText, Bounds, EventKind, Point, Points,
+    AttributedText, Bounds, EventKind, EventPayload, NodeId, PayloadValue, Point, Points,
     geometry::point,
-    selection::{SelectionModel, SelectionTexts},
+    selection::{
+        KeptRows, SelectionModel, SelectionTexts, autoscroll_step, reading_order, reorder,
+    },
 };
 
 use crate::{
@@ -40,12 +42,9 @@ use crate::{
 const SELECT_SLOP: f32 = 3.0;
 /// The same over a press target (a link, `onPress`).
 const SELECT_SLOP_PRESS: f32 = 10.0;
-/// How often (ms) autoscroll scrolls while the mouse is past an edge.
+/// How often (ms) autoscroll scrolls while the mouse is near or past an
+/// edge.
 const AUTOSCROLL_TICK: u64 = 16;
-/// Autoscroll's step per tick for each point the mouse is past the edge,
-/// and its largest step.
-const AUTOSCROLL_RATE: f32 = 0.3;
-const AUTOSCROLL_MAX: f32 = 40.0;
 
 /// The texts of an area, in document order (depth first, children bottom
 /// to top), as the model sees them: coordinates are the area's.
@@ -77,12 +76,24 @@ impl Texts {
     }
 
     fn collect(&mut self, view: &NshView) {
+        // In reading order: a virtual list's recycled cells are mounted
+        // in no particular order.
+        let start = self.views.len();
+        let mut runs = Vec::new();
         view.with_children(|children| {
             for child in children {
+                let from = self.views.len();
                 self.add(child);
                 self.collect(child);
+                runs.push((child.state().frame, from..self.views.len()));
             }
         });
+        if let Some(order) = reading_order(&runs) {
+            reorder(&mut self.views, start, &order);
+            reorder(&mut self.texts, start, &order);
+            reorder(&mut self.frames, start, &order);
+            reorder(&mut self.to_root, start, &order);
+        }
     }
 
     /// Adds `view` when it is text that takes part.
@@ -148,6 +159,10 @@ impl SelectionTexts for Texts {
     fn key(&self, i: usize) -> u64 {
         u64::from(self.views[i].id())
     }
+
+    fn continues(&self, i: usize) -> bool {
+        self.views[i].state().props.continues_text
+    }
 }
 
 /// Whether text takes part in the area around it.
@@ -209,6 +224,10 @@ struct Current {
     last: Option<(f32, f32)>,
     /// An autoscroll tick is pending.
     autoscrolling: bool,
+    /// The virtual list rows its ends are in, kept rendered.
+    kept: KeptRows,
+    /// The selected text last reported to the area's `onSelectionChange`.
+    reported: String,
 }
 
 impl Current {
@@ -223,11 +242,16 @@ impl Current {
             over_press: false,
             last: None,
             autoscrolling: false,
+            kept: KeptRows::default(),
+            reported: String::new(),
         }
     }
 
     /// Hands each text its part of the selection.
     fn apply(&mut self, texts: &Texts) {
+        if let Some(nodes) = self.kept.changed(&self.model) {
+            keep_rendered(self.surface, nodes);
+        }
         let ranges = self.model.ranges(texts);
         let mut highlighted = Vec::with_capacity(ranges.len());
         for (i, range) in ranges {
@@ -244,9 +268,23 @@ impl Current {
 
     /// Takes the highlights away.
     fn unhighlight(&mut self) {
+        if let Some(nodes) = self.kept.release() {
+            keep_rendered(self.surface, nodes);
+        }
         for view in self.highlighted.drain(..) {
             set_range(&view, None);
         }
+    }
+}
+
+/// Keeps the virtual list rows of `nodes` rendered (none: lets go).
+fn keep_rendered(surface: u64, nodes: Vec<u64>) {
+    if let Some(surface) = Surface::by_key(surface) {
+        let nodes = nodes
+            .into_iter()
+            .filter_map(|k| k.try_into().ok())
+            .collect();
+        surface.control(|c| c.keep_rendered(nodes));
     }
 }
 
@@ -283,6 +321,7 @@ fn take(surface: u64, area: Option<&NshView>) -> Option<Current> {
 }
 
 fn put(current: Current) {
+    let surface = current.surface;
     // Something made another current meanwhile: that one stays.
     let mut current = Some(current);
     CURRENT.with_borrow_mut(|c| {
@@ -290,15 +329,75 @@ fn put(current: Current) {
             *c = current.take();
         }
     });
-    if let Some(mut lost) = current {
-        lost.unhighlight();
+    match current {
+        Some(lost) => end(lost),
+        None => report(surface),
     }
+}
+
+/// Ends `current`'s selection: its highlights go, and an area that
+/// reported a selected text (and is still there) reports `""`.
+fn end(mut current: Current) {
+    current.unhighlight();
+    if !current.reported.is_empty() && current.area.attached() {
+        let id = current.area.state().id;
+        if let Some(surface) = Surface::by_key(current.surface) {
+            send(&surface, id, String::new(), 0);
+        }
+    }
+}
+
+/// Reports the current area's selected text to its `onSelectionChange`
+/// when it changed (after it is put back: the handler may change what is
+/// shown).
+fn report(surface: u64) {
+    let Some(mut current) = take(surface, None) else {
+        return;
+    };
+    let (id, listens) = {
+        let s = current.area.state();
+        (s.id, s.events.contains(EventKind::SelectionChange))
+    };
+    let mut change = None;
+    if listens {
+        let (text, start) = if current.model.is_empty() {
+            (String::new(), 0)
+        } else {
+            let texts = Texts::of(&current.area);
+            (
+                current.model.text(&texts),
+                current.model.start_offset(&texts),
+            )
+        };
+        if text != current.reported {
+            current.reported.clone_from(&text);
+            change = Some((text, start));
+        }
+    }
+    CURRENT.set(Some(current));
+    if let Some((text, start)) = change
+        && let Some(surface) = Surface::by_key(surface)
+    {
+        send(&surface, id, text, start);
+    }
+}
+
+/// Sends `onSelectionChange` with `text` to view `id`.
+fn send(surface: &Surface, id: NodeId, text: String, start: u32) {
+    surface.event(
+        id,
+        EventKind::SelectionChange,
+        EventPayload::Map(vec![
+            ("text", PayloadValue::Str(text)),
+            ("start", PayloadValue::Number(f64::from(start))),
+        ]),
+    );
 }
 
 /// Ends the current area's selection (a single text was selected).
 pub(crate) fn clear() {
-    if let Some(mut current) = CURRENT.take() {
-        current.unhighlight();
+    if let Some(current) = CURRENT.take() {
+        end(current);
     }
 }
 
@@ -320,7 +419,7 @@ pub(crate) fn end_batch(surface: &Rc<Surface>) {
     DIRTY.set(false);
     let gone = !current.area.attached() || !current.area.state().props.selectable_view;
     if gone {
-        current.unhighlight();
+        end(current);
         return;
     }
     let texts = Texts::of(&current.area);
@@ -333,7 +432,7 @@ pub(crate) fn end_batch(surface: &Rc<Surface>) {
 /// the views get it: ends the area's selection when the press is outside
 /// it.
 pub(crate) fn window_pressed(surface: &Surface, x: f32, y: f32) {
-    let Some(mut current) = take(surface.key(), None) else {
+    let Some(current) = take(surface.key(), None) else {
         return;
     };
     let inside = current
@@ -347,7 +446,7 @@ pub(crate) fn window_pressed(surface: &Surface, x: f32, y: f32) {
     if inside {
         put(current);
     } else {
-        current.unhighlight();
+        end(current);
     }
 }
 
@@ -400,8 +499,8 @@ pub(crate) fn pointer(
             let mut current = match CURRENT.take() {
                 Some(c) if c.surface == key && c.area == *area => c,
                 other => {
-                    if let Some(mut other) = other {
-                        other.unhighlight();
+                    if let Some(other) = other {
+                        end(other);
                     }
                     Current::new(key, area.clone())
                 }
@@ -486,8 +585,9 @@ fn scroll_view_of(area: &NshView) -> Option<NshView> {
     None
 }
 
-/// How far `(x, y)` (root coordinates) is past the edges of `view`
-/// (negative above or left of it, 0 inside).
+/// The autoscroll step per tick for `(x, y)` (root coordinates) near or
+/// past the edges of `view` ([`autoscroll_step`]: negative toward the top
+/// or left, 0 away from them).
 fn past_edges(view: &NshView, x: f32, y: f32) -> (f32, f32) {
     let bounds = view.to_root().and_then(|m| {
         let s = view.state();
@@ -496,16 +596,10 @@ fn past_edges(view: &NshView, x: f32, y: f32) -> (f32, f32) {
     let Some((bx, by, bw, bh)) = bounds else {
         return (0.0, 0.0);
     };
-    let past = |p: f32, start: f32, len: f32| {
-        if p < start {
-            p - start
-        } else if p > start + len {
-            p - (start + len)
-        } else {
-            0.0
-        }
-    };
-    (past(x, bx, bw), past(y, by, bh))
+    (
+        autoscroll_step(Points(x - bx), Points(bw)).0,
+        autoscroll_step(Points(y - by), Points(bh)).0,
+    )
 }
 
 /// Scrolls `view` toward the mouse at `(x, y)` (root coordinates) when it
@@ -516,12 +610,7 @@ fn autoscroll_by(surface: &Rc<Surface>, view: &NshView, x: f32, y: f32) -> bool 
         return false;
     };
     let (px, py) = past_edges(view, x, y);
-    let step = |d: f32| (d * AUTOSCROLL_RATE).clamp(-AUTOSCROLL_MAX, AUTOSCROLL_MAX);
-    let (dx, dy) = if horizontal {
-        (step(px), 0.0)
-    } else {
-        (0.0, step(py))
-    };
+    let (dx, dy) = if horizontal { (px, 0.0) } else { (0.0, py) };
     if (dx, dy) == (0.0, 0.0) || !crate::scroll::can_scroll(view, dx, dy) {
         return false;
     }
@@ -583,8 +672,8 @@ fn select_all(surface: u64, area: &NshView) {
     let mut current = match CURRENT.take() {
         Some(c) if c.surface == surface && c.area == *area => c,
         other => {
-            if let Some(mut other) = other {
-                other.unhighlight();
+            if let Some(other) = other {
+                end(other);
             }
             Current::new(surface, area.clone())
         }

@@ -56,7 +56,7 @@ Supported files: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.heic`, and `.svg` (
 In Rust, a missing or broken file fails the build, and a changed one builds the crate again. In TSX, assets are resolved relative to the importing module, and their `url` is relative to the app's root (the entry's directory). `nsh build` copies them to `out/assets/`, `nsh package` puts them in the app, and during development the dev server serves them.
 
 > [!TIP]
-> In TSX, `src` also accepts `asset:/path` strings, and imported files are the ones guaranteed to ship. A path that is never imported works with the dev server, which serves the whole app directory, and is missing from packaged apps. Import every image you use. A Rust crate ships its whole `assets/` directory through `assets!()`.
+> In TSX, `src` also accepts `asset:/path` strings, and imported files are the ones guaranteed to ship. A path that is never imported works with the dev server for images, fonts, audio and video in the app's directory (outside hidden directories), and is missing from packaged apps. Import every image you use. A Rust crate ships its whole `assets/` directory through `assets!()`.
 
 ### Pixel densities
 
@@ -276,7 +276,7 @@ Animated GIF, WebP and APNG files play automatically, as assets or from URLs. Th
 |---|---|---|---|
 | `onLoadStart` | `.on_load_start(..)` | | Loading starts |
 | `onProgress` | `.on_progress(..)` | `{ loaded, total }` in bytes (`total` 0 when unknown) | During a download, at most every 100 ms |
-| `onLoad` | `.on_load(..)` | `{ width, height }` | The image is ready; the source's size in pixels (an SVG's in points, [on the web as the browser measures it](#svg-images)) |
+| `onLoad` | `.on_load(..)` | `{ size }` | The image is ready; the source's size in pixels (an SVG's in points, [on the web as the browser measures it](#svg-images)) |
 | `onError` | `.on_error(..)` | `{ message }` (a `&str` in Rust) | Loading or decoding failed |
 | `onLoadEnd` | `.on_load_end(..)` | | After `onLoad` or `onError` |
 
@@ -284,7 +284,7 @@ Animated GIF, WebP and APNG files play automatically, as assets or from URLs. Th
 let status = signal(SharedString::from("loading…"));
 
 image(url)
-    .on_load(move |size: &Size<Points>| status.set(format!("{}×{}", size.width.0, size.height.0).into()))
+    .on_load(move |size: &Size<DevicePixels>| status.set(format!("{}×{}", size.width.0, size.height.0).into()))
     .on_error(move |message: &str| status.set(message.to_owned().into()))
     .w(px(90.0))
     .h(px(60.0))
@@ -295,7 +295,7 @@ const status = signal("loading…");
 
 <Image
   src={url}
-  onLoad={(e) => status.set(`${e.width}×${e.height}`)}
+  onLoad={({ size }) => status.set(`${size.width}×${size.height}`)}
   onError={(e) => status.set(e.message)}
   style={{ width: 90, height: 60 }}
 />
@@ -313,8 +313,8 @@ Images that are not on screen can be measured and loaded ahead: `image_size(..)`
 spawn(async move {
     // Ok(ImageSize { width, height }), in pixels.
     let size = image_size("https://example.com/photo.jpg").await;
-    // true once the bytes are in memory.
-    let ok = prefetch_image("https://example.com/next.jpg").await;
+    // Ok(()) once the bytes are in memory.
+    let loaded = prefetch_image("https://example.com/next.jpg").await;
 });
 ```
 
@@ -322,13 +322,13 @@ spawn(async move {
 import { Image } from "nsh";
 
 const size = await Image.getSize("https://example.com/photo.jpg");   // { width, height } in pixels
-const ok = await Image.prefetch("https://example.com/next.jpg");      // true once the bytes are in memory
+await Image.prefetch("https://example.com/next.jpg");                // once the bytes are in memory
 ```
 
 | Rust | TSX | Returns |
 |---|---|---|
 | `image_size(src)` | `Image.getSize(src)` | The image's size in pixels (an SVG's in points, [on the web as the browser measures it](#svg-images)); an error when it cannot be loaded |
-| `prefetch_image(src)` | `Image.prefetch(src)` | `true` once the image's bytes are loaded |
+| `prefetch_image(src)` | `Image.prefetch(src)` | Nothing, once the image's bytes are loaded; an error when it cannot be loaded |
 
 In TSX, `src` is a URL string or an imported image. For an imported image with [variants](#pixel-densities), both load the variant the views load on this screen, and `getSize` gives the imported file's size. Both keep the downloaded bytes for the views that show the image next, so an image prefetched before it is shown appears without a download.
 
@@ -358,10 +358,39 @@ function RemoteImage(props: { url: string }) {
 
 | File | Rust (`asset!`) | TSX import | Page |
 |---|---|---|---|
-| `.ttf`, `.otf` | A `FontAsset` with its family name | The font's family name | [Fonts](./fonts.md) |
+| `.ttf`, `.otf`, `.woff`, `.woff2` | A `FontAsset` with its family name | The font's family name | [Fonts](./fonts.md) |
+| `.wav`, `.m4a`, `.aac`, `.mp3` | A `FileAsset` with its URI | The file's `asset:/` URL | [Sound](../modules/nsh.md#sound) |
 | `.json` and other files | A `FileAsset` with its URI | `.json`: the parsed value, bundled into the script | [Project structure](./project-structure.md#modules) |
 
 Fonts are registered before the first frame in both.
+
+### Reading a file at run time
+
+`fetch` reads a file the app ships by its `asset:/` URL, in TSX and in Rust alike, on every platform. An imported image carries its URL (`url`), a Rust crate's files have theirs from `asset!` (`FileAsset::uri`) and `assets!()`:
+
+```rust tabs
+const GREETING: FileAsset = asset!("locales/en.txt");
+
+#[component]
+fn Greeting() -> impl IntoElement {
+    let greeting = signal(String::new());
+    spawn(async move {
+        match fetch(GREETING.uri).await {
+            Ok(response) => greeting.set(response.text()),
+            Err(error) => greeting.set(error),
+        }
+    });
+    text(move || greeting.get())
+}
+```
+
+```tsx tabs
+import flag from "./images/flag.png";
+
+const bytes = await (await fetch(flag.url)).bytes();
+```
+
+The engine reads the file from the app's files off its thread (from the dev server during `nsh run`), with no capability needed: they are the app's own. A web app downloads what the page did not preload from where it serves its assets. The response is `200` with the file's bytes, its `Content-Length` and the `Content-Type` its extension gives (`image/png`, `application/json`, ...), and its `url` is the `asset:/` URL asked for, without its fragment, however the file arrived; a file the app does not ship rejects as a network error that names it. The URL names the file by its path inside the app's files, on every platform alike: the scheme reads in any case, as URLs' schemes do, and a query or a fragment leaves the file the same (`asset:/locales/en.json?v=2` reads `locales/en.json`). The request reads the file with `GET` (or `HEAD`): a URL whose path leaves the app's files (`..`, an absolute path) and a request with another method reject the same way, before anything is read or downloaded.
 
 ### A module's own URL
 

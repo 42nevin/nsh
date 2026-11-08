@@ -36,9 +36,9 @@ log.workspace = true
 
 # Empty off the desktop (like the other platform crates off their targets).
 [target.'cfg(any(target_os = "linux", target_os = "macos", windows))'.dependencies]
-nsh-core = { workspace = true, features = ["svg"] }
-nsh-engine = { workspace = true, features = ["net"] }
-nsh-base = { workspace = true, features = ["highlight"] }
+nsh-core = { workspace = true, features = ["svg", "loader"] }
+nsh-engine = { workspace = true, features = ["net", "shader"] }
+nsh-base = { workspace = true, features = ["editor", "highlight", "math", "plot", "rich-editor", "term"] }
 gpui.workspace = true
 gpui_platform.workspace = true
 image = { workspace = true, features = ["gif", "webp", "jpeg", "bmp", "ico", "tiff"] }
@@ -49,7 +49,6 @@ serde_json.workspace = true
 ttf-parser.workspace = true
 unicode-bidi.workspace = true
 unicode-linebreak.workspace = true
-ureq.workspace = true
 anyhow.workspace = true
 crossbeam-channel.workspace = true
 futures-channel.workspace = true
@@ -78,9 +77,12 @@ test = false
 
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-handle.workspace = true
+objc2.workspace = true
 objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+raw-window-handle.workspace = true
 windows-sys.workspace = true
 
 # Tests in windows of GPUI's test platform (feature `shot`) compile

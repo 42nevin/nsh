@@ -45,9 +45,20 @@ function App() {
   return (
     <View style={{ flex: 1, padding: 8, gap: 8 }}>
       <Square style={{ width: 40, height: 20 }} />
-      <Input autoFocus value={text()} onChange={(t) => text.set(t)} style={{ height: 30 }} />
+      <Input autoFocus value={text()} onChange={({ value }) => text.set(value)} style={{ height: 30 }} />
     </View>
   );
+}
+mount(App);
+"#;
+
+/// A focused field that shows the app's state.
+const LIFECYCLE_FIELD: &str = r#"
+import { lifecycle, mount } from "nsh";
+import { Input } from "nsh/base";
+
+function App() {
+  return <Input autoFocus value={lifecycle()} style={{ height: 30 }} />;
 }
 mount(App);
 "#;
@@ -68,7 +79,7 @@ function App() {
       <Input
         autoFocus
         value={text()}
-        onChange={(t) => {
+        onChange={({ value: t }) => {
           log.push("change " + t);
           text.set(t);
         }}
@@ -176,8 +187,11 @@ fn windows(cx: &mut TestAppContext) {
     compositions_are_reported_and_hold_values_until_they_end(cx);
     menu_shortcuts_leave_a_focused_field_the_keys_it_uses(cx);
     presses_carry_where_the_pointer_was(cx);
+    files_dropped_from_outside_reach_the_view_under_them(cx);
     presses_carry_the_modifier_keys_and_click_count(cx);
+    mouse_events_carry_the_position_button_and_modifiers(cx);
     an_embedded_surface_takes_the_keyboard_when_its_app_focuses_a_field(cx);
+    text_typed_ahead_of_enter_or_a_binding_lands_in_the_next_field(cx);
     the_app_s_shortcuts_reach_it_while_a_native_component_has_the_keyboard(cx);
     js_and_rust_view_shortcuts_fire_together_in_either_order(cx);
     each_view_s_functions_read_the_context_its_options_gave_its_engine(cx);
@@ -186,6 +200,9 @@ fn windows(cx: &mut TestAppContext) {
     an_auto_hidden_menu_bar_shows_on_alt_alone_and_while_a_menu_is_open(cx);
     asset_uris_resolve_in_the_first_directory_that_has_the_file(cx);
     releasing_shift_before_alt_keeps_the_auto_hidden_menu_bar_hidden(cx);
+    the_app_s_state_follows_its_window_s_activation_and_visibility(cx);
+    set_bounds_sizes_the_window_and_keeps_the_size_it_leaves_out(cx);
+    a_secondary_click_on_a_drag_area_reaches_its_on_context_menu(cx);
 }
 
 fn keys_reach_the_fields_of_a_surface_showing_a_native_component(cx: &mut TestAppContext) {
@@ -273,6 +290,94 @@ fn an_embedded_surface_takes_the_keyboard_when_its_app_focuses_a_field(cx: &mut 
     wait_for(&view, cx, "ab");
 }
 
+/// Two fields. Enter in the first, and Ctrl+N (Command+N on macOS), both
+/// focus the second. Text typed before the engine has handled that key
+/// belongs to the second field.
+const TWO_FIELDS: &str = r#"
+import { keymap, mount, signal, View, type InputRef } from "nsh";
+import { Input } from "nsh/base";
+
+function App() {
+  const first = signal("A");
+  const second = signal("");
+  let next!: InputRef;
+  const go = () => next.focus();
+  keymap.bind("mod+n", go, { when: "always" });
+  return (
+    <View style={{ flex: 1, padding: 8, gap: 8 }}>
+      <Input
+        autoFocus
+        value={first()}
+        onChange={({ value }) => first.set(value)}
+        onSubmit={go}
+        submitBehavior="submit"
+        style={{ height: 30 }}
+      />
+      <Input ref={next} value={second()} onChange={({ value }) => second.set(value)} style={{ height: 30 }} />
+    </View>
+  );
+}
+mount(App);
+"#;
+
+fn down(vk: u16, modifiers: crate::input::Modifiers) -> crate::input::KeyEvent {
+    crate::input::KeyEvent {
+        vk,
+        down: true,
+        repeat: false,
+        modifiers,
+    }
+}
+
+/// `x`, then Backspace, then `y`, before the engine applies `key`. The
+/// focused field must still read "A", and then "y" once the next field
+/// has the keyboard.
+fn typed_ahead(cx: &mut TestAppContext, key: crate::input::KeyEvent) {
+    let code = nsh_bundler::compile_module("App.tsx", TWO_FIELDS, &[]).unwrap();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| AppView::new(AppOptions::default(), window, cx));
+    view.update(cx, |view, _| view.load(App::Js(Bundle::source(code))));
+    cx.update(|window, cx| window.focus(&view.focus_handle(cx), cx));
+    wait_for(&view, cx, "A");
+    view.update(cx, |view, _| {
+        let surface = view.surface().clone();
+        assert!(crate::input::key(&surface, key), "the key was not handled");
+        crate::text_input::char_input(&surface, "x");
+        assert!(crate::input::key(
+            &surface,
+            down(crate::keys::VK_BACK, crate::input::Modifiers::default())
+        ));
+        crate::text_input::char_input(&surface, "y");
+        let now = crate::text_input::focused(view.surface())
+            .and_then(|field| crate::text_input::accessible_value(&field))
+            .map(|value| value.text);
+        assert!(
+            matches!(now.as_deref(), None | Some("A")),
+            "typed ahead into the field that still has the keyboard: {now:?}"
+        );
+    });
+    wait_for(&view, cx, "y");
+}
+
+fn text_typed_ahead_of_enter_or_a_binding_lands_in_the_next_field(cx: &mut TestAppContext) {
+    typed_ahead(
+        cx,
+        down(crate::keys::VK_RETURN, crate::input::Modifiers::default()),
+    );
+    let modifiers = if cfg!(target_os = "macos") {
+        crate::input::Modifiers {
+            meta: true,
+            ..crate::input::Modifiers::default()
+        }
+    } else {
+        crate::input::Modifiers {
+            ctrl: true,
+            ..crate::input::Modifiers::default()
+        }
+    };
+    typed_ahead(cx, down(0x4E, modifiers));
+}
+
 struct KeyLog {
     keys: Rc<std::cell::RefCell<Vec<String>>>,
     focus: Rc<std::cell::RefCell<Option<gpui::FocusHandle>>>,
@@ -291,7 +396,10 @@ impl NativeComponent for KeyLog {
             div()
                 .size_full()
                 .track_focus(&focus)
-                .on_key_down(move |e, _, _| keys.borrow_mut().push(e.keystroke.unparse()))
+                .on_key_down(move |e, _, cx| {
+                    keys.borrow_mut()
+                        .push(e.keystroke.unparse(cx.platform_info().os))
+                })
                 .into_any_element(),
         )
     }
@@ -393,7 +501,12 @@ fn the_app_s_shortcuts_reach_it_while_a_native_component_has_the_keyboard(cx: &m
     // GPUI's test window sends no releases. K's release reaches the keymap
     // while the component has the focus, so the next Ctrl+K is not a repeat.
     cx.simulate_event(gpui::KeyUpEvent {
-        keystroke: gpui::Keystroke::parse(&format!("{primary}-k")).unwrap(),
+        keystroke: gpui::Keystroke::parse(if cfg!(target_os = "macos") {
+            "cmd-k"
+        } else {
+            "ctrl-k"
+        })
+        .unwrap(),
     });
     cx.simulate_keystrokes(&format!("{primary}-k shift-{primary}-n"));
     assert_eq!(
@@ -452,7 +565,7 @@ function App() {
   setTimeout(async () => text.set(`${Whose.now()} ${await Whose.later()}`), 0);
   return (
     <View style={{ flex: 1 }}>
-      <Input autoFocus value={text()} onChange={(t) => text.set(t)} style={{ height: 30 }} />
+      <Input autoFocus value={text()} onChange={({ value }) => text.set(value)} style={{ height: 30 }} />
     </View>
   );
 }
@@ -619,8 +732,8 @@ fn js_and_rust_view_shortcuts_fire_together_in_either_order(cx: &mut TestAppCont
 /// A pad inside 8 points of padding. A press writes where it was in the
 /// pad and in the window.
 mod press_point {
-    use nsh_core::prelude::*;
     use nsh_base::input;
+    use nsh_core::prelude::*;
 
     #[component]
     pub(super) fn PressPoint() -> impl IntoElement {
@@ -652,6 +765,132 @@ mod press_point {
                     .h(px(30.0)),
             )
     }
+}
+
+fn files_dropped_from_outside_reach_the_view_under_them(cx: &mut TestAppContext) {
+    let source = r#"
+import { mount, signal, View } from "nsh";
+import { Input } from "nsh/base";
+const log = signal<string[]>([]);
+const add = (entry: string) => log.set([...log(), entry]);
+mount(() => <View style={{ flex: 1 }}>
+  <View
+    onFileDragEnter={() => add("enter outer")}
+    onFileDragLeave={() => add("leave outer")}
+    onFileDrop={(e) => add("drop outer " + e.uris.join(";"))}
+    style={{ height: 100 }}
+  >
+    <View
+      onFileDragEnter={() => add("enter inner")}
+      onFileDragLeave={() => add("leave inner")}
+      onFileDrop={(e) => add("drop inner " + e.uris.join(";"))}
+      style={{ height: 40 }}
+    />
+  </View>
+  <View style={{ height: 100 }} />
+  <Input autoFocus readonly value={log().join(", ") || "none"} style={{ height: 30 }} />
+</View>);
+"#;
+    let code = nsh_bundler::compile_module("App.tsx", source, &[]).unwrap();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| AppView::new(AppOptions::default(), window, cx));
+    view.update(cx, |view, _| view.load(App::Js(Bundle::source(code))));
+    cx.update(|window, cx| window.focus(&view.focus_handle(cx), cx));
+    wait_for(&view, cx, "none");
+    let origin = view.read_with(cx, |view, _| view.surface().origin.get());
+    let at = |y: f32| gpui::point(gpui::px(origin.0 + 10.0), gpui::px(origin.1 + y));
+    let send = |cx: &mut VisualTestContext, event: gpui::FileDropEvent| {
+        cx.update(|window, cx| {
+            window.dispatch_event(gpui::PlatformInput::FileDrop(event), cx);
+        });
+        cx.run_until_parked();
+    };
+    let enter = |cx: &mut VisualTestContext, y: f32, paths: &[String]| {
+        let paths = gpui::ExternalPaths(paths.iter().map(std::path::PathBuf::from).collect());
+        send(
+            cx,
+            gpui::FileDropEvent::Entered {
+                position: at(y),
+                paths,
+            },
+        );
+        // The platform's next report, once the drag's frame has laid the
+        // drop layer over the surface.
+        send(cx, gpui::FileDropEvent::Pending { position: at(y) });
+    };
+    // The innermost listener under the drag is the destination; moving
+    // leaves it for the next one, and the drop goes there, without the
+    // relative path.
+    let dropped = crate::file_drop::test_url("a%20b.txt");
+    enter(
+        cx,
+        20.0,
+        &[crate::file_drop::test_path("a b.txt"), "b.txt".into()],
+    );
+    wait_for(&view, cx, "enter inner");
+    send(cx, gpui::FileDropEvent::Pending { position: at(70.0) });
+    wait_for(&view, cx, "enter inner, leave inner, enter outer");
+    send(cx, gpui::FileDropEvent::Submit { position: at(70.0) });
+    wait_for(
+        &view,
+        cx,
+        &format!("enter inner, leave inner, enter outer, drop outer {dropped}, leave outer"),
+    );
+    // Leaving the window leaves the destination.
+    enter(cx, 20.0, &[crate::file_drop::test_path("c.txt")]);
+    send(cx, gpui::FileDropEvent::Exited);
+    wait_for(
+        &view,
+        cx,
+        &format!(
+            "enter inner, leave inner, enter outer, drop outer {dropped}, leave outer, \
+             enter inner, leave inner"
+        ),
+    );
+    // Where no view listens, the drop goes nowhere.
+    enter(cx, 150.0, &[crate::file_drop::test_path("d.txt")]);
+    send(
+        cx,
+        gpui::FileDropEvent::Submit {
+            position: at(150.0),
+        },
+    );
+    wait_for(
+        &view,
+        cx,
+        &format!(
+            "enter inner, leave inner, enter outer, drop outer {dropped}, leave outer, \
+             enter inner, leave inner"
+        ),
+    );
+    // A drag that ended schedules one clear of its destination, however
+    // often the window redraws before the clear runs.
+    enter(cx, 20.0, &[crate::file_drop::test_path("e.txt")]);
+    wait_for(
+        &view,
+        cx,
+        &format!(
+            "enter inner, leave inner, enter outer, drop outer {dropped}, leave outer, \
+             enter inner, leave inner, enter inner"
+        ),
+    );
+    view.update(cx, |view, cx| {
+        let surface = view.surface();
+        assert!(crate::file_drop::take_needs_clear(surface));
+        assert!(!crate::file_drop::take_needs_clear(surface));
+        crate::file_drop::clear(surface);
+        assert!(!crate::file_drop::take_needs_clear(surface));
+        crate::rt::flush(cx);
+    });
+    send(cx, gpui::FileDropEvent::Exited);
+    wait_for(
+        &view,
+        cx,
+        &format!(
+            "enter inner, leave inner, enter outer, drop outer {dropped}, leave outer, \
+             enter inner, leave inner, enter inner, leave inner"
+        ),
+    );
 }
 
 fn presses_carry_where_the_pointer_was(cx: &mut TestAppContext) {
@@ -758,12 +997,12 @@ fn height_below_title_bar(cx: &mut VisualTestContext) -> f32 {
 const OWNED_WINDOW: &str = r#"
 import { mount, signal, View } from "nsh";
 import { Input } from "nsh/base";
-import { Menu, Window } from "nsh/desktop";
+import { Menu, currentWindow } from "nsh/desktop";
 
 function App() {
   const height = signal(-1);
   const chosen = signal("");
-  Window.setTitle("Owned");
+  currentWindow().set({ title: "Owned" });
   Menu.setApplicationMenu([
     {
       label: "File",
@@ -775,7 +1014,7 @@ function App() {
     },
   ]);
   return (
-    <View style={{ flex: 1 }} onLayout={(e) => height.set(Math.round(e.size.height))}>
+    <View style={{ flex: 1 }} onLayout={({ bounds }) => height.set(Math.round(bounds.size.height))}>
       <Input autoFocus value={`h ${height()}${chosen()}`} style={{ height: 30 }} />
     </View>
   );
@@ -783,10 +1022,31 @@ function App() {
 mount(App);
 "#;
 
-/// The app's height the field reads.
+/// The app's height the field reads, once the app is laid out at the
+/// height its surface is drawn at. The engine lays the app out first at
+/// the surface's height before the app's first batch, which brings the
+/// menu bar that makes the surface shorter: the field reads that first
+/// height until the engine lays the app out again.
 fn app_height(view: &Entity<AppView>, cx: &mut VisualTestContext) -> f32 {
-    let text = wait_until(view, cx, |t| t.starts_with("h ") && !t.starts_with("h -1"));
-    text.split(' ').nth(1).and_then(|h| h.parse().ok()).unwrap()
+    let start = Instant::now();
+    loop {
+        cx.run_until_parked();
+        let read = field_text(view, cx)
+            .as_deref()
+            .and_then(|t| t.strip_prefix("h "))
+            .and_then(|t| t.split(' ').next()?.parse::<f32>().ok());
+        let drawn = view.read_with(cx, |view, _| {
+            view.surface().root.state().frame.size.height.0.round()
+        });
+        if read == Some(drawn) {
+            return drawn;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the field reads the height {read:?}, the surface is {drawn} tall"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn an_embedded_view_that_owns_its_window_sets_its_title_and_menu(cx: &mut TestAppContext) {
@@ -848,17 +1108,17 @@ fn quit_and_close_requests_go_to_the_handler_instead_of_acting(cx: &mut TestAppC
 const AUTO_HIDDEN_BAR: &str = r#"
 import { mount, signal, View } from "nsh";
 import { Input } from "nsh/base";
-import { Menu, Window } from "nsh/desktop";
+import { Menu } from "nsh/desktop";
 
 function App() {
   const height = signal(-1);
   const chosen = signal("");
-  Window.setMenuBar("autoHide");
+  Menu.setMenuBar("autoHide");
   Menu.setApplicationMenu([
     { label: "File", submenu: [{ label: "New", onSelect: () => chosen.set(" new") }] },
   ]);
   return (
-    <View style={{ flex: 1 }} onLayout={(e) => height.set(Math.round(e.size.height))}>
+    <View style={{ flex: 1 }} onLayout={({ bounds }) => height.set(Math.round(bounds.size.height))}>
       <Input autoFocus value={`h ${height()}${chosen()}`} style={{ height: 30 }} />
     </View>
   );
@@ -932,17 +1192,17 @@ function App() {
     <View style={{ flex: 1 }}>
       <Image
         src="asset:/app.png"
-        onLoad={(e) => report("app", `${e.width}x${e.height}`)}
+        onLoad={({ size }) => report("app", `${size.width}x${size.height}`)}
         onError={(e) => report("app", e.message)}
         style={{ width: 10, height: 10 }}
       />
       <Image
         src="asset:/bytes/cover.png"
-        onLoad={(e) => report("cover", `${e.width}x${e.height}`)}
+        onLoad={({ size }) => report("cover", `${size.width}x${size.height}`)}
         onError={(e) => report("cover", e.message)}
         style={{ width: 10, height: 10 }}
       />
-      <Input autoFocus value={text()} onChange={(t) => text.set(t)} style={{ height: 30 }} />
+      <Input autoFocus value={text()} onChange={({ value }) => text.set(value)} style={{ height: 30 }} />
     </View>
   );
 }
@@ -1034,7 +1294,7 @@ function App() {
         autoFocus
         submitBehavior="submit"
         value={text()}
-        onChange={(t) => text.set(t)}
+        onChange={({ value }) => text.set(value)}
         style={{ height: 30 }}
       />
     </View>
@@ -1124,7 +1384,7 @@ function App() {
         }
         style={{ height: 40 }}
       />
-      <Input autoFocus value={text()} onChange={(t) => text.set(t)} style={{ height: 30 }} />
+      <Input autoFocus value={text()} onChange={({ value }) => text.set(value)} style={{ height: 30 }} />
     </View>
   );
 }
@@ -1155,6 +1415,83 @@ fn presses_carry_the_modifier_keys_and_click_count(cx: &mut TestAppContext) {
     );
 }
 
+/// A pad 100 × 40 at (10, 10) over a focused field that shows the pad's
+/// last `onMouseEnter`, `onMouseMove` and `onMouseLeave`: where the mouse
+/// was in the pad and the window, the button held and Shift.
+const MOUSE_EVENTS: &str = r#"
+import { mount, signal, View } from "nsh";
+import { Input } from "nsh/base";
+
+const show = (name, e) =>
+  `${name} ${Math.round(e.position.x)} ${Math.round(e.position.y)} in ${Math.round(e.pagePosition.x)} ${Math.round(e.pagePosition.y)} ${e.pressedButton} ${e.modifiers.shift}`;
+
+function App() {
+  const enter = signal("-");
+  const move = signal("-");
+  const leave = signal("-");
+  return (
+    <View style={{ flex: 1 }}>
+      <View
+        onMouseEnter={(e) => enter.set(show("enter", e))}
+        onMouseMove={(e) => move.set(show("move", e))}
+        onMouseLeave={(e) => leave.set(show("leave", e))}
+        style={{ marginLeft: 10, marginTop: 10, width: 100, height: 40 }}
+      />
+      <Input autoFocus value={`${enter()} | ${move()} | ${leave()}`} style={{ height: 30 }} />
+    </View>
+  );
+}
+mount(App);
+"#;
+
+fn mouse_events_carry_the_position_button_and_modifiers(cx: &mut TestAppContext) {
+    let code = nsh_bundler::compile_module("App.tsx", MOUSE_EVENTS, &[]).unwrap();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| AppView::new(AppOptions::default(), window, cx));
+    view.update(cx, |view, _| view.load(App::Js(Bundle::source(code))));
+    cx.update(|window, cx| window.focus(&view.focus_handle(cx), cx));
+    wait_for(&view, cx, "- | - | -");
+    let none = gpui::Modifiers::default();
+    // The move that brings the mouse in enters the pad and moves over it.
+    cx.simulate_mouse_move(gpui::point(gpui::px(30.0), gpui::px(25.0)), None, none);
+    wait_for(
+        &view,
+        cx,
+        "enter 20 15 in 30 25 null false | move 20 15 in 30 25 null false | -",
+    );
+    // Moves with a button down are moves too, with the button.
+    cx.simulate_mouse_move(
+        gpui::point(gpui::px(40.0), gpui::px(30.0)),
+        gpui::MouseButton::Left,
+        none,
+    );
+    wait_for(
+        &view,
+        cx,
+        "enter 20 15 in 30 25 null false | move 30 20 in 40 30 left false | -",
+    );
+    cx.simulate_mouse_move(gpui::point(gpui::px(50.0), gpui::px(30.0)), None, none);
+    wait_for(
+        &view,
+        cx,
+        "enter 20 15 in 30 25 null false | move 40 20 in 50 30 null false | -",
+    );
+    // A modifier key changing while the mouse rests is a move where it is.
+    cx.simulate_modifiers_change(gpui::Modifiers::shift());
+    wait_for(
+        &view,
+        cx,
+        "enter 20 15 in 30 25 null false | move 40 20 in 50 30 null true | -",
+    );
+    cx.simulate_modifiers_change(none);
+    cx.simulate_mouse_move(gpui::point(gpui::px(120.0), gpui::px(30.0)), None, none);
+    wait_for(
+        &view,
+        cx,
+        "enter 20 15 in 30 25 null false | move 40 20 in 50 30 null false | leave 110 20 in 120 30 null false",
+    );
+}
+
 /// A left click at `position` that is click `count` of a series.
 fn click(cx: &mut VisualTestContext, position: gpui::Point<gpui::Pixels>, count: usize) {
     let (button, modifiers) = (gpui::MouseButton::Left, gpui::Modifiers::default());
@@ -1171,4 +1508,133 @@ fn click(cx: &mut VisualTestContext, position: gpui::Point<gpui::Pixels>, count:
         modifiers,
         click_count: count,
     });
+}
+
+fn the_app_s_state_follows_its_window_s_activation_and_visibility(cx: &mut TestAppContext) {
+    let code = nsh_bundler::compile_module("App.tsx", LIFECYCLE_FIELD, &[]).unwrap();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| AppView::new(AppOptions::default(), window, cx));
+    view.update(cx, |view, _| view.load(App::Js(Bundle::source(code))));
+    cx.update(|window, cx| {
+        window.activate_window();
+        window.focus(&view.focus_handle(cx), cx);
+    });
+    wait_for(&view, cx, "active");
+    cx.deactivate_window();
+    wait_for(&view, cx, "inactive");
+    cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+    wait_for(&view, cx, "background");
+    cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
+    wait_for(&view, cx, "inactive");
+    cx.update(|window, _| window.activate_window());
+    wait_for(&view, cx, "active");
+}
+
+/// A window the app sizes at start, and resizes from the menu.
+const SIZED_WINDOW: &str = r#"
+import { mount, View } from "nsh";
+import { Input } from "nsh/base";
+import { Menu, currentWindow } from "nsh/desktop";
+
+function App() {
+  const win = currentWindow();
+  win.setBounds({ size: { width: 640, height: 480 } });
+  Menu.setApplicationMenu([
+    {
+      label: "View",
+      submenu: [
+        { label: "Narrow", shortcut: "mod+shift+n", onSelect: () => win.setBounds({ size: { width: 500 } }) },
+        {
+          label: "Both",
+          shortcut: "mod+shift+b",
+          onSelect: () => {
+            win.setBounds({ size: { width: 600 } });
+            win.setBounds({ size: { height: 400 } });
+          },
+        },
+      ],
+    },
+  ]);
+  return (
+    <View style={{ flex: 1 }}>
+      <Input autoFocus value="sized" style={{ height: 30 }} />
+    </View>
+  );
+}
+mount(App);
+"#;
+
+fn set_bounds_sizes_the_window_and_keeps_the_size_it_leaves_out(cx: &mut TestAppContext) {
+    let code = nsh_bundler::compile_module("App.tsx", SIZED_WINDOW, &[]).unwrap();
+    let (view, cx) = owned_view(cx, code, |_| {});
+    wait_for(&view, cx, "sized");
+    let size = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            let size = window.bounds().size;
+            (f32::from(size.width), f32::from(size.height))
+        })
+    };
+    wait_until_window(cx, "the window at 640x480", |cx| size(cx) == (640.0, 480.0));
+    let primary = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    };
+    cx.simulate_keystrokes(&format!("shift-{primary}-n"));
+    wait_until_window(cx, "the window at 500x480", |cx| size(cx) == (500.0, 480.0));
+    // Two calls in one callback: the second keeps the first's width, which
+    // GPUI's test platform applies at once (`chrome::frame_size` takes the
+    // platforms that do not).
+    cx.simulate_keystrokes(&format!("shift-{primary}-b"));
+    wait_until_window(cx, "the window at 600x400", |cx| size(cx) == (600.0, 400.0));
+}
+
+/// A bar 100 × 40 at (10, 10) that drags the window and has a context
+/// menu, over a focused field that shows where the menu was asked for.
+const DRAG_AREA_MENU: &str = r#"
+import { mount, signal, View } from "nsh";
+import { Input } from "nsh/base";
+
+function App() {
+  const asked = signal("-");
+  return (
+    <View style={{ flex: 1 }}>
+      <View
+        desktop={{ windowDrag: true }}
+        onContextMenu={(e) => asked.set(`menu ${Math.round(e.position.x)} ${Math.round(e.position.y)}`)}
+        style={{ marginLeft: 10, marginTop: 10, width: 100, height: 40 }}
+      />
+      <Input autoFocus value={asked()} style={{ height: 30 }} />
+    </View>
+  );
+}
+mount(App);
+"#;
+
+fn a_secondary_click_on_a_drag_area_reaches_its_on_context_menu(cx: &mut TestAppContext) {
+    let code = nsh_bundler::compile_module("App.tsx", DRAG_AREA_MENU, &[]).unwrap();
+    let (view, cx) = owned_view(cx, code, |_| {});
+    wait_for(&view, cx, "-");
+    // Not the window menu (Linux): the view's own menu. The surface starts
+    // below the platform's title bar (macOS, Windows).
+    let (x, y) = view.read_with(cx, |view, _| view.surface().origin.get());
+    let (position, button, modifiers) = (
+        gpui::point(gpui::px(x + 30.0), gpui::px(y + 25.0)),
+        gpui::MouseButton::Right,
+        gpui::Modifiers::default(),
+    );
+    cx.simulate_event(gpui::MouseDownEvent {
+        position,
+        button,
+        modifiers,
+        click_count: 1,
+        first_mouse: false,
+    });
+    cx.simulate_event(gpui::MouseUpEvent {
+        position,
+        button,
+        modifiers,
+        click_count: 1,
+    });
+    wait_for(&view, cx, "menu 20 15");
 }

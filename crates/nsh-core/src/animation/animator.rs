@@ -165,6 +165,24 @@ impl Animator {
         self.graph.is_animating()
     }
 
+    /// When the graph should be ticked next for an animation that ends by
+    /// itself to end on time without frames ([`Graph::deadline`]).
+    pub fn deadline(&self, now: f64) -> Option<f64> {
+        self.graph.deadline(now)
+    }
+
+    /// The highest frame rate the graph's running animations need
+    /// ([`Graph::frame_rate`]): `None`, the screen's highest.
+    pub fn frame_rate(&self) -> Option<f32> {
+        self.graph.frame_rate()
+    }
+
+    /// True while an animation that ends by itself runs, not one looping
+    /// forever ([`Graph::is_finishing`]): what a test's step waits for.
+    pub fn finishing(&self) -> bool {
+        self.graph.is_finishing()
+    }
+
     /// A scroll view moved to `offset`: feeds its scroll value. False if no
     /// value is bound to it.
     pub fn scrolled(&mut self, id: u32, offset: Point<Points>) -> bool {
@@ -459,6 +477,7 @@ mod tests {
             id: 4,
             horizontal: false,
             scrollbar_visible: true,
+            replaced: false,
             scroll_value: Some(2),
             pull_value: None,
             keyboard_dismiss: Default::default(),
@@ -492,6 +511,7 @@ mod tests {
             id: 4,
             horizontal: false,
             scrollbar_visible: true,
+            replaced: false,
             scroll_value: Some(2),
             pull_value: None,
             keyboard_dismiss: Default::default(),

@@ -1,11 +1,12 @@
 // Switches the tabbed code blocks of `remark-code-tabs.js`. Choosing a tab
 // switches every group on the page that has one for the same language, and
 // the choice is remembered (localStorage, when the browser allows it).
+import { playSelect } from './sound';
 
 const KEY = 'codeTab';
 
 function tabsOf(group: HTMLElement): HTMLButtonElement[] {
-  return [...group.querySelectorAll<HTMLButtonElement>(':scope > [role="tablist"] > [role="tab"]')];
+  return [...group.querySelectorAll<HTMLButtonElement>(':scope > .code-tabs__head > [role="tablist"] > [role="tab"]')];
 }
 
 function select(group: HTMLElement, key: string): boolean {
@@ -46,6 +47,7 @@ export function initCodeTabs() {
     for (const [index, tab] of tabs.entries()) {
       tab.addEventListener('click', () => {
         const key = tab.dataset.tab ?? '';
+        if (tab.getAttribute('aria-selected') !== 'true') playSelect();
         selectEverywhere(key, group);
         try {
           localStorage.setItem(KEY, key);

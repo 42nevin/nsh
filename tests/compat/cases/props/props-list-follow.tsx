@@ -28,9 +28,16 @@ function App() {
           </View>
         )}
       </List>
+      <List each={range(10)} alignment="bottom" estimatedItemSize={40} style={{ height: 100 }}>
+        {(item) => (
+          <View style={{ height: 40 }}>
+            <Text>Tail {item()}</Text>
+          </View>
+        )}
+      </List>
       <List
         each={range(10)}
-        viewabilityConfig={{ itemVisiblePercentThreshold: 100 }}
+        viewabilityConfig={{ itemVisibleThreshold: 1 }}
         onViewableItemsChange={(info) => viewable.set(info.viewableItems.map((t) => t.index).join(","))}
         style={{ height: 100 }}
       >

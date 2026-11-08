@@ -1,82 +1,26 @@
-// The Rich Editor demo's toolbar controls and its Lucide icons, on the
-// shared gallery UI's colors and finishes.
-import { Canvas, type CanvasRenderingContext2D, Path2D, View } from "nsh";
-import { Button as BaseButton } from "nsh/base";
-import { colors, finish, focusRing } from "../ui";
-import { lucide, type LucideElement, type LucideName } from "../lucide";
+// The Rich Editor demo's toolbar controls, with Lucide's icons, on the
+// shared gallery UI's colors and finishes. A terminal draws no icons: each
+// control shows its `short` label there (its label when unset), as text,
+// sized to it and two columns from the next.
+import { Text, View } from "nsh";
+import { Button as BaseButton, Toggle as BaseToggle, ToggleGroup as BaseToggleGroup } from "nsh/base";
+import { colors, focusRing, ghostFill, terminal, TERMINAL_GAP, toggleGlyph, toggleLabel, toggleLook } from "../ui";
+import { LucideIcon, type LucideIconName } from "../icons";
 
-/** The Lucide icons the Rich Editor demo draws (`lucide.ts`, made by `scripts/lucide.py`). */
-export type LucideIconName = LucideName;
-
-/** The numbers of an SVG `points` list, in pairs. */
-function points(list: string): number[] {
-  return list
-    .trim()
-    .split(/[\s,]+/)
-    .map(Number);
-}
-
-/** Draws one element as Lucide's SVG does: stroked, never filled. */
-function draw(cx: CanvasRenderingContext2D, el: LucideElement) {
-  switch (el.tag) {
-    case "path":
-      cx.stroke(new Path2D(el.d));
-      return;
-    case "circle":
-      cx.beginPath();
-      cx.arc(el.cx, el.cy, el.r, 0, Math.PI * 2);
-      break;
-    case "ellipse":
-      cx.beginPath();
-      cx.ellipse(el.cx, el.cy, el.rx, el.ry, 0, 0, Math.PI * 2);
-      break;
-    case "rect":
-      cx.beginPath();
-      cx.roundRect(el.x, el.y, el.width, el.height, el.rx ?? 0);
-      break;
-    case "line":
-      cx.beginPath();
-      cx.moveTo(el.x1, el.y1);
-      cx.lineTo(el.x2, el.y2);
-      break;
-    case "polyline":
-    case "polygon": {
-      const p = points(el.points);
-      cx.beginPath();
-      cx.moveTo(p[0], p[1]);
-      for (let i = 2; i < p.length; i += 2) cx.lineTo(p[i], p[i + 1]);
-      if (el.tag === "polygon") cx.closePath();
-      break;
-    }
-  }
-  cx.stroke();
-}
-
-/** A Lucide icon on its 24 × 24 grid, stroked with `tint` (width 2, round caps and joins). */
-export function LucideIcon(props: { name: LucideIconName; size?: number; tint: string }) {
-  const size = props.size ?? 20;
-  return (
-    <Canvas
-      style={{ pointerEvents: "none", width: size, height: size }}
-      draw={(cx, { width }) => {
-        cx.scale(width / 24, width / 24);
-        cx.strokeStyle = props.tint;
-        cx.lineWidth = 2;
-        cx.lineCap = "round";
-        cx.lineJoin = "round";
-        for (const el of lucide[props.name] as LucideElement[]) draw(cx, el);
-      }}
-    />
-  );
-}
+export { LucideIcon, type LucideIconName } from "../icons";
 
 /** An item of a {@link ToggleGroup}: its icon, and the label screen readers say and its tooltip shows. */
-export type ToggleItem<T extends string> = { value: T; icon: LucideIconName; label: string; disabled?: boolean };
+export type ToggleItem<T extends string> = { value: T; icon: LucideIconName; label: string; short?: string; disabled?: boolean };
+
+/** The gap between a toolbar's controls: two columns in a terminal, where each is its label. */
+export const TOOL_GAP = terminal ? TERMINAL_GAP : 2;
 
 /**
  * A row of icon toggles on one track (shadcn's toggle group): `single` keeps
- * at most one pressed, `multiple` any. Each toggle is `nsh/base`'s `Button`,
- * selected while pressed, so screen readers (and tests) read its state.
+ * at most one pressed, `multiple` any. The track is `nsh/base`'s
+ * `ToggleGroup` (a toolbar, one Tab stop whose arrow keys move the focus)
+ * and each item its `Toggle`, so screen readers (and tests) read its pressed
+ * state.
  */
 export function ToggleGroup<T extends string>(props: {
   type: "single" | "multiple";
@@ -88,44 +32,42 @@ export function ToggleGroup<T extends string>(props: {
   testID?: string;
 }) {
   return (
-    <View
+    <BaseToggleGroup
       testID={props.testID}
-      style={{ flexDirection: "row", padding: 2, gap: 2, borderRadius: 9, backgroundColor: colors.inset, borderWidth: 1, borderColor: colors.border }}
+      style={{ flexDirection: "row", padding: 2, gap: TOOL_GAP, borderRadius: 9, backgroundColor: colors.inset, borderWidth: 1, borderColor: colors.border }}
     >
       <Each of={props.items}>
         {(item) => {
           const pressed = () => props.value.includes(item().value);
+          // The toggles' shared look: bare while off, `finish.on` while pressed.
+          const look = { disabled: () => item().disabled };
           return (
             <View tooltip={item().label}>
-              <BaseButton
-                selected={pressed()}
+              <BaseToggle
+                pressed={pressed()}
                 disabled={item().disabled}
                 accessibilityLabel={item().label}
-                onPress={() => props.onToggle(item().value, !pressed())}
-                hoverStyle={item().disabled || pressed() ? undefined : { backgroundColor: colors.raised }}
-                focusStyle={focusRing(1)}
-                style={{
-                  width: 30,
-                  height: 28,
-                  borderRadius: 7,
-                  alignItems: "center",
-                  justifyContent: "center",
-                  opacity: item().disabled ? 0.35 : 1,
-                  ...(pressed() ? { ...finish.pill, borderWidth: 1 } : { borderWidth: 1, borderColor: "transparent" }),
-                }}
+                onChange={({ pressed: next }) => props.onToggle(item().value, next)}
+                {...toggleLook(look)}
               >
-                <LucideIcon name={item().icon} size={16} tint={pressed() ? colors.text : colors.muted} />
-              </BaseButton>
+                <If when={terminal} else={<LucideIcon name={item().icon} {...toggleGlyph(pressed, look)} />}>
+                  <Text style={toggleLabel(pressed, look)}>{item().short ?? item().label}</Text>
+                </If>
+              </BaseToggle>
             </View>
           );
         }}
       </Each>
-    </View>
+    </BaseToggleGroup>
   );
 }
 
-/** A square icon button for toolbars: its label is what screen readers say and its tooltip. */
-export function IconButton(props: { icon: LucideIconName; label: string; disabled?: boolean; onPress: () => void }) {
+/**
+ * A square icon button for toolbars: its label is what screen readers say and its tooltip. In a terminal it is
+ * its label in the muted color on no band, as the toolbar's toggles that are off are, so the tools read as one row
+ * (a ghost button's band, {@link ghostFill}, would set it apart as if pressed).
+ */
+export function IconButton(props: { icon: LucideIconName; label: string; short?: string; disabled?: boolean; onPress: () => void }) {
   return (
     <View tooltip={props.label}>
       <BaseButton
@@ -134,9 +76,11 @@ export function IconButton(props: { icon: LucideIconName; label: string; disable
         onPress={props.onPress}
         hoverStyle={props.disabled ? undefined : { backgroundColor: colors.raised }}
         focusStyle={focusRing(1)}
-        style={{ width: 32, height: 32, borderRadius: 8, alignItems: "center", justifyContent: "center", opacity: props.disabled ? 0.35 : 1 }}
+        style={{ width: terminal ? undefined : 32, height: terminal ? undefined : 32, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: terminal ? undefined : ghostFill(), opacity: props.disabled ? 0.35 : 1 }}
       >
-        <LucideIcon name={props.icon} size={16} tint={colors.text} />
+        <If when={terminal} else={<LucideIcon name={props.icon} size={16} tint={colors.text} />}>
+          <Text style={{ color: colors.muted }}>{props.short ?? props.label}</Text>
+        </If>
       </BaseButton>
     </View>
   );

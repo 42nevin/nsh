@@ -9,8 +9,10 @@
 //! field), so a change sends only what changed.
 //! A region ([`crate::element::dynamic`], `If`, `Each`) is an effect queueing its
 //! new elements; the core reconciles that region's nodes alone, in place
-//! among its parent's other children. Patches and the events components emit
-//! are taken at the start of each commit round, until none is left.
+//! among its parent's other children. Reused nodes are diffed against the
+//! latest values their bindings applied, including when replaced by static
+//! elements. Patches and the events components emit are taken at the start
+//! of each commit round, until none is left.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -81,7 +83,7 @@ pub(super) struct BoundNode {
     pub(super) style: StyleRefinement,
     pub(super) classes: Classes,
     /// Its text's content and raw text node.
-    text: Option<(SharedString, NodeId)>,
+    pub(super) text: Option<(SharedString, NodeId)>,
 }
 
 /// A region of a parent's children.
@@ -248,12 +250,12 @@ impl<M: TextEngine> Core<M> {
     ) {
         inst.bound.insert(
             id,
-            BoundNode {
+            Box::new(BoundNode {
                 attrs: attrs.clone(),
                 style: style.clone(),
                 classes,
                 text,
-            },
+            }),
         );
     }
 
@@ -556,17 +558,21 @@ impl<M: TextEngine> Core<M> {
                     Some(cx) => {
                         let mut old = old;
                         (old.inset_padding, old.inset_margin) = inst.root_insets_applied;
+                        let old = super::components::with_test_id(old, &inst.root_test_id_applied);
                         let attrs = cx.over(attrs);
                         inst.root_insets_applied = (attrs.inset_padding, attrs.inset_margin);
+                        inst.root_test_id_applied = super::components::test_id_of(&attrs);
                         (attrs, old)
                     }
                     None => (attrs, old),
                 };
-                if self.components.slot_hosts.get(&id) == Some(&host) {
-                    // An app's slot: what is not a style goes to its
-                    // target (`super::slots`).
+                if self.components.slot_hosts.get(&id) == Some(&host)
+                    || self.components.fill_holders.contains(&id)
+                {
+                    // An app's slot, or a node around a fill: what is not a
+                    // style goes to its target (`super::slots`).
                     self.apply_slot_attrs(id, host, &attrs, &old, None);
-                } else {
+                } else if !self.apply_target_attrs(id, &attrs, &old, app.as_ref()) {
                     self.apply_attrs_over(id, &attrs, &old, app.as_ref());
                 }
                 if let Some((style, classes, class)) = restyle {

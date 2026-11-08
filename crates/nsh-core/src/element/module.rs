@@ -110,8 +110,9 @@ pub enum FunctionCall {
     /// converted in the JS call): it reaches the platform with the same free
     /// functions views use (`dialog`, `clipboard_string`, ...).
     Async(AsyncCall),
-    /// In the JS call, returning a task's start ([`super::Later`]): what
-    /// the call throws throws there; JS gets a promise of the task.
+    /// In the JS call, returning a task's start ([`super::Later`]): JS gets
+    /// a promise of the task, rejected with what the call refuses (a
+    /// function returning a promise never throws).
     Start(AsyncCall),
 }
 
@@ -320,6 +321,17 @@ impl ModuleCx {
         answer
     }
 
+    /// Draws the views' bars with the built-in bar `source` makes of
+    /// `theme`, or with the platform's indicator
+    /// ([`set_builtin_scrollbars`](super::set_builtin_scrollbars)).
+    pub fn set_builtin_scrollbars(
+        &mut self,
+        source: super::ScrollbarSource,
+        theme: Option<super::AnyValue>,
+    ) {
+        self.actions.push(Action::BuiltInScrollbars(source, theme));
+    }
+
     /// Unfocuses the focused input, hiding the software keyboard.
     pub fn dismiss_keyboard(&mut self) {
         self.actions.push(Action::Command(ROOT_ID, Command::Blur));
@@ -364,6 +376,18 @@ impl ModuleCx {
     /// [`crate::platform::Appearance::System`] follows the system again.
     pub fn set_color_scheme(&mut self, appearance: crate::platform::Appearance) {
         self.actions.push(Action::Appearance(appearance));
+    }
+
+    /// Shows the app in `locale` whatever the user's language (`None`: the
+    /// user's again), as [`crate::i18n::set_locale`] does.
+    pub fn set_locale(&mut self, locale: Option<crate::platform::Locale>) {
+        self.actions.push(Action::Locale(locale));
+    }
+
+    /// Gives the core the app's translations (`nsh-js`: the bundle's).
+    #[doc(hidden)]
+    pub fn set_translations(&mut self, translations: crate::i18n::Translations) {
+        self.actions.push(Action::Translations(translations));
     }
 
     /// Asks the platform for `action` (the runtime's own modules).

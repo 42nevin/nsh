@@ -18,13 +18,15 @@ use std::cell::RefCell;
 
 use jni::{
     JNIEnv,
-    objects::{JClass, JFloatArray, JIntArray, JObject, JObjectArray, JString, JValue},
+    objects::{
+        JBooleanArray, JClass, JFloatArray, JIntArray, JObject, JObjectArray, JString, JValue,
+    },
     sys::{jboolean, jfloat, jint, jintArray, jlong, jstring},
 };
 use nsh_core::{
     Points,
     geometry::{Bounds, Point, bounds, point, px, size},
-    selection::{Handle, SelectionModel, SelectionTexts},
+    selection::{Handle, KeptRows, SelectionModel, SelectionTexts, reading_order, reorder},
 };
 
 /// The selection of one area and what it knows of the area's texts.
@@ -34,7 +36,11 @@ struct Area {
     contents: Vec<String>,
     /// The texts' view ids: their identity across `texts_changed`.
     keys: Vec<u64>,
+    /// Which texts continue the one before them (`ViewProps::continues_text`).
+    continues: Vec<bool>,
     frames: Vec<Bounds<Points>>,
+    /// The virtual list rows its ends are in, kept rendered.
+    kept: KeptRows,
 }
 
 /// The texts of an area for one native call: hit-tests ask the Java
@@ -42,6 +48,7 @@ struct Area {
 struct Texts<'a, 'local> {
     contents: &'a [String],
     keys: &'a [u64],
+    continues: &'a [bool],
     frames: &'a [Bounds<Points>],
     env: RefCell<&'a mut JNIEnv<'local>>,
     this: &'a JObject<'local>,
@@ -62,6 +69,10 @@ impl SelectionTexts for Texts<'_, '_> {
 
     fn key(&self, i: usize) -> u64 {
         self.keys.get(i).copied().unwrap_or(i as u64)
+    }
+
+    fn continues(&self, i: usize) -> bool {
+        self.continues.get(i).copied().unwrap_or(false)
     }
 
     fn offset_at(&self, i: usize, p: Point<Points>) -> u32 {
@@ -131,11 +142,14 @@ fn with_texts<'local, R>(
         model,
         contents,
         keys,
+        continues,
         frames,
+        ..
     } = area;
     let texts = Texts {
         contents,
         keys,
+        continues,
         frames,
         env: RefCell::new(env),
         this,
@@ -166,9 +180,10 @@ extern "system" fn Java_com_longbridge_nsh_SelectableView_nativeDestroy(
 }
 
 /// The area's texts, in document order, are now these (content, view
-/// ids and frames): the selection follows (`texts_changed`). Returns whether it
+/// ids, whether each continues the one before, frames): the selection follows (`texts_changed`). Returns whether it
 /// changed.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
 extern "system" fn Java_com_longbridge_nsh_SelectableView_nativeSetTexts<'local>(
     mut env: JNIEnv<'local>,
     _: JClass<'local>,
@@ -176,6 +191,7 @@ extern "system" fn Java_com_longbridge_nsh_SelectableView_nativeSetTexts<'local>
     this: JObject<'local>,
     contents: JObjectArray<'local>,
     keys: JIntArray<'local>,
+    continues: JBooleanArray<'local>,
     frames: JFloatArray<'local>,
 ) -> jboolean {
     // SAFETY: Java passes its live handle, on the UI thread.
@@ -203,6 +219,15 @@ extern "system" fn Java_com_longbridge_nsh_SelectableView_nativeSetTexts<'local>
         ids.clear();
     }
     area.keys = ids.into_iter().map(|id| id as u32 as u64).collect();
+    let len = env.get_array_length(&continues).unwrap_or(0).max(0) as usize;
+    let mut flags = vec![0; len];
+    if env
+        .get_boolean_array_region(&continues, 0, &mut flags)
+        .is_err()
+    {
+        flags.clear();
+    }
+    area.continues = flags.into_iter().map(|flag| flag != 0).collect();
     read_frames(&env, &frames, &mut area.frames);
     // Frames for every text, even if Java's array falls short.
     area.frames.resize(area.contents.len(), Bounds::default());
@@ -314,4 +339,79 @@ fn ints_array(env: &JNIEnv<'_>, values: &[jint]) -> jintArray {
         return std::ptr::null_mut();
     }
     array.into_raw()
+}
+
+/// The order of the texts Java listed depth first (`SelectableView.collect`,
+/// in mount order), from its `runs`: for each view group, after its
+/// children's, a count of children and each child's frame and range of
+/// texts (`left, top, width, height, from, to`). The shared rule
+/// ([`reading_order`]) puts a virtual list's recycled cells in reading
+/// order. Returns the texts' original indices in their new order, or null
+/// when the order stays.
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_longbridge_nsh_SelectableView_nativeReadingOrder<'local>(
+    env: JNIEnv<'local>,
+    _: JClass<'local>,
+    count: jint,
+    runs: JFloatArray<'local>,
+) -> jintArray {
+    let len = env.get_array_length(&runs).unwrap_or(0).max(0) as usize;
+    let mut data = vec![0.0; len];
+    if env.get_float_array_region(&runs, 0, &mut data).is_err() {
+        return std::ptr::null_mut();
+    }
+    let mut texts: Vec<jint> = (0..count.max(0)).collect();
+    let mut moved = false;
+    let mut at = 0;
+    while at < data.len() {
+        let n = data[at] as usize;
+        at += 1;
+        let Some(group) = data.get(at..at + n * 6) else {
+            break;
+        };
+        at += n * 6;
+        let group: Vec<_> = group
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .map(|r| {
+                (
+                    bounds(point(px(r[0]), px(r[1])), size(px(r[2]), px(r[3]))),
+                    r[4] as usize..r[5] as usize,
+                )
+            })
+            .collect();
+        let start = group.first().map_or(0, |(_, r)| r.start);
+        if group.iter().all(|(_, r)| r.end <= texts.len())
+            && let Some(order) = reading_order(&group)
+        {
+            reorder(&mut texts, start, &order);
+            moved = true;
+        }
+    }
+    if moved {
+        ints_array(&env, &texts)
+    } else {
+        std::ptr::null_mut()
+    }
+}
+
+/// The view ids of the texts whose virtual list rows the engine is to keep
+/// rendered (`Native.keepRendered`): the selection's ends, when they
+/// changed since the last call (empty: none), else null.
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_longbridge_nsh_SelectableView_nativeKept(
+    env: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+) -> jintArray {
+    // SAFETY: Java passes its live handle, on the UI thread.
+    let area = unsafe { area(handle) };
+    match area.kept.changed(&area.model) {
+        Some(keys) => ints_array(
+            &env,
+            &keys.into_iter().map(|k| k as jint).collect::<Vec<_>>(),
+        ),
+        None => std::ptr::null_mut(),
+    }
 }

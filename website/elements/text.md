@@ -1,7 +1,7 @@
 ---
 title: Text
 description: "The element that draws text: nested spans, links, line limits, font scaling, inline views and text layout events."
-order: 3
+order: 20
 group: primitives
 demo: el-text
 ---
@@ -93,6 +93,8 @@ leave spans as they are; spaces inside the span give the box room on its sides.
 ### Links
 
 A span with a press handler is a link: a press on its characters goes to the span, a press elsewhere to the paragraph.
+In a terminal each link is also a stop of the keyboard focus: Tab reaches the links of a paragraph in turn, and Return
+presses the focused one.
 
 ```rust tabs
 text("By continuing you agree to the ")
@@ -212,8 +214,8 @@ The font is registered before the first frame. See [fonts](../docs/fonts.md).
 | Event | Rust | Payload | When |
 |---|---|---|---|
 | `onTextLayout` | | `{ lines: TextLayoutLine[] }` | After each layout of the paragraph. |
-| `onPress`, `onLongPress`, … | `.on_press`, `.on_long_press`, … | none | As on [view](./view.md#events); on a span, presses on its characters. |
-| `onLayout` | `.on_layout` | `Bounds` | The block's frame changed. |
+| `onPress`, `onLongPress`, … | `.on_press`, `.on_long_press`, … | `PressEvent` (none in Rust) | As on [view](./view.md#events); on a span, presses on its characters. |
+| `onLayout` | `.on_layout` | `{ bounds }` | The block's frame changed. |
 
 `TextLayoutLine` is `{ text, x, y, width, height, ascender, descender, capHeight, xHeight }`, in the text's content box:
 

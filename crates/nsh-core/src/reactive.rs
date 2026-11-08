@@ -168,6 +168,9 @@ struct Node<H: Host> {
     handle: bool,
     /// Disposed: runs no more (a memo keeps its value for its handle).
     disposed: bool,
+    /// Being disposed (what it owns goes, its cleanups run): until that
+    /// ends, the node is the graph's, not its handle's.
+    disposing: bool,
 }
 
 impl<H: Host> Node<H> {
@@ -188,6 +191,7 @@ impl<H: Host> Node<H> {
             context: None,
             handle: false,
             disposed: false,
+            disposing: false,
         }
     }
 
@@ -240,6 +244,10 @@ pub struct Graph<H: Host> {
     effects: Option<Vec<u32>>,
     exec: u64,
     runs: u64,
+    /// The generation a slot added at the end starts at: above every
+    /// generation of the slots [`Graph::compact`] dropped, so a handle of a
+    /// dropped node never names the node made in its place.
+    floor: u32,
     /// The host's own state.
     pub data: H::Data,
 }
@@ -256,6 +264,7 @@ impl<H: Host> Graph<H> {
             effects: None,
             exec: 0,
             runs: 0,
+            floor: 1,
             data,
         }
     }
@@ -268,10 +277,34 @@ impl<H: Host> Graph<H> {
                 id
             }
             None => {
-                self.nodes.push(Node::new(kind, 1));
+                self.nodes.push(Node::new(kind, self.floor));
                 (self.nodes.len() - 1) as u32
             }
         }
+    }
+
+    /// Gives back the slots a large tree used once it is gone: drops the
+    /// free slots at the end of the arena, then lets the arena's spare
+    /// room go. Freed slots are reused lowest first from then on, so those
+    /// near the end empty out and go at the next compaction. Call when no
+    /// round runs (the engine does when it is idle); a no-op otherwise.
+    pub fn compact(&mut self) {
+        if self.updates.is_some() || self.effects.is_some() || self.free.is_empty() {
+            return;
+        }
+        while let Some(n) = self.nodes.last() {
+            if n.kind != Kind::Free {
+                break;
+            }
+            self.floor = self.floor.max(n.generation.wrapping_add(1).max(1));
+            self.nodes.pop();
+        }
+        let len = self.nodes.len() as u32;
+        self.free.retain(|&id| id < len);
+        // `alloc` pops from the end: the lowest ids go first.
+        self.free.sort_unstable_by(|a, b| b.cmp(a));
+        shrink_spare(&mut self.nodes);
+        shrink_spare(&mut self.free);
     }
 
     /// A new signal holding `value` (owned), compared by `equals`, named by
@@ -425,13 +458,23 @@ impl<H: Host> Graph<H> {
         self.nodes[id as usize].handle = true;
     }
 
+    /// Whether node `id`'s handle owns what the node holds: it is freed with
+    /// the handle ([`Self::drop_handle`]), as a signal or a disposed
+    /// computation is. A live computation belongs to its owner and outlives
+    /// its handle, so what it holds is not the handle's (a garbage collector
+    /// must not count it among the handle's children); so does one being
+    /// disposed, until that ends ([`dispose`] frees it then).
+    pub fn held_by_handle(&self, id: u32) -> bool {
+        let n = &self.nodes[id as usize];
+        n.kind == Kind::Signal || (n.disposed && !n.disposing)
+    }
+
     /// The handle of node `id` went: a signal, or a disposed computation,
     /// is freed now (what it held comes back, to free once the graph is no
     /// longer borrowed).
     pub fn drop_handle(&mut self, id: u32) -> Option<Held<H>> {
-        let n = &mut self.nodes[id as usize];
-        n.handle = false;
-        if n.kind == Kind::Signal || n.disposed {
+        self.nodes[id as usize].handle = false;
+        if self.held_by_handle(id) {
             self.unlink_observers(id);
             Some(self.release(id))
         } else {
@@ -556,7 +599,15 @@ impl<H: Host> Graph<H> {
 
     fn track(&mut self, id: u32) {
         let l = self.listener;
-        if l == NONE || l == UNOWNED || self.nodes[l as usize].disposed {
+        if l == NONE || l == UNOWNED {
+            return;
+        }
+        // Only a live computation takes sources: it unlinks them before its
+        // slot is freed (when it runs again or is disposed). A computation
+        // disposed in a nested run is the listener again once that run
+        // returns, and its slot may hold a signal by then.
+        let n = &self.nodes[l as usize];
+        if n.disposed || !n.is_computation() {
             return;
         }
         // Repeated reads of the same source make one edge.
@@ -658,6 +709,15 @@ impl<H: Host> Graph<H> {
     }
 }
 
+/// Lets `v`'s room go when it is more than twice what it holds (and more
+/// than a small arena's), keeping a quarter more for growth.
+fn shrink_spare<T>(v: &mut Vec<T>) {
+    const SMALL: usize = 1024;
+    if v.capacity() > SMALL && v.capacity() > 2 * v.len() {
+        v.shrink_to((v.len() + v.len() / 4).max(SMALL));
+    }
+}
+
 /// The graph of `h`, for one short borrow.
 #[inline]
 fn g<'a, H: Host>(h: H) -> &'a mut Graph<H> {
@@ -671,9 +731,23 @@ fn g<'a, H: Host>(h: H) -> &'a mut Graph<H> {
 /// root, `runWithOwner`): what `f` makes runs at once rather than queued;
 /// only effects wait for the end.
 pub fn run_updates<H: Host, R>(h: H, init: bool, f: impl FnOnce() -> R) -> R {
+    let Some(wait) = begin_updates(h, init) else {
+        return f();
+    };
+    let r = f();
+    end_updates(h, wait);
+    r
+}
+
+/// The start of a [`run_updates`] round, out of line so the generic
+/// function is little more than its closure (one per closure, hundreds in
+/// all): `None` inside a running round, else whether the effects wait for
+/// an outer round.
+#[cfg_attr(target_arch = "wasm32", inline(never))]
+fn begin_updates<H: Host>(h: H, init: bool) -> Option<bool> {
     let graph = g(h);
     if graph.updates.is_some() {
-        return f();
+        return None;
     }
     if !init {
         graph.updates = Some(Vec::new());
@@ -685,14 +759,18 @@ pub fn run_updates<H: Host, R>(h: H, init: bool, f: impl FnOnce() -> R) -> R {
         false
     };
     graph.exec += 1;
-    let r = f();
+    Some(wait)
+}
+
+/// The end of a [`run_updates`] round.
+#[cfg_attr(target_arch = "wasm32", inline(never))]
+fn end_updates<H: Host>(h: H, wait: bool) {
     complete_updates(h, wait);
     if !wait {
         // The round ended: the runaway count starts over. The JS host also
         // resets it when a call returns; Rust components make no such call.
         g(h).reset_runs();
     }
-    r
 }
 
 /// Solid's `completeUpdates`. Solid runs the effects in a new round, whose
@@ -970,6 +1048,13 @@ pub fn dispose<H: Host>(h: H, id: u32) {
     if !is_node(id) || g(h).nodes[id as usize].disposed {
         return;
     }
+    // Disposed before it is cleaned: what runs meanwhile (what it owns
+    // going, its cleanups, a flush they start) neither tracks into it, runs
+    // it again nor disposes it again. Each would leave links to its slot
+    // once the slot is freed, or free the slot twice.
+    let n = &mut g(h).nodes[id as usize];
+    n.disposed = true;
+    n.disposing = true;
     // Code running under it goes on under no owner it could reuse the slot
     // of: what it makes from now on goes at once (its cleanups' too).
     if g(h).owner == id {
@@ -979,7 +1064,7 @@ pub fn dispose<H: Host>(h: H, id: u32) {
     let graph = g(h);
     graph.unlink_observers(id);
     let n = &mut graph.nodes[id as usize];
-    n.disposed = true;
+    n.disposing = false;
     n.state = CLEAN;
     if n.handle {
         let func = n.func.take();
@@ -1038,10 +1123,17 @@ pub fn effect<H: Host>(h: H, kind: Kind, func: H::Func, value: H::Value) -> u32 
 
 /// Runs `f` with no listener (untracked).
 pub fn untracked<H: Host, R>(h: H, f: impl FnOnce() -> R) -> R {
-    let listener = g(h).set_listener(NONE);
+    let listener = swap_listener(h, NONE);
     let r = f();
-    g(h).listener = listener;
+    swap_listener(h, listener);
     r
+}
+
+/// Makes `listener` the graph's, returning the previous one (out of line
+/// for the generic functions around closures).
+#[cfg_attr(target_arch = "wasm32", inline(never))]
+fn swap_listener<H: Host>(h: H, listener: u32) -> u32 {
+    g(h).set_listener(listener)
 }
 
 /// Runs `f` as one batch: its writes apply together at the end.
@@ -1052,14 +1144,28 @@ pub fn batch<H: Host, R>(h: H, f: impl FnOnce() -> R) -> R {
 /// Runs `f` under owner `owner` with no listener, as a root runs (what `f`
 /// makes runs at once).
 pub fn with_owner<H: Host, R>(h: H, owner: u32, f: impl FnOnce() -> R) -> R {
+    let previous = enter_owner_untracked(h, owner);
+    let r = run_updates(h, true, f);
+    leave_owner_untracked(h, previous);
+    r
+}
+
+/// The start of [`with_owner`]: `owner` current, no listener; what was
+/// before, for [`leave_owner_untracked`].
+#[cfg_attr(target_arch = "wasm32", inline(never))]
+fn enter_owner_untracked<H: Host>(h: H, owner: u32) -> (SavedOwner, u32) {
     let graph = g(h);
     let previous_owner = graph.enter_owner(owner);
     let previous_listener = graph.set_listener(NONE);
-    let r = run_updates(h, true, f);
+    (previous_owner, previous_listener)
+}
+
+/// The end of [`with_owner`]: the owner and listener before it back.
+#[cfg_attr(target_arch = "wasm32", inline(never))]
+fn leave_owner_untracked<H: Host>(h: H, (previous_owner, previous_listener): (SavedOwner, u32)) {
     let graph = g(h);
     graph.leave_owner(previous_owner);
     graph.listener = previous_listener;
-    r
 }
 
 /// Runs `f` in a new root owner under the current one (context passes
@@ -1069,11 +1175,19 @@ pub fn with_owner<H: Host, R>(h: H, owner: u32, f: impl FnOnce() -> R) -> R {
 /// Under [`DISPOSED`] there is no root: `f` runs there too (what it makes
 /// goes at once) and the root is `DISPOSED`, which disposing ignores.
 pub fn with_root<H: Host, R>(h: H, f: impl FnOnce() -> R) -> (u32, R) {
-    if g(h).owner == DISPOSED {
-        return (DISPOSED, with_owner(h, DISPOSED, f));
-    }
-    let id = g(h).root();
+    let id = new_root(h);
     (id, with_owner(h, id, f))
+}
+
+/// The root [`with_root`] runs under: a new one, or [`DISPOSED`].
+#[cfg_attr(target_arch = "wasm32", inline(never))]
+fn new_root<H: Host>(h: H) -> u32 {
+    let graph = g(h);
+    if graph.owner == DISPOSED {
+        DISPOSED
+    } else {
+        graph.root()
+    }
 }
 
 /// [`with_root`] as if run under `owner`: what is made later (a list's

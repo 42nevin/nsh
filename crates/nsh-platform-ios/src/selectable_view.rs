@@ -28,10 +28,13 @@
 use std::cell::{Cell, RefCell};
 
 use nsh_core::{
-    AttributedText, Bounds, Color, Point, Points,
+    AttributedText, Bounds, Color, EventKind, EventPayload, NodeId, PayloadValue, Point, Points,
     geometry::{bounds, point, px, size},
-    selection::{Handle, SelectionModel, SelectionTexts, TextPosition},
+    selection::{
+        Handle, KeptRows, SelectionModel, SelectionTexts, TextPosition, reading_order, reorder,
+    },
 };
+use nsh_engine::EngineControl;
 use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
     rc::{Allocated, Retained},
@@ -71,6 +74,8 @@ struct Entry {
     text: std::sync::Arc<AttributedText>,
     /// The content box, in the area's coordinates.
     frame: Bounds<Points>,
+    /// It continues the text before it (`ViewProps::continues_text`).
+    continues: bool,
 }
 
 /// The texts of an area as the model sees them.
@@ -114,16 +119,30 @@ impl SelectionTexts for AreaTexts {
         // The text's node id.
         self.entries[i].view.tag() as u64
     }
+
+    fn continues(&self, i: usize) -> bool {
+        self.entries[i].continues
+    }
 }
 
 impl AreaTexts {
     /// The texts of `area`'s subtree, in document order.
     fn list(area: &UIView) -> Self {
         fn walk(view: &UIView, area: &UIView, out: &mut Vec<Entry>) {
+            // In reading order: a virtual list's recycled cells are mounted
+            // in no particular order.
+            let start = out.len();
+            let mut runs = Vec::new();
             for child in view.subviews().iter() {
                 if child.isHidden() {
                     continue;
                 }
+                let from = out.len();
+                let f = child.frame();
+                let frame = bounds(
+                    pt(f.origin),
+                    size(px(f.size.width as f32), px(f.size.height as f32)),
+                );
                 if let Some(text) = child.downcast_ref::<TextView>() {
                     // Explicitly selectable texts drop their own selection.
                     text.update_own_selection();
@@ -138,6 +157,7 @@ impl AreaTexts {
                     };
                     let r = text.convertRect_toView(rect, Some(area));
                     out.push(Entry {
+                        continues: text.continues_text(),
                         view: text.retain(),
                         text: content,
                         frame: bounds(
@@ -148,6 +168,10 @@ impl AreaTexts {
                 } else {
                     walk(&child, area, out);
                 }
+                runs.push((frame, from..out.len()));
+            }
+            if let Some(order) = reading_order(&runs) {
+                reorder(out, start, &order);
             }
         }
         let mut entries = Vec::new();
@@ -233,12 +257,22 @@ pub(crate) struct AreaIvars {
     touch: Cell<bool>,
     /// The end a handle drag moves, and from the finger to the caret.
     dragging: Cell<Option<(Handle, CGPoint)>>,
+    /// The engine, told which virtual list rows the ends are in.
+    control: RefCell<Option<EngineControl>>,
+    /// Those rows, kept rendered.
+    kept: RefCell<KeptRows>,
     /// The last pointer press: when, where, its click count.
     last_click: Cell<(f64, CGPoint, u32)>,
     /// `UIEditMenuInteraction` (iOS 16), made on first use.
     edit_menu: RefCell<Option<Retained<AnyObject>>>,
     /// The interaction's menu shows (its delegate hears).
     menu_shown: Cell<bool>,
+    /// The area's node id.
+    id: Cell<NodeId>,
+    /// JS listens to the area's `onSelectionChange`.
+    listens: Cell<bool>,
+    /// The selected text last reported to `onSelectionChange`.
+    reported: RefCell<String>,
 }
 
 define_class!(
@@ -524,8 +558,19 @@ define_class!(
 
 impl AreaResponder {
     /// Makes `area` a selectable view.
-    pub(crate) fn attach(area: &UIView, mtm: MainThreadMarker) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(AreaIvars::default());
+    pub(crate) fn attach(
+        area: &UIView,
+        mtm: MainThreadMarker,
+        control: EngineControl,
+        id: NodeId,
+        listens: bool,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(AreaIvars {
+            control: RefCell::new(Some(control)),
+            id: Cell::new(id),
+            listens: Cell::new(listens),
+            ..AreaIvars::default()
+        });
         // SAFETY: UIView's designated initializer.
         let this: Retained<Self> = unsafe {
             msg_send![super(this), initWithFrame: CGRect::new(CGPoint::ZERO, CGSize::ZERO)]
@@ -579,6 +624,18 @@ impl AreaResponder {
         area.setUserInteractionEnabled(true);
         update_texts(area);
         this
+    }
+
+    /// Whether JS listens to the area's `onSelectionChange`.
+    pub(crate) fn set_listens(&self, listens: bool) {
+        self.ivars().listens.set(listens);
+    }
+
+    /// The area's view is deleted: [`Self::detach`] without reporting the
+    /// cleared selection to a view that is gone.
+    pub(crate) fn delete(&self) {
+        self.ivars().listens.set(false);
+        self.detach();
     }
 
     /// The area is no longer one: its gestures, handles and highlight go.
@@ -754,6 +811,21 @@ impl AreaResponder {
     /// Draws what is selected: each text's part of the highlight, the
     /// handles.
     fn redraw(&self) {
+        let kept = self
+            .ivars()
+            .kept
+            .borrow_mut()
+            .changed(&self.ivars().model.borrow());
+        if let Some(nodes) = kept
+            && let Some(control) = &*self.ivars().control.borrow()
+        {
+            control.keep_rendered(
+                nodes
+                    .into_iter()
+                    .filter_map(|k| k.try_into().ok())
+                    .collect(),
+            );
+        }
         let tint = self.tint();
         let mut now = Vec::new();
         {
@@ -782,6 +854,40 @@ impl AreaResponder {
         }
         *self.ivars().highlighted.borrow_mut() = now;
         self.place_handles();
+        self.report();
+    }
+
+    /// Reports the selected text (`""` once nothing is) to the area's
+    /// `onSelectionChange` when it changed and JS listens.
+    fn report(&self) {
+        if !self.ivars().listens.get() {
+            return;
+        }
+        let (text, start) = {
+            let model = self.ivars().model.borrow();
+            if model.is_empty() {
+                (String::new(), 0)
+            } else {
+                let texts = self.ivars().texts.borrow();
+                (model.text(&*texts), model.start_offset(&*texts))
+            }
+        };
+        if *self.ivars().reported.borrow() == text {
+            return;
+        }
+        *self.ivars().reported.borrow_mut() = text.clone();
+        // Not borrowed while the handler runs: it may detach the area.
+        let control = self.ivars().control.borrow().clone();
+        if let Some(control) = control {
+            control.dispatch_event(
+                self.ivars().id.get(),
+                EventKind::SelectionChange,
+                EventPayload::Map(vec![
+                    ("text", PayloadValue::Str(text)),
+                    ("start", PayloadValue::Number(f64::from(start))),
+                ]),
+            );
+        }
     }
 
     /// Puts the handles on the ends of a touch selection (hides them

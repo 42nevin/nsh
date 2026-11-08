@@ -108,7 +108,9 @@ mount(() => <Text>{{shown()}}</Text>);
             trace: false,
             network,
             websocket: None,
+            refuse_connections: None,
             filesystem: None,
+            windows: None,
             assets: None,
             environment: Environment {
                 os: Os::Linux,
@@ -127,6 +129,8 @@ mount(() => <Text>{{shown()}}</Text>);
             clipboard: None,
             host: Default::default(),
             picker: None,
+            speech: None,
+            audio: None,
         };
         let engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
         Self {
@@ -337,7 +341,8 @@ report({
 /// chat `main.js`: `process.run` for versions, `process.spawn` with
 /// `{ lines: true, stdin: "null" | "pipe", cwd }`, chained `on("stdout")`
 /// / `on("stderr")` / `on("exit")`, `write(line)` and `kill()`; signed and
-/// disktree: `run(...)` results' `code` / `stdout` / `stderr`.
+/// disktree: `run(...)` results' `code` / `stdout` / `stderr` (and
+/// NSH's `signal`).
 #[test]
 fn process_calls_of_the_bench_apps() {
     let app = App::start(
@@ -346,7 +351,7 @@ import process from "process";
 (async () => {
   const out = {};
   const ran = await process.run("/bin/sh", ["-c", "echo out; echo err >&2; exit 3"]);
-  out.run = { code: ran.code, stdout: ran.stdout, stderr: ran.stderr, keys: Object.keys(ran).sort() };
+  out.run = { code: ran.code, signal: ran.signal, stdout: ran.stdout, stderr: ran.stderr, keys: Object.keys(ran).sort() };
   const ok = await process.run("/bin/sh", ["-c", "pwd"], { cwd: process.dataDir });
   out.cwd = ok.stdout.trim() === process.dataDir && ok.code === 0;
   // chat: a one-shot provider, read line by line.
@@ -382,10 +387,11 @@ import process from "process";
         |_| {},
     );
     let out = app.result();
-    // gpui-shell's `Output`: exactly `code`, `stdout`, `stderr`.
+    // gpui-shell's `Output`: `code`, `stdout`, `stderr`; NSH adds the
+    // `signal` that ended the child (`null` when it exited, as here).
     assert_eq!(
         out["run"],
-        serde_json::json!({ "code": 3, "stdout": "out\n", "stderr": "err\n", "keys": ["code", "stderr", "stdout"] }),
+        serde_json::json!({ "code": 3, "signal": null, "stdout": "out\n", "stderr": "err\n", "keys": ["code", "signal", "stderr", "stdout"] }),
         "{out}"
     );
     assert_eq!(out["cwd"], true);

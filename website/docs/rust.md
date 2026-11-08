@@ -14,7 +14,7 @@ own UI. What differs is the language of your own code, and with it whether the a
 | | Rust | TSX | Rust with TSX |
 |---|---|---|---|
 | Your UI, state and handlers | Rust | TSX on QuickJS | Rust components and modules, TSX screens that use them |
-| The app runs | the engine and your crate only, on every platform and in the browser | QuickJS and the engine | QuickJS and the engine, with your crate |
+| The app runs | the engine and your crate only, on every platform and in the browser | QuickJS and the engine (in the browser, its JavaScript engine) | QuickJS and the engine, with your crate (in the browser, its JavaScript engine) |
 | Suits | Medium and large apps with demanding business logic | Apps and modules delivered at run time, quick iteration | A Rust core with parts that change often |
 | Edits | Rebuild and restart | Hot updates | Hot updates for TSX, rebuild and restart for Rust |
 | Start | `nsh init my-app --template rust` | `nsh init my-app --template ts` | `nsh init my-app --template mixed` |
@@ -45,6 +45,10 @@ cd my-app
 nsh run                        # this machine's backend; --target ios, android, web, macos, linux or windows
 nsh package --target web       # or ios, ios-simulator, android, macos, linux, windows
 ```
+
+Build with [huacnlee/cargo](https://github.com/huacnlee/cargo), the Cargo NSH is developed with: a drop-in fork that builds each dependency once for all your
+projects and Git worktrees and keeps its build directory under a size limit on its own, with nothing to configure
+([Installation](./installation.md#building-from-a-checkout)).
 
 `src/lib.rs` holds the app: components, state, handlers, tasks.
 
@@ -140,8 +144,9 @@ native targets' threads.
 
 ## Desktop title bars
 
-Rust apps draw their own title bars with `nsh_core::element::desktop`. Call
-`set_title_bar(TitleBarStyle::Hidden, Some(height))`, mark the bar's background
+Rust apps draw their own title bars with `nsh_core::element::desktop`. Set the
+window's `title_bar` attribute to `TitleBarStyle::Hidden` with
+`current_window().set(..)`, mark the bar's background
 with `.window_drag(true)`, and reserve the native window controls' space with
 `title_bar()`. Its `top` is the bar's height, and `left` and `right` are the widths
 occupied by the system controls. Reading it subscribes to changes, including full
@@ -150,12 +155,18 @@ behavior; `.window_drag(false)` keeps a child out of its parent's drag region.
 
 ```rust
 use nsh_core::{
-    desktop::TitleBarStyle,
-    element::{desktop::{close_window, set_title_bar, title_bar}}, prelude::*,
+    desktop::{TitleBarOptions, TitleBarStyle, WindowAttributes, WindowControl},
+    element::desktop::{current_window, title_bar},
+    prelude::*,
 };
 
 fn window_bar() -> impl IntoElement {
-    set_title_bar(TitleBarStyle::Hidden, Some(px(42.0)));
+    let mut bar = TitleBarOptions::default();
+    bar.style = TitleBarStyle::Hidden;
+    bar.height = Some(px(42.0));
+    let mut attributes = WindowAttributes::default();
+    attributes.title_bar = Some(bar);
+    current_window().set(attributes);
     view()
         .h(px(42.0))
         .flex_row()
@@ -164,12 +175,56 @@ fn window_bar() -> impl IntoElement {
         .pl(move || title_bar().left + px(12.0))
         .pr(move || title_bar().right + px(12.0))
         .child(text("My app").flex_1())
-        .child(text("Close").window_drag(false).on_press(close_window))
+        .child(text("Close").window_control(WindowControl::Close))
 }
 ```
 
-`set_title_bar(TitleBarStyle::Default, None)` restores the system title bar.
-`close_window()` follows the embedding host's normal window-close behavior.
+A title bar with `TitleBarStyle::Default` restores the system's. A view with
+`.window_control(..)` is the window's minimize, maximize or close button: the
+platform carries out its press, and a close goes through the window's
+`close_on_press`. The `WindowRef` has the window's other requests
+(`set_mode`, `minimize`, `set_bounds`, `close`, ...), `window()` opens windows of
+the app's own, and the module has the menus (`set_application_menu`,
+`popup_menu`) too: [nsh/desktop](../modules/nsh-desktop.md).
+
+## Files and folders
+
+On the desktops, Rust code shows the system's file dialogs and hands local paths to
+the system, each answer awaited in a task: `pick_paths` with an `OpenDialog`
+(`OpenDialog::files()`, `::folders()` or `::files_and_folders()`), `pick_save_path`
+with a `SaveDialog`, `open_path` (the file's default app), `reveal_path` (the item
+selected in Finder, File Explorer or the file manager) and `move_to_trash` (where the
+item went, when macOS says). The dialogs answer `Ok(None)` when the user cancels and
+an error when they cannot show (on Linux without a file chooser portal, and on iOS,
+Android and the web, where `open_path`, `reveal_path` and `move_to_trash` answer
+an error too). Every request that fails answers its error, never `false`.
+
+```rust
+use nsh_core::{
+    file_dialog::{FileFilter, OpenDialog},
+    prelude::*,
+};
+
+fn open_notes() {
+    let picked = pick_paths(
+        OpenDialog::files()
+            .multiple(true)
+            .filter(FileFilter::new("Markdown", ["md", "markdown"]))
+            .button_label("Open"),
+    );
+    spawn(async move {
+        match picked.await {
+            Ok(Some(paths)) => {
+                for path in paths {
+                    let _ = reveal_path(path).await;
+                }
+            }
+            Ok(None) => {} // Cancelled.
+            Err(error) => log::warn!("no file dialog: {error}"),
+        }
+    });
+}
+```
 
 ## Extending a Rust app with TSX
 
@@ -267,7 +322,7 @@ function Overview() {
   return (
     <View class="gap-2 p-4">
       <Text>Balance: {balance()}</Text>
-      <Chart symbol="NSH" range="1M" onSelect={(price) => balance.set(ledger.add(price))} />
+      <Chart symbol="NSH" range="1M" onSelect={(e) => balance.set(ledger.add(e.price))} />
       <View onPress={() => ledger.upload("https://example.com/ledger")} role="button" class="rounded-lg bg-blue-600 px-4 py-2 active:bg-blue-700">
         <Text class="text-white">Upload</Text>
       </View>
@@ -320,8 +375,11 @@ returning a value gives `Promise<T>`. Arguments and results are typed from the s
 `#[derive(JsObject)]` structs and `#[derive(PropEnum)]` enums, instances of your classes, and TSX functions
 (`Callback<A, R>`, which Rust calls at once inside a call, or later with `post` and `call_async`; TS sees
 `(value: number) => void` for a `Callback<f64>`, and `#[args(balance)] listener: Callback<f64>` names the argument,
-`(balance: number) => void`). An event's handler argument is `value` too, and `#[args(index)]` on the event's
-variant names it. An argument of
+`(balance: number) => void`). A function that starts listening is named `on(event, listener)` and returns `Stop`
+(`Stop::new(|| …)`), which TSX gets as a function that stops it (`() => void`); it runs once, when TSX calls it or
+when what called `on` goes (a component, or the module's run under hot reload). An event's handler gets one object: a variant's value is its field `value`, which
+`#[args(price)]` on the variant names (`onSelect({ price })`), and `#[args(open, reason)]` names the fields of a
+variant of several. An argument of
 the wrong type throws a `TypeError` in the call, or rejects the Promise of one that returns a Promise; an `Err`
 throws (or rejects) with its message. A class's object owns its Rust value: it is freed when the object is collected, or at
 once with `ledger.dispose()` (also `using ledger = new Ledger()`). Name the TSX entry to run it, `nsh run App.tsx` or `nsh package App.tsx --target …`: TSX edits are hot

@@ -14,6 +14,31 @@ Rust 组件、嵌入 NSH 的原生应用），以及在 `nsh/base` 之上构建�
 本文是一份规范性指南：**必须**表示生命周期、正确性或生态约束；**应该**表示默认架构，偏离时需要有具体理由。精确签名以当前
 源码、参考页面和 `.nsh/types` 中的声明为准。
 
+## 先建立应用的界面基础，再编写页面
+
+新应用在实现功能页面之前，先建立设计标准、Theme Tokens 和应用自己的风格组件。已有应用先找到并复用这些基础。标准与共享
+界面代码保存在应用仓库中；具体内容见[设计指南](./design-guides.md#先建立应用自己的设计系统)。
+
+按以下顺序开发：
+
+1. 明确应用支持的 Desktop、Mobile、Web、TUI 目标，以及各自的输入、导航和密度要求。
+2. 在主题文件（`nsh.json` 的 `"theme"`）中定义语义颜色角色与浅色、深色值，并确定组件使用的字体、间距、圆角和尺寸尺度。
+3. 在 `nsh/base` 之上封装、组合应用自己的风格控件，覆盖可见部件、变体和交互状态。在支持的目标上验证有代表性的组合，再铺开到页面。
+4. 用这一层组合页面。缺少 token 或共享变体时，先在所属层补充，再由页面使用；共享控件的修改应一致地作用于所有使用处。
+
+NSH 提供无样式的 `nsh-base` crate（TSX 中为 `nsh/base`），对应 [`gpui-base`](https://gpui-kit.com/base)；应用或社区组件库拥有对应
+[`gpui-component`](https://gpui-kit.com/component) 的风格层，`nsh-core` 则对应底层的 GPUI。普通界面应该导入应用自己的风格控件，把基础组件的组装与样式
+保留在共享层中。适配各目标平台的外观时，保留基础组件的行为、焦点与无障碍能力。
+
+主题颜色必须通过语义 token 读取：Rust 使用 `theme().primary` 或 `theme().color("warning")`，TSX 使用 `bg-primary`、
+`text-warning` 或 `token("warning")`。十六进制、RGB/RGBA、HSL/HSLA 原始值定义在主题源中，页面与组件的样式中不直接写，
+包括状态样式、渐变和阴影。`bg-blue-500` 这样的色板类以及任意颜色类同样绕过应用的语义角色；应该补充所缺的角色。
+`bg-primary/90` 或 `theme().primary.opacity(0.9)` 这样的 token 透明度保留了颜色的语义来源。用户自选颜色、图片像素、
+颜色选择器的选中值等属于数据，外围控件仍使用主题 token。
+
+完成前，检查新增外观代码中的原始颜色值与色板类、共享组件的使用情况，并在浅色、深色和目标平台上操作各状态。无法验证的平台
+应明确记录，不能用一张截图代替所有目标的验证。
+
 ## 让常见用法自然低成本
 
 **设计原则：框架类型与所有权安排，应让组件的常见用法默认就低成本。** 开发者应能构建、复用界面，而不必在每个调用处手写缓存。
@@ -226,7 +251,7 @@ pub fn Search(props: SearchProps) -> impl IntoElement {
 ```tsx tabs
 function Search(props: { placeholder: string }) {
   const query = signal("");
-  return <Input value={query()} onChange={(text) => query.set(text)} placeholder={props.placeholder} />;
+  return <Input value={query()} onChange={({ value }) => query.set(value)} placeholder={props.placeholder} />;
 }
 ```
 
@@ -278,7 +303,7 @@ switch()
 ```
 
 ```tsx tabs
-<Switch checked={showHidden()} onChange={(next) => showHidden.set(next)}>
+<Switch checked={showHidden()} onChange={({ checked }) => showHidden.set(checked)}>
   <Text>Show hidden files</Text>
 </Switch>
 ```
@@ -394,7 +419,7 @@ function CartRow() {
       max={10}
       decrementLabel="Fewer"
       incrementLabel="More"
-      onChange={(next) => quantity.set(next)}
+      onChange={({ value }) => quantity.set(value)}
     />
   );
 }
@@ -418,7 +443,7 @@ export interface QuantityStepperProps {
   /** What screen readers say for the button that adds one. */
   incrementLabel: string;
   /** The user asked for another quantity; the owner sets `value`. */
-  onChange?: (next: number) => void;
+  onChange?: (e: { value: number }) => void;
 }
 
 export function QuantityStepper(props: QuantityStepperProps) {
@@ -426,7 +451,7 @@ export function QuantityStepper(props: QuantityStepperProps) {
   const max = () => props.max ?? 99;
   const step = (delta: number) => {
     const next = Math.min(max(), Math.max(min(), props.value + delta));
-    if (next !== props.value) props.onChange?.(next);
+    if (next !== props.value) props.onChange?.({ value: next });
   };
   const buttonClass = "size-8 items-center justify-center rounded-(--radius) bg-muted active:opacity-60 disabled:opacity-40";
   return (
@@ -447,8 +472,9 @@ export function QuantityStepper(props: QuantityStepperProps) {
 
 组件拥有它创建的东西，它创建的一切都随它消失：它的 `<If>` 分支隐藏、它的行被移除或它的页面被弹出时。在 Rust 中，任务、
 定时器和间隔（`spawn`、`set_timeout`、`set_interval`）以及按键绑定（`on_key`）随创建它们时的归属者结束；在 TSX 中，用
-[`cleanup`](./reactivity.md#cleanup) 注册停止操作，或从 effect 中返回它。开始监听的函数返回一个停止监听的函数
-（`() => void`），组件渲染期间注册的内容随组件一起移除，`keymap.bind` 就是如此。
+[`cleanup`](./reactivity.md#cleanup) 注册停止操作，或从 effect 中返回它。监听用 `on(event, listener)`
+（`host.on(name, listener)`、`BackHandler.on("press", listener)`），它返回一个停止监听的函数（`() => void`，Rust 中返回
+`Stop`），组件渲染期间注册的内容随组件一起移除，`keymap.bind` 的绑定也是如此。
 
 某个东西意外地一直在运行时，先检查在组件之外创建的 effect 和 computed 值（在事件处理函数或定时器回调中创建的没有归属者，会
 一直存在）、注册时没有保留停止操作的监听，以及从没有组件归属的 store 启动的工作。被丢弃的 `resource` 加载会中止（TSX 中的
@@ -818,10 +844,12 @@ const liked = signal<Set<number>>(new Set());
 （组件的 props 和事件、crate 的导出、宿主应用的原生组件和模块接收的函数）采用同样的纪律：
 
 - 输入只增加可选成员；类型只放宽；默认值和行为保持不变（新行为需要主动开启）；
-- 选项是一个对象（`scrollTo({ x, y, animated })`），而不是第三个位置参数；
+- 参数可能增加的函数把选项放在一个对象里（`scrollTo({ x, y, animated })`），而不是再加一个位置参数；永远不会增加的参数（例如范围的起点和终点）保持为位置参数；
 - 模式是可以增加取值的字符串联合类型，而不是以后需要第三种状态的布尔值；
 - 一个值只有一种类型：`version: string`，而不是 `string | number`；
 - 函数返回一个可以增加字段的对象，而不是元组或单独的值；
+- 返回 Promise 的函数通过 reject 报告所有失败，调用方能处理的失败带上 `code`，NSH 自己的接口也是如此：调用方按 code 区分，
+  消息是给人看的，可能会变；
 - 重命名时保留旧名称，作为同一实现的 `@deprecated` 别名。
 
 在 Rust 中，需要持续演进的行为状态默认使用私有字段。有意设计成记录的配置和序列化数据可以暴露字段，但所有包含公开字段的
@@ -835,17 +863,19 @@ const liked = signal<Set<number>>(new Set());
 不能假设每个平台支持相同的能力。标题栏和窗口控件、无障碍、剪贴板、触感反馈、滚动物理、字体和时序都可能不同。一个包在每个
 平台上运行（[平台特定代码](./platform-specific.md)）；平台特定的代码放在 NSH 为它准备的位置，并定义回退行为：
 
-- 两个平台都有的 prop 是顶层 prop；只有一个平台有的 prop 放进 `ios={{…}}`、`android={{…}}`、`desktop={{…}}` 或
-  `web={{…}}`（Rust 中是构建器方法），只有当前平台的对象会生效；
+- 元素在各平台上都要表达的意思是顶层 prop；平台系统自带的功能放进 `ios={{…}}`、`android={{…}}`、`macos={{…}}`、
+  `desktop={{…}}` 或 `web={{…}}`（Rust 中是构建器方法），有这个功能的每个平台各放一份，只有当前平台的对象会生效；
 - 移动平台的 API 来自 `nsh/mobile`，桌面的 API 来自 `nsh/desktop`；
 - 按平台设置的样式使用 `ios:`、`android:` 和 `web:` 类名。
 
 平台分支即使表现不同，也必须保留语义契约。例如对话框在 iOS 上是面板，在桌面上是覆盖窗口的一层，但应用仍需要一致的打开状态。
-共享的行为在无界面环境中测试，平台的部分用 `nsh test --target` 测试。
+共享的行为在无界面环境中测试，平台的部分用 `nsh test --target` 测试。按 NSH 报告的值（`platform.os`、状态、原因）分支时，每个分支都要有
+`default`：之后的版本会增加平台和情况，今天下发的应用也要在上面运行（[兼容性](./compatibility.md)）。
 
 应用在 `nsh.json` 的 `"capabilities"` 中声明它在 VM 之外能访问的内容：可以请求的主机、Web 视图显示的页面、剪贴板、状态栏
 （[沙箱与权限](./sandbox-and-capabilities.md)）。将被下发到其他应用中的应用，准确列出它用到的内容，并像处理失败的请求那样
-处理被拒绝的请求：宿主应用授予的权限可能少于应用声明的。
+处理被拒绝的请求：宿主应用授予的权限可能少于应用声明的。被拒绝的调用以 `code` 为 `"ERR_ACCESS_DENIED"` 的错误失败，
+它的 `permission` 是能力名，`resource` 是请求的内容。
 
 ## 文件、代码与命名风格
 
@@ -859,7 +889,7 @@ const liked = signal<Set<number>>(new Set());
 ### 词汇是 API 的一部分
 
 在各个组件中，同一概念使用同一个词。在给 prop 或事件命名之前，先在 NSH 自己的 API 中寻找这个术语，然后是 GPUI Kit 的
-`gpui-base`、GPUI 和 `gpui-component`，再然后是各平台的控件。原语所显示的内容和全局 API 的名称取自 HTML、DOM 和 CSS
+[`gpui-base`](https://gpui-kit.com/base)、GPUI 和 [`gpui-component`](https://gpui-kit.com/component)，再然后是各平台的控件。原语所显示的内容和全局 API 的名称取自 HTML、DOM 和 CSS
 （`src`、`html`、`placeholder`）。Rust 名称是 `snake_case`，在 TSX 中转换为 `camelCase`（`on_open_change` 即
 `onOpenChange`）；一个词保持一个词（`readonly`、`multiline`）。
 
@@ -879,11 +909,11 @@ const liked = signal<Set<number>>(new Set());
 | 插槽 | 它是什么 | `header`、`footer`、`trigger`、`content`、`empty` |
 | 应用提供的内容 | `render<Part>` | `renderCodeBlock` |
 | 关闭开关 | `closeOn<Trigger>`，默认 `true` | `closeOnEscape`、`closeOnBackdropPress` |
-| 值的变化 | `on<Value>Change(next, details?)` | `onChange(text)`、`onOpenChange(open, reason)` |
+| 值的变化 | `on<Value>Change({ <value>, ... })`，一个对象 | `onChange({ value })`、`onOpenChange({ open, reason })` |
 | 其他事件 | `on<Event>`，现在时，一个对象 | `onPress()`、`onSubmit({ text })` |
 | 阶段 | `<act>Start`、`<act>End` | `onPanStart`、`onLoadStart` |
-| 指针位于视图上方 | `In` / `Out` | `onHoverIn`、`onHoverOut` |
-| 开始监听 | 返回 `() => void` | `keymap.bind(..)` |
+| 鼠标位于视图上方 | `Enter` / `Move` / `Leave`，与 DOM 相同 | `onMouseEnter`、`onMouseMove`、`onMouseLeave` |
+| 开始监听 | `on(event, listener)`，返回 `() => void` | `host.on(name, l)`、`BackHandler.on("press", l)` |
 | 环境中的值 | 访问器，旁边是 `set<Value>` | `colorScheme()`、`setColorScheme` |
 | 只读的布尔值 | `is<Adjective>`、`has<Noun>` | `isAvailable` |
 
@@ -927,12 +957,13 @@ Rust 构建器消费并返回 `Self`，以它设置的 prop 命名，不加 `set
 
 ### 回调与事件的措辞
 
-- 值的变化先传值，其他内容放在后面：`onChange(next)`、`onOpenChange(open, reason)`。其他每个事件都传一个对象，即使只有一个
-  字段（`onLinkPress({ url })`），这样以后增加字段只是一次添加；没有内容可报告的事件不传参数。
+- 每个事件都传一个对象，即使只有一个字段、即使是值的变化，字段按它们报告的属性命名：`onChange({ value })`、
+  `onOpenChange({ open, reason })`、`onLinkPress({ url })`。这样以后增加字段只是一次添加。API 的数据类型是一个字段，
+  而不是载荷本身（`onImagePress({ image })`）；没有内容可报告的事件不传参数。
 - 以动作命名，不用过去时，也不用请求：`onPress`、`onClose`、`onCancel`、`onBackPress`。
 - 当动作有名字时，以意图而不是几何位置命名：`onLoadMore`，而不是“到达了末尾”。
-- 生命周期成对使用 `onOpen` / `onClose`；阶段用 `Start` / `End`，从不用 `Begin`；指针位于视图上方是 `onHoverIn` /
-  `onHoverOut`，文件拖过视图是 `Enter` / `Leave`。
+- 生命周期成对使用 `onOpen` / `onClose`；阶段用 `Start` / `End`，从不用 `Begin`；鼠标位于视图上方是 `onMouseEnter` /
+  `onMouseMove` / `onMouseLeave`（与 DOM 的名称相同），文件拖过视图是 `Enter` / `Leave`。
 - 在文档中说明回调是在组件自身状态变化之前还是之后运行，以及它是否可能重入组件。
 
 ### 文档与界面文案

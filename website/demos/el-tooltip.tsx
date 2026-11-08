@@ -1,24 +1,27 @@
 import { mount, signal, Text, View } from "nsh";
 import { type OpenChangeReason, Tooltip } from "nsh/base";
-import { button, buttonText, desktop, Inspector, Log, Panel, Stage, ui, wide } from "./palette";
+import { button, buttonText, createPresence, desktop, Icon, iconButtonGlyph, type IconName, iconButtonLook, Inspector, Log, Panel, Stage, tooltipLook, tooltipText, ui, wide } from "./palette";
 
 /** An icon button with a hint of the app's look, above or below it. */
 function Tool(props: {
-  icon: string;
+  icon: IconName;
   label: string;
   hint: string;
   placement: "top" | "bottom";
   pinned: boolean;
   onPress: () => void;
-  onOpenChange: (open: boolean, reason: OpenChangeReason) => void;
+  onOpenChange: (e: { open: boolean; reason: OpenChangeReason }) => void;
 }) {
   const hovered = signal(false);
+  // The bubble stays made between showings: it comes in from its side as it shows.
+  const presence = createPresence(props.placement);
+  const glyph = iconButtonGlyph({ variant: "secondary" });
   return (
     <View style={{ alignItems: "center", gap: 6 }}>
       <View
         onPress={props.onPress}
         accessibilityLabel={props.label}
-        {...button("secondary", { align: "center", style: { width: desktop ? 36 : 52, height: desktop ? 36 : 52, paddingHorizontal: 0 } })}
+        {...iconButtonLook({ variant: "secondary" })}
         tooltip={
           <Tooltip
             open={props.pinned || hovered()}
@@ -26,17 +29,20 @@ function Tool(props: {
             offset={8}
             margin={8}
             delay={400}
-            onOpenChange={(open, reason) => {
-              hovered.set(open);
-              props.onOpenChange(open, reason);
+            onOpenChange={(e) => {
+              hovered.set(e.open);
+              props.onOpenChange(e);
             }}
-            style={{ backgroundColor: ui().text, borderRadius: 7, paddingHorizontal: 10, paddingVertical: 6 }}
+            onOpen={presence.show}
+            onClose={presence.hide}
           >
-            <Text style={{ fontSize: 13, color: ui().page }}>{props.hint}</Text>
+            <View class={tooltipLook().class} style={presence.style}>
+              <Text class={tooltipText}>{props.hint}</Text>
+            </View>
           </Tooltip>
         }
       >
-        <Text style={{ fontSize: desktop ? 17 : 22, color: ui().text }}>{props.icon}</Text>
+        <Icon name={props.icon} {...glyph} />
       </View>
       <Text style={{ fontSize: 11, color: ui().faint }}>{props.placement}</Text>
     </View>
@@ -47,21 +53,21 @@ function App() {
   const events = signal<string[]>([]);
   const pressed = signal("—");
   const pinned = signal(false);
-  const log = (name: string) => (open: boolean, reason: OpenChangeReason) =>
+  const log = (name: string) => ({ open, reason }: { open: boolean; reason: OpenChangeReason }) =>
     events.set([`${name} ${open ? "shown" : "hidden"} · ${reason}`, ...events()].slice(0, 6));
   const tools = () => (
     <>
-      <Tool icon="★" label="Star" hint="Add to favorites" placement="top" pinned={pinned()} onPress={() => pressed.set("Star")} onOpenChange={log("Star")} />
-      <Tool icon="↗" label="Share" hint="Share with your team" placement="bottom" pinned={pinned()} onPress={() => pressed.set("Share")} onOpenChange={log("Share")} />
-      <Tool icon="✕" label="Delete" hint="Move to the trash" placement="top" pinned={pinned()} onPress={() => pressed.set("Delete")} onOpenChange={log("Delete")} />
+      <Tool icon="star" label="Star" hint="Add to favorites" placement="top" pinned={pinned()} onPress={() => pressed.set("Star")} onOpenChange={log("Star")} />
+      <Tool icon="share" label="Share" hint="Share with your team" placement="bottom" pinned={pinned()} onPress={() => pressed.set("Share")} onOpenChange={log("Share")} />
+      <Tool icon="trash" label="Delete" hint="Move to the trash" placement="top" pinned={pinned()} onPress={() => pressed.set("Delete")} onOpenChange={log("Delete")} />
     </>
   );
   // The `tooltip` prop of any element: a `Tooltip` with the app's look.
   const pin = () => (
     <View
       tooltip={
-        <Tooltip style={{ backgroundColor: ui().text, borderRadius: 7, paddingHorizontal: 10, paddingVertical: 6 }}>
-          <Text style={{ fontSize: 13, color: ui().page }}>Shows every tooltip without a pointer</Text>
+        <Tooltip class={tooltipLook().class}>
+          <Text class={tooltipText}>Shows every tooltip without a pointer</Text>
         </Tooltip>
       }
       onPress={() => pinned.set(!pinned())}
@@ -77,7 +83,7 @@ function App() {
       <Text style={{ fontSize: 13, color: ui().text }}>{pressed()}</Text>
     </Panel>
   );
-  const changes = () => <Log title="onOpenChange(open, reason)" lines={events()} minHeight={130} />;
+  const changes = () => <Log title="onOpenChange({ open, reason })" lines={events()} minHeight={130} />;
 
   return (
     <View style={{ flex: 1, backgroundColor: ui().page, padding: 20, paddingTop: 24, gap: 14 }}>
