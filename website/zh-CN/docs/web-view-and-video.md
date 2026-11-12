@@ -86,7 +86,7 @@ mount(App);
 |---|---|---|
 | `onLoadStart` | `WebViewNavigation` | 页面开始加载。 |
 | `onLoad` | `WebViewNavigation` | 页面加载完成。 |
-| `onError` | `{ message }` | 加载失败。 |
+| `onError` | `{ message, code? }` | 加载失败。在 macOS 上，网页内容进程终止时报告 `code: "ERR_NSH_HOST_ERROR"`；应用决定何时重新打开页面。 |
 | `onNavigationStateChange` | `WebViewNavigation` | URL、标题、加载状态或历史改变。 |
 | `onMessage` | `{ data: string }` | 页面发来消息（见下文）。 |
 

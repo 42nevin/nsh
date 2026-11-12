@@ -2,6 +2,8 @@
 #[cfg(target_os = "macos")]
 mod title_bar;
 #[cfg(target_os = "macos")]
+mod web_termination;
+#[cfg(target_os = "macos")]
 mod window_press;
 fn main() {
     if !std::env::args().any(|arg| arg == "--ignored") {
@@ -11,6 +13,7 @@ fn main() {
         {
             window_press::run();
             title_bar::run();
+            web_termination::run();
         }
     }
 }

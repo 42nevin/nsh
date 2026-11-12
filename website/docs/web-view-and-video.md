@@ -91,7 +91,7 @@ Events:
 |---|---|---|
 | `onLoadStart` | `WebViewNavigation` | A page started loading. |
 | `onLoad` | `WebViewNavigation` | A page finished loading. |
-| `onError` | `{ message }` | Loading failed. |
+| `onError` | `{ message, code? }` | Loading failed. On macOS, a terminated web content process reports `code: "ERR_NSH_HOST_ERROR"`; the app chooses when to reopen the page. |
 | `onNavigationStateChange` | `WebViewNavigation` | The URL, title, loading state or history changed. |
 | `onMessage` | `{ data: string }` | The page posted a message (below). |
 

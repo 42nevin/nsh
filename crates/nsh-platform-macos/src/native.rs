@@ -1451,6 +1451,19 @@ define_class!(
             });
         }
 
+        /// WebKit's content process ended; the app decides whether to reopen the page.
+        #[unsafe(method(webViewWebContentProcessDidTerminate:))]
+        fn content_process_terminated(&self, _web: &AnyObject) {
+            self.ivars().navigation.set(None);
+            self.ivars().downloading.borrow_mut().clear();
+            self.emit(EventKind::Error, || {
+                EventPayload::Map(vec![
+                    ("message", PayloadValue::Str("web content process terminated".into())),
+                    ("code", PayloadValue::Str(nsh_core::element::codes::HOST_ERROR.into())),
+                ])
+            });
+        }
+
         #[unsafe(method(webView:didFailNavigation:withError:))]
         fn did_fail(&self, _web: &AnyObject, navigation: Option<&AnyObject>, error: &AnyObject) {
             self.failed(navigation, error);
