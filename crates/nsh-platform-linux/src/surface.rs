@@ -29,7 +29,7 @@ use std::{
 use crossbeam_channel::{Receiver, Sender};
 use gtk4::{self as gtk, glib, prelude::*};
 use nsh_core::{EventKind, EventPayload, MountBatch, MountItem, NodeId, Points, ROOT_ID, Size};
-use nsh_engine::{Engine, EngineConfig, EngineControl, Environment, MountSink};
+use nsh_engine::{Engine, EngineConfig, EngineControl, Environment, MainThreadTask, MountSink};
 use rustc_hash::FxHashMap;
 
 use crate::{animation::UiAnimation, mount::Mounter, text::PangoTextEngine, view::NshView};
@@ -40,6 +40,9 @@ enum Message {
     Error(String),
     Frame,
     HotUpdateFailed,
+    /// A function the app runs on the main thread
+    /// ([`MountSink::run_on_main_thread`]), after the batches before it.
+    Run(MainThreadTask),
 }
 
 thread_local! {
@@ -94,6 +97,10 @@ impl MountSink for Sink {
     fn hot_update_failed(&self) {
         self.send(Message::HotUpdateFailed);
     }
+
+    fn run_on_main_thread(&self, task: MainThreadTask) {
+        self.send(Message::Run(task));
+    }
 }
 
 /// Called when the app reports a fatal error (development hosts show it).
@@ -116,6 +123,9 @@ pub(crate) struct Surface {
     /// What the main window keeps: its attributes, its state's
     /// bookkeeping ([`crate::window`]).
     pub(crate) main_window: RefCell<crate::window::MainWindow>,
+    /// The view the screen reader's focus is on while the keyboard focus
+    /// is elsewhere ([`crate::access::focus`]).
+    pub(crate) reader_focus: RefCell<glib::WeakRef<NshView>>,
     /// Pointer input state ([`crate::input`]).
     pub(crate) input: crate::input::Input,
     pub(crate) file_drop: crate::file_drop::State,
@@ -172,6 +182,9 @@ pub(crate) struct Surface {
     pub(crate) asset_base: RefCell<Option<crate::image::AssetBase>>,
     /// The disk cache of downloaded images ([`crate::image::set_disk_cache`]).
     pub(crate) image_cache: RefCell<Option<nsh_core::image::DiskCache>>,
+    /// The roots the app's `<Image>` files are read under
+    /// ([`nsh_engine::Engine::media_files`]).
+    pub(crate) media_files: RefCell<Arc<nsh_core::access::MediaFiles>>,
     /// What the running app may reach (checked for image redirects).
     pub(crate) access: RefCell<Arc<nsh_core::access::Access>>,
     /// Videos, web views and registered native components.
@@ -209,12 +222,17 @@ pub(crate) enum Next {
 
 impl Surface {
     /// The GPU device shader views render with ([`crate::shader`]), opened
-    /// the first time one asks.
+    /// the first time one asks; without one the app hears that shader views
+    /// draw nothing (`shadersAvailable()`).
     pub(crate) fn shader_renderer(&self) -> Option<Rc<nsh_engine::shader::Renderer>> {
         self.shader_renderer
             .get_or_init(|| {
-                nsh_engine::shader::Renderer::new(nsh_engine::shader::PixelFormat::Rgba)
-                    .map(Rc::new)
+                let renderer =
+                    nsh_engine::shader::Renderer::new(nsh_engine::shader::PixelFormat::Rgba);
+                if renderer.is_none() {
+                    self.control(EngineControl::shaders_unavailable);
+                }
+                renderer.map(Rc::new)
             })
             .clone()
     }
@@ -240,6 +258,7 @@ impl Surface {
             nav: RefCell::default(),
             windows: RefCell::default(),
             main_window: RefCell::default(),
+            reader_focus: RefCell::default(),
             input: Default::default(),
             file_drop: Default::default(),
             engine: RefCell::new(None),
@@ -265,6 +284,7 @@ impl Surface {
             audio: Default::default(),
             asset_base: RefCell::new(None),
             image_cache: RefCell::new(None),
+            media_files: RefCell::default(),
             access: RefCell::new(Arc::default()),
             native: Default::default(),
             keymap: Default::default(),
@@ -387,8 +407,11 @@ impl Surface {
         *self.rx.borrow_mut() = Some(rx);
         *self.pending.borrow_mut() = pending;
         let family = crate::text::ui_family();
-        // The embedding app's theme overrides are in the first frame.
+        // The embedding app's theme overrides are in the first frame, and
+        // the links that came before are the app's address when its code
+        // first runs (`UrlScheme.url()`).
         let tokens = self.host_tokens.borrow().clone();
+        let links = self.pending_links.take();
         // The app reads the displays as it first renders.
         let displays = crate::window::displays();
         let setup = |control: &EngineControl| {
@@ -398,11 +421,15 @@ impl Surface {
             if !displays.is_empty() {
                 control.set_displays(displays);
             }
+            for url in links {
+                control.dispatch_event(ROOT_ID, EventKind::UrlScheme, url_payload(url));
+            }
         };
         match Engine::start_with(config, move || PangoTextEngine::new(family), sink, setup) {
             Ok(engine) => {
                 // The app's downloaded images go through its disk cache.
                 crate::image::set_disk_cache(self, engine.image_cache());
+                *self.media_files.borrow_mut() = engine.media_files();
                 // The test moves its clock through the engine.
                 #[cfg(feature = "dev")]
                 if let Some(model) = &*self.test_model.borrow() {
@@ -414,9 +441,6 @@ impl Surface {
                 *self.control.borrow_mut() = Some(engine.control());
                 *self.engine.borrow_mut() = Some(engine);
                 crate::window::watch_displays(self);
-                for url in self.pending_links.take() {
-                    self.open_url(&url);
-                }
             }
             Err(err) => log::error!("cannot start the engine: {err}"),
         }
@@ -455,17 +479,14 @@ impl Surface {
     }
 
     /// Hands the app a URL the system opened it with (`EventKind::UrlScheme`),
-    /// kept until the engine starts.
+    /// kept until the engine starts, which applies it before the app's code
+    /// first runs.
     pub(crate) fn open_url(&self, url: &str) {
         if self.control.borrow().is_none() {
             self.pending_links.borrow_mut().push(url.to_owned());
             return;
         }
-        self.event(
-            nsh_core::ROOT_ID,
-            EventKind::UrlScheme,
-            EventPayload::Map(vec![("url", nsh_core::PayloadValue::Str(url.to_owned()))]),
-        );
+        self.event(ROOT_ID, EventKind::UrlScheme, url_payload(url.to_owned()));
     }
 
     /// Shows fatal app errors with `f` (development hosts).
@@ -488,6 +509,12 @@ impl Surface {
             self.control(|c| c.set_environment(environment));
             crate::system::environment_applied(self);
         }
+    }
+
+    /// Lays the app out at `width` × `height` before GTK sizes the root,
+    /// which it does only as its window shows ([`crate::window::launch_hidden`]).
+    pub(crate) fn assume_size(&self, width: f32, height: f32) {
+        self.resized(width, height);
     }
 
     fn resized(&self, width: f32, height: f32) {
@@ -553,6 +580,7 @@ impl Surface {
                         f();
                     }
                 }
+                Message::Run(task) => task.run(),
             }
         }
         if applied {
@@ -768,6 +796,14 @@ impl Drop for Surface {
         let key = self.key;
         let _ = SURFACES.try_with(|s| s.borrow_mut().remove(&key));
     }
+}
+
+/// The payload of a `UrlScheme` event reporting `url`.
+fn url_payload(url: String) -> EventPayload {
+    EventPayload::Map(vec![(
+        nsh_core::url_scheme::URL,
+        nsh_core::PayloadValue::Str(url),
+    )])
 }
 
 /// GLib's monotonic time in seconds, the clock GDK's frame times are on.

@@ -56,6 +56,7 @@ mount(() => <Text>{{shown()}}</Text>);
         minify: false,
         split: false,
         ui_sets: Vec::new(),
+        ..Default::default()
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
@@ -69,6 +70,7 @@ mount(() => <Text>{{shown()}}</Text>);
         app: nsh_engine::App::Js(bundle),
         viewport: Size::new(nsh_core::geometry::px(400.0), nsh_core::geometry::px(300.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -632,6 +634,7 @@ mount(() => <Text>{shown()}</Text>);
         minify: false,
         split: false,
         ui_sets: Vec::new(),
+        ..Default::default()
     })
     .unwrap();
     let bundle = Bundle::source(bundled.code)
@@ -643,6 +646,7 @@ mount(() => <Text>{shown()}</Text>);
         app: nsh_engine::App::Js(bundle),
         viewport: Size::new(nsh_core::geometry::px(400.0), nsh_core::geometry::px(300.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,

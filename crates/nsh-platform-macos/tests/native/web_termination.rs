@@ -2,7 +2,7 @@
 //!
 //! WebKit asks its navigation delegate, `webViewWebContentProcessDidTerminate:`;
 //! the web view's handler must report it through the app's error listener
-//! with the stable host-error code, and not reload the page.
+//! with the stable termination code, and not reload the page.
 
 use std::{
     sync::Mutex,
@@ -147,10 +147,10 @@ pub(super) fn run() {
     );
     assert_eq!(
         field("code"),
-        Some(&PayloadValue::Str(codes::HOST_ERROR.into())),
-        "a termination reports the host-error code: {fields:?}"
+        Some(&PayloadValue::Str(codes::WEBVIEW_TERMINATED.into())),
+        "a termination reports the termination code: {fields:?}"
     );
-    println!("web termination: code {}", codes::HOST_ERROR);
+    println!("web termination: code {}", codes::WEBVIEW_TERMINATED);
 
     surface.stop();
     window.close();

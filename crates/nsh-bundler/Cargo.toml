@@ -3,6 +3,7 @@ name = "nsh-bundler"
 description = "JS bundler: rolldown + nsh's JSX compiler; the compiler alone without feature `bundle`."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 readme.workspace = true
@@ -54,7 +55,7 @@ ttf-parser = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "sync", "fs"], optional = true }
 nsh-core.workspace = true
 # The app's theme (`nsh.json` `"theme"`): its tokens are classes.
-nsh-base = { workspace = true, features = ["editor", "highlight", "plot", "rich-editor", "term"] }
+nsh-base = { workspace = true, features = ["editor", "emoji-picker", "highlight", "plot", "rich-editor", "term"] }
 nsh-js = { workspace = true, optional = true, features = ["zlib", "crypto"] }
 serde_json.workspace = true
 log.workspace = true

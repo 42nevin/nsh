@@ -46,6 +46,7 @@ mount(() => <Text>{status()}</Text>);
         app: nsh_engine::App::Js(bundle),
         viewport: Size::new(nsh_core::geometry::px(400.0), nsh_core::geometry::px(300.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -128,6 +129,7 @@ mount(() => <Text>{status()}</Text>);"#,
         minify: false,
         split: false,
         ui_sets: Vec::new(),
+        ..Default::default()
     })
     .unwrap();
     let mut paths = nsh_core::access::TrustedPaths::default();
@@ -143,6 +145,7 @@ mount(() => <Text>{status()}</Text>);"#,
         app: nsh_engine::App::Js(bundle),
         viewport: Size::new(nsh_core::geometry::px(400.0), nsh_core::geometry::px(300.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,

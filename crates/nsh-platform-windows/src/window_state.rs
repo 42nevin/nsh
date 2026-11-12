@@ -127,13 +127,10 @@ pub(crate) fn state(hwnd: HWND) -> Option<WindowState> {
     with_screens(|screens| {
         let screen = screen_of(screens, hwnd, rect)?;
         // SAFETY: plain queries on a live window.
-        let (minimized, shown, foreground) = unsafe {
-            (
-                IsIconic(hwnd).as_bool(),
-                IsWindowVisible(hwnd).as_bool(),
-                GetForegroundWindow() == hwnd,
-            )
-        };
+        let (minimized, shown) =
+            unsafe { (IsIconic(hwnd).as_bool(), IsWindowVisible(hwnd).as_bool()) };
+        // In a background app: the window that would have the keyboard.
+        let foreground = window::foreground() == hwnd;
         let full = window::is_full_screen(hwnd);
         let maximized = !full
             && (zoomed(hwnd) || (minimized && placement.flags.contains(WPF_RESTORETOMAXIMIZED)));
@@ -167,7 +164,9 @@ pub(crate) fn state(hwnd: HWND) -> Option<WindowState> {
         state.mode = mode;
         state.minimized = minimized;
         state.visible = shown && !minimized;
-        state.focused = foreground;
+        // A window hidden while it had the keyboard can stay the foreground
+        // one: the user sees nothing take keys there.
+        state.focused = foreground && shown;
         state.content_bounds = content_bounds(hwnd, &screen).unwrap_or(state.bounds);
         state.display = Some(screen.display.id);
         state.scale_factor = window::dpi(hwnd) as f32 / 96.0;
@@ -512,6 +511,13 @@ pub(crate) fn size_content(hwnd: HWND, content: nsh_core::geometry::Size<Points>
 pub(crate) fn bounds_of(hwnd: HWND) -> Option<Bounds<Points>> {
     let rect = window_rect(hwnd)?;
     with_screens(|screens| Some(screen_of(screens, hwnd, rect)?.bounds(rect)))
+}
+
+/// `rect` (screen pixels) in screen points, converted on the monitor with
+/// most of it: a tray icon's, whose taskbar may be on another monitor than
+/// the app's window.
+pub(crate) fn screen_bounds(rect: RECT) -> Option<Bounds<Points>> {
+    with_screens(|screens| Some(screens.native_screen(rect)?.bounds(rect)))
 }
 
 #[cfg(test)]

@@ -48,7 +48,8 @@ Input                        native gestures -> EngineControl::dispatch_event ->
   animations run on the frame clock.
 - **macOS** (AppKit, `macos.md`): one flipped, layer-backed `NSView` per node at the core's frames, decorated by Core
   Animation (the iOS backend's), text and canvases drawn into content layers, desktop input and scroll views as on Linux; each
-  commit is one main-queue hop; native animations run on the root's display link.
+  commit is one main-queue hop; native animations run on a display link made from the root of a window that shows
+  (the main one's, else one of the app's own: `macos.md` "Frames").
 - **Windows** (Win32, `windows.md`): one retained `NshView` per node, the whole tree drawn by the surface's window
   with Direct2D into a flip-model swap chain (no child windows but web views and components' own windows); each
   commit is one `WM_NSH_WAKE` posted to the window; native animations run on a ticker paced by the compositor
@@ -99,8 +100,9 @@ It clones that lease when rebuilding the same menu, and keeps the original
 `EngineControl` for choices. The last lease drop sends private retirement on the
 same engine channel as choices: earlier choices run before the callbacks are
 released. Leases contain no VM pointer and cannot redirect an old menu into a
-new engine after a surface reload. A backend that discards the menu retires it
-immediately; it must process every set, not just the last set in a batch.
+new engine after a surface reload. The headless and terminal hosts retain the current menu
+for shortcuts and retire replaced or cleared menus. A backend that discards
+the menu retires it immediately; it must process every set, not just the last set in a batch.
 
 On AppKit, every menu item strongly owns its generation's target through
 `representedObject`; AppKit's `target` property alone is weak. The target owns

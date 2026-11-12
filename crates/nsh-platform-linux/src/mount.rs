@@ -131,6 +131,7 @@ impl Mounter {
             MountItem::Remove { id } => {
                 if let Some(view) = self.get(*id) {
                     crate::selectable_view::touched(surface, view);
+                    crate::input::removed(surface, view);
                     // A removal animation detaches the view when it ends.
                     if !crate::transition::removing(surface, view, self.layout_animation.as_ref()) {
                         self.detach(surface, view);
@@ -142,6 +143,7 @@ impl Mounter {
                 crate::navigation::deleted(surface, *id);
                 if let Some(view) = self.views.remove(id) {
                     crate::selectable_view::touched(surface, &view);
+                    crate::input::removed(surface, &view);
                     crate::native::deleted(surface, &view);
                     crate::shader::deleted(surface, &view);
                     // A removal animation detaches the view when it ends.
@@ -226,7 +228,7 @@ impl Mounter {
                     view.state_mut().events = *events;
                     crate::file_drop::events_changed(surface, view);
                     crate::input::events_changed(surface, view);
-                    crate::access::events_changed(view);
+                    crate::access::events_changed(surface, view);
                 }
             }
             MountItem::Image {
@@ -332,7 +334,7 @@ impl Mounter {
                 view.state_mut().props = props.clone();
                 crate::input::props_changed(surface, view);
                 crate::selectable_view::props_changed(surface, view);
-                crate::access::props_changed(view);
+                crate::access::props_changed(surface, view);
             }
             MountItem::LayoutAnimation(a) => self.layout_animation = Some(*a),
             MountItem::Input { id, config } => {
@@ -423,6 +425,11 @@ impl Mounter {
                     crate::text_input::set_selection(view, *start, *end);
                 }
             }
+            Command::InsertText(text) => {
+                if let Some(view) = view {
+                    crate::text_input::insert_text(view, text);
+                }
+            }
             Command::ScrollTo { y, .. } if view.is_some_and(|v| v.kind() == ViewKind::Input) => {
                 crate::text_input::scroll_to(view.expect("an input"), *y);
             }
@@ -443,7 +450,7 @@ impl Mounter {
             // mounter again while a batch is applied.
             Command::AccessibilityFocus => {
                 if let Some(view) = view {
-                    view.grab_focus();
+                    crate::access::focus(surface, view);
                 }
             }
             Command::ImageInfo { .. } => crate::image::command(surface, id, command),

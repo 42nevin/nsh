@@ -1,15 +1,19 @@
 import { mount, View, nativeComponent } from "nsh";
 import { Menu } from "nsh/desktop";
+import { setLocale } from "nsh/i18n";
+
+setLocale("en");
 
 const Probe = nativeComponent("MenuLifecycleProbe", {
   props: [],
-  events: ["replace", "install", "clear", "invalid", "barrier", "burst", "collect"],
+  events: ["replace", "install", "clear", "invalid", "barrier", "burst", "collect", "relabel"],
 });
 let probe: any;
 let sequence = 0;
 const resources: WeakRef<object>[] = [];
 function install(name: string) {
   Menu.setApplicationMenu([{ label: "Actions", submenu: [
+    { role: "copy" },
     { label: "Choose", onSelect: () => probe.command(name) },
     { label: "Disabled", disabled: true, onSelect: () => probe.command("forbidden") },
   ] }]);
@@ -17,6 +21,7 @@ function install(name: string) {
 install("old");
 mount(() => <View><Probe
   ref={node => { probe = node; node?.command("ready"); }}
+  onRelabel={() => setLocale("ja")}
   onReplace={() => {
     probe.command("choose-current");
     install(`new-${++sequence}`);

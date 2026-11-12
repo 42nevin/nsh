@@ -103,10 +103,13 @@ public class NshView extends FrameLayout {
 
     @Override
     public boolean dispatchTouchEvent(android.view.MotionEvent e) {
-        boolean tracking = touches.onTouch(e);
+        android.view.MotionEvent t = mounter.keyboardTap(e);
+        boolean tracking = touches.onTouch(t);
         // A tracked finger went down: hear the rest of the gesture even if
         // no view takes it.
-        return super.dispatchTouchEvent(e) || tracking;
+        boolean handled = super.dispatchTouchEvent(t) || tracking;
+        if (t != e) t.recycle();
+        return handled;
     }
 
     /**
@@ -206,7 +209,9 @@ public class NshView extends FrameLayout {
         }
         // The back key where the window has no OnBackInvokedCallback in
         // effect (below Android 13, or `enableOnBackInvokedCallback` off).
-        addOnUnhandledKeyEventListener((v, e) -> onBackKey(e));
+        // Android 8 has no such listener: there the activity's
+        // `onBackPressed` hands the press to `handleBack`.
+        if (Build.VERSION.SDK_INT >= 28) addOnUnhandledKeyEventListener((v, e) -> onBackKey(e));
         // Apps keep their data in <dataDir>/<app id>: nsh in the files
         // directory unless the development host's test session says.
         // ... and the images they download in <cacheDir>/<app id>/images: nsh
@@ -363,6 +368,25 @@ public class NshView extends FrameLayout {
     }
 
     /**
+     * Insets the host app adds to the safe area, like UIKit's
+     * {@code additionalSafeAreaInsets}: for its own UI that floats over this
+     * view, such as a tab bar drawn over the content. They add to the parts
+     * of the system bars the view sits under, and {@code safeAreaInsets()}
+     * reads the sum, so content can scroll under that UI and still end
+     * clear of it. Pages already shown follow a change. Call it on the UI
+     * thread.
+     *
+     * @param left   pixels added on the left
+     * @param top    pixels added at the top
+     * @param right  pixels added on the right
+     * @param bottom pixels added at the bottom
+     */
+    public void setAdditionalSafeAreaInsets(int left, int top, int right, int bottom) {
+        additional = new int[] {Math.max(0, top), Math.max(0, right), Math.max(0, bottom), Math.max(0, left)};
+        publishEnvironment(getRootWindowInsets());
+    }
+
+    /**
      * Runs a JS bundle written by `nsh build` (`bundle.js`); assets come from
      * `assets/` next to it. Bytecode only loads from the APK's own assets
      * ({@link #loadAssetBundle}) or a signed package ({@link #runPackage}):
@@ -480,6 +504,35 @@ public class NshView extends FrameLayout {
         mounter.components.put(name, factory);
     }
 
+    /** Hears a scroll view the host watches ({@link #watchScroll}) come and go, on the UI thread. */
+    public interface ScrollWatcher {
+        /**
+         * The scroll view is there: at once when it already is, and again
+         * with a new handle when the app replaces the element or reloads.
+         *
+         * @param handle follows and drives it
+         */
+        void onAttached(NshScrollHandle handle);
+
+        /** The scroll view is gone (deleted, its {@code nativeID} changed or its app stopped): its handle is dead. */
+        void onDetached();
+    }
+
+    /**
+     * Watches the app's {@code <Scroll>} whose {@code nativeID} is
+     * {@code nativeId}, for native UI of the host that follows or drives the
+     * app's scrolling in the frame of the scroll, without JS (a sheet under
+     * the content, say): {@code watcher} gets a {@link NshScrollHandle} when
+     * the scroll view is there. With several of the same {@code nativeID},
+     * the newest one is watched. One watcher per {@code nativeID}.
+     *
+     * @param nativeId the scroll view's {@code nativeID}
+     * @param watcher the watcher (UI thread), or null to stop watching
+     */
+    public void watchScroll(String nativeId, ScrollWatcher watcher) {
+        mounter.watchScroll(nativeId, watcher);
+    }
+
     /**
      * The launch parameters of the apps loaded from now on: what the app
      * reads synchronously at start as {@code host.params} ({@code nsh/host}),
@@ -559,7 +612,8 @@ public class NshView extends FrameLayout {
 
     /**
      * Hands the app a URL the system opened it with, as its {@code onLink} event (a scheme the app registered, nsh.json
-     * {@code schemes}). URLs given before the app listens are kept until it does. UI thread.
+     * {@code schemes}). URLs given before the app listens are kept until it does; given before an app loads, they are
+     * the address of the next one loaded when its code first runs ({@code UrlScheme.url()}). UI thread.
      *
      * @param url the URL
      */
@@ -798,8 +852,15 @@ public class NshView extends FrameLayout {
             mounter.keyboard(ime > 0 && !systemPans()
                     ? at[1] + getHeight() - Math.round(ime) : Integer.MAX_VALUE);
         }
+        // The host's own floating UI (setAdditionalSafeAreaInsets), on top of
+        // the system bars'; the keyboard keeps measuring from the view's edge.
+        top += additional[0];
+        right += additional[1];
+        bottom += additional[2];
+        left += additional[3];
         Configuration c = getResources().getConfiguration();
         boolean dark = (c.uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        float[] previous = safe;
         safe = new float[] {top / density, right / density, bottom / density, left / density};
         java.util.Locale locale = hostLocale != null ? hostLocale : java.util.Locale.getDefault();
         float fontScale = hostFontScale > 0 && !Float.isInfinite(hostFontScale) ? hostFontScale : c.fontScale;
@@ -825,6 +886,9 @@ public class NshView extends FrameLayout {
                 // 14 keeps the first day of the week and the temperature unit
                 // in its extension.
                 java.util.Locale.getDefault(java.util.Locale.Category.FORMAT).toLanguageTag());
+        // Screens report their own insets only when their options change, so
+        // a page already shown would keep the old safe area.
+        if (!java.util.Arrays.equals(previous, safe)) mounter.reportAllScreenInsets();
     }
 
     /** The system's time zone's ID (`localeSettings()`'s `timeZone`). */
@@ -898,6 +962,9 @@ public class NshView extends FrameLayout {
     /** TalkBack turning on or off: `screenReaderEnabled()`. */
     private final android.view.accessibility.AccessibilityManager.TouchExplorationStateChangeListener screenReader =
             enabled -> publishEnvironment(getRootWindowInsets());
+
+    /** The host's additional safe-area insets (px: top, right, bottom, left). */
+    private int[] additional = new int[4];
 
     /** The safe-area insets last published (dp: top, right, bottom, left). */
     private float[] safe = new float[4];
@@ -1101,6 +1168,13 @@ public class NshView extends FrameLayout {
     void submit(byte[] ops, Object[] objects, long seq) {
         main.post(() -> {
             if (handle != 0) mounter.apply(ops, objects, seq);
+        });
+    }
+
+    /** The app's functions for the UI thread wait in Rust: run them after the batches before. */
+    void runMainThreadTasks() {
+        main.post(() -> {
+            if (handle != 0) Native.runMainThreadTasks(handle);
         });
     }
 

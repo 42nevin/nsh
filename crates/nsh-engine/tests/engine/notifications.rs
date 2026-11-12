@@ -21,6 +21,7 @@ function App() {
   (async () => {
     await Notifications.setBadge(4);
     await Notifications.close("old");
+    await Notifications.closeAll();
     for (const count of [-1, 1.5]) await Notifications.setBadge(count).catch((e) => say(e.name));
     await Notifications.show({ id: "", title: "T" }).catch((e) => say(e.name));
     say(await Notifications.requestPermission());
@@ -63,6 +64,7 @@ fn bundle(app: &str, name: &str) -> Bundle {
         minify: false,
         split: false,
         ui_sets: ui_sets.iter().map(Into::into).collect(),
+        ..Default::default()
     })
     .unwrap();
     let bytecode = nsh_js::compile_bytecode_with(
@@ -157,6 +159,7 @@ fn the_platform_answers_the_app() {
     assert!(text.contains("pressed:a"), "{text}");
     assert!(commands.contains(&N::SetBadge(4)));
     assert!(commands.contains(&N::Close("old".into())));
+    assert!(commands.contains(&N::CloseAll));
     assert!(commands.contains(&N::Listen));
     assert!(commands.contains(&N::Permission { id: 0, ask: true }));
     assert!(commands.contains(&N::Show {

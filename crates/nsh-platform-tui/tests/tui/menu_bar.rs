@@ -462,3 +462,77 @@ fn app_quit_ends_the_app_as_a_quit_role_does() {
     draw_until(&mut view, &mut terminal, &rx, "ready");
     assert!(view.exit_requested(), "{}", screen(&terminal));
 }
+
+#[test]
+fn replaced_and_cleared_menu_callbacks_release_their_resources() {
+    let (mut view, rx) = surface();
+    let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    let code = nsh_bundler::compile_module(
+        "MenuOwners.tsx",
+        r#"
+        import { mount, signal, Text, keymap } from "nsh";
+        import { Menu } from "nsh/desktop";
+        const status = signal("ready");
+        const resources = [];
+        for (let i = 0; i < 16; i++) {
+            const resource = { index: i };
+            resources.push(new WeakRef(resource));
+            Menu.setApplicationMenu([{ label: "Actions", submenu: [
+                { label: "Choose", shortcut: "ctrl+o", onSelect() {
+                    status.set(`chosen ${resource.index}`);
+                } },
+            ] }]);
+        }
+        keymap.bind("alt+p", () => {
+            status.set(`alive ${resources.filter(ref => ref.deref() !== undefined).length}.`);
+        });
+        keymap.bind("alt+c", () => {
+            Menu.setApplicationMenu(null);
+            status.set("cleared");
+        });
+        mount(() => <Text>{status()}</Text>);
+        "#,
+        &[],
+    )
+    .unwrap();
+    view.load(Bundle::source(code)).unwrap();
+    draw_until(&mut view, &mut terminal, &rx, "ready");
+    view.handle(Input::Key {
+        key: "p".into(),
+        modifiers: Modifiers {
+            alt: true,
+            ..Default::default()
+        },
+        release: false,
+    });
+    // These resources are acyclic: releasing their callbacks frees them
+    // without a GC timer. This key turn follows the installed menu batch.
+    draw_until(&mut view, &mut terminal, &rx, "alive 1.");
+    view.handle(Input::Key {
+        key: "o".into(),
+        modifiers: Modifiers {
+            ctrl: true,
+            ..Default::default()
+        },
+        release: false,
+    });
+    draw_until(&mut view, &mut terminal, &rx, "chosen 15");
+    view.handle(Input::Key {
+        key: "c".into(),
+        modifiers: Modifiers {
+            alt: true,
+            ..Default::default()
+        },
+        release: false,
+    });
+    draw_until(&mut view, &mut terminal, &rx, "cleared");
+    view.handle(Input::Key {
+        key: "p".into(),
+        modifiers: Modifiers {
+            alt: true,
+            ..Default::default()
+        },
+        release: false,
+    });
+    draw_until(&mut view, &mut terminal, &rx, "alive 0.");
+}

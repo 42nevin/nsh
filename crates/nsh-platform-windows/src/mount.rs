@@ -105,6 +105,8 @@ impl Mounter {
                 | MountItem::Remove { .. }
                 | MountItem::Delete { .. }
                 | MountItem::ViewProps { .. }
+                | MountItem::Frame { .. }
+                | MountItem::ViewStyle { .. }
         ) {
             crate::selectable_view::tree_changed();
         }
@@ -160,6 +162,7 @@ impl Mounter {
             }
             MountItem::Remove { id } => {
                 if let Some(view) = &self.get(*id) {
+                    crate::input::removed(surface, view);
                     crate::navigation::removing(surface, view);
                     // A removal animation detaches the view when it ends.
                     if !crate::transition::removing(surface, view, self.layout_animation.as_ref()) {
@@ -170,6 +173,7 @@ impl Mounter {
             MountItem::Delete { id } => {
                 crate::file_drop::deleted(surface, *id);
                 if let Some(view) = self.views.remove(*id) {
+                    crate::input::removed(surface, &view);
                     crate::navigation::removing(surface, &view);
                     crate::native::deleted(surface, &view);
                     crate::shader::deleted(surface, &view);
@@ -450,6 +454,11 @@ impl Mounter {
                 if let Some(view) = view {
                     crate::text_input::set_selection(view, *start, *end);
                 }
+            }
+            // Not carried out on this platform yet: the app's paste is lost,
+            // so say so.
+            Command::InsertText(_) => {
+                log::warn!("insertText is not supported on Windows yet; nothing inserted")
             }
             Command::ScrollTo { y, .. } if view.is_some_and(|v| v.kind() == ViewKind::Input) => {
                 crate::text_input::scroll_to(view.expect("an input"), *y);

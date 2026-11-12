@@ -1,7 +1,7 @@
 //! Dependency-only AppKit regression for application-menu callback ownership.
 //!
 //! Opt in with a fresh `NSH_MENU_LIFECYCLE_DIR`; `NSH_MENU_LIFECYCLE_CASE`
-//! selects `replacement` (default), `tracking` or `collection`. No external AX client or
+//! selects `replacement` (default), `tracking`, `collection` or `relabel`. No external AX client or
 //! product application is used. The existing fixture binary avoids another
 //! copy of the bundler and runtime.
 
@@ -275,6 +275,31 @@ fn replacement(app: &NSApplication, fixture: &Fixture, shared: &Shared, director
     assert_eq!(count(shared, "old"), 3, "stopped engines reject input");
 }
 
+fn relabel(app: &NSApplication, shared: &Shared, directory: &Path) {
+    autoreleasepool(|_| choose_current(app, shared));
+    await_count(shared, "old", 1);
+    // AppKit can retain the old submenu while a locale change rebuilds it.
+    let (held, index) = autoreleasepool(|_| current(app));
+    emit(shared, "relabel");
+    wait(shared, "localized native menu", || {
+        autoreleasepool(|_| {
+            app.mainMenu()
+                .is_some_and(|menu| find(&menu, "コピー").is_some())
+        })
+    })
+    .unwrap();
+    autoreleasepool(|_| held.performActionForItemAtIndex(index));
+    await_count(shared, "old", 2);
+    autoreleasepool(|_| drop(held));
+    // Retirement and this event use the same engine channel. The barrier
+    // lets the old menu release before the current menu is chosen.
+    emit(shared, "barrier");
+    await_count(shared, "barrier", 1);
+    report(directory, shared, "old-localized-menu-released", None);
+    autoreleasepool(|_| choose_current(app, shared));
+    await_count(shared, "old", 3);
+}
+
 fn tracking(app: &NSApplication, fixture: &Fixture, shared: &Shared) {
     let (menu, index) = current(app);
     let held = menu.clone();
@@ -346,6 +371,7 @@ pub(super) fn run(directory: PathBuf) {
             "replacement" => replacement(&app, &fixture, &shared, &directory),
             "tracking" => tracking(&app, &fixture, &shared),
             "collection" => collection(&shared),
+            "relabel" => relabel(&app, &shared, &directory),
             other => panic!("unknown menu lifecycle case {other}"),
         }
         drop(fixture);

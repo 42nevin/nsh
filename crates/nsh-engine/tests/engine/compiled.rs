@@ -52,6 +52,7 @@ fn start() -> (Engine, Receiver<MountBatch>) {
         minify: true,
         split: false,
         ui_sets: vec![nsh_base::registry().into()],
+        ..Default::default()
     })
     .unwrap();
     assert!(!bundle.code.contains("solid"), "only the app's code");
@@ -63,6 +64,7 @@ fn start() -> (Engine, Receiver<MountBatch>) {
         app: nsh_engine::App::Js(unsafe { Bundle::bytecode(bytecode) }),
         viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -196,6 +198,16 @@ fn start_app(app: &str) -> (Engine, Receiver<MountBatch>) {
 /// [`start_app`] on a platform whose screen headers are `header_heights`
 /// ([`nsh_core::NO_NATIVE_HEADER`]: none, as on the desktops and the web).
 fn start_app_with(app: &str, header_heights: (Points, Points)) -> (Engine, Receiver<MountBatch>) {
+    start_app_culling(app, header_heights, false)
+}
+
+/// [`start_app_with`], with scroll views making only the views near their
+/// viewport (`content_culling`), as the platforms' apps do.
+fn start_app_culling(
+    app: &str,
+    header_heights: (Points, Points),
+    content_culling: bool,
+) -> (Engine, Receiver<MountBatch>) {
     let dir = std::env::temp_dir().join(format!(
         "nsh-compiled-nav-{}-{}-{}",
         std::process::id(),
@@ -213,6 +225,7 @@ fn start_app_with(app: &str, header_heights: (Points, Points)) -> (Engine, Recei
             nsh_base::registry().into(),
             crate::test_ui::registry().into(),
         ],
+        ..Default::default()
     })
     .unwrap();
     let bytecode = nsh_js::compile_bytecode_with(
@@ -230,6 +243,7 @@ fn start_app_with(app: &str, header_heights: (Points, Points)) -> (Engine, Recei
         app: nsh_engine::App::Js(unsafe { Bundle::bytecode(bytecode) }),
         viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
+        content_culling,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -346,6 +360,70 @@ fn navigation_stacks_screens_and_modals() {
         })
     });
     assert!(text_id(&batch, "in modal").is_some());
+}
+
+const SCROLL_DIALOG: &str = r#"import { mount, signal, Scroll, Text, View } from "nsh";
+import { Dialog } from "nsh/base";
+
+const open = signal(false);
+
+mount(() => (
+  <Scroll style={{ flex: 1 }}>
+    <View style={{ height: 3000 }}>
+      <View testID="open" onPress={() => open.set(true)}>
+        <Text>Open</Text>
+      </View>
+      <Dialog open={open()} presentation="pageSheet">
+        <Text>in sheet</Text>
+      </Dialog>
+    </View>
+    <View style={{ height: 3000 }}>
+      <Dialog open={open()}>
+        <Text>far down</Text>
+      </Dialog>
+    </View>
+  </Scroll>
+));
+"#;
+
+/// A dialog in a scroll view's content opens as the platforms' apps run
+/// it (`content_culling`): its modal shows over everything, beside the
+/// content in view and in content far down that was not made yet.
+#[test]
+fn dialogs_in_a_scroll_view_open_with_content_culling() {
+    let (engine, rx) = start_app_culling(SCROLL_DIALOG, (px(44.0), px(96.0)), true);
+    let first = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first frame");
+    let button = first
+        .items
+        .iter()
+        .find_map(|i| match i {
+            MountItem::Events { id, events } if events.contains(EventKind::Press) => Some(*id),
+            _ => None,
+        })
+        .expect("the button");
+    engine
+        .control()
+        .dispatch_event(button, EventKind::Press, EventPayload::None);
+    let modals = |b: &MountBatch| {
+        b.items
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i,
+                    MountItem::Create {
+                        kind: nsh_core::ViewKind::Modal,
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    let batch = next(&rx, |b| modals(b) > 0);
+    assert_eq!(modals(&batch), 2);
+    assert!(text_id(&batch, "in sheet").is_some());
+    assert!(text_id(&batch, "far down").is_some());
 }
 
 const MODAL_DISMISS: &str = r#"import { mount, signal, Text, View } from "nsh";
@@ -1374,4 +1452,156 @@ fn set_routes_keeps_pages_that_stay_and_parts_take_test_ids() {
             _ => None,
         });
     assert_eq!(backdrop, Some(Some(false)), "the backdrop is no Tab stop");
+}
+
+const SET_ROUTES_KINDS: &str = r#"import { mount, signal, Text, View } from "nsh";
+import { NavPage, NavStack, createNavStack } from "nsh/base";
+
+const page = { name: "page" };
+const name = (route: unknown) => (typeof route === "object" ? (route as { name: string }).name : String(route));
+const nav = createNavStack<unknown>(["a", "a", 1, page, NaN]);
+const made = signal<string[]>([]);
+setTimeout(() => nav.setRoutes(["a", 1, page, "a", "b", 1, NaN]), 0);
+
+mount(() => (
+  <View style={{ flex: 1 }}>
+    <Text>{`made ${made().join(" ")}`}</Text>
+    <NavStack state={nav} style={{ flex: 1 }}>
+      {(route) => {
+        made.update((all) => [...all, name(route)]);
+        return <NavPage title={name(route)}><Text>{name(route)}</Text></NavPage>;
+      }}
+    </NavStack>
+  </View>
+));
+"#;
+
+/// `setRoutes` keeps, for each route that stays, the first page of that
+/// route not kept yet, routes compared as `===` does: strings by content,
+/// objects by identity, numbers by value (`NaN` never), however many.
+#[test]
+fn set_routes_keeps_the_pages_of_routes_of_every_kind() {
+    let (_engine, rx) = start_app(SET_ROUTES_KINDS);
+    let mut all = Vec::new();
+    while let Ok(b) = rx.recv_timeout(Duration::from_millis(500)) {
+        all.extend(texts(&b));
+    }
+    // The five pages, then only those of "b", the second 1 and NaN: the
+    // first "a", 1, `page` and the second "a" keep theirs.
+    let last = all.iter().rev().find(|t| t.starts_with("made"));
+    assert_eq!(
+        last.map(String::as_str),
+        Some("made a a 1 page NaN b 1 NaN"),
+        "{all:?}"
+    );
+}
+
+const SPARSE_ARRAYS: &str = r#"
+import { Animated, mount, nativeComponent, PanResponder, Path2D, split, Text, View } from "nsh";
+import { createNavStack } from "nsh/base";
+
+const huge = () => new Array(2 ** 32 - 1);
+function Children() {
+  return <View>{huge()}</View>;
+}
+function Rows() {
+  return <View><Each of={huge()}>{() => <Text>row</Text>}</Each></View>;
+}
+function attempt(render: () => unknown) {
+  try {
+    render();
+    return "rendered";
+  } catch (e) {
+    const error = e as Error;
+    return `${error.name}${error.message.includes("cannot be read") ? "" : `(${error.message})`}`;
+  }
+}
+function AtTheBound() {
+  return <View>{new Array(2 ** 20)}</View>;
+}
+function JustOver() {
+  return <View>{new Array(2 ** 20 + 1)}</View>;
+}
+// Each array is short; nested in itself they hold 1000 ** 64 items. Reading
+// it depth first ends at the nesting bound, and checking whether it holds
+// functions (first) ends at the item budget.
+function Cycle() {
+  const a: unknown[] = new Array(1000).fill(0);
+  a.fill(a);
+  return <View>{a}</View>;
+}
+// A proxy whose length grows after it was checked.
+function Growing() {
+  let reads = 0;
+  const array = new Proxy([1, 2, 3], {
+    get: (target, key, receiver) =>
+      key === "length" ? (++reads > 1 ? 2 ** 32 - 1 : 3) : Reflect.get(target, key, receiver),
+  });
+  return <View><Each of={array}>{() => <Text>row</Text>}</Each></View>;
+}
+const Native = nativeComponent("Probe", { props: huge() as never[] });
+const pan = PanResponder.create({});
+// Within the bound, but read pairwise or nested: on `main` each of these
+// ran for far longer than the frame is waited for (from 1.6 s for 2 ** 13
+// routes, quadratic; 4.4 s for 2 ** 20 keys of 2 ** 10 props, a product;
+// 8 s and 3.7 GB for a canvas argument eight wide).
+const names = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => `${prefix}${i}`);
+function Nested() {
+  const a: unknown[] = new Array(1000).fill(0);
+  return a.fill(a);
+}
+// A stack at the bound refuses another screen and can still be popped.
+function Full() {
+  const stack = createNavStack(new Array(2 ** 20).fill("a"));
+  const pushed = attempt(() => stack.push("b"));
+  stack.pop();
+  return `${pushed},${stack.routes().length}`;
+}
+const results = [
+  `children:${attempt(Children)}`,
+  `at:${attempt(AtTheBound)}`,
+  `each:${attempt(Rows)}`,
+  `over:${attempt(JustOver)}`,
+  `cycle:${attempt(Cycle)}`,
+  `growing:${attempt(Growing)}`,
+  `stagger:${attempt(() => Animated.stagger(10, huge()))}`,
+  `sequence:${attempt(() => Animated.sequence(huge()))}`,
+  `split:${attempt(() => split({}, huge() as string[]))}`,
+  `stack:${attempt(() => createNavStack(huge()))}`,
+  `setRoutes:${attempt(() => createNavStack([]).setRoutes(huge()))}`,
+  `native:${attempt(() => <Native />)}`,
+  `grant:${attempt(() => pan.panHandlers.onResponderGrant({ touches: huge() } as never))}`,
+  `move:${attempt(() => pan.panHandlers.onResponderMove({ touches: huge() } as never))}`,
+  `canvas:${attempt(() => new Path2D().moveTo(Nested() as never, 0))}`,
+  `routes:${attempt(() => createNavStack(names("a", 2 ** 15)).setRoutes(names("b", 2 ** 15)))}`,
+  `keys:${attempt(() => split(Object.fromEntries(names("p", 2 ** 15).map((k) => [k, 0])), names("k", 2 ** 17)))}`,
+  `full:${Full()}`,
+];
+mount(() => <Text>{results.join(" ")}</Text>);
+"#;
+
+/// A sparse array is as long as it says, and the renderer reads arrays
+/// natively, where the time budget cannot interrupt: one that says it has
+/// billions of items is refused with a `RangeError` instead of holding the
+/// engine thread for billions of reads.
+#[test]
+fn arrays_too_long_to_render_are_refused() {
+    let (_engine, rx) = start_app(SPARSE_ARRAYS);
+    let first = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("first frame");
+    assert_eq!(
+        texts(&first),
+        [
+            "children:RangeError at:rendered each:RangeError over:RangeError \
+             cycle:TypeError(nsh: children nested too deeply) growing:rendered \
+             stagger:RangeError sequence:RangeError split:RangeError \
+             stack:RangeError setRoutes:RangeError native:RangeError \
+             grant:RangeError move:RangeError canvas:rendered routes:rendered \
+             keys:rendered full:RangeError(nsh: a navigation stack holds at most \
+             1048576 screens),1048575"
+        ],
+        "{:?}",
+        texts(&first)
+    );
 }

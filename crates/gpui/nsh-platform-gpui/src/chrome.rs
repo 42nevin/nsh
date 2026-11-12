@@ -81,7 +81,7 @@ use nsh_core::{
     EventKind, EventPayload, PayloadValue, ROOT_ID,
     desktop::{
         CloseReason, DesktopCommand, Key, MenuBarMode, MenuItem, MenuRole, Shortcut, TitleBarStyle,
-        WindowAttributes,
+        WindowAttributes, WindowMode,
     },
     geometry::{Edges as Insets, Points},
 };
@@ -205,6 +205,10 @@ pub(crate) struct Chrome {
     standalone: Cell<bool>,
     /// Activation must work even while the window is not rendering.
     window: Cell<Option<AnyWindowHandle>>,
+    /// The mode the window opens in, while it waits hidden since it opened
+    /// (nsh.json `window.defaultVisible: false`): it takes it as it first
+    /// shows, as GPUI would show it to apply it ([`crate::open_app_window`]).
+    pub(crate) opening_mode: Cell<Option<WindowMode>>,
     style: Cell<TitleBarStyle>,
     /// The app's title bar's height (`titleBar.height`).
     height: Cell<Option<f32>>,
@@ -922,6 +926,7 @@ pub(crate) fn own_window_parts(
     height: Option<f32>,
     resizable: bool,
     window: &Window,
+    cx: &gpui::App,
 ) -> Vec<AnyElement> {
     let client = PLATFORM == Platform::Linux
         && matches!(
@@ -942,7 +947,7 @@ pub(crate) fn own_window_parts(
                 surface,
                 Some(root),
                 window.is_maximized(),
-                window.is_window_active(),
+                crate::window::is_active(window, cx),
                 height,
                 &theme,
             ))
@@ -962,7 +967,7 @@ fn observe(surface: &Rc<Surface>, window: &Window, cx: &App) {
         menus::close(surface);
     }
     c.maximized.set(window.is_maximized());
-    c.active.set(window.is_window_active());
+    c.active.set(crate::window::is_active(window, cx));
     c.client_decorated.set(matches!(
         window.window_decorations(),
         gpui::Decorations::Client { .. }
@@ -1102,6 +1107,14 @@ pub(crate) fn drag_area(surface: &Rc<Surface>, root: Option<nsh_core::NodeId>) -
                 if phase != DispatchPhase::Bubble || !h.is_hovered(window) {
                     return;
                 }
+                // Windows moves the window itself from the press it hit
+                // tests as `HTCAPTION`: the platform hands the press to the
+                // app before `DefWindowProc` sees it, so consuming it keeps
+                // the window from moving at all (`start_window_move` does
+                // nothing on Windows).
+                if PLATFORM == Platform::Windows {
+                    return;
+                }
                 let _in = crate::window::enter(&surface, root);
                 let (ox, oy) = surface.origin.get();
                 let (x, y) = (f32::from(e.position.x), f32::from(e.position.y));
@@ -1199,6 +1212,14 @@ fn title_row(surface: &Rc<Surface>, theme: &Theme) -> AnyElement {
         .border_b_1()
         .border_color(theme.bar_border)
         .on_mouse_down(MouseButton::Left, move |e, window, cx| {
+            // Windows moves the window itself for a press on the caption
+            // (its hit test answers `HTCAPTION`, which also maximizes on a
+            // double click and opens the window menu): a press the app
+            // consumes never reaches `DefWindowProc`, so the window would
+            // not move, and `Window::start_window_move` does nothing there.
+            if PLATFORM == Platform::Windows {
+                return;
+            }
             title_press(&s, e, window);
             cx.stop_propagation();
         });

@@ -1,19 +1,19 @@
 ---
 title: nsh/mobile
-description: iOS 和 Android 的 API：系统标签栏 TabBar、iOS 的 InputAccessoryView、Android 的 BackHandler，以及 isAvailable。
+description: iOS 和 Android 的 API：系统标签栏 TabBar、触感反馈 Haptics、iOS 的 InputAccessoryView、Android 的 BackHandler，以及 isAvailable。
 order: 12.2
 ---
 
 # nsh/mobile
 
-`nsh/mobile` 收录 iOS 和 Android 的专属能力：两者都有的系统标签栏 `TabBar`；iOS 的 [`InputAccessoryView`](#inputaccessoryview)，键盘上方的工具栏；Android 的 [`BackHandler`](#backhandler)，返回键。Rust 代码使用 `nsh_core::mobile` 和 `nsh_core::prelude`；TSX 导入 `nsh/mobile`。这个模块在所有平台上都可以导入，所以同一个 bundle 能在各处运行：在其他平台上，它的组件不占空间、调用立即返回，`isAvailable` 告诉你当前是否在 iOS 或 Android 上（`nsh` 的 `platform.os` 区分具体平台）。桌面的能力在 [nsh/desktop](./nsh-desktop.md) 中。
+`nsh/mobile` 收录 iOS 和 Android 的专属能力：两者都有的系统标签栏 `TabBar` 和设备的触感反馈 [`Haptics`](#haptics)；iOS 的 [`InputAccessoryView`](#inputaccessoryview)，键盘上方的工具栏；Android 的 [`BackHandler`](#backhandler)，返回键。Rust 代码使用 `nsh_core::mobile` 和 `nsh_core::prelude`；TSX 导入 `nsh/mobile`。这个模块在所有平台上都可以导入，所以同一个 bundle 能在各处运行：在其他平台上，它的组件不占空间、调用立即返回，`isAvailable` 告诉你当前是否在 iOS 或 Android 上（`nsh` 的 `platform.os` 区分具体平台）。桌面的能力在 [nsh/desktop](./nsh-desktop.md) 中。
 
 ```rust tabs
 use nsh_core::mobile::{TabBarItem, tab_bar};
 ```
 
 ```tsx tabs
-import { BackHandler, InputAccessoryView, isAvailable, TabBar } from "nsh/mobile";
+import { BackHandler, Haptics, InputAccessoryView, isAvailable, TabBar } from "nsh/mobile";
 import type { TabBarItem, TabBarProps } from "nsh/mobile";
 ```
 
@@ -89,7 +89,7 @@ function App() {
 mount(App);
 ```
 
-`TabBar` 来自 `nsh/mobile`，在 Rust 中是 `nsh_core::mobile`。选中状态属于应用：一次点按通过 `onChange` 报告该标签的索引（`{ index }`），标签栏像系统的一样立即显示这次选择，应用显示那一部分并把索引作为 `selectedIndex` 传回。样式没有给定高度时，高度是系统的。在 Rust 中，`tab_bar()` 创建它，每个 prop 一个 setter（`.items(..)`、`.selected_index(..)`），每个事件一个监听方法（`.on_change(..)`），以及带类型的样式方法；`TabBarItem::new(title).icon(name)` 创建一个标签。
+`TabBar` 来自 `nsh/mobile`，在 Rust 中是 `nsh_core::mobile`。选中状态属于应用：一次点按通过 `onChange` 报告该标签的索引（`{ index }`），标签栏像系统的一样立即显示这次选择，应用显示那一部分并把索引作为 `selectedIndex` 传回。样式没有给定高度时，高度是系统的。在 Rust 中，`tab_bar()` 创建它，每个 prop 一个 setter（`.items(..)`、`.selected_index(..)`），每个事件一个监听方法（`.on_change(..)`），以及带类型的样式方法；`TabBarItem::new(title).icon(name).badge(text)` 创建一个标签。
 
 ### Props
 
@@ -107,6 +107,7 @@ mount(App);
 |---|---|---|---|
 | `title` | `TabBarItem::new(title)` | `string` | 标签的标题，屏幕阅读器会读出它。 |
 | `icon` | `.icon(name)` | `string` | 标签的图标，用平台对它的称呼：iOS 上是 [SF Symbol](https://developer.apple.com/sf-symbols/)（`"house"`），Android 上是应用的 drawable（`res/drawable/home.xml` 写作 `"home"`，`"android:ic_menu_search"` 是系统的）。用 `platform.select` 按平台选择。 |
+| `badge` | `.badge(text)` | `string` | 标签的角标：一段文字，例如 `"3"` 或 `"New"`，或者 `""` 表示没有文字的角标；不设置（默认）则不显示。采用系统的角标外观，屏幕阅读器会随标签的标题读出它：它的文字；`""` 则读出系统对没有文字的角标的说法（VoiceOver 的；在 Android 上是系统的“新通知”，使用设备的语言）。 |
 
 ### 事件
 
@@ -116,8 +117,8 @@ mount(App);
 
 ### 平台说明
 
-- **iOS 和 Mac Catalyst**：`UITabBar`，采用当前 iOS 版本的系统外观：iOS 26 上是悬浮的 Liquid Glass 标签栏及其选中效果。图标是 SF Symbols。主题的 `primary` 是标签栏的 `tintColor`，即选中标签的颜色；其他标签保持系统的颜色。
-- **Android**：Material 3 的导航栏，由平台的 View 组成：每个标签的文字上方是放在激活指示器中的图标，按压时有水波纹；Android 12 及以上使用系统的动态颜色，更早的版本使用 Material 的基准颜色；浅色或深色跟随应用的外观。位于窗口底部时，它延伸到导航栏下方，高度增加导航栏的 inset，与 Material 的一致。图标是应用的 drawable（由标签栏着色）。选中标签的图标和文字使用主题的 `primary`，激活指示器是这个颜色的 12% 不透明度；其他标签保持系统的颜色。
+- **iOS 和 Mac Catalyst**：`UITabBar`，采用当前 iOS 版本的系统外观：iOS 26 上是悬浮的 Liquid Glass 标签栏及其选中效果。图标是 SF Symbols。主题的 `primary` 是标签栏的 `tintColor`，即选中标签的颜色；其他标签保持系统的颜色。角标是标签项的 `badgeValue`：文字完整显示，`""` 是系统没有文字的角标，大小与一位数字的角标相同。
+- **Android**：Material 3 的导航栏，由平台的 View 组成：每个标签的文字上方是放在激活指示器中的图标，按压时有水波纹；Android 12 及以上使用系统的动态颜色，更早的版本使用 Material 的基准颜色；浅色或深色跟随应用的外观。位于窗口底部时，它延伸到导航栏下方，高度增加导航栏的 inset，与 Material 的一致。图标是应用的 drawable（由标签栏着色）。选中标签的图标和文字使用主题的 `primary`，激活指示器是这个颜色的 12% 不透明度；其他标签保持系统的颜色。角标采用 Material 3 的样式：`""` 是位于图标角上的小角标（圆点），文字是从图标中部开始的大角标，使用它的 error 颜色，超出激活指示器的部分以省略号结尾。大角标与 Material 的一样只容纳简短的文字，即一个数字或不超过四个字符的词：更长的文字会被截断（`"Updated"` 显示为“Up…”），而 iOS 会完整显示。TalkBack 把 `""` 读作系统的“新通知”。
 - **桌面（macOS、Windows、Linux、GPUI）和 Web**：各个部分用 [Tabs](../elements/tabs.md) 显示，外观由应用决定。`TabBar` 在这些平台上不占空间，所以一个布局可以同时包含两者，用 `platform.os`（[`nsh` 的设备 API](./nsh.md#device)）来选择。
 
 ## InputAccessoryView
@@ -272,5 +273,62 @@ function Editor() {
 
 > [!NOTE]
 > 监听器在系统已经派发了返回操作之后才运行：主线程从不等待应用的代码。只要注册了至少一个监听器，对话框不处理的返回操作就由 NSH 接管；没有监听器返回 `true` 时，由 NSH 自己让最上层的导航栈返回或退出应用。
+
+## Haptics
+
+在 iOS 和 Android 上可用；在其他平台上，调用会立即返回。
+
+```ts
+const Haptics: {
+  selection(): void;
+  impact(style?: "light" | "medium" | "heavy" | "soft" | "rigid"): void;
+  notification(kind?: "success" | "warning" | "error"): void;
+};
+```
+
+设备在用户的手指下播放触感反馈：选择发生了变化、一个元素发生了碰撞、一个任务结束了。iOS 上由反馈生成器播放（`UISelectionFeedbackGenerator`、`UIImpactFeedbackGenerator`、`UINotificationFeedbackGenerator`）；Android 上由视图的触感反馈播放。设备没有触感硬件，或者用户关闭了触感（Android 的触摸反馈设置、iOS 的系统触感）时，什么都不会播放。
+
+| 成员 | Rust | 说明 |
+|---|---|---|
+| `selection()` | `haptic(Haptic::Selection)` | 选择发生了变化：选择器的值、分段、滑块的一个刻度。 |
+| `impact(style)` | `haptic(Haptic::Impact(HapticImpact::Medium))` 等 | 一个元素发生了碰撞；`style` 是它的分量，默认 `"medium"`。 |
+| `notification(kind)` | `haptic(Haptic::Notification(HapticNotification::Success))` 等 | 一个任务成功、产生警告或失败；默认 `"success"`。 |
+
+传入不认识的名称会抛出 `TypeError`。Android 并不是每种触感都有对应的常量，它会播放最接近的一种：成功和失败从 Android 11 起用 `CONFIRM` 和 `REJECT`；警告，以及 Android 11 之前的失败，用长按的触感。
+
+```rust tabs
+use nsh_core::prelude::*;
+
+fn save_button() -> impl IntoElement {
+    view().child(text("Save")).on_press(|_| {
+        spawn(async {
+            let saved = save().await;
+            haptic(if saved.is_ok() {
+                Haptic::Notification(HapticNotification::Success)
+            } else {
+                Haptic::Notification(HapticNotification::Error)
+            });
+        });
+    })
+}
+```
+
+```tsx tabs
+import { Text, View } from "nsh";
+import { Haptics } from "nsh/mobile";
+
+function SaveButton() {
+  return (
+    <View
+      onPress={async () => {
+        const saved = await save();
+        Haptics.notification(saved ? "success" : "error");
+      }}
+    >
+      <Text>Save</Text>
+    </View>
+  );
+}
+```
 
 状态栏在 iOS 和 Android 上都由 `nsh/base` 中[页面和对话框](./nsh-base.md#status-bar)的 `statusBar` 设置。
