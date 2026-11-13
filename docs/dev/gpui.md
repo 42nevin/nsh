@@ -44,9 +44,10 @@ desktops the crates are empty.
 
 The two crates are a workspace of their own, `crates/gpui` (its own `Cargo.toml`, `Cargo.lock` and the dependencies
 only they use: GPUI, wry, GStreamer, tiny-skia, ...), excluded from the main workspace, so the main workspace's builds,
-`cargo test --workspace`, clippy and CI never build GPUI. It builds into the repository's `target/`
-(`crates/gpui/.cargo/config.toml`; the CLI and xtask pass `--manifest-path` and `--target-dir` from the root). The
-GPUI Kit example `examples/embed-gpui` is a workspace of its own too, built into `target/` the same way; its
+`cargo test --workspace`, clippy and CI never build GPUI. Its default output is the repository's `target/`
+(`crates/gpui/.cargo/config.toml`). The CLI runs Cargo inside this workspace and resolves the output through
+`cargo metadata`, honoring Cargo's configuration and `CARGO_TARGET_DIR` (or the Cargo implementation's output policy).
+The GPUI Kit example `examples/embed-gpui` is a workspace of its own too, built into `target/` the same way; its
 `build.rs` bundles its app, so `cargo run` there starts it, and the main workspace's member `example-embed-gpui`
 (`examples/embed-gpui/run`, std only) makes `cargo run -p example-embed-gpui` from the root run that command.
 

@@ -3694,7 +3694,8 @@ mod tests {
 
     #[test]
     fn a_rust_app_gets_runners_without_js() {
-        let dir = std::env::temp_dir().join(format!("nsh-rust-runners-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("nsh-webview-rust-runners-{}", std::process::id()));
         let app = app(
             &dir,
             &[("app-native", dir.join("native"))],
@@ -3721,17 +3722,30 @@ mod tests {
             ("rust-ios", "nsh-ios-app", "nsh-platform-ios"),
         ] {
             let cargo = read(&format!("{dir}/Cargo.toml"));
-            // No `js`: the runner links no QuickJS.
-            assert!(cargo.contains(&format!("{lib} = {{ path =")), "{cargo}");
-            assert!(
-                cargo.contains(&format!("{platform} = {{ path =")),
-                "{cargo}"
-            );
-            assert_eq!(
-                cargo.matches("default-features = false").count(),
-                2,
-                "{cargo}"
-            );
+            let manifest: toml::Value = cargo.parse().unwrap();
+            let platform_dependency = manifest["target"]
+                .as_table()
+                .unwrap()
+                .values()
+                .find_map(|target| target["dependencies"].get(platform))
+                .expect("the runner's platform dependency");
+            // No `js`: the runner links no QuickJS. Optional platform
+            // features come from the app, not its runner; dependency
+            // paths may themselves contain names such as `webview`.
+            for dependency in [&manifest["dependencies"][lib], platform_dependency] {
+                assert!(dependency["path"].as_str().is_some(), "{cargo}");
+                assert_eq!(
+                    dependency["default-features"].as_bool(),
+                    Some(false),
+                    "{cargo}"
+                );
+            }
+            for feature in platform_dependency["features"].as_array().unwrap() {
+                assert!(
+                    !matches!(feature.as_str().unwrap(), "js" | "webview"),
+                    "{cargo}"
+                );
+            }
             let main = read(&format!("{dir}/main.rs"));
             assert!(
                 main.contains(&format!("{}::run_rust(app_root())", lib.replace('-', "_"))),
@@ -3742,8 +3756,6 @@ mod tests {
                 "{main}"
             );
         }
-        // Optional platform features come from the app, not its runner.
-        assert!(!read("rust-linux/Cargo.toml").contains("webview"));
         let android = read("rust-android/lib.rs");
         assert!(android.contains("nsh::main!(app_root());"), "{android}");
         assert!(read("rust-android/Cargo.toml").contains("default-features = false"));
@@ -3778,7 +3790,14 @@ mod tests {
         assert!(read("rust-app/Cargo.toml").contains("name = \"nsh_rust_app\""));
         // GPUI has no runner: a Rust app is embedded in GPUI apps instead.
         app.gpui_workspace().unwrap();
-        assert!(!read("gpui/Cargo.toml").contains("rust-gpui"));
+        let gpui: toml::Value = read("gpui/Cargo.toml").parse().unwrap();
+        assert!(
+            gpui["workspace"]["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|member| member.as_str().unwrap() != "rust-gpui")
+        );
         // Its development hosts run the root when a test session says so
         // (`nsh test --target`); its release runners are the `rust-*` ones.
         for (dir, platform) in [

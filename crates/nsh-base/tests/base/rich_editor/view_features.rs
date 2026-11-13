@@ -193,17 +193,21 @@ fn Features(props: FeaturesProps) -> impl IntoElement {
 }
 
 fn start_features(doc: Value, editable: bool) -> Headless {
-    let schema = feature_schema();
-    let plugins = starter::plugins(&schema);
-    let doc = schema.node_from_json(&doc).unwrap();
-    let state =
-        EditorState::create(EditorStateConfig::new(schema).doc(doc).plugins(plugins)).unwrap();
-    let session = EditorSession::new(state, NodeViews::new());
     let mut config = EngineConfig {
         viewport: Size::new(px(800.0), px(900.0)),
-        ..EngineConfig::new(Root::new::<Features>(move || FeaturesProps {
-            session: Some(session.clone()),
-            editable,
+        // The starter's keymap belongs to the simulated platform, not the
+        // test process's host OS.
+        ..EngineConfig::new(Root::new::<Features>(move || {
+            let schema = feature_schema();
+            let plugins = starter::plugins(&schema);
+            let doc = schema.node_from_json(&doc).unwrap();
+            let state =
+                EditorState::create(EditorStateConfig::new(schema).doc(doc).plugins(plugins))
+                    .unwrap();
+            FeaturesProps {
+                session: Some(EditorSession::new(state, NodeViews::new())),
+                editable,
+            }
         }))
     };
     config.environment.os = Os::Linux;
@@ -465,7 +469,6 @@ fn selection_boxes_are_drawn_in_task_items_and_code_blocks() {
     );
     app.type_text("id:editor", "").unwrap();
     keys(&mut app, &["ctrl+a"]);
-    app.wait(Duration::from_millis(100)).unwrap();
     // A code block's own background would hide boxes drawn under the
     // blocks: each textblock draws its own under its text.
     for text in ["buy milk", "let x"] {

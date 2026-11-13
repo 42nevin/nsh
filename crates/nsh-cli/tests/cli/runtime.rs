@@ -21,6 +21,9 @@ fn gpui_uses_its_workspaces_cargo_output_instead_of_a_stale_cli_sibling() {
     let workspace = root.join("crates/gpui");
     fs::create_dir_all(&bin).unwrap();
     fs::create_dir_all(&workspace).unwrap();
+    // The CLI and shell use the physical directory even when temp_dir
+    // names it through a symlink (such as /var on macOS).
+    let physical_workspace = workspace.canonicalize().unwrap();
     fs::create_dir_all(root.join("crates/nsh-ios-host")).unwrap();
     fs::write(root.join("crates/nsh-ios-host/Cargo.toml"), "").unwrap();
     fs::write(workspace.join("Cargo.toml"), "").unwrap();
@@ -35,7 +38,10 @@ fn gpui_uses_its_workspaces_cargo_output_instead_of_a_stale_cli_sibling() {
         &cargo,
         r##"#!/bin/sh
 set -eu
-test "$PWD" = "$GPUI_WORKSPACE"
+test "$PWD" = "$GPUI_WORKSPACE" || {
+    printf 'cargo ran in %s, expected %s\n' "$PWD" "$GPUI_WORKSPACE" >&2
+    exit 1
+}
 case " $* " in *' --target-dir '*) exit 43;; esac
 case "$1" in
 build)
@@ -58,7 +64,7 @@ esac
             .arg(root)
             .env_remove("NSH_RUNTIME")
             .env("CARGO", &cargo)
-            .env("GPUI_WORKSPACE", &workspace)
+            .env("GPUI_WORKSPACE", &physical_workspace)
             .env("MOCK_TARGET", &target)
             .env("CARGO_TARGET_DIR", &target)
             .output()

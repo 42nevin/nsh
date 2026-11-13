@@ -72,6 +72,8 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+# Generated Cargo manifests are checked independently of their source paths.
+toml.workspace = true
 # The syntaxes file the web runtime fetches must be a dump its syntect reads.
 syntect.workspace = true
 # Pages loaded at the app's paths resolve their files as browsers do.
