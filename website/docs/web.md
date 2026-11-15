@@ -242,6 +242,23 @@ Content-Security-Policy `connect-src` with the declared hosts (and the page's ow
 refuses requests and redirect hops to any other host. An error that keeps it from starting is shown on the page;
 later errors go to the browser's console.
 
+#### Under a strict script policy
+
+The page runs no inline code: its scripts are files of the site, so a server that sends a strict policy such as
+`script-src 'self' 'wasm-unsafe-eval'` serves it as it is. The app itself runs in a frame of the page whose import map
+is the one inline script left; `nsh package` prints its hash, which the policy adds:
+
+```text
+✓ packaged .nsh/out/Sports, 5.1 MB
+  under a Content-Security-Policy it needs script-src 'self' 'wasm-unsafe-eval' 'sha256-…'
+```
+
+The map names the app's files by their digests, so the hash changes when the app's code does: take it from each
+package. `base-uri` may be `'none'`. A TSX app that loads a native module whole (`import * as base from "nsh/base"`
+passed on as a value, `import(name)`) has the map made as it starts, which needs `'unsafe-inline' blob:`; `nsh package`
+says so. A web view's bridge (`window.nsh.postMessage`) is a file too; scripts in the web view's own `html` and its
+`injectedJavaScript*` are inline, the app's to allow, and `injectJavaScript` needs `'unsafe-eval'`.
+
 ### Embed it with an iframe
 
 There is no embedding API on the web: embed the published app with an `<iframe>`. Its size is the app's window:
@@ -319,11 +336,17 @@ await player.runModule(new URL("./bundle.js", location.href).href);
 
 `assets` (a map from `asset:/` paths to URLs) replaces `assetBase`, `readAsset(uri)` returns the bytes of an asset the engine needs at once (a font) or `null`, `data` maps the files the runtime fetches when it first needs them to their URLs (`syntaxes`: `nsh-syntaxes.<digest>.bin`; by default `nsh-<name>.bin` next to `nsh.js`), and `glue` is the URL of the wasm-bindgen glue of a runtime whose crates call [browser APIs from Rust](#browser-apis-from-rust) (`nsh-bindgen.<digest>.js`), which the player loads with the runtime; `player.runModule(url, { capabilities, appId })` runs the app under the capabilities it declares (its `capabilities.json`) and keeps its storage under its `nsh.json` id (without one, under the page's path). Relative URLs, in these options and the app's images alike, resolve against the page's URL as the player is made (`player.baseURL`), so they still load after the page moves the address to another directory. The page `nsh package --target web` writes uses all of them.
 
-`runModule(url, { chunks })` also takes where the chunks of a [split bundle](#split-bundles) are, and `runModule(url, { params })` the app's `host.params`: a JSON object the page already has for the app, such as the data of its first screen. The page `nsh package --target web` writes passes the JSON of a `<script type="application/json" id="nsh-params">` element when the page has one, so a server that serves the page can hand the app its data with it and the app shows it without asking for it again.
+`runModule(url, { chunks })` also takes where the chunks of a [split bundle](#split-bundles) are, and `runModule(url, { params })` the app's `host.params`: a JSON object the page already has for the app, such as the data of its first screen. The page `nsh package --target web` writes passes the JSON of a `<script type="application/json" id="nsh-params">` element when the page has one, so a server that serves the page can hand the app its data with it and the app shows it without asking for it again. The parameters go together with the page's [host](#the-hosts-functions): the app's `host.call` still reaches `createPlayer`'s `host`.
 
 `player.runSource(code, { name, sourceMap, capabilities, appId })` runs an ES module given as source text, with the same options. With `nsh-playground.wasm`, `player.compileAndRun(tsx, name, options)` compiles TSX first, runs it with `runSource`'s options and resolves to the compile error, or `null`; `player.compile(tsx)` returns `{ code }` or `{ error }`.
 
 The container's size is the app's window (`windowSize()`); resizing the container resizes the app. `player.setDark(true)` switches the appearance at run time, which apps observe through `colorScheme()` and `dark:` classes.
+
+The app's lifecycle is the page's. An app that listens to quit requests (`Application.on("quitRequest")`,
+[Quitting](../modules/nsh-desktop.md#quitting)) is asked as the user leaves the page it is embedded in, and the browser
+may ask the user whether to leave; its `quit` listeners run as the page goes. A page that keeps leaving to itself runs
+the app under capabilities without `"application": true` (`runModule(url, { capabilities })`): the user then leaves
+without the app being asked, and its `quit` listeners still run as the page goes.
 
 Dialogs and alerts cover the container. With `dialogs: "viewport"` they cover the whole browser window, as a page's own modal dialogs do, while the app keeps the container as its window: a `Dialog` lays out at the window's size and safe area and slides in from its bottom edge, its backdrop covers the whole page, and the mouse wheel over it leaves the page in place. The dialog shows in the browser's top layer (Chrome 114, Safari 17, Firefox 125 and later), so it is above the rest of the page wherever the container is; in earlier browsers it covers the container.
 
@@ -519,6 +542,22 @@ import { Head } from "nsh/web";
   />
   …
 </NavPage>
+```
+
+The main window's title is the page's title too, which is how an app written in Rust titles its tab: set it as the
+desktops do (`currentWindow().set({ title })` in TSX), and a mounted `Head`'s title wins over it. An empty title brings
+back the page's own `<title>`. A Rust app's nsh.json `window.title` titles its tab from launch, as it titles its window
+on the desktops. Each entry of the browser's history keeps the title its page had, so set the title in the same turn as
+the page or address it belongs to.
+
+```rust
+use nsh_core::{desktop::WindowAttributes, element::desktop::main_window};
+
+fn show_title(title: &str) {
+    let mut attributes = WindowAttributes::default();
+    attributes.title = Some(format!("{title} · Market Notes"));
+    main_window().set(attributes);
+}
 ```
 
 ## Limits

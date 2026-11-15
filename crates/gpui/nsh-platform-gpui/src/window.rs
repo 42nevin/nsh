@@ -1839,9 +1839,10 @@ pub(crate) fn displays(cx: &App) -> Vec<Display> {
         .iter()
         .map(|d| {
             let origin = screen::origin(&**d);
+            let bounds = to_bounds(screen::global(d.bounds(), origin));
             let mut display = Display::new(
                 display_id(&**d),
-                to_bounds(screen::global(d.bounds(), origin)),
+                bounds,
                 to_bounds(screen::global(d.visible_bounds(), origin)),
                 Some(d.id()) == primary,
             );
@@ -1849,6 +1850,7 @@ pub(crate) fn displays(cx: &App) -> Vec<Display> {
                 .refresh_interval()
                 .filter(|i| !i.is_zero())
                 .map(|i| 1.0 / i.as_secs_f32());
+            display.cutouts = native::cutouts(d.id(), bounds);
             display
         })
         .collect()
@@ -2234,7 +2236,8 @@ impl Element for WindowElement {
             crate::canvas::begin_pass(surface.key());
             let mut dcx = crate::render::DrawCx::new(window, cx, bounds, dark);
             let origin = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
-            crate::render::draw_view(&mut dcx, &w.view, Mat4::new(), origin);
+            let local = crate::render::root_matrix(&w.view, origin);
+            crate::render::draw_view(&mut dcx, &w.view, Mat4::new(), local);
             std::mem::take(&mut dcx.drawn)
         };
         crate::surface::place_items(&w.placed, drawn);
@@ -2307,6 +2310,23 @@ mod tests {
 
     fn gpui_rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
         Bounds::new(gpui::point(px(x), px(y)), gpui::size(px(w), px(h)))
+    }
+
+    /// A notch is computed from the display's bounds in screen coordinates
+    /// (as [`displays`] passes them to `native::cutouts`), not GPUI's own,
+    /// which start at each display's corner on macOS.
+    #[test]
+    fn a_notch_is_placed_in_screen_coordinates() {
+        // A built-in screen right of a 2560 × 1440 primary display, its top
+        // 658 points below the primary's: GPUI measures it from its corner.
+        let local = gpui_rect(0.0, 0.0, 1512.0, 982.0);
+        let origin = gpui::point(px(2560.0), px(658.0));
+        let bounds = to_bounds(screen::global(local, origin));
+        let area = size(Points(664.0), Points(32.0));
+        assert_eq!(
+            nsh_core::desktop::notch(bounds, area, area, Points(32.0)),
+            Some(rect(3224.0, 658.0, 184.0, 32.0)),
+        );
     }
 
     /// A secondary display is the first that is not the primary one or a

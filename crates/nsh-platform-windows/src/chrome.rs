@@ -427,6 +427,8 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
         DesktopCommand::OpenWindow(_) => {}
         DesktopCommand::Quit => quit(surface),
         DesktopCommand::SetQuitOnRequest(quit) => c.asks_quit.set(!quit),
+        // Additional quit request sources are currently macOS-only.
+        DesktopCommand::SetQuitRequestOptions(_) | DesktopCommand::CancelQuitRequest => {}
         // Quits as above, then the runner starts the app again; an
         // embedding app's window is its own.
         DesktopCommand::Restart => {
@@ -557,6 +559,8 @@ pub(crate) fn popup_actions(surface: &Surface, items: Vec<LocalItem>) {
                     role: None,
                     when: nsh_core::keymap::When::Always,
                     icon: None,
+                    symbol: None,
+                    destructive: false,
                 })
             }
         })
@@ -1585,6 +1589,7 @@ fn append(
                     enabled,
                     items,
                     icon,
+                    ..
                 } => {
                     let Ok(sub) = CreatePopupMenu() else { continue };
                     append(sub, items, labels, entries, icons, true);
@@ -1729,6 +1734,10 @@ fn choose_owned(
                         shift,
                         ..Default::default()
                     },
+                    scan: 0,
+                    extended: false,
+                    sys: false,
+                    translated: false,
                 },
             );
         }
@@ -2175,6 +2184,8 @@ mod tests {
             role: Some(MenuRole::Copy),
             when: nsh_core::keymap::When::Always,
             icon: None,
+            symbol: None,
+            destructive: false,
         };
         let text = |labels: &MenuLabels| String::from_utf16(&item_text(&action, labels)).unwrap();
         assert_eq!(text(&MenuLabels::default()), "Copy\tCtrl+C\0");
@@ -2262,6 +2273,10 @@ mod tests {
                         shift: true,
                         ..Default::default()
                     },
+                    scan: 0,
+                    extended: false,
+                    sys: false,
+                    translated: false,
                 },
             );
             let popup = surface.chrome.app_popup(Arc::from([]), None);

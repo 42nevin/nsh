@@ -306,6 +306,8 @@ mount(App);
 - **拖动、捏合和旋转可以同时进行**：同一张卡片可以同时被拖动、缩放和旋转。
 - **用松手速度做物理效果。** 拖动结束时的速度可以直接作为弹簧或衰减的速度；绑定的值用来挑选吸附点。
 
+视图挂着拖动回调或 `pan` 值时就可以拖动，所以在表达式里写条件就能开关它的拖动：`onPanEnd={zoomed() ? undefined : close}` 在 `zoomed()` 为真时把拖动交给里面的内容。条件要写在表达式里：只写一个名字（`onPanEnd={handler}`）只设置一次（[哪些会重新运行](./jsx-and-components.md#哪些会重新运行)）。
+
 ```rust tabs
 // 吸附到左边或右边的卡片。
 view()
@@ -358,6 +360,7 @@ view()
 | `timestamp` | 毫秒。 |
 | `touches` | 所有按下的手指。 |
 | `changedTouches` | 本次事件涉及的手指。 |
+| `modifiers` | 手指或鼠标按键按下时按住的修饰键（`{ control, alt, shift, platform }`，与按压事件相同）：Alt 拖动或 Shift 点击可以在 grant 里读取。在所有平台上，触摸事件和 grant 都先于同一次按压的 `onPressDown`。 |
 | `nativeEvent` | 事件本身，因此 `e.nativeEvent.locationX` 也可用。 |
 | `stopPropagation()` | 外层视图不再收到这次触摸事件。 |
 
@@ -439,7 +442,7 @@ let origin = 0;
 
 | Rust | TSX | 说明 |
 |---|---|---|
-| `.on_responder_grant(..)` | `onResponderGrant` | 该视图现在是响应者。Rust 默认阻止原生滚动视图接管触摸（`TouchClaim::block_native(false)` 则允许）；TSX 中返回 `true` 达到同样效果。 |
+| `.on_responder_grant(..)` | `onResponderGrant` | 该视图现在是响应者。Rust 默认阻止原生滚动视图接管触摸，在 iOS 上也阻止其外层导航栈的滑动返回（`TouchClaim::block_native(false)` 则允许）；TSX 中返回 `true` 达到同样效果。 |
 | `.on_responder_reject(..)` | `onResponderReject` | 另一个视图是响应者且不肯放手。 |
 | `.on_responder_start(..)` | `onResponderStart` | 又有一根手指按下。 |
 | `.on_responder_move(..)` | `onResponderMove` | 手指移动。 |
@@ -450,7 +453,7 @@ let origin = 0;
 
 Rust 组件的响应者从成为响应者起一直保持按下状态，直到它的触摸结束，无论手指或指针移到哪里，就像 CSS 的 `:active` 会保持到按钮松开：它的 `.active(..)` 样式和其中的 `group-active:` 类在整个拖动过程中保持不变（例如拖出条带的调整大小手柄）。
 
-Rust 处理函数收到一个 `ResponderEvent`：手指在它按下的视图中的位置 `location`、page 坐标 `page`、`timestamp`，以及自成为响应者以来的手势 `gesture`。
+Rust 处理函数收到一个 `ResponderEvent`：手指在它按下的视图中的位置 `location`、page 坐标 `page`、`timestamp`、按下时按住的修饰键 `modifiers`，以及自成为响应者以来的手势 `gesture`。
 
 ```rust tabs
 use nsh_core::prelude::*;

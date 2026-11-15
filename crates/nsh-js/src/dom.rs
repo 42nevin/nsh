@@ -80,11 +80,14 @@ pub(crate) struct Dom {
     desktop: Cell<bool>,
     /// The layout direction sent to the root (`None`: nothing mounted yet).
     rtl: Cell<Option<bool>>,
-    /// The `onDismiss` handlers of modals the app removed, kept until the
+    /// The `onDismiss` handlers of dialogs the app removed, kept until the
     /// platform reports their dismissal, oldest first (owned): an app
     /// removes a dialog in `onOpenChange` or `onCancel`, and the platform reports
     /// `onDismiss` once it has gone (after its animation).
     dismissed: RefCell<Vec<(NodeId, JsValue)>>,
+    /// How many dialog nodes are alive: a removal looks for their
+    /// `onDismiss` handlers only when some are.
+    dialogs: Cell<usize>,
     /// Whether the user's language is written right to left.
     env_rtl: Cell<bool>,
     /// The tags (bits by `Tag as u32`; 63: the root) text was put in
@@ -125,6 +128,8 @@ struct NodeData {
     /// Has a `panActivation`: becomes the responder when the platform
     /// activates its pan, and is not asked before.
     pan_gated: bool,
+    /// It was given a `selectionMenu`, whose functions go with it.
+    selection_menu: bool,
     /// Values of props that may hold native animation nodes (`style`,
     /// `pan`, ...), kept alive with the view (owned).
     retained: Vec<(std::borrow::Cow<'static, str>, JsValue)>,
@@ -303,6 +308,7 @@ impl Dom {
             env_rtl: Cell::new(false),
             unshown_text: Cell::new(0),
             dismissed: RefCell::new(Vec::new()),
+            dialogs: Cell::new(0),
             lazy_rows: Cell::new(false),
             pending_rows: RefCell::new(FxHashMap::default()),
         }
@@ -475,6 +481,14 @@ pub(crate) const NODE_METHODS: &[(&str, c_int, &str, &str)] = &[
         ),
     ),
     (
+        "animateLayout",
+        1,
+        decl!("(transition?: LayoutAnimationAnimation): void"),
+        decl!(
+            "Animates the frames this view's change moves in this turn, with `transition` (a phase of `LayoutAnimation.configureNext`: `type`, `duration`, `delay`, `springDamping`, `bezier`; easing in and out over 300 ms without one): its own frame and its subtree's, its siblings' and its ancestors' siblings' that it pushes, and the content of those that it resizes. The rest of the turn (a list that updates, live data) changes at once, as it would without it, and a view that gains or loses children does not carry the change into them. Insertions and removals are not animated. A `LayoutAnimation.configureNext` in the same turn animates every frame instead. E.g. a header that collapses over a list that keeps updating."
+        ),
+    ),
+    (
         "reveal",
         1,
         decl!("(options?: RevealOptions): void"),
@@ -634,6 +648,17 @@ unsafe extern "C" fn node_method(
                 qjs::JS_SetPropertyStr(cx, o, c"animated".as_ptr(), field(a0, c"animated"));
                 ("scrollTo", o)
             }
+            // The phase `update` of a layout animation sent to this node.
+            "animateLayout" => {
+                let o = qjs::JS_NewObject(cx);
+                let update = if qjs::JS_IsObject(a0) {
+                    qjs::JS_DupValue(cx, a0)
+                } else {
+                    qjs::JS_NewObject(cx)
+                };
+                qjs::JS_SetPropertyStr(cx, o, c"update".as_ptr(), update);
+                ("layoutAnimation", o)
+            }
             "scrollToEnd" if qjs::JS_IsUndefined(a0) => ("scrollToEnd", qjs::JS_NewObject(cx)),
             other => (
                 NODE_METHODS
@@ -667,6 +692,9 @@ pub(crate) fn init(raw: *mut JsContext) {
 /// A new node object for id `id` (owned).
 fn new_node(cx: *mut JsContext, id: NodeId, text: bool, tag: Option<Tag>) -> JsValue {
     let d = dom(cx);
+    if tag == Some(Tag::Modal) {
+        d.dialogs.set(d.dialogs.get() + 1);
+    }
     let data = Box::into_raw(Box::new(NodeData {
         id,
         text,
@@ -674,6 +702,7 @@ fn new_node(cx: *mut JsContext, id: NodeId, text: bool, tag: Option<Tag>) -> JsV
         popped: UNDEFINED,
         touch: Vec::new(),
         pan_gated: false,
+        selection_menu: false,
         retained: Vec::new(),
         parent: DETACHED,
         children: Vec::new(),
@@ -932,8 +961,8 @@ pub(crate) fn insert_node(
     insert_before(cx, parent, child, before)
 }
 
-/// How many removed modals' `onDismiss` handlers wait for their dismissal
-/// at most (a modal removed before it was presented never gets one).
+/// How many removed dialogs' `onDismiss` handlers wait for their dismissal
+/// at most (a dialog removed before it was presented never gets one).
 const MAX_DISMISSED: usize = 16;
 
 fn next_id(cx: *mut JsContext) -> NodeId {
@@ -949,7 +978,7 @@ unsafe extern "C" fn node_finalize(rt: *mut qjs::JSRuntime, obj: JsValue) {
     if p.is_null() {
         return;
     }
-    let mut data = unsafe { Box::from_raw(p) };
+    let data = unsafe { Box::from_raw(p) };
     if let Some(state) = crate::state::of_runtime(rt) {
         // SAFETY: a projection of the live state's renderer.
         let d = unsafe { &(*state).dom };
@@ -963,23 +992,13 @@ unsafe extern "C" fn node_finalize(rt: *mut qjs::JSRuntime, obj: JsValue) {
             // Not the op queue: a finalizer may run while it is borrowed.
             d.shared.releases.borrow_mut().push(data.id);
         }
-        // A removed modal still hears its dismissal.
-        if data.tag == Some(Tag::Modal)
-            && let Some(i) = data
-                .handlers
-                .iter()
-                .position(|&(e, _)| e == EventKind::Dismiss)
-        {
-            let (_, handler) = data.handlers.swap_remove(i);
-            let oldest = {
-                let mut dismissed = d.dismissed.borrow_mut();
-                dismissed.push((data.id, handler));
-                (dismissed.len() > MAX_DISMISSED).then(|| dismissed.remove(0).1)
-            };
-            if let Some(v) = oldest {
-                // SAFETY: a value the renderer owned, freed after the borrow.
-                unsafe { qjs::JS_FreeValueRT(rt, v) };
-            }
+        // Trailing header bar handlers live as long as the page, a
+        // selection menu's as long as its view.
+        if data.tag == Some(Tag::Screen) || data.selection_menu {
+            crate::desktop::clear_header_rt(rt, data.id);
+        }
+        if data.tag == Some(Tag::Modal) {
+            d.dialogs.set(d.dialogs.get().saturating_sub(1));
         }
     }
     for v in data.children {
@@ -1151,6 +1170,9 @@ fn insert_before(
     let owned = held.unwrap_or_else(|| unsafe { qjs::JS_DupValue(cx, child) });
     children.insert(pos, owned);
     unsafe { (*c).parent = parent_id };
+    if old == DETACHED {
+        forget_dismissals(cx, child);
+    }
     d.push(
         cx,
         Op::Insert {
@@ -1256,6 +1278,9 @@ fn remove_child(cx: *mut JsContext, parent: JsValue, child: JsValue) -> Result<(
     };
     let owned = children.remove(i);
     unsafe { (*c).parent = DETACHED };
+    if dom(cx).dialogs.get() > 0 {
+        keep_dismissals(cx, child);
+    }
     let pushed = dom(cx).push(
         cx,
         Op::Remove {
@@ -1266,6 +1291,89 @@ fn remove_child(cx: *mut JsContext, parent: JsValue, child: JsValue) -> Result<(
     // Last: this may finalize the child.
     unsafe { qjs::JS_FreeValue(cx, owned) };
     pushed
+}
+
+/// Hands the `onDismiss` handlers of the dialogs in detached subtree
+/// `node` (borrowed) to the renderer, so a removed dialog still hears its
+/// dismissal (after its animation). Done here, while no collection runs,
+/// not in the node's finalizer: a finalizer run by QuickJS's cycle
+/// collection must not keep a value of the cycle it frees (#1643).
+fn keep_dismissals(cx: *mut JsContext, node: JsValue) {
+    let p = node_ptr(cx, node);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: live node data, read briefly; the handler is dup'd.
+    let (id, kept) = unsafe {
+        let handler = ((*p).tag == Some(Tag::Modal))
+            .then(|| {
+                (*p).handlers
+                    .iter()
+                    .find(|&&(e, _)| e == EventKind::Dismiss)
+            })
+            .flatten()
+            .map(|&(_, h)| qjs::JS_DupValue(cx, h));
+        ((*p).id, handler)
+    };
+    let d = dom(cx);
+    if let Some(handler) = kept {
+        let freed = {
+            let mut dismissed = d.dismissed.borrow_mut();
+            let mut freed: Vec<JsValue> = Vec::new();
+            if let Some(i) = dismissed.iter().position(|&(n, _)| n == id) {
+                freed.push(dismissed.remove(i).1);
+            }
+            dismissed.push((id, handler));
+            if dismissed.len() > MAX_DISMISSED {
+                freed.push(dismissed.remove(0).1);
+            }
+            freed
+        };
+        // After the borrow: freeing may finalize nodes.
+        free_values(cx, freed);
+    }
+    // SAFETY: live node data; dups held while walking.
+    let children: Vec<JsValue> = unsafe { &(*p).children }
+        .iter()
+        .map(|&v| unsafe { qjs::JS_DupValue(cx, v) })
+        .collect();
+    for &child in &children {
+        keep_dismissals(cx, child);
+    }
+    free_values(cx, children);
+}
+
+/// Drops what [`keep_dismissals`] kept for the dialogs in subtree `node`
+/// (borrowed), inserted again.
+fn forget_dismissals(cx: *mut JsContext, node: JsValue) {
+    let d = dom(cx);
+    if d.dismissed.borrow().is_empty() {
+        return;
+    }
+    let mut ids = Vec::new();
+    collect_ids(cx, node, &mut ids);
+    let freed: Vec<JsValue> = {
+        let mut dismissed = d.dismissed.borrow_mut();
+        let (gone, kept): (Vec<_>, Vec<_>) =
+            dismissed.drain(..).partition(|(n, _)| ids.contains(n));
+        *dismissed = kept;
+        gone.into_iter().map(|(_, v)| v).collect()
+    };
+    free_values(cx, freed);
+}
+
+fn collect_ids(cx: *mut JsContext, node: JsValue, ids: &mut Vec<NodeId>) {
+    let p = node_ptr(cx, node);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: live node data, read only (no JS runs).
+    unsafe {
+        ids.push((*p).id);
+        for &child in &(*p).children {
+            collect_ids(cx, child, ids);
+        }
+    }
 }
 
 // --- Elements, text, props -----------------------------------------------------
@@ -1368,6 +1476,14 @@ fn set_prop(
         }
         "tooltip" if followed(cx, name, value) => return bind_prop_with(cx, node, name, value),
         _ => {}
+    }
+    if name == "selectionMenu" {
+        // SAFETY: live node data.
+        unsafe { (*p).selection_menu = true };
+        return crate::desktop::set_selection_menu(cx, id, value);
+    }
+    if name == "headerRightItems" {
+        return crate::desktop::set_header_right_items(cx, id, value);
     }
     if let Some(prop) = nsh_core::js::host::style_patch_prop(name) {
         let prop = prop(part_style(cx, name, value)?);
@@ -2197,6 +2313,17 @@ unsafe extern "C" fn item_run(
     if unsafe { !qjs::JS_IsException(r) && qjs::JS_IsFunction(cx, r) } && node_ptr(cx, r).is_null()
     {
         return item_memo(cx, r);
+    }
+    // An array holding functions (a component's `children` shown beside a
+    // branch of its own, `{cond ? a : b}{props.children}`): each gets a memo
+    // too, as `insert_run` gives them, or the array's effect would call
+    // them all, and make their nodes again, when any one of them changes.
+    if unsafe { qjs::JS_IsArray(r) }
+        && let Some(memos) = memoize_run(cx, r)
+    {
+        // SAFETY: the copy holds what it needs of `r`.
+        unsafe { qjs::JS_FreeValue(cx, r) };
+        return memos;
     }
     r
 }
@@ -3586,13 +3713,27 @@ pub(crate) fn handler(cx: *mut JsContext, id: NodeId, event: EventKind) -> Optio
     let d = dom(cx);
     let p = d.by_id(id);
     if p.is_null() {
-        // A removed modal's dismissal: its handler, given away (owned).
+        // A removed dialog's dismissal: its handler, given away (owned).
         if event != EventKind::Dismiss {
             return None;
         }
         let mut dismissed = d.dismissed.borrow_mut();
         let i = dismissed.iter().position(|&(n, _)| n == id)?;
         return Some(dismissed.remove(i).1);
+    }
+    if event == EventKind::Dismiss {
+        // A removed dialog still alive: what was kept for it goes.
+        let kept = {
+            let mut dismissed = d.dismissed.borrow_mut();
+            dismissed
+                .iter()
+                .position(|&(n, _)| n == id)
+                .map(|i| dismissed.remove(i).1)
+        };
+        if let Some(v) = kept {
+            // SAFETY: a value the renderer owned, freed after the borrow.
+            unsafe { qjs::JS_FreeValue(cx, v) };
+        }
     }
     // SAFETY: live node data; a dup of the handler.
     unsafe { &(*p).handlers }
@@ -4965,6 +5106,9 @@ mod tests {
             const v = element("view");
             v.focus();
             v.blur();
+            // The frames its change moves, with its own transition.
+            v.animateLayout({ type: "bezier", bezier: [0.3, 0, 0, 1], duration: 200 });
+            v.animateLayout();
             globalThis.keep = [s, i, v];
             "#,
         )
@@ -4983,6 +5127,8 @@ mod tests {
                 "Command { id: 4, command: InsertText(\"pasted\") }",
                 "Command { id: 6, command: Focus }",
                 "Command { id: 6, command: Blur }",
+                "Command { id: 6, command: LayoutAnimation(LayoutAnimation { create: None, update: Some(LayoutTransition { curve: Bezier([0.3, 0.0, 0.0, 1.0]), property: Opacity, duration_ms: 200.0, delay_ms: 0.0 }), delete: None }) }",
+                "Command { id: 6, command: LayoutAnimation(LayoutAnimation { create: None, update: Some(LayoutTransition { curve: EaseInEaseOut, property: Opacity, duration_ms: 300.0, delay_ms: 0.0 }), delete: None }) }",
             ]
         );
     }
@@ -5054,9 +5200,7 @@ mod tests {
             first.iter().any(|o| matches!(
                 o,
                 Op::SetProp {
-                    prop: nsh_core::Prop::ComponentPropBinding(name, Some(_)),
-                    ..
-                } if &**name == "progress"
+                    prop: nsh_core::Prop::ComponentPropBinding(name, Some(_)), .. } if &**name == "progress"
             )),
             "{first:?}"
         );

@@ -3961,6 +3961,7 @@ name = "nsh-ios-app"
 version = "0.5.0"
 dependencies = [
  "log",
+ "nsh-base",
  "nsh-engine",
  "nsh-platform-apple",
  "nsh-platform-ios",
@@ -3971,6 +3972,7 @@ name = "nsh-ios-host"
 version = "0.5.0"
 dependencies = [
  "log",
+ "nsh-base",
  "nsh-dev",
  "nsh-engine",
  "nsh-platform-ios",
@@ -4008,6 +4010,7 @@ name = "nsh-linux-app"
 version = "0.5.0"
 dependencies = [
  "log",
+ "nsh-base",
  "nsh-engine",
  "nsh-platform-linux",
  "serde_json",
@@ -4018,6 +4021,7 @@ name = "nsh-linux-host"
 version = "0.5.0"
 dependencies = [
  "log",
+ "nsh-base",
  "nsh-dev",
  "nsh-engine",
  "nsh-platform-linux",
@@ -4028,6 +4032,7 @@ name = "nsh-macos-app"
 version = "0.5.0"
 dependencies = [
  "log",
+ "nsh-base",
  "nsh-engine",
  "nsh-platform-apple",
  "nsh-platform-macos",
@@ -4039,6 +4044,7 @@ name = "nsh-macos-host"
 version = "0.5.0"
 dependencies = [
  "log",
+ "nsh-base",
  "nsh-dev",
  "nsh-engine",
  "nsh-platform-macos",
@@ -4102,7 +4108,10 @@ dependencies = [
  "nsh-engine",
  "objc2",
  "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation",
+ "objc2-image-io",
  "objc2-ui-kit",
  "serde_json",
 ]
@@ -4323,6 +4332,7 @@ name = "nsh-windows-app"
 version = "0.5.0"
 dependencies = [
  "log",
+ "nsh-base",
  "nsh-engine",
  "nsh-platform-windows",
  "serde_json",
@@ -4333,6 +4343,7 @@ name = "nsh-windows-host"
 version = "0.5.0"
 dependencies = [
  "log",
+ "nsh-base",
  "nsh-dev",
  "nsh-engine",
  "nsh-platform-windows",

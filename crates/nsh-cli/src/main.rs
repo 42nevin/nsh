@@ -15,6 +15,7 @@ mod dev_port;
 mod entry;
 mod init;
 mod logger;
+mod native_features;
 mod package;
 mod platforms;
 mod play;
@@ -993,6 +994,7 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
                 arch,
                 run,
                 asset_url: asset_url.as_deref(),
+                development: false,
             })
         }
         Command::Run {

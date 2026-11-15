@@ -308,7 +308,7 @@ the span around them), found by their characters (`text:`, a bare string) and pr
 the events go to the span's node; they are not texts of their own (`texts()` lists the text view's).
 `Screen::span_style` reads the resolved style of characters a selector names (`id:<testID>` a nested text's test id,
 `text:<text>` where the text reads it), the first character's, including a nested text's background. `app.spanStyle`
-returns that style; on a real host the agent's model answers it (`TestStep::SpanStyle`, a `protocol::SpanStyle`). A span's test id is listed on its block's text (`AttributedText::test_ids`). Setting the id
+returns that style; on a real host the agent's model answers it (`TestStep::SpanStyle`, a `protocol::SpanStyle`). `Screen::view_style` reads a view's last `ViewStyle` mount item: `backgroundColor` (absent when transparent), its own `opacity`, and `effectiveOpacity` (multiplied through its ancestors); `app.viewStyle` returns it, or null when nothing matches (`TestStep::ViewStyle`). It is the value the app set, so an animation reads as its end value, and backgrounds a platform paints itself are not in it. A span's test id is listed on its block's text (`AttributedText::test_ids`). Setting the id
 later updates the block's metadata and remounts its existing final layout, including fitted font sizes, without
 preparing or laying out the text again or reporting `onTextLayout`. Empty spans have no first character:
 queries report an error, including bare selectors whose test id matches an empty span. Steps acting on a view are strict, as Playwright's: the matches
@@ -367,7 +367,8 @@ report it:
   window's and those of no window (`Keymap::find_in`), and the root hears `KeyCommand`; then, on a desktop, the
   application menu (`DesktopCommand::SetMenu`, `Screen::app_menu`) chooses its item with that shortcut
   (`MenuItem::find_shortcut`, keeping `MenuAction::fires_while_editing` while an input has the focus) and the root
-  hears `Menu`, as the platforms' menus do after the keymap; else, on macOS and the web, Tab / Shift+Tab move the keyboard focus between the stops
+  hears `Menu`, as the platforms' menus do after the keymap; else, on the desktops (macOS, Windows, Linux), the web and in a
+  terminal, Tab / Shift+Tab move the keyboard focus between the stops
   (`Screen::tab_stops`: editable inputs and the views `ViewProps::focus_stop` takes, pressables not
   `focusable={false}` and `focusable={true}` views that take no presses, in tree order, around; only the newest
   dialog's while one is shown over the focus' window, `Screen::focus_scope`, as the platforms keep Tab inside it; on the
@@ -375,7 +376,7 @@ report it:
   `Headless::modals_closed`), telling the
   views `Blur` / `Focus` and the view its `FOCUSED` state, and Return or Space presses the view it is on when it takes
   presses (a press of the pointer takes it off; on such a view they reach only the focus' own bindings in the keymap
-  above, `Keymap::find_at`, and the application menu not at all), and on the web Shift+F10 raises `ContextMenu` with no pointer on
+  above, `Keymap::find_at`, and the application menu not at all), and on the web and Linux Shift+F10 raises `ContextMenu` with no pointer on
   the nearest view around it that listens (`pointerType: null`, at its bottom-start corner); else the focused input takes a character, Backspace or the return key, else
   Escape goes back when there is something to go back from;
 - `wait`, `wait_for` / `wait_for_gone` / `wait_until` (until a selector matches, matches no more, a condition on the
@@ -384,9 +385,11 @@ report it:
   batch; what `waitUntil` waits for between calls there until the frames' time reaches its timeout), `idle`
   (until quiet for a while).
 
-A step first applies the batches that came since the last one (they belong to it), then waits until the app is quiet
-for 100 ms and no native animation runs that ends by itself (2 s at most); on a manual clock it asks instead of
-waiting (below). Native animations that loop forever (a
+A step first applies the batches that came since the last one (they belong to it), then, on the system's clock, has
+the engine run what the step sent (`EngineControl::flush`, again while the batches applied send more back:
+`Headless::caught_up`), so an engine slower than the quiet window still finishes a step before the next one acts, and
+waits until the app is quiet for 100 ms and no native animation runs that ends by itself (2 s at most); on a manual
+clock it asks instead of waiting (below). Native animations that loop forever (a
 spinner: a loop without `iterations`, `Graph::is_finishing`) run in the background: their values move with the app's
 time, and no step or wait waits for them, as a browser's test runner does not wait for an infinite CSS animation. It fails, with the texts on screen (bounded to `nsh_testing::SCREEN_TEXT_LIMIT` characters of rendered output), when it cannot be taken, and when the app threw meanwhile
 (`MountSink::report`: an exception that escaped a callback, a bundle that did not load, a stopped VM; an asset's
@@ -461,7 +464,8 @@ Headless runs play the platform's part NSH's protocol defines, and refuse what o
   `forward`, `go` and `type_address` report the root's `UrlScheme` events the page reports (`quiet`, `change`,
   `open`); a change to the web's history in `nsh.js` changes it too;
 - URLs the app opens (`Command::OpenUrl`) are recorded (`Screen::opened_urls`), never opened, and answered with
-  `onOpenUrl` `{ opened: true }`, as a device with an app for every scheme would (`app.openedUrls()`);
+  `onOpenUrl` `{ opened: true }`, as a device with an app for every scheme would (`app.openedUrls()`), but
+  `{ opened: false }` for those matching the globs of `Headless::fail_open_urls` (`app.failOpenUrls`);
 - the platform has no eyedropper (`Environment::screen_color` false) until a Rust test calls
   `Headless::on_screen_color(color)`: then `Command::PickScreenColor` is answered with `onScreenColor`, that color (or
   none, a cancel);
@@ -1128,10 +1132,12 @@ How users get it (`website/docs/installation.md`):
 
 ### Runners
 
-Every workflow runs on GitHub's runners: the checks, the release (its builds, its `Plan`, `Release` and `Nightly`
-jobs, the crates' publication, the Homebrew formula's update) and the Website workflow's build and deployment of the
-published site. This repository is public, so its jobs run on GitHub's fresh runners, never on machines shared with
-other projects.
+Some checks run on the organization's self-hosted runners, which keep their builds between jobs; each job's
+`runs-on` says where it runs. On a self-hosted runner a job installs its toolchain without making it the machine's
+default (`RUSTUP_TOOLCHAIN` picks it) and skips the dependency caches. Pull requests from forks and the scheduled runs
+on `main` run every check on GitHub's runners. The release (its builds, `Plan`, `Release` and `Nightly`), the crates'
+publication, the Homebrew formula's update and the website's deployment run only on GitHub's runners: the jobs that
+hold write tokens or decide and build what users download run on fresh machines.
 
 The checks (Core, Linux, Windows, TUI, Rust application, Examples, Compat) run on pull requests, and on `main` every
 three hours (skipped when `main` has not moved since the last scheduled run, `changed.yml`) and on manual runs, never on every push: a push to `main` is a pull request that already passed

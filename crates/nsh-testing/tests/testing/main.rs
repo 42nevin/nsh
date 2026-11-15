@@ -467,7 +467,7 @@ fn a_press_reaches_a_view_across_a_scroll_view_s_fold() {
     let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
     let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
     assert!(failed.is_empty(), "{failed:#?}");
-    assert_eq!(results.len(), 2);
+    assert_eq!(results.len(), 3);
 }
 
 #[test]
@@ -598,12 +598,20 @@ fn a_test_plays_the_embedding_app() {
     let results = run_file(&run, &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
     let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
     assert!(failed.is_empty(), "{failed:#?}");
-    assert_eq!(results.len(), 4);
+    assert_eq!(results.len(), 5);
 }
 
 #[test]
 fn span_styles_follow_id_updates_and_reject_empty_spans() {
     let file = todo().parent().unwrap().join("queries/Spans.test.tsx");
+    let results = run_file(&test_run(None), &file, &mut |_| {}).unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].failure.is_none(), "{:?}", results[0]);
+}
+
+#[test]
+fn view_styles_read_background_and_opacity() {
+    let file = todo().parent().unwrap().join("queries/ViewStyles.test.tsx");
     let results = run_file(&test_run(None), &file, &mut |_| {}).unwrap();
     assert_eq!(results.len(), 1);
     assert!(results[0].failure.is_none(), "{:?}", results[0]);

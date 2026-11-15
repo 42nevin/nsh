@@ -73,6 +73,9 @@ fn setup() -> (std::path::PathBuf, nsh_platform_macos::AppOptions) {
         asset_base: Some(AssetBase::Directory(dir.join("assets"))),
         // An app on its own, not a module embedded in another app.
         limits: Limits::standalone(),
+        // The packaged app's login item: a Rust app `nsh run` runs in
+        // place has none, so it never registers a development build.
+        login_item: !developing,
         ..AppOptions::default()
     };
     let info = std::fs::read_to_string(dir.join("app.json"))
@@ -98,6 +101,11 @@ fn setup() -> (std::path::PathBuf, nsh_platform_macos::AppOptions) {
     // start: no Dock icon or menu bar shows before its code runs.
     if field("activationPolicy").as_deref() == Some("accessory") {
         options.activation_policy = ActivationPolicy::Accessory;
+    }
+    // `nsh run` of a Rust app runs the runner outside an app bundle and
+    // names the app's icon; a packaged app's bundle has its own.
+    if developing {
+        options.icon = field("icon").map(std::path::PathBuf::from);
     }
     // `open -a <App> --args --fps` shows the performance monitor, and so
     // does `NSHPerformanceMonitor` (a boolean) in the bundle's Info.plist:

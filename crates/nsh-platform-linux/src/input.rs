@@ -224,6 +224,8 @@ struct Pointer {
     mode: Mode,
     /// It moved (a JS responder granted now took it from a native press).
     moved: bool,
+    /// The modifier keys held when it went down (for JS touches).
+    modifiers: nsh_core::keymap::Modifiers,
 }
 
 /// A touchpad scroll gesture.
@@ -819,7 +821,7 @@ fn dispatch(surface: &Rc<Surface>, event: &gdk::Event) -> glib::Propagation {
 /// around the one under it that listens to `onContextMenu` hears it (true:
 /// the click is taken). Text fields are GTK's widgets, which show their
 /// own menu.
-fn context_menu(surface: &Surface, x: f32, y: f32, state: gdk::ModifierType) -> bool {
+fn context_menu(surface: &Rc<Surface>, x: f32, y: f32, state: gdk::ModifierType) -> bool {
     let Some(hit) = pick(&event_root(surface), x, y) else {
         return false;
     };
@@ -906,7 +908,12 @@ fn wheel_event(
                 |v| v.state().events.contains(EventKind::Wheel),
                 |v| v.kind() == ViewKind::Scroll,
             )?;
-            Some((view, takes && !native_scrolls))
+            let along = input::wheel_along(
+                view.state().props.pan_activation,
+                dx.abs() > dy.abs(),
+                state.contains(gdk::ModifierType::CONTROL_MASK),
+            );
+            Some((view, takes && along && !native_scrolls))
         },
     );
     let Some((view, takes)) = routed else {
@@ -944,7 +951,7 @@ fn wheel_event(
 /// Select All, GTK's own labels), at `(x, y)` (root coordinates). Its
 /// items run the `clipboard.copy` / `selection.select-all` actions the
 /// target installs.
-fn edit_menu(surface: &Surface, target: &NshView, x: f32, y: f32) -> bool {
+fn edit_menu(surface: &Rc<Surface>, target: &NshView, x: f32, y: f32) -> bool {
     let selected = if target.state().props.selectable_view {
         crate::selectable_view::has_selection(surface, target)
     } else {
@@ -953,8 +960,17 @@ fn edit_menu(surface: &Surface, target: &NshView, x: f32, y: f32) -> bool {
     let p = event_root(surface)
         .compute_point(target, &graphene::Point::new(x, y))
         .unwrap_or_else(|| graphene::Point::new(x, y));
-    let popover = gtk::PopoverMenu::from_model(Some(&edit_menu_model(selected)));
+    let model = edit_menu_model(selected);
+    let app = app_menu(surface, target);
+    if let Some((section, _)) = &app {
+        model.append_section(None, section);
+    }
+    let popover = gtk::PopoverMenu::from_model(Some(&model));
+    if let Some((_, actions)) = &app {
+        popover.insert_action_group("selection-menu", Some(actions));
+    }
     popover.set_parent(target);
+    crate::key_focus::observe_popovers(surface, popover.upcast_ref());
     popover.set_has_arrow(false);
     popover.set_halign(gtk::Align::Start);
     popover.set_position(gtk::PositionType::Bottom);
@@ -965,6 +981,57 @@ fn edit_menu(surface: &Surface, target: &NshView, x: f32, y: f32) -> bool {
     });
     popover.popup();
     true
+}
+
+/// The app's items of a selectable view's menu (`selectionMenu`): a
+/// section of them and the `selection-menu` actions they run, each
+/// reporting its item's id as the root's `Menu` event. `None` without
+/// items (selectable text alone has none).
+fn app_menu(
+    surface: &Rc<Surface>,
+    target: &NshView,
+) -> Option<(gio::Menu, gio::SimpleActionGroup)> {
+    use nsh_core::desktop::MenuItem;
+    let items = target.state().props.selection_menu.clone();
+    if items.is_empty() {
+        return None;
+    }
+    let menu = gio::Menu::new();
+    let mut section = gio::Menu::new();
+    let actions = gio::SimpleActionGroup::new();
+    for (index, item) in items.iter().enumerate() {
+        match item {
+            MenuItem::Action(item) => {
+                let name = format!("item-{index}");
+                let action = gio::SimpleAction::new(&name, None);
+                action.set_enabled(item.enabled && item.id != 0);
+                let (weak, id) = (Rc::downgrade(surface), item.id);
+                action.connect_activate(move |_, _| {
+                    if let Some(surface) = weak.upgrade() {
+                        surface.event(
+                            nsh_core::ROOT_ID,
+                            EventKind::Menu,
+                            EventPayload::Map(vec![(
+                                "id",
+                                nsh_core::PayloadValue::Number(id as f64),
+                            )]),
+                        );
+                    }
+                });
+                actions.add_action(&action);
+                // No mnemonics in the app's labels.
+                let label = item.label.replace('_', "__");
+                section.append(Some(&label), Some(&format!("selection-menu.{name}")));
+            }
+            MenuItem::Separator => {
+                menu.append_section(None, &section);
+                section = gio::Menu::new();
+            }
+            MenuItem::Submenu { .. } => {}
+        }
+    }
+    menu.append_section(None, &section);
+    Some((menu, actions))
 }
 
 /// The edit menu's items (GTK's label with its mnemonic, action); Copy
@@ -1535,6 +1602,7 @@ fn down(surface: &Rc<Surface>, key: Key, x: f32, y: f32, time: f64, modifiers: g
             pressed: Vec::new(),
             mode: Mode::Thumb(view.clone(), (x, y)),
             moved: false,
+            modifiers: self::modifiers(modifiers),
         };
         p.velocity.add(time, point(Points(x), Points(y)));
         crate::scroll::thumb_begin(surface, view);
@@ -1613,6 +1681,7 @@ fn down(surface: &Rc<Surface>, key: Key, x: f32, y: f32, time: f64, modifiers: g
         pressed,
         mode: Mode::Idle,
         moved: false,
+        modifiers: self::modifiers(modifiers),
     };
     p.velocity.add(time, point(Points(x), Points(y)));
     if p.reporting {
@@ -1844,6 +1913,7 @@ fn report(surface: &Surface, phase: TouchPhase, changed: &Pointer, activated: Op
         phase,
         timestamp: changed.time,
         points,
+        modifiers: changed.modifiers,
         activated,
     };
     surface.event(
