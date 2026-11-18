@@ -455,9 +455,13 @@ impl<M: TextEngine> Core<M> {
     /// asked for); then what they listen to (once per commit, before the
     /// dirty views are flushed).
     pub(super) fn sync_overlays(&mut self) {
+        // Releasing the last overlay can leave only its published keyboard
+        // listeners to withdraw, even when there were no pointer watches.
         if self.overlays.is_empty()
             && self.overlay_state.watched.is_empty()
             && self.overlay_state.hinting.is_empty()
+            && !self.overlay_state.cancel
+            && !self.overlay_state.hint_escape
         {
             return;
         }

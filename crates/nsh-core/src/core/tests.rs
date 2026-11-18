@@ -31516,6 +31516,82 @@ fn overlays_hear_presses_outside_and_cancel_from_the_top() {
 }
 
 #[test]
+fn releasing_the_last_cancel_only_overlay_unbinds_escape_and_back() {
+    use StyleValue::Number;
+    /// Folds a batch into what the root last published: its listeners, and
+    /// a keymap that binds Escape.
+    fn observe(batch: &MountBatch, events: &mut Option<EventMask>, escape: &mut bool) {
+        for item in &batch.items {
+            match item {
+                MountItem::Events { id, events: e } if *id == ROOT_ID => *events = Some(*e),
+                MountItem::Keymap(keymap) => {
+                    // A keymap is published whole, and only when it changed.
+                    *escape = keymap
+                        .bindings()
+                        .iter()
+                        .any(|binding| binding.id == overlay::ESCAPE_BINDING);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut c = core();
+    add(&mut c, 2, Tag::View, ROOT_ID, &[("height", Number(40.0))]);
+    add(&mut c, 4, Tag::Overlay, 2, &[]);
+    // Nothing watches presses outside and the overlay is no hint: Escape and
+    // back are the only listeners it adds.
+    apply(
+        &mut c,
+        vec![
+            overlay_prop(
+                4,
+                crate::OverlayProp::Anchor(crate::overlay::OverlayAnchor::Node(2)),
+            ),
+            Op::Listen {
+                id: 4,
+                event: EventKind::Cancel,
+                enabled: true,
+            },
+        ],
+    );
+    // What the root published last: its listeners and the Escape binding.
+    let mut published = None;
+    let mut escape_bound = false;
+    observe(&c.commit().unwrap(), &mut published, &mut escape_bound);
+    assert!(escape_bound, "a shown cancel overlay binds Escape");
+    assert!(
+        published.is_some_and(|events| events.contains(EventKind::KeyCommand)),
+        "and listens to keys"
+    );
+    assert!(
+        published.is_some_and(|events| events.contains(EventKind::BackPress)),
+        "and to back"
+    );
+
+    // Removed from the view and released before one commit: the core has no
+    // overlays left to place, and the listeners go with the last of them.
+    apply(
+        &mut c,
+        vec![Op::Remove { parent: 2, child: 4 }, Op::Release { id: 4 }],
+    );
+    let batch = c.commit().unwrap();
+    observe(&batch, &mut published, &mut escape_bound);
+    assert!(
+        !escape_bound,
+        "releasing the last cancel overlay removes its Escape binding: {:?}",
+        batch.items
+    );
+    assert!(
+        published.is_none_or(|events| !events.contains(EventKind::KeyCommand)),
+        "and the key listener, so the dialog below handles the next Escape"
+    );
+    assert!(
+        published.is_none_or(|events| !events.contains(EventKind::BackPress)),
+        "and the back listener"
+    );
+}
+
+#[test]
 fn a_secondary_click_is_a_press_outside_the_overlays_it_misses() {
     use StyleValue::Number;
     let mut c = core();
