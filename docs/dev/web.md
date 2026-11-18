@@ -187,16 +187,24 @@ build to the same file) and takes `nsh.js` from the crate.
   `host:*`), as the browser follows redirects before NSH could check them. Relative URLs resolve against the page
   (`document.baseURI`, `nsh_set_base_url`) as it starts: the page's script resolves its `app` URLs (and the head's
   requests are keyed the same way), the `Player` its `assets`, `data` and `assetBase` and the app's relative
-  `asset()` URLs against `player.baseURL`, and `browser/runtime.js` the entry, the chunks and the app realm's
-  `<base>`, so nothing loads from the directory a `history.pushState` moved the address to. `nsh.json` `web.base`
+  `asset()` URLs against `player.baseURL` (`createPlayer`'s `baseURL`, the site's base, else `document.baseURI`),
+  links, web views' URLs and addresses against `player.addressBase()`, and `browser/runtime.js` the entry, the chunks and the realm's
+  `import.meta.url`, so nothing
+  loads from the directory a `history.pushState` moved the address to. `nsh.json` `web.base`
   (`web::page_base`: a path from the root
   in the form browsers send it, unreserved characters and percent-escapes without dot or empty segments, a `/`
-  added at its end, which `start_at` matches requests against as it is) puts a `<base href>` first in the head, so the page loads its files at any of the app's paths
-  (`/sports/football`), which `SiteServer::start_at` (`--run`) serves under it; the dev page has `<base href="/">`
+  added at its end, which `start_at` matches requests against as it is) prefixes every file's URL (`Site::url`) and
+  is the app's `base` (the player's `baseURL`); the page has no `<base href>`, which a strict `base-uri` refuses, and
+  loads its files at any of the app's paths (`/sports/football`), which `SiteServer::start_at` (`--run`) serves
+  under it; the dev page has `<base href="/">`
   (the dev server serves its files at the root). `nsh.json` `web.history` reaches `createPlayer`'s `history` on
   both pages (the packaged page's `app.history`, the dev page's `HISTORY`, which `with_page_host` fills in); without
   it the player's default (`window.top === window`) holds. The app ships as minified ES modules
-  (`app.<digest>.js` and `<chunk>.<digest>.js`). An import map resolves original chunk URLs to hashed files;
+  (`app.<digest>.js` and `<chunk>.<digest>.js`), linked to one another and to the native modules' facade files
+  (`web::publish_modules`), so the realm needs no import map (an inline script) unless the app imports a native
+  module whole; the page's styles are a file and the runtime's are constructed sheets, for a strict `style-src`;
+  the runtime's own images (`image_bytes`, `svgInColor`, `Clipboard.readImage`) are `blob:` / `data:` URLs, so the
+  policy `nsh package` prints adds `img-src 'self' blob: data:`;
   transitive entry fonts load before startup and dynamic imports prepare the requested chunk's font dependencies.
   The browser loads static dependencies, module cycles and dynamic chunks itself. No bytecode or hardening
   bytecode ships in a browser package. An app with a Rust crate of
@@ -465,7 +473,7 @@ the player holds it only while the app listens, and drops it on `reset()` and wh
 The app ends with the page. While an app runs, the player holds a `pagehide` listener (`Player.watchPageEnd`, which does
 not affect the back / forward cache): a `pagehide` that discards the page (not `persisted`) starts the app's quit
 listeners (`nsh_quit` → `LocalEngine::start_quit`, once per app), however the user left; a page kept in the cache keeps
-its app running. `nsh test --target web` closes its pages with `Target.closeTarget`, which runs no `beforeunload`.
+its app running, in the background until it is shown again (`Player.watchPageCache`). `nsh test --target web` closes its pages with `Target.closeTarget`, which runs no `beforeunload`.
 
 ## The playground's compiler
 
@@ -486,7 +494,8 @@ browserslist queries). `nsh.js` gives every import it does not know a stub that 
 when the JSON differs): `idiom`, `locale` (`navigator.languages[0]`), `languages` (`navigator.languages`, the locale
 first), `regional` (the locale's hour cycle and first day of the week from `Intl`, the rest the region's), `timeZone`
 (`Intl.DateTimeFormat().resolvedOptions().timeZone`), `lifecycle` (`background` while `document.visibilityState` is
-`hidden`, else `active` with the focus and `inactive` without), `rtl` (`<html dir>`, else the locale's script),
+`hidden` or the page is in the back / forward cache, from a `persisted` `pagehide` to a `persisted` `pageshow`, else
+`active` with the focus and `inactive` without), `rtl` (`<html dir>`, else the locale's script),
 `reduceMotion`, `fontScale` (the root font size / 16), `pixelRatio`, `safeArea` (`env(safe-area-inset-*)` read through a
 hidden probe element, clipped to the container) and `keyboard` (the container's part below `visualViewport`). The Rust
 side keeps it (`PAGE`) for the next start; the appearance and the window keep their own calls (`nsh_set_dark`,
@@ -542,7 +551,11 @@ measured against it frame by frame (`requestAnimationFrame` samplers of computed
 
 - **Animated values** (`src/animation.rs`): the graph's clock is in seconds (`Graph::tick`), so `nsh_frame` divides the
   `requestAnimationFrame` time (ms) by 1000; passing milliseconds ended every `timing` / `spring` / `decay` on its
-  first frame. Bound values are inline styles: a property bound no more (its view taken over by an element without
+  first frame. That time is the frame's, when it began, unless its callbacks run more than `FRAME_HELD_MS` (16 ms)
+  after it: a task held the frame (a press handled before the callbacks, whose code mounted a sheet and started its
+  entrance), and the frame steps at the time its callbacks run (`Player.frameTime`), never earlier than the frame
+  before. Stepped at the frame's time, an animation the task started began before it was asked for, and its first
+  drawn step was as far along as the task took. Bound values are inline styles: a property bound no more (its view taken over by an element without
   the binding) is cleared from them with the next output (`["a", view, prop, ""]`), so the view shows its own style.
 - **Without frames** (a hidden tab, and often an iframe out of view: browsers run no `requestAnimationFrame` there),
   what an animation ends still happens on time, as on macOS (`Surface::keep_deadline`). After each call into the
@@ -673,7 +686,9 @@ follows itself to check each one against restricted capabilities (`access.rs`).
 
 Relative request URLs (`fetch("/api")`, `new Request("x")`) resolve against the page's `document.baseURI` as the
 player started (`player.baseURL`), which `nsh.js` hands over once with `nsh_set_base_url`. The app's `fetch`, the
-browser's own run in the app realm, resolves them against that realm's `<base>`, which is `player.baseURL` too; a
+browser's own run in the app realm, resolves them against `player.baseURL` too: the realm's `<base>`, or where the
+page names the site's base (`baseURL`, a published app's page, which has no `<base>` for a strict `base-uri` to
+refuse) the realm's `fetch` itself (`installFetch`'s `base`); a
 `fetch` in the page's own realm (the host module's) resolves against the page's address when it runs.
 Native hosts have no base and keep rejecting relative URLs. `new URL("/x")` without a base throws,
 as in browsers. Relative `<Image>` URLs resolve against `player.baseURL` too (`asset()`), so they load after the
@@ -703,7 +718,11 @@ browsers' touches into what phones report:
   pans or pinches `none` (a `panActivation` gate along one axis leaves the other axis to the scroll views around), so
   the page neither scrolls, zooms nor refreshes under the app and presses and pans get no `pointercancel`. Touch
   scrolling is the browser's: a `pointercancel` in a scroll view starts its drag, `touchend` ends it, a scroll within
-  150 ms after it begins the glide, `scrollend` ends it (`touchScroll`, `scrolled`, `scrollEnded`).
+  150 ms after it begins the glide, `scrollend` ends it (`touchScroll`, `scrolled`, `scrollEnded`). A scroll view
+  along one axis contains only that axis's overscroll, so a swipe across it chains to the scroll view around it.
+  A touch responder that blocks native scrolling (`setResponder`: a `TouchClaim` with `block_native`, JS's
+  `onResponderGrant` returning true) keeps its touches: a non-passive `touchmove` on the root prevents the browser's
+  scroll while it holds them (`responderBlocks`), unless the browser already scrolls (`cancelable` false).
 - **Wheels and touchpads** (`wheel`) go to the innermost scroll view along their axis that can move that way (a
   vertical wheel scrolls a horizontal view when no vertical one can) and stay on it while events come within 200 ms;
   notches glide, touchpads follow the fingers; snapping views move one snap point per scroll. Nothing to scroll: the
@@ -819,6 +838,30 @@ browsers' touches into what phones report:
   itself crosses another origin needs that outer embedder's cooperation; it cannot bypass that boundary.
   `Sheet` uses a web modal root around its existing overlays, with its own animation and close lifecycle.
   The documentation player enables viewport dialogs, so the website's iframe demos use this path.
+- **Overlays over the window** (`createPlayer`'s `overlays: "viewport"`, `viewportOverlays`): the root view's anchored
+  overlays (`Popover`, menus, hints, a select's list: `elements.md` "Overlays") show over the whole window rather than
+  inside the container, which clips them (an app given a small part of a page: a 250 point composer whose topic list is
+  360 high). The core puts a root view's overlays above its own children, in the order they stack; `syncFloats`, after
+  each batch, lifts the root's children from the first overlay with an anchor on (`ViewProps::overlay_anchor`, the
+  `vp` op's `anchored`) into the top layer as manual popovers (`liftFloat`, class `.nsh-float`), the overlays shown after
+  it with it so they stay above it; overlays without an anchor before it (a `fixed` view, a popover's backdrop on touch
+  screens) stay in the container. Each stays where it is in the root, so its events, pointer coordinates (the root's:
+  `point`), focus and `inert` are as before. A lifted view the batch moved in the DOM left the top layer and is raised
+  again with those after it (the focus kept), and dialogs over the window are raised again above them. Their frames
+  are the root's coordinates; `.nsh-float` is `position: fixed` with the root's place in the window as its margins
+  (`--nsh-float-x` / `-y` on the root, `placeFloats`), so the views' own `left` / `top` and layout animations are
+  untouched. `placeFloats` also reports the window less its safe area in the root's coordinates (`nsh_overlay_area`,
+  `Core::set_overlay_area`), where the core places and flips the root's anchored overlays instead of the root's safe
+  area (`overlay_area`; it lays them out again only while one is shown), on start, on every scroll of the page
+  (a capturing `scroll` listener: any scroll view around the container moves it; the app's own scroll views, inside
+  the root, are left alone), on `resize` and the visual viewport's (the area ends above the on-screen keyboard, as
+  `keyboardHeight`), and when the root or the document's box changes size. A press on the page outside the root while overlays are lifted
+  (`pressAround`, a capturing `pointerdown` on the document) reaches the core as `nsh_press_outside` /
+  `Core::presses_beyond_root`: the overlays watching presses hear `onPressOutside` as for a press in the root outside
+  them, and the press goes on to the page. A lifted view has a blocking `wheel` listener of its own, as a dialog's
+  layer. Dialogs in the container (`dialogs` left out) are not raised above them: a page that lifts overlays lifts
+  dialogs too. Without popovers they stay in the container, with a warning. In an iframe the window is the iframe's (the
+  iframe is not lifted as for dialogs); a container the page scales with a CSS transform is not accounted for.
 - **History**: when the app is the page (`window.top === window`, or `createPlayer`'s `history` option) every page
   above a stack's first and every dialog is a history entry (`pushState`, state `{ nsh: depth }`), so the browser's
   back button and the mouse's go back in the app; entries the app takes away itself are gone back over with
@@ -838,7 +881,7 @@ browsers' touches into what phones report:
   address; where the app is the page `set_app_url` resolves a URL against the page's base (the root `onUrlScheme`
   event's `base`, kept in the cell) and refuses another origin (`resolve_on_page`, and the core again), as `browser/address.js` does for TS (which checks
   the raw string as `check_address` does before resolving, in the app's realm). `setUrl` / `set_app_url` reach the
-  root as `Command::SetAppUrl` on the web, and `setPageUrl` keeps the URL in `pageUrl` when the app is the page.
+  root as `Command::SetAppUrl` (the core sends it to every platform: iOS and macOS hand it off, `embedding.md`), and `setPageUrl` keeps the URL in `pageUrl` when the app is the page.
   `syncHistory` applies it last, with `history.replaceState(history.state, "", url)`, after pushing the entries of
   the turn's pages, so the address lands on the new top entry; while a `history.go` of its own is in flight
   (`ignoredPops`) it waits, and when the last ignored `popstate` lands the waiting address goes to the entry, or the
@@ -880,7 +923,7 @@ browsers' touches into what phones report:
   drops its own) when the turn pushed no page's entry (else the address goes on the new top entry, as a replace) and
   it is not the landed entry's address; a turn that popped pages pushes it once its `history.go` lands. A new run
   drops a push waiting (`resetHistory`). `browser/address.js` hands the options to the core as they are; the core
-  reads them (`SetUrlOptions`), and a `history` of another value is a `TypeError`. The other platforms keep the URL.
+  reads them (`SetUrlOptions`), and a `history` of another value is a `TypeError`. The other platforms keep the URL; iOS and macOS also hand it off when the app opts in.
 - **Text selection**: text is selectable when `selectable` is true (`userSelect: "text"`; `nsh-selectable`), and with the desktop idiom also
   when it is unset (`null` in the `t` item: `nsh-autoselect`, selectable under `.nsh-desktop`) unless a view around it,
   or the text itself, takes presses, touches, pans or pinches (`nsh-press`, set in `updateTouchAction`), as on a web
@@ -973,11 +1016,13 @@ scroll events postpone it, and the browser's `scrollend` cancels it.
   carry), so an app keeps its data wherever its page is and apps of one origin keep theirs apart. An app without an id
   (the demo player's, the playground's) keeps its entries under `nsh:<page directory>:<key>` (the directory of
   `document.baseURI`): apps run one after another on one such page share theirs. `nsh.js` wraps every call in try / catch (blocked
-  storage, private mode, quota) and hands failures back as messages.
+  storage, private mode, quota) and hands failures back as messages: a value the browser refuses is not kept and
+  `setItem` fails, as past NSH's own quota. What other tabs of the origin change under the app's prefix arrives as
+  `storage` events, which `nsh.js` hands to the engine (`nsh_storage_changed`), so the app reads their changes.
 - **Alerts** (`AlertDialog`, both presentations) are drawn in the root (over the whole window with `dialogs:
   "viewport"`, as dialogs are: under Input): with the `desktop` idiom as the Linux and
   macOS backends' alerts (up to three buttons in a row, the last regular one the default), otherwise as iOS's alert
-  and action sheet; their keys and focus are under Input. Only clicks pressed inside the dialog count: a tap's
+  and action sheet, an alert's `input` an `<input>` above its buttons; their keys and focus are under Input. Only clicks pressed inside the dialog count: a tap's
   compatibility click, which lands after the press that opened it, must not dismiss it.
 - **Offscreen canvases** (`renderCanvas`, `docs/dev/canvas.md`): a size over the browser's canvas limit (iOS WebKit's
   is 16777216 pixels in all; the probe of `offscreenCanvas` finds any browser's) answers `CANVAS_IMAGE.TOO_LARGE`,

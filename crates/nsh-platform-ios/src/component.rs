@@ -16,8 +16,8 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 use nsh_core::{
     EventKind, EventPayload, JsonValue, NodeId, Points, Size,
     platform::{
-        MENU_BUTTON_COMPONENT, SEGMENTED_CONTROL_COMPONENT, TAB_BAR_COMPONENT,
-        is_reserved_component,
+        CONTEXT_MENU_COMPONENT, DATE_TIME_PICKER_COMPONENT, MENU_BUTTON_COMPONENT,
+        SEGMENTED_CONTROL_COMPONENT, SWITCH_COMPONENT, TAB_BAR_COMPONENT, is_reserved_component,
     },
 };
 use nsh_engine::EngineControl;
@@ -129,7 +129,16 @@ impl Default for Components {
             SEGMENTED_CONTROL_COMPONENT,
             crate::system_segmented_control::factory(),
         );
+        components.insert(SWITCH_COMPONENT, crate::system_switch::factory());
+        components.insert(
+            DATE_TIME_PICKER_COMPONENT,
+            crate::system_date_time_picker::factory(),
+        );
         components.insert(MENU_BUTTON_COMPONENT, crate::system_menu_button::factory());
+        components.insert(
+            CONTEXT_MENU_COMPONENT,
+            crate::system_context_menu::factory(),
+        );
         components
     }
 }

@@ -161,6 +161,8 @@ pub(crate) struct ViewState {
     pub(crate) shift: (f32, f32),
     /// Extra opacity (screen and modal transitions).
     pub(crate) fade: f32,
+    /// A modal retained only for its exit animation, outside keyboard navigation.
+    pub(crate) modal_exiting: bool,
     /// Scroll state (scroll views). Boxed, as the image, canvas and
     /// shader states: few views have one, and every view's state is
     /// allocated with its AppKit view.
@@ -194,6 +196,7 @@ pub(crate) struct ViewState {
 impl ViewState {
     pub(crate) fn new(id: NodeId, kind: ViewKind) -> Self {
         ViewState {
+            modal_exiting: false,
             id,
             kind,
             frame: Bounds::default(),
@@ -429,6 +432,10 @@ pub(crate) struct Ivars {
     /// `drawLayer:inContext:` returned while `state` was borrowed, leaving
     /// Core Animation's cleared region unpainted.
     dropped_draw: Cell<bool>,
+    /// Its content layer shows a text painted off the main thread
+    /// ([`crate::text::show_raster`]), not a backing store of Core
+    /// Animation's, which a partial redraw would start empty.
+    rastered: Cell<bool>,
     /// Deferred drawing and placement marks in this subtree, including
     /// this view. Only their transforms can reveal deferred work.
     waiting: Cell<usize>,
@@ -461,6 +468,9 @@ define_class!(
                 view.ivars().dropped_draw.set(true);
                 return;
             };
+            // Core Animation's own backing store takes the layer's whole
+            // picture (redraws of a part wait until it holds it).
+            view.ivars().rastered.set(false);
             let c = Some(cx);
             CGContext::save_g_state(c);
             // The layer's space, in points, is the context's base space:
@@ -486,22 +496,27 @@ define_class!(
                 Some(_) => crate::canvas::LayerPart::Prefix,
                 None => crate::canvas::LayerPart::Whole { asynchronous },
             };
+            let frame = layer.frame();
+            // `desired_content_bounds` keeps text layers at a zero origin, so
+            // only cropped canvas layers shift into the view's space.
             if part == crate::canvas::LayerPart::Suffix {
-                let origin = layer.frame().origin;
-                CGContext::translate_ctm(c, -origin.x, -origin.y);
+                CGContext::translate_ctm(c, -frame.origin.x, -frame.origin.y);
             } else {
                 crate::text::draw(cx, &state, layer.bounds().size);
+                if state.text.is_none() && (frame.origin.x != 0.0 || frame.origin.y != 0.0) {
+                    CGContext::translate_ctm(c, -frame.origin.x, -frame.origin.y);
+                }
             }
             // What Core Animation redraws (all of it, or a canvas's part
             // that animated values changed), top down.
             let dirty = CGContext::clip_bounding_box(c);
-            let (size, scale) = (layer.bounds().size, layer.contentsScale());
+            let scale = layer.contentsScale();
             if crate::fps::measuring() && state.canvas.is_some() {
                 let start = std::time::Instant::now();
-                crate::canvas::draw(cx, &state, dirty, size, scale, base, part);
+                crate::canvas::draw(cx, &state, dirty, frame, scale, base, part);
                 crate::fps::drew_canvas(start.elapsed());
             } else {
-                crate::canvas::draw(cx, &state, dirty, size, scale, base, part);
+                crate::canvas::draw(cx, &state, dirty, frame, scale, base, part);
             }
             CGContext::restore_g_state(c);
             // Where the next paint happens (`canvas.rs`): Core Animation's
@@ -1265,6 +1280,15 @@ define_class!(
         #[unsafe(method(viewDidMoveToWindow))]
         fn view_did_move_to_window(&self) {
             crate::sight::moved();
+            // Out of its window: AppKit tells every view under a removed
+            // one, a whole page's thousands when it is replaced. Nothing
+            // below matters off screen (geometry and density are set again
+            // when it is attached, which tells it again), and each view's
+            // walk of its ancestors cost milliseconds per page removed. A
+            // surface's root still hears it.
+            if self.window().is_none() && self.ivars().surface.borrow().strong_count() == 0 {
+                return;
+            }
             NshView(self.retain()).set_layer_geometry();
             NshView(self.retain()).rescale();
             if self.ivars().window.borrow().strong_count() > 0 {
@@ -1740,6 +1764,7 @@ impl NshView {
             // Not known until a first scan.
             foreign: Cell::new(true),
             dropped_draw: Cell::new(false),
+            rastered: Cell::new(false),
             waiting: Cell::new(0),
             sharpened: Cell::new(0.0),
         });
@@ -1995,17 +2020,57 @@ impl NshView {
         }
     }
 
+    /// Desired frame of its `content` layer in the view's space, or `None`
+    /// when nothing visible is painted (avoiding empty backing stores).
+    fn desired_content_bounds(&self) -> Option<CGRect> {
+        let size = self.ns().frame().size;
+        if size.width <= 0.0 || size.height <= 0.0 {
+            return None;
+        }
+        let state = self.state();
+        if !state.draws() {
+            return None;
+        }
+        if state.text.is_some() {
+            return Some(CGRect::new(CGPoint::new(0.0, 0.0), size));
+        }
+        state.canvas.as_ref()?.content_bounds(size)
+    }
+
+    /// Removes any retained content and overlay layers so Core Animation
+    /// releases their backing stores immediately.
+    fn clear_content_layers(&self) {
+        if let Some((layer, _)) = self.ivars().content.borrow_mut().take() {
+            layer.removeFromSuperlayer();
+        }
+        if let Some((layer, _)) = self.ivars().overlay.borrow_mut().take() {
+            layer.removeFromSuperlayer();
+        }
+        self.ivars().rastered.set(false);
+        self.clear_canvas_painted();
+    }
+
     /// Draws its content (text, canvas) again, if it draws any.
     pub(crate) fn redraw(&self) {
-        // A view that stopped drawing clears what it drew.
-        if !self.state().draws() && self.ivars().content.borrow().is_none() {
+        let Some((layer, _)) = self.content_layer() else {
+            return;
+        };
+        if self.show_raster(&layer) {
             return;
         }
-        if let Some(layer) = self.content_layer() {
-            self.update_canvas_overlay();
-            self.clear_canvas_painted();
-            layer.setNeedsDisplay();
+        self.update_canvas_overlay();
+        self.clear_canvas_painted();
+        layer.setNeedsDisplay();
+    }
+
+    /// Shows the picture of its text the engine thread painted, if it has
+    /// one that fits `layer` ([`crate::text::show_raster`]); whether it did.
+    fn show_raster(&self, layer: &CALayer) -> bool {
+        let shown = crate::text::show_raster(self, layer);
+        if shown {
+            self.ivars().rastered.set(true);
         }
+        shown
     }
 
     /// Forgets what its canvas's content layer painted when the whole layer
@@ -2029,12 +2094,12 @@ impl NshView {
     pub(crate) fn canvas_painted(&self) -> Option<crate::canvas::Painted> {
         let content = self.ivars().content.borrow();
         let (layer, _) = content.as_ref()?;
-        let size = layer.bounds().size;
-        if size.width <= 0.0 || size.height <= 0.0 {
+        let frame = layer.frame();
+        if frame.size.width <= 0.0 || frame.size.height <= 0.0 {
             return None;
         }
         Some(crate::canvas::Painted {
-            size,
+            frame,
             scale: layer.contentsScale(),
             prefix_only: self.ivars().overlay.borrow().is_some(),
         })
@@ -2086,10 +2151,24 @@ impl NshView {
         changed
     }
 
-    /// The layer its content is drawn in (made on first use).
-    fn content_layer(&self) -> Option<Retained<CALayer>> {
+    /// The layer its content is drawn in (made on first use, sized to what it
+    /// draws, or cleared when nothing visible is painted) and whether its
+    /// frame changed or was just created.
+    fn content_layer(&self) -> Option<(Retained<CALayer>, bool)> {
+        let Some(bounds) = self.desired_content_bounds() else {
+            self.clear_content_layers();
+            return None;
+        };
         if let Some((layer, _)) = &*self.ivars().content.borrow() {
-            return Some(layer.clone());
+            let frame_changed = layer.frame() != bounds;
+            if frame_changed {
+                let resized = layer.bounds().size != bounds.size;
+                layer.setFrame(bounds);
+                if resized {
+                    layer.setContentsScale(self.content_scale(bounds.size));
+                }
+            }
+            return Some((layer.clone(), frame_changed));
         }
         let host = self.ns().layer()?;
         let mtm = MainThreadMarker::from(&*self.0);
@@ -2118,15 +2197,14 @@ impl NshView {
         // The same density a sharpening walk would give it, capped by its
         // size: views that mount while an ancestor is scaled (cards while
         // a canvas zooms) may have missed the walk.
-        layer.setContentsScale(self.content_scale(self.ns().frame().size));
+        layer.setContentsScale(self.content_scale(bounds.size));
         // Above the decoration behind it (fills, gradients, inset
         // shadows), below the children and the borders in front.
         layer.setZPosition(crate::decor::BEHIND / 2.0);
-        let size = self.ns().frame().size;
-        layer.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), size));
+        layer.setFrame(bounds);
         host.addSublayer(&layer);
         *self.ivars().content.borrow_mut() = Some((layer.clone(), drawer));
-        Some(layer)
+        Some((layer, true))
     }
 
     /// Its content layer got a new size: drawn again when it can be seen.
@@ -2219,6 +2297,11 @@ impl NshView {
     /// Its window, screen or content size changed: the content layers
     /// draw at the new density.
     fn rescale(&self) {
+        // Most views draw no content of their own: their ancestors' scale
+        // (a walk to the root, for each view a page attaches) is not needed.
+        if self.ivars().content.borrow().is_none() && self.ivars().overlay.borrow().is_none() {
+            return;
+        }
         let zoom = raster_zoom(self.inherited_scale() * self.layer_scale());
         self.draw_zoomed(self.backing_scale(), zoom);
     }
@@ -2244,32 +2327,84 @@ impl NshView {
         }
     }
 
+    /// Whether `rect` (in the view's space) lies inside an existing unpartitioned
+    /// content layer that holds Core Animation's own backing store.
+    fn rect_fits_content(
+        &self,
+        rect: nsh_core::Bounds<nsh_core::Points>,
+    ) -> Option<Retained<CALayer>> {
+        if self.ivars().overlay.borrow().is_some()
+            || self.ivars().rastered.get()
+            || self
+                .state()
+                .canvas
+                .as_ref()
+                .is_some_and(|c| c.has_layer_split())
+        {
+            return None;
+        }
+        let content = self.ivars().content.borrow();
+        let (layer, _) = content.as_ref()?;
+        let frame = layer.frame();
+        let (rx0, ry0) = (rect.origin.x.0 as CGFloat, rect.origin.y.0 as CGFloat);
+        let (rx1, ry1) = (
+            rx0 + rect.size.width.0 as CGFloat,
+            ry0 + rect.size.height.0 as CGFloat,
+        );
+        (frame.size.width > 0.0
+            && frame.size.height > 0.0
+            && rx0 >= frame.origin.x
+            && ry0 >= frame.origin.y
+            && rx1 <= frame.origin.x + frame.size.width
+            && ry1 <= frame.origin.y + frame.size.height)
+            .then(|| layer.clone())
+    }
+
     /// Part of what it draws changed (`rect`, in its own coordinates, y
     /// down): only that is drawn again (a canvas's animated values, a
     /// text's recolored lines).
     pub(crate) fn redraw_rect(&self, rect: nsh_core::Bounds<nsh_core::Points>) {
         crate::shader::ui_changed(self);
-        let fresh = self.ivars().content.borrow().is_none();
-        let Some(layer) = self.content_layer() else {
-            return;
+        // When `before ∪ after` from `set_args` stays within the current tile
+        // frame, skip rescanning all ops in `content_bounds` and keep the
+        // existing backing store.
+        let layer = if let Some(layer) = self.rect_fits_content(rect) {
+            layer
+        } else {
+            let Some((layer, frame_changed)) = self.content_layer() else {
+                return;
+            };
+            if self.show_raster(&layer) {
+                return;
+            }
+            let changed = self.update_canvas_overlay();
+            // A picture painted off the main thread is not Core Animation's
+            // backing store: a part redrawn would start from an empty one.
+            if frame_changed || changed || self.ivars().rastered.get() {
+                self.clear_canvas_painted();
+                layer.setNeedsDisplay();
+            }
+            if frame_changed
+                || self.ivars().overlay.borrow().is_some()
+                || changed
+                || self.ivars().rastered.get()
+            {
+                return;
+            }
+            layer
         };
-        let changed = self.update_canvas_overlay();
-        if fresh || changed {
-            self.clear_canvas_painted();
-            layer.setNeedsDisplay();
-        }
-        if fresh || self.ivars().overlay.borrow().is_some() || changed {
-            return;
-        }
+        let origin = layer.frame().origin;
+        let local_x = rect.origin.x.0 as CGFloat - origin.x;
+        let local_y = rect.origin.y.0 as CGFloat - origin.y;
         // Layer space is y up unless its contents are flipped
         // (`drawLayer:inContext:` flips the drawing the same way).
         let y = if layer.contentsAreFlipped() {
-            rect.origin.y.0 as CGFloat
+            local_y
         } else {
-            layer.bounds().size.height - (rect.origin.y.0 + rect.size.height.0) as CGFloat
+            layer.bounds().size.height - (local_y + rect.size.height.0 as CGFloat)
         };
         layer.setNeedsDisplayInRect(CGRect::new(
-            CGPoint::new(rect.origin.x.0 as CGFloat, y),
+            CGPoint::new(local_x, y),
             CGSize::new(rect.size.width.0 as CGFloat, rect.size.height.0 as CGFloat),
         ));
     }
@@ -2333,6 +2468,7 @@ impl NshView {
             let s = self.state();
             s.id == ROOT_ID && self.ivars().surface.borrow().strong_count() > 0
         };
+        let old_size = self.ns().frame().size;
         if !root && self.ns().frame() != rect {
             self.ns().setFrame(rect);
             crate::sight::moved();
@@ -2342,29 +2478,43 @@ impl NshView {
             if self.kind() == ViewKind::Input {
                 crate::text_input::resized(self);
             }
-            let resized = self
-                .ivars()
-                .content
-                .borrow()
-                .as_ref()
-                .is_some_and(|(layer, _)| {
-                    let resized = layer.bounds().size != rect.size;
-                    layer.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), rect.size));
-                    resized
-                });
-            // A text's box changes with its own `MountItem::Text`, which
-            // says whether it draws again, unless its picture was cut.
-            let keeps = self.state().text.as_ref().is_some_and(|t| !t.cut.get());
-            if resized && !keeps {
-                self.content_resized();
-            }
-            if resized {
-                // The 4096 pixel bound is per side: a layer that grew may
-                // need a lower density (and one that shrank, a higher).
-                self.rescale();
+            if old_size != rect.size {
+                self.resize_content_layers();
             }
         }
         self.set_layer_geometry();
+    }
+
+    /// Updates its content layers when the view's box changed size.
+    fn resize_content_layers(&self) {
+        let Some(bounds) = self.desired_content_bounds() else {
+            self.clear_content_layers();
+            return;
+        };
+        let resized = match &*self.ivars().content.borrow() {
+            Some((layer, _)) => {
+                let changed = layer.frame() != bounds;
+                if changed {
+                    layer.setFrame(bounds);
+                }
+                changed
+            }
+            // A canvas whose drawing was omitted while the view had zero size
+            // needs to draw once it gets a non-zero box.
+            None => true,
+        };
+        if !resized {
+            return;
+        }
+        // A text's box changes with its own `MountItem::Text`, which says
+        // whether it draws again, unless its picture was cut.
+        let keeps = self.state().text.as_ref().is_some_and(|t| !t.cut.get());
+        if !keeps {
+            self.content_resized();
+        }
+        // The 4096 pixel bound is per side: a layer that grew may need a lower
+        // density (and one that shrank, a higher).
+        self.rescale();
     }
 
     /// Sets the layer's anchor, position, transform, opacity and
@@ -2670,7 +2820,7 @@ impl NshView {
         }
         let mut at = Some(self.clone());
         while let Some(view) = at {
-            if view.state().style.hidden {
+            if view.state().style.hidden || view.state().modal_exiting {
                 return false;
             }
             at = view.parent_view();

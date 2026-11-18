@@ -61,7 +61,7 @@ const components: DemoEntry[] = [
   { name: "Collapsible", detail: "Storage and advanced settings under their summaries", icon: "collapsible", screen: lazy(() => import("./demos/Controls").then((m) => m.CollapsibleDemo)) },
   { name: "ColorPicker", detail: "An area, sliders of RGB, HSL, HSB or OKLCH, a field and swatches", icon: "styles", screen: lazy(() => import("./demos/ColorPickerDemo").then((m) => m.ColorPickerDemo)) },
   { name: "Combobox", detail: "Topics picked several at once with search, a reviewer picked alone", icon: "select", screen: lazy(() => import("./demos/Controls").then((m) => m.ComboboxDemo)) },
-  { name: "Command", detail: "A Cmd+K palette in a dialog, an inline menu, 5 000 files that filter at every keystroke, a search the server answers", icon: "search", screen: lazy(() => import("./demos/CommandDemo").then((m) => m.CommandDemo)) },
+  { name: "Command", detail: `A ${keymap.label("mod+k")} palette in a dialog, an inline menu, 5 000 files that filter at every keystroke, a search the server answers`, icon: "search", screen: lazy(() => import("./demos/CommandDemo").then((m) => m.CommandDemo)) },
   { name: "DataTable", detail: "A million stocks of sixty columns, their quotes ticking every 33 ms, fixed columns, sorting, selection, resized and moved columns", icon: "table", screen: lazy(() => import("./demos/DataTableDemo").then((m) => m.DataTableDemo)) },
   { name: "DatePicker", detail: "A due date on weekdays, a trip's range with presets, a meeting's day and time", icon: "select", screen: lazy(() => import("./demos/Controls").then((m) => m.DatePickerDemo)) },
   { name: "DiffView", detail: "Two texts side by side or unified, changes navigated, reverted and kept, a patch", icon: "diff", screen: lazy(() => import("./demos/DiffDemo").then((m) => m.DiffDemo)) },
@@ -85,6 +85,7 @@ const components: DemoEntry[] = [
   { name: "Select", detail: "A sort order, fonts in sections with search, a disabled language", icon: "select", screen: lazy(() => import("./demos/Controls").then((m) => m.SelectDemo)) },
   { name: "Sheet", detail: "A panel at an edge, over a backdrop; a swipe, the backdrop, Escape or back closes it", icon: "sheet", screen: lazy(() => import("./demos/Overlays").then((m) => m.SheetDemo)) },
   { name: "Slider", detail: "A level and a price range the app owns", icon: "sliders", screen: lazy(() => import("./demos/Controls").then((m) => m.SliderDemo)) },
+  { name: "SplitView", detail: "Mailboxes, messages and a message in columns: a sidebar that hides, one column at a time on a phone, each column's pages kept", icon: "sidebar", fill: true, screen: lazy(() => import("./demos/SplitViewDemo").then((m) => m.SplitViewDemo)) },
   { name: "Switch", detail: "Settings that take effect at once, one that needs another on", icon: "switch", screen: lazy(() => import("./demos/Controls").then((m) => m.SwitchDemo)) },
   { name: "Tabs", detail: "A section switcher, a disabled tab", icon: "tabs", screen: lazy(() => import("./demos/Controls").then((m) => m.TabsDemo)) },
   { name: "Terminal", detail: "A shell's colors, a progress bar redrawn in place, the keys typed sent back", icon: "terminal", screen: lazy(() => import("./demos/TerminalDemo").then((m) => m.TerminalDemo)) },
@@ -100,7 +101,7 @@ const components: DemoEntry[] = [
 const purposes: [string, string[]][] = [
   ["Actions", ["Button", "Link", "Toggle", "Toolbar", "Command"]],
   ["Inputs", ["Input", "NumberInput", "OtpInput", "Checkbox", "Radio", "Switch", "Slider", "Select", "Combobox", "DatePicker", "ColorPicker", "EmojiPicker"]],
-  ["Navigation", ["NavStack", "Tabs", "Pagination", "Accordion", "Collapsible", "Carousel", "Tree"]],
+  ["Navigation", ["NavStack", "SplitView", "Tabs", "Pagination", "Accordion", "Collapsible", "Carousel", "Tree"]],
   ["Overlays", ["Popover", "HoverCard", "Menu", "Tooltip", "Sheet", "Toast"]],
   ["Data", ["Avatar", "Progress", "DataTable", "Plot", "DiffView"]],
   ["Documents and workspaces", ["TextView", "Editor", "RichEditor", "Terminal", "Dock", "Resizable"]],
@@ -267,6 +268,17 @@ function Phone() {
             return <Home />;
           case "demo": {
             const Demo = route.demo.screen;
+            // A demo of its own pages (`fill`) takes the whole page: they show
+            // their headers and the way back.
+            if (route.demo.fill) {
+              return (
+                <NavPage title={route.demo.name} headerVisible={false}>
+                  <View style={{ flex: 1, backgroundColor: colors.background }}>
+                    <Demo />
+                  </View>
+                </NavPage>
+              );
+            }
             return (
               <NavPage title={route.demo.name} {...header} header={<PageHeader title={route.demo.name} />}>
                 <View style={{ flex: 1, backgroundColor: colors.background }}>

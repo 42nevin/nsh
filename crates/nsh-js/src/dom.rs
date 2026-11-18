@@ -485,7 +485,7 @@ pub(crate) const NODE_METHODS: &[(&str, c_int, &str, &str)] = &[
         1,
         decl!("(transition?: LayoutAnimationAnimation): void"),
         decl!(
-            "Animates the frames this view's change moves in this turn, with `transition` (a phase of `LayoutAnimation.configureNext`: `type`, `duration`, `delay`, `springDamping`, `bezier`; easing in and out over 300 ms without one): its own frame and its subtree's, its siblings' and its ancestors' siblings' that it pushes, and the content of those that it resizes. The rest of the turn (a list that updates, live data) changes at once, as it would without it, and a view that gains or loses children does not carry the change into them. Insertions and removals are not animated. A `LayoutAnimation.configureNext` in the same turn animates every frame instead. E.g. a header that collapses over a list that keeps updating."
+            "Animates the frames this view's change moves in this turn, with `transition` (a phase of `LayoutAnimation.configureNext`: `type`, `duration`, `delay`, `springDamping`, a physical spring's `stiffness` / `damping` / `mass`, `bezier`; easing in and out over 300 ms without one): its own frame and its subtree's, its siblings' and its ancestors' siblings' that it pushes, and the content of those that it resizes. The rest of the turn (a list that updates, live data) changes at once, as it would without it, and a view that gains or loses children does not carry the change into them. Insertions and removals are not animated. A `LayoutAnimation.configureNext` in the same turn animates every frame instead. E.g. a header that collapses over a list that keeps updating."
         ),
     ),
     (
@@ -3892,6 +3892,17 @@ unsafe extern "C" fn each_component(
         }
         r
     }
+}
+
+/// The owner node `id` was made under, if it is still live: what is
+/// rendered into the node later sees that owner's context.
+pub(crate) fn owner_of_node(cx: *mut JsContext, id: NodeId) -> u32 {
+    let p = dom(cx).by_id(id);
+    if p.is_null() {
+        return reactive::NONE_OWNER;
+    }
+    // SAFETY: live node data.
+    reactive::live_owner(cx, unsafe { (*p).owner })
 }
 
 /// Hands the pending exception of a listener of node `id` to the error

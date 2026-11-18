@@ -20,7 +20,11 @@
 // instance of its own), `assetBase` (where `asset:/<path>` is served) or
 // `assets` (a map from `<path>` to its URL, as `nsh package --target web`
 // writes it; relative URLs, these and the others, resolve against the
-// page's `document.baseURI` as the player is made: `player.baseURL`),
+// page's `document.baseURI` as the player is made, or `baseURL`:
+// `player.baseURL`), `baseURL` (the site's base, which the app's relative
+// URLs and addresses resolve against instead of the page's: a page served
+// at its app's routes names it so, as a strict `base-uri` refuses a
+// `<base href>`),
 // `readAsset(uri)` (the bytes of an asset the engine needs at
 // once, a font: a `Uint8Array` or null), `data` (the URLs of the files the
 // runtime fetches when it first needs them, by name, as `nsh package
@@ -57,6 +61,8 @@ const FOCUSED = 4;
  * modality as it is (`inputWith`). */
 const MODALITY_KEYS_SKIPPED = new Set(["Shift", "Control", "Alt", "AltGraph", "Meta", "CapsLock", "Fn", "Hyper", "Super", "OS"]);
 const PRESS_EVENTS = ["onPress", "onLongPress", "onPressIn", "onPressOut"];
+/** The press listeners other than `onLongPress`, which alone leaves the taps to the views around. */
+const TAP_EVENTS = ["onPress", "onPressIn", "onPressOut"];
 const MOUSE_EVENTS = ["onMouseEnter", "onMouseLeave", "onMouseMove"];
 /** The DOM's `buttons` bits, in the order a held button is named by. */
 const MOUSE_BUTTONS = [[1, "left"], [2, "right"], [4, "middle"], [8, "back"], [16, "forward"]];
@@ -79,6 +85,14 @@ const ARIA_ROLES = {
   none: null, header: "heading", image: "img", imagebutton: "button", keyboardkey: "button", adjustable: "slider",
   search: "searchbox", text: null, summary: "status", togglebutton: "button", dropdownlist: "combobox",
 };
+
+/** Reconcile accessibility props with the element's current attributes. */
+function setAriaAttribute(el, name, value) {
+  const next = value == null || value === false ? null : String(value);
+  if (el.getAttribute(name) === next) return;
+  if (next === null) el.removeAttribute(name);
+  else el.setAttribute(name, next);
+}
 
 /**
  * The HTML element a view or text is drawn as, from what its props say it
@@ -128,6 +142,10 @@ const VELOCITY_WINDOW = 100;
  * when no animation frame did (`keepDeadline`, `moveScreens`, ...): more
  * than a frame, so that while the page shows its frames always come first. */
 const LATE_MS = 50;
+/** How long after its time a frame's `requestAnimationFrame` callbacks may
+ * run and still step the native animations at that time (`frameTime`):
+ * later than that, a task held the frame. */
+const FRAME_HELD_MS = 16;
 /** How long a dialog waits for the two frames before it comes in
  * (`present`): far more than two frames, so it only waits that long while
  * frames stop (a hidden tab). */
@@ -147,6 +165,9 @@ class CanvasTooLarge extends Error {}
 function tooLarge(width, height) {
   return `this browser cannot make a ${width} × ${height} pixel canvas (${width * height} pixels): it is over the browser's canvas size limit`;
 }
+
+/** A listener that does nothing: a blocking `wheel` listener's presence. */
+const noop = () => {};
 
 /** Whether `src` is on the page's origin. */
 function sameOrigin(src) {
@@ -222,6 +243,8 @@ const KEYFRAMES = `
    are set, so those are only for browsers without them (Firefox). */
 .nsh-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
 .nsh-scroll::-webkit-scrollbar-track, .nsh-scroll::-webkit-scrollbar-corner { background: transparent; }
+.nsh-scroll::-webkit-scrollbar-track:vertical { margin: var(--nsh-bar-t, 0) 0 var(--nsh-bar-b, 0); }
+.nsh-scroll::-webkit-scrollbar-track:horizontal { margin: 0 var(--nsh-bar-r, 0) 0 var(--nsh-bar-l, 0); }
 .nsh-scroll::-webkit-scrollbar-thumb { border-radius: 3px; background: rgba(128,128,128,.45); }
 @supports not selector(::-webkit-scrollbar) {
   .nsh-scroll { scrollbar-width: thin; scrollbar-color: rgba(128,128,128,.45) transparent; }
@@ -292,8 +315,11 @@ img.nsh-fill { pointer-events: none; }
 .nsh-fit-none { object-fit: none; }
 .nsh-spacer { position: absolute; left: 0; top: 0; width: 1px; height: 1px; pointer-events: none; visibility: hidden; }
 /* Over the style's \`overflow: clip\`. */
-.nsh-scroll.nsh-ox.nsh-ox { overflow-x: auto; overflow-y: hidden; }
-.nsh-scroll.nsh-oy.nsh-oy { overflow-x: hidden; overflow-y: auto; }
+/* A one-axis scroll view keeps only its own axis's overscroll: a swipe
+   across it (vertical over a horizontal one, as over an editor's text
+   inside its vertical scroll) scrolls the scroll view around it. */
+.nsh-scroll.nsh-ox.nsh-ox { overflow-x: auto; overflow-y: hidden; overscroll-behavior-y: auto; }
+.nsh-scroll.nsh-oy.nsh-oy { overflow-x: hidden; overflow-y: auto; overscroll-behavior-x: auto; }
 .nsh-scroll.nsh-oxy.nsh-oxy { overflow: auto; }
 .nsh-scroll.nsh-onone.nsh-onone { overflow: hidden; }
 .nsh-scroll.nsh-zoom.nsh-zoom { touch-action: none; }
@@ -337,6 +363,12 @@ img.nsh-fill { pointer-events: none; }
    backdrop below and the views' own classes override it. */
 .nsh-root > .nsh-viewport { position: fixed; inset: 0; width: auto; height: auto; margin: 0; }
 .nsh-viewport { touch-action: none; border: 0; padding: 0; overflow: visible; color: inherit; background-color: transparent; }
+/* Anchored overlays over the window (overlays: "viewport", syncFloats) are popovers in the top layer too, at their
+   frames in the root moved by where the root is in the window (--nsh-float-x / -y, placeFloats). The second rule
+   undoes the popover's own box where the view's classes say nothing. */
+.nsh-root > .nsh-float { position: fixed; inset: auto; margin: var(--nsh-float-y, 0px) 0 0 var(--nsh-float-x, 0px);
+  touch-action: none; }
+:where(.nsh-float) { border: 0; padding: 0; overflow: visible; color: inherit; background-color: transparent; }
 .nsh-dialog-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.35); display: flex;
   align-items: center; justify-content: center; z-index: 1000; }
 .nsh-dialog { width: 270px; border-radius: 14px; background: rgba(245,245,245,.97); color: #000; text-align: center;
@@ -344,7 +376,7 @@ img.nsh-fill { pointer-events: none; }
 .nsh-dialog h3 { font-size: 17px; font-weight: 600; margin: 18px 16px 4px; }
 .nsh-dialog p { margin: 0 16px 18px; }
 .nsh-dialog button { display: block; width: 100%; border: 0; border-top: 0.5px solid rgba(0,0,0,.2); background: none;
-  font: 17px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #007aff; padding: 11px; cursor: pointer; }
+  font: 17px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #007aff; padding: 11px; cursor: default; }
 /* Dialogs on desktop browsers: the in-surface cards of the Linux and macOS backends. */
 .nsh-desktop .nsh-dialog-backdrop { background: rgba(0,0,0,.4); }
 .nsh-desktop .nsh-dialog { width: min(340px, calc(100% - 64px)); border-radius: 12px; padding: 20px; text-align: left;
@@ -376,6 +408,16 @@ img.nsh-fill { pointer-events: none; }
 .nsh-dialog button.cancel { font-weight: 600; }
 .nsh-desktop .nsh-dialog button.cancel { font-weight: 500; }
 .nsh-dialog button.destructive { color: #ff3b30; }
+.nsh-dialog button:disabled { opacity: .4; }
+.nsh-dialog-input { display: block; box-sizing: border-box; width: calc(100% - 32px); margin: 0 16px 16px; padding: 6px 8px;
+  border: 0.5px solid rgba(0,0,0,.25); border-radius: 7px; background: #fff; color: inherit; outline: none;
+  font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+.nsh-dialog h3 + .nsh-dialog-input { margin-top: 14px; }
+.nsh-desktop .nsh-dialog-input { width: 100%; margin: 12px 0 0; padding: 7px 10px; border: 1px solid #e5e5e5;
+  border-radius: 8px; font-size: 14px; }
+.nsh-desktop .nsh-dialog-input:focus { border-color: #a3a3a3; }
+.nsh-dark .nsh-dialog-input { background: rgba(28,28,30,.9); border-color: rgba(255,255,255,.2); }
+.nsh-desktop.nsh-dark .nsh-dialog-input { background: #0a0a0a; border-color: #262626; }
 .nsh-dark .nsh-dialog { background: rgba(44,44,46,.97); color: #fff; }
 .nsh-dark .nsh-dialog button { border-top-color: rgba(255,255,255,.15); color: #0a84ff; }
 .nsh-dark .nsh-dialog button.destructive { color: #ff453a; }
@@ -387,7 +429,7 @@ img.nsh-fill { pointer-events: none; }
 .nsh-sheet > div { border-radius: 14px; background: rgba(245,245,245,.97); color: #000; overflow: hidden; text-align: center; }
 .nsh-sheet .nsh-sheet-head { padding: 12px 16px; color: #8a8a8e; border-bottom: 0.5px solid rgba(0,0,0,.2); }
 .nsh-sheet .nsh-sheet-head b { display: block; font-weight: 600; }
-.nsh-sheet button { display: block; width: 100%; border: 0; background: none; padding: 16px; cursor: pointer;
+.nsh-sheet button { display: block; width: 100%; border: 0; background: none; padding: 16px; cursor: default;
   font: 19px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #007aff; }
 .nsh-sheet button + button { border-top: 0.5px solid rgba(0,0,0,.2); }
 .nsh-sheet button.cancel { font-weight: 600; }
@@ -437,7 +479,7 @@ img.nsh-fill { pointer-events: none; }
   border-left: 3px solid #ff6b6b; border-radius: 10px; white-space: pre-wrap; -webkit-user-select: text; user-select: text; }
 .nsh-error-copy { float: right; position: sticky; top: 0; margin: 0 0 6px 10px; border: 0; border-radius: 6px;
   background: rgba(255,255,255,.12); color: #fff; font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  padding: 4px 12px; cursor: pointer; }
+  padding: 4px 12px; cursor: default; }
 .nsh-error-copy:hover { background: rgba(255,255,255,.2); }
 `;
 
@@ -479,6 +521,18 @@ function localOffset(ms) {
   return 0 - new Date(ms).getTimezoneOffset() * 60;
 }
 
+/**
+ * Whether the page can show the browser's share sheet: it has
+ * `navigator.share` and the page's permissions policy allows `web-share`
+ * (a frame of another origin needs `allow="web-share"`).
+ */
+function webShareAllowed() {
+  if (typeof navigator === "undefined" || typeof navigator.share !== "function") return false;
+  const doc = typeof document === "undefined" ? undefined : document;
+  const policy = doc?.permissionsPolicy ?? doc?.featurePolicy;
+  return typeof policy?.allowsFeature === "function" ? policy.allowsFeature("web-share") : true;
+}
+
 /** The browser's time zone (`Asia/Shanghai`), Intl's default; "" when unknown. */
 function timeZoneName() {
   return new Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
@@ -502,6 +556,39 @@ function regional(locale) {
     // A tag the browser does not take: the region's.
   }
   return known;
+}
+
+/** The characters of `text` as `maxLength` counts them: Unicode code
+ * points (an emoji is one, though a JS string holds two units for it). */
+function charLength(text) {
+  let n = 0;
+  for (const _ of text) n++;
+  return n;
+}
+
+let graphemes;
+
+/** The longest prefix of `text` of at most `max` characters
+ * ({@link charLength}) that ends between user-perceived characters, as the
+ * core's `clip_chars` cuts: a letter with its accent or an emoji with its
+ * skin tone goes in whole or not at all. */
+function clipChars(text, max) {
+  if (max <= 0) return "";
+  if (text.length <= max || charLength(text) <= max) return text;
+  graphemes ??= typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+    : null;
+  // Without `Intl.Segmenter`, between code points.
+  const parts = graphemes ? graphemes.segment(text) : text;
+  let used = 0;
+  let end = 0;
+  for (const part of parts) {
+    const segment = typeof part === "string" ? part : part.segment;
+    used += charLength(segment);
+    if (used > max) break;
+    end += segment.length;
+  }
+  return text.slice(0, end);
 }
 
 /**
@@ -537,19 +624,37 @@ const decoder = new TextDecoder();
  */
 const CLASSES = { sheets: {}, rules: new Map(), texts: new Map() };
 
+/** A style sheet of the runtime's own, after the page's and the earlier
+ * ones, holding `text`: a constructed sheet the document adopts, which a
+ * strict `style-src` allows (it refuses `<style>` elements), or in a
+ * browser without them a `<style>` element (`id`). */
+function runtimeSheet(id, text = "") {
+  if (typeof CSSStyleSheet === "function" && "replaceSync" in CSSStyleSheet.prototype && "adoptedStyleSheets" in document) {
+    const sheet = new CSSStyleSheet();
+    if (text) sheet.replaceSync(text);
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+    return sheet;
+  }
+  const style = document.createElement("style");
+  style.id = id;
+  style.textContent = text;
+  document.head.append(style);
+  return style.sheet;
+}
+
 /** The sheet of the generated classes (`nsh-classes`), after the runtime's
  * own rules, or of the views' own rules (`nsh-own`): changing a rule makes
  * the browser go over its whole sheet again, so those that change are
  * apart. */
 function classSheet(id) {
-  if (!CLASSES.sheets[id]) {
-    const style = document.createElement("style");
-    style.id = id;
-    document.head.append(style);
-    CLASSES.sheets[id] = style.sheet;
-  }
+  if (!CLASSES.sheets[id]) CLASSES.sheets[id] = runtimeSheet(id);
   return CLASSES.sheets[id];
 }
+
+/** The document's sheet of the runtime's own rules ([`KEYFRAMES`]), made
+ * by the first player of any copy of the runtime on the page. */
+const RUNTIME_SHEET = Symbol.for("nsh.runtimeSheet");
+
 
 /** Adds (or, for a view's own rule, replaces) class `name` with `text`.
  * The class is doubled: it wins over the runtime's rules of a class and a
@@ -676,8 +781,8 @@ const glueImports = new Map();
  * every player after the first imports it under a URL of its own: another
  * instance of the module. The first keeps the URL the page preloads.
  */
-function importGlue(url) {
-  const href = new URL(String(url), document.baseURI);
+function importGlue(url, base) {
+  const href = new URL(String(url), base);
   const imported = glueImports.get(href.href) ?? 0;
   glueImports.set(href.href, imported + 1);
   if (imported > 0) href.searchParams.set("player", String(imported));
@@ -901,7 +1006,7 @@ function frameViewport(frame, colorScheme) {
     frame.style.setProperty(name, value, "important");
   }
   try { frame.showPopover(); } catch (error) {
-    if (saved === null) frame.removeAttribute("style"); else frame.setAttribute("style", saved);
+    if (saved === null) frame.removeAttribute("style"); else frame.style.cssText = saved;
     if (popover === null) frame.removeAttribute("popover"); else frame.setAttribute("popover", popover);
     placeholder?.remove(); outer?.release(); throw error;
   }
@@ -911,7 +1016,7 @@ function frameViewport(frame, colorScheme) {
     if (frame._nshViewport !== state || --state.users) return;
     observer.disconnect();
     frame.hidePopover();
-    if (saved === null) frame.removeAttribute("style"); else frame.setAttribute("style", saved);
+    if (saved === null) frame.removeAttribute("style"); else frame.style.cssText = saved;
     if (popover === null) frame.removeAttribute("popover"); else frame.setAttribute("popover", popover);
     unlock();
     placeholder?.remove(); outer?.release(); delete frame._nshViewport;
@@ -955,17 +1060,17 @@ class Player {
     // app's relative URLs resolve against it once, so they still load
     // after the address moves to another directory (`history.pushState`
     // to `/sports/football`).
-    this.baseURL = document.baseURI;
+    // The site's base when the page names it (`baseURL`): the page's
+    // address is one of the app's routes, below it.
+    this.siteBase = options.baseURL == null ? null : new URL(String(options.baseURL), document.baseURI).href;
+    this.baseURL = this.siteBase ?? document.baseURI;
     this.assetBase = new URL(options.assetBase || "./", this.baseURL).href;
     const resolve = (urls) => urls && Object.fromEntries(Object.entries(urls).map(([key, url]) => [key, new URL(url, this.baseURL).href]));
     this.assets = resolve(options.assets);
     this.data = resolve(options.data);
     this.container = container;
-    if (!document.getElementById("nsh-style")) {
-      const style = document.createElement("style");
-      style.id = "nsh-style";
-      style.textContent = KEYFRAMES;
-      document.head.append(style);
+    if (!document[RUNTIME_SHEET]) {
+      Object.defineProperty(document, RUNTIME_SHEET, { value: runtimeSheet("nsh-style", KEYFRAMES) });
     }
     this.root = document.createElement("div");
     this.root.className = window.top === window ? "nsh-root" : "nsh-root nsh-embedded";
@@ -1024,6 +1129,12 @@ class Player {
     if (options.dialogs === "viewport" && !this.viewportDialogs) {
       console.warn("[nsh] this browser has no popovers: dialogs cover the player, not the window");
     }
+    // Anchored overlays (popovers, menus, tooltips, a select's list) over
+    // the whole window rather than inside the container (`syncFloats`).
+    this.viewportOverlays = options.overlays === "viewport" && typeof HTMLElement.prototype.showPopover === "function";
+    if (options.overlays === "viewport" && !this.viewportOverlays) {
+      console.warn("[nsh] this browser has no popovers: overlays stay inside the player, not over the window");
+    }
     // Host events sent before the app runs (`begin`).
     this.hostEvents = [];
     if (window.top === window) document.documentElement.classList.add("nsh-page");
@@ -1034,7 +1145,7 @@ class Player {
     // the CLI ran `wasm-bindgen --target web` on the runtime, and its glue
     // provides the module's other imports. It loads while the module
     // compiles; a failed compile does not leave its rejection unhandled.
-    const glueLoad = this.options.glue ? importGlue(this.options.glue) : null;
+    const glueLoad = this.options.glue ? importGlue(this.options.glue, this.baseURL) : null;
     glueLoad?.catch(() => {});
     const imports = {
       env: {
@@ -1176,6 +1287,7 @@ class Player {
         // (the error handed over with `nsh_storage_reply`).
         storage_load: (pp, pl) => this.storage(() => {
           const prefix = this.str(pp, pl);
+          this.followStorage(prefix);
           const entries = Object.create(null);
           for (let i = 0; i < localStorage.length; i++) {
             const key = localStorage.key(i);
@@ -1524,6 +1636,49 @@ class Player {
     return done;
   }
 
+  /**
+   * Follows what other tabs of the origin change in the app's storage,
+   * kept under `prefix` (`storage_load`): a tab gets a `storage` event for
+   * each `localStorage` change the others make, never for its own.
+   */
+  followStorage(prefix) {
+    (this.storagePrefixes ??= new Set()).add(prefix);
+    if (this.storageListener) return;
+    this.storageListener = (e) => this.storageChanged(e);
+    window.addEventListener("storage", this.storageListener);
+  }
+
+  /**
+   * Hands the engine a change another tab made to the app's storage: the
+   * value this tab reads now rather than the event's `newValue`, which a
+   * write this tab made since the other tab's may have replaced. A `key`
+   * of null is `localStorage.clear()`: the engine reads the entries again.
+   */
+  storageChanged(e) {
+    let area;
+    try {
+      area = localStorage;
+    } catch {
+      return;
+    }
+    if (e.storageArea !== area) return;
+    for (const prefix of this.storagePrefixes) {
+      let kind = 2, key = "", value = "";
+      if (e.key !== null) {
+        if (!e.key.startsWith(prefix)) continue;
+        key = e.key.slice(prefix.length);
+        try {
+          value = area.getItem(e.key);
+        } catch {
+          continue;
+        }
+        kind = value === null ? 0 : 1;
+      }
+      this.call((w) => this.withStrings([prefix, key, value ?? ""], (pp, pl, kp, kl, vp, vl) =>
+        w.nsh_storage_changed(pp, pl, kp, kl, vp, vl, kind)));
+    }
+  }
+
   /** Calls `f(ptr, len, ...)` for each string, freeing them afterwards. */
   withStrings(strings, f) {
     const passed = strings.map((s) => {
@@ -1545,10 +1700,45 @@ class Player {
       this.measure.font = font;
       const t = this.measure.measureText("Hg");
       const x = this.measure.measureText("x");
-      m = [t.fontBoundingBoxAscent ?? 0, t.fontBoundingBoxDescent ?? 0, x.actualBoundingBoxAscent ?? 0];
+      // Ascent and descent as the DOM draws a run (`.nsh-run`: absolutely
+      // placed, `font` shorthand, so `line-height: normal`): where its
+      // baseline falls in its box. Canvas rounds its font box to whole
+      // pixels (Chrome), each font its own way, which put runs of two fonts
+      // on one line up to a pixel and a half apart on a phone.
+      const dom = this.domMetrics(font);
+      m = dom
+        ? [dom[0], dom[1], x.actualBoundingBoxAscent ?? 0]
+        : [t.fontBoundingBoxAscent ?? 0, t.fontBoundingBoxDescent ?? 0, x.actualBoundingBoxAscent ?? 0];
       this.metricsCache.set(font, m);
     }
     return m;
+  }
+
+  /** `[ascent, descent]` of a run in `font` as the DOM lays it out, or
+   * null without a document to measure in. */
+  domMetrics(font) {
+    if (typeof document === "undefined" || !document.body) return null;
+    let probe = this.metricsProbe;
+    if (!probe || !probe.box.isConnected) {
+      const box = document.createElement("div");
+      box.setAttribute("aria-hidden", "true");
+      box.style.cssText = "position:absolute;left:-10000px;top:0;visibility:hidden;pointer-events:none";
+      const run = document.createElement("span");
+      run.className = "nsh-run";
+      run.style.cssText = "left:0;top:0";
+      run.textContent = "Hg";
+      const mark = document.createElement("i");
+      mark.style.cssText = "display:inline-block;width:0;height:0;vertical-align:baseline";
+      run.append(mark);
+      box.append(run);
+      document.body.append(box);
+      probe = this.metricsProbe = { box, run, mark };
+    }
+    probe.run.style.font = font;
+    const top = probe.run.getBoundingClientRect();
+    const ascent = probe.mark.getBoundingClientRect().top - top.top;
+    if (!(top.height > 0)) return null;
+    return [ascent, top.height - ascent];
   }
 
   /**
@@ -1683,6 +1873,11 @@ class Player {
     } finally {
       this.starting = false;
     }
+    // The new engine's overlays go over the window too.
+    if (this.viewportOverlays) {
+      this.floatArea = null;
+      this.placeFloats();
+    }
     if (!deferEvents) this.startedApp();
   }
 
@@ -1768,6 +1963,8 @@ class Player {
     this.frameLayers?.clear();
     if (this.viewportDialogs) this.dialogs = [];
     this.viewportObserver?.disconnect();
+    for (const el of this.floats ?? []) this.sinkFloat(el);
+    this.floats = [];
     this.fileOperations.clear();
     for (const id of [...this.requests.keys()]) this.fetchCancel(id);
     for (const id of [...this.websockets.keys()]) this.websocketCancel(id);
@@ -1777,6 +1974,9 @@ class Player {
     clearTimeout(this.keeper?.timer);
     this.keeper = null;
     this.browserHost?.stop();
+    this.storagePrefixes?.clear();
+    if (this.storageListener) window.removeEventListener("storage", this.storageListener);
+    this.storageListener = null;
     this.wasm?.nsh_stop();
     } finally { this.stopping = false; }
   }
@@ -1840,8 +2040,24 @@ class Player {
     this.frame = requestAnimationFrame((now) => {
       this.frame = 0;
       this.frameAt = performance.now();
-      this.call((w) => w.nsh_frame(now));
+      this.call((w) => w.nsh_frame(this.frameTime(now)));
     });
+  }
+
+  /**
+   * The time an animation frame steps the native animations at: the
+   * frame's (when it began, so the steps keep the display's pace), unless a
+   * task held the frame, and then when its callbacks run. A press handled
+   * before them runs the app's code, which may mount a sheet and start its
+   * entrance; stepped at the frame's time, that entrance would start before
+   * it was asked for, and its first drawn step would be as far along as the
+   * press took (a slow one showed the sheet nearly in place). Never earlier
+   * than the frame before.
+   */
+  frameTime(now) {
+    const at = this.frameAt - now > FRAME_HELD_MS ? this.frameAt : now;
+    this.steppedAt = Math.max(at, this.steppedAt ?? at);
+    return this.steppedAt;
   }
 
   /** `keepDeadline` once the call into the engine that asked for a frame
@@ -1898,6 +2114,7 @@ class Player {
     this.size = [width, height];
     this.call((w) => w.nsh_resize(width, height));
     this.environmentChanged();
+    if (this.viewportOverlays) this.placeFloats();
     for (const el of this.views.values()) if (el._kind === "modal" && el.isConnected && !el._leaving) this.placeModal(el);
   }
 
@@ -1937,6 +2154,7 @@ class Player {
     document.addEventListener("visibilitychange", changed);
     addEventListener("focus", changed);
     addEventListener("blur", changed);
+    this.watchPageCache(changed);
     visualViewport?.addEventListener("resize", changed);
     visualViewport?.addEventListener("scroll", changed);
     new MutationObserver(changed).observe(document.documentElement, { attributes: true, attributeFilter: ["dir", "lang"] });
@@ -1944,6 +2162,31 @@ class Player {
     this.safeProbe = document.createElement("div");
     this.safeProbe.className = "nsh-probe";
     document.body.append(this.safeProbe);
+    if (this.viewportOverlays) this.installFloats();
+  }
+
+  /** A page the browser keeps in its back / forward cache (a `pagehide`
+   * that is `persisted`) is in the background until a `pageshow` brings it
+   * back: the app sees the pair of edges whether or not the browser tells
+   * `visibilitychange` around them. A page that is discarded (`pagehide`
+   * not `persisted`) ends its app instead (`watchPageEnd`). Neither
+   * listener keeps a page out of that cache. */
+  watchPageCache(changed) {
+    const cached = (value) => (event) => {
+      if (!event.persisted) return;
+      this.pageCached = value;
+      changed();
+    };
+    window.addEventListener("pagehide", cached(true));
+    window.addEventListener("pageshow", cached(false));
+  }
+
+  /** The app's state (`lifecycle()`): `background` while the page is
+   * hidden (another tab, a minimized window) or in the back / forward
+   * cache, else whether it has the focus. */
+  lifecycle() {
+    if (this.pageCached || document.visibilityState === "hidden") return "background";
+    return document.hasFocus() ? "active" : "inactive";
   }
 
   /** The page's insets covered by system UI, where they overlap the root
@@ -1993,11 +2236,10 @@ class Player {
       keyboard: this.keyboardHeight(),
       appleKeyboard: APPLE,
       host: Boolean(this.options.host),
-      lifecycle: document.visibilityState === "hidden"
-        ? "background"
-        : document.hasFocus() ? "active" : "inactive",
+      lifecycle: this.lifecycle(),
       timeZone: timeZoneName(),
       screenColor: typeof window.EyeDropper === "function",
+      share: webShareAllowed(),
       notifications: typeof window.Notification === "function",
       audio: typeof (window.AudioContext ?? window.webkitAudioContext) === "function",
       // Shader views draw until the first one finds no WebGL 2 (`shaderGl`).
@@ -2115,6 +2357,7 @@ class Player {
     if (this.removals.length) this.finishRemovals();
     if (this.readingHosts?.size) this.orderReading();
     if (this.relating?.size) this.linkRelations();
+    if (this.viewportOverlays) this.syncFloats();
   }
 
   /** The DOM id of view `id`: unique on the page, beside other players. */
@@ -2818,6 +3061,10 @@ class Player {
       pagePosition: { x: pageX, y: pageY },
       modifiers: { control: !!e.ctrlKey, alt: !!e.altKey, shift: !!e.shiftKey, platform: !!e.metaKey },
       pressedButton: held ? held[1] : null,
+      pointerType: e.pointerType === "pen" ? "pen" : "mouse",
+      pressure: e.pressure ?? (held ? 0.5 : 0),
+      tiltX: e.tiltX || 0,
+      tiltY: e.tiltY || 0,
     };
   }
 
@@ -2856,7 +3103,7 @@ class Player {
     let el = this.view(id);
     if (!el) return;
     el = this.retag(el, elementTag(props));
-    if (props.href != null) el.setAttribute("href", props.href);
+    if (props.href != null) el.setAttribute("href", this.siteBase ? this.linkHref(props.href) : props.href);
     else el.removeAttribute("href");
     el._props = props;
     // A list in its parent's viewport: its cells are read in screen order.
@@ -2885,7 +3132,10 @@ class Player {
   retag(el, tag) {
     if (el.localName === tag || (el._kind !== "view" && el._kind !== "text")) return el;
     const next = document.createElement(tag);
-    for (const { name, value } of el.attributes) next.setAttribute(name, value);
+    // Inline styles (a frame's) through the CSSOM: a strict `style-src`
+    // refuses a `style` attribute set as text.
+    for (const { name, value } of el.attributes) if (name !== "style") next.setAttribute(name, value);
+    if (el.style.cssText) next.style.cssText = el.style.cssText;
     for (const key of Object.keys(el)) next[key] = el[key];
     next.append(...el.childNodes);
     el.replaceWith(next);
@@ -2908,13 +3158,15 @@ class Player {
   /** ARIA attributes from the accessibility props (`op_vp`). */
   updateAria(el) {
     const p = el._props ?? {};
-    const set = (name, value) => (value == null || value === false ? el.removeAttribute(name) : el.setAttribute(name, String(value)));
+    const set = (name, value) => setAriaAttribute(el, name, value);
     const role = ARIA_ROLES[p.role] ?? (p.role && p.role !== "none" ? p.role : el._pressable ? "button" : null);
     // A combo box that is an input is its field, which keeps the focus
     // (`fieldAria`).
     set("role", el._field && p.role === "combobox" ? null : role);
-    set("aria-label", el._field ? null : p.label ?? el._textLabel);
-    set("aria-description", el._field ? null : p.hint);
+    if (!el._field) {
+      set("aria-label", p.label ?? el._textLabel);
+      set("aria-description", p.hint);
+    }
     set("aria-disabled", p.disabled && "true");
     set("aria-selected", p.selected && "true");
     set("aria-checked", p.checked);
@@ -2978,12 +3230,12 @@ class Player {
    * the field is the element screen readers read as the input. */
   fieldAria(el, field) {
     const p = el._props ?? {};
-    const set = (name, value) => (value == null || value === false ? field.removeAttribute(name) : field.setAttribute(name, String(value)));
+    const set = (name, value) => setAriaAttribute(field, name, value);
     set("aria-label", (p.label ?? el._textLabel) || null);
     set("aria-description", p.hint || null);
     // Props may arrive before the field exists; its wrapper then held the name.
-    el.removeAttribute("aria-label");
-    el.removeAttribute("aria-description");
+    setAriaAttribute(el, "aria-label", null);
+    setAriaAttribute(el, "aria-description", null);
     set("aria-invalid", p.invalid && "true");
     // A combo box's field is the combo box: the focus stays in it while
     // its list is open, and its active descendant is the highlighted row.
@@ -4336,7 +4588,17 @@ class Player {
     const el = this.view(id);
     if (!el) return;
     const refresh = el._behavior?.refreshIndicator?.height !== behavior.refreshIndicator?.height;
+    const bar = String(this.barInset(el)) !== String(behavior.bar ?? [0, 0, 0, 0]);
     el._behavior = behavior;
+    // The browser's own indicator (phones) keeps its track within the
+    // insets where its scroll bar can be styled (`.nsh-scroll`'s track).
+    if (bar) {
+      const [top, right, bottom, left] = this.barInset(el);
+      el.style.setProperty("--nsh-bar-t", `${top}px`);
+      el.style.setProperty("--nsh-bar-r", `${right}px`);
+      el.style.setProperty("--nsh-bar-b", `${bottom}px`);
+      el.style.setProperty("--nsh-bar-l", `${left}px`);
+    }
     // A refresh in progress keeps the room of the indicator now showing.
     if (refresh && el._refreshing && !el._pulling && el._pull > 0) this.animatePull(el, this.refreshSpace(el));
     if (refresh) this.updateSpinner(el);
@@ -4518,12 +4780,27 @@ class Player {
     const h = !!el._horizontal;
     const view = h ? el.clientWidth : el.clientHeight;
     const total = h ? el.scrollWidth : el.scrollHeight;
-    if (total <= view + 0.5 || view <= 4 * BAR_MARGIN) return null;
-    const track = view - 2 * BAR_MARGIN;
+    // Its track keeps within the view's `scrollbarInset`.
+    const [top, right, bottom, left] = this.barInset(el);
+    const [before, after] = h ? [left, right] : [top, bottom];
+    const room = view - before - after;
+    if (total <= view + 0.5 || room <= 4 * BAR_MARGIN) return null;
+    const track = room - 2 * BAR_MARGIN;
     const len = Math.min(track, Math.max(32, (track * view) / total));
     const max = total - view;
     const t = Math.min(Math.max((h ? el.scrollLeft : el.scrollTop) / max, 0), 1);
-    return [BAR_MARGIN + t * (track - len), len, track - len, max];
+    return [before + BAR_MARGIN + t * (track - len), len, track - len, max];
+  }
+
+  /** `el`'s `scrollbarInset`: `[top, right, bottom, left]`. */
+  barInset(el) {
+    return el._behavior?.bar ?? [0, 0, 0, 0];
+  }
+
+  /** The edge `el`'s bar runs along (its right, or a horizontal view's bottom), moved in by its inset. */
+  barEdge(el) {
+    const [, right, bottom] = this.barInset(el);
+    return el._horizontal ? el.clientHeight - bottom : el.clientWidth - right;
   }
 
   /** Shows `el`'s bar where its content is; it fades after `BAR_HOLD`
@@ -4541,7 +4818,7 @@ class Player {
       el.insertBefore(el._bar, el.firstChild);
     }
     const [start, len] = thumb;
-    const edge = (el._horizontal ? el.clientHeight : el.clientWidth) - BAR_THICK - BAR_MARGIN;
+    const edge = this.barEdge(el) - BAR_THICK - BAR_MARGIN;
     el._bar.firstChild.style.cssText = el._horizontal
       ? `left:${start}px;top:${edge}px;width:${len}px;height:${BAR_THICK}px`
       : `left:${edge}px;top:${start}px;width:${BAR_THICK}px;height:${len}px`;
@@ -4556,7 +4833,8 @@ class Player {
     if (!thumb) return false;
     const r = el.getBoundingClientRect();
     const [x, y] = [e.clientX - r.left, e.clientY - r.top];
-    const [along, across, edge] = el._horizontal ? [x, y, el.clientHeight] : [y, x, el.clientWidth];
+    const [along, across] = el._horizontal ? [x, y] : [y, x];
+    const edge = this.barEdge(el);
     return across >= edge - BAR_GRAB && across <= edge && along >= thumb[0] - 4 && along <= thumb[0] + thumb[1] + 4;
   }
 
@@ -5309,8 +5587,8 @@ class Player {
     field.setAttribute("autocorrect", correct ? "on" : "off");
     if (config.autoComplete != null) field.setAttribute("autocomplete", config.autoComplete);
     else field.removeAttribute("autocomplete");
-    if (config.maxLength != null) field.maxLength = config.maxLength;
-    else field.removeAttribute("maxlength");
+    field._maxLength = config.maxLength ?? null;
+    this.fieldLimit(field);
     el._config = config;
     field.classList.toggle("nsh-ph", !!config.placeholderColor);
     // A built-in bar of the app's takes the textarea's indicator's place.
@@ -5323,6 +5601,7 @@ class Player {
   }
 
   wireInput(el, field) {
+    field.addEventListener("beforeinput", (e) => this.beforeInput(field, e));
     field.addEventListener("input", () => this.textChanged(el, field));
     field.addEventListener("scroll", () => this.inputScrolled(el, field), { passive: true });
     if (typeof ResizeObserver === "function") {
@@ -5334,6 +5613,7 @@ class Player {
     // characters chosen).
     field.addEventListener("compositionstart", (e) => {
       field._composing = true;
+      this.fieldLimit(field);
       this.compositionChanged(el, field, e.data ?? "");
     });
     field.addEventListener("compositionupdate", (e) => this.compositionChanged(el, field, e.data ?? ""));
@@ -5394,7 +5674,44 @@ class Player {
     this.call((w) => w.nsh_input_scroll(el._id, ...now));
   }
 
+  /** `field`'s `maxlength` for its `maxLength`: the browser counts UTF-16
+   * units, `maxLength` characters ({@link charLength}), so the limit is the
+   * units the text has plus one per character of room left, set again
+   * after each edit. An input method's composition, whose text the page
+   * cannot cut, stays within `maxLength` characters that way: a character
+   * of one unit leaves the limit as it was, one of two (an emoji) raises it
+   * by one. */
+  fieldLimit(field) {
+    const max = field._maxLength;
+    if (max == null) {
+      field.removeAttribute("maxlength");
+      return;
+    }
+    const value = field.value;
+    field.maxLength = value.length + Math.max(0, max - charLength(value));
+  }
+
+  /** Before the user's insertion of known text (typing, a paste, a drop, the
+   * app's `insertText`) into `field`: its `maxlength` takes exactly what of
+   * that text fits by characters ({@link clipChars}), so the browser cuts
+   * it there itself, keeping its own undo. */
+  beforeInput(field, e) {
+    const max = field._maxLength;
+    if (max == null || !e.inputType?.startsWith("insert")) return;
+    const text = e.inputType === "insertCompositionText" ? null : e.data ?? e.dataTransfer?.getData("text/plain") ?? null;
+    if (text == null) {
+      this.fieldLimit(field);
+      return;
+    }
+    const value = field.value;
+    const start = field.selectionStart ?? value.length;
+    const end = field.selectionEnd ?? start;
+    const kept = value.slice(0, start) + value.slice(end);
+    field.maxLength = kept.length + clipChars(text, max - charLength(kept)).length;
+  }
+
   textChanged(el, field) {
+    this.fieldLimit(field);
     this.inputScrolled(el, field);
     if (field.value === field._known) return;
     field._known = field.value;
@@ -5509,7 +5826,12 @@ class Player {
       return;
     }
     field._known = text;
-    if (field.value !== text) field.value = text;
+    if (field.value !== text) {
+      // The app's value is never cut to `maxLength`, as on every platform
+      // (the browser's `maxlength` limits only the user's edits).
+      field.value = text;
+      this.fieldLimit(field);
+    }
   }
 
   op_ic([, id, x, y, w, h]) {
@@ -5835,19 +6157,35 @@ class Player {
     return 0;
   }
 
+  /** A link's `href` under the site's base, as a `<base href>` would have
+   * it (the page's own address is one of the app's routes). */
+  linkHref(href) {
+    try {
+      return new URL(String(href), this.siteBase).href;
+    } catch {
+      return String(href);
+    }
+  }
+
+  /** What the app's relative addresses and links resolve against: the
+   * site's base (`baseURL`), else the page's current base, as
+   * `history.replaceState` resolves them. */
+  addressBase() {
+    return this.siteBase ?? document.baseURI;
+  }
+
   /** `UrlScheme.setUrl` / `set_app_url`: the current entry's address, once
    * the entries of the pages pushed or popped with it exist
    * (`syncHistory`); with `push` (`history: "push"`) an entry of its own
    * after it, unless the turn pushed a page's (which takes the address) or
    * it is the address shown. In one turn the last address wins, and a push
-   * wins over a replace. Resolved as `replaceState` resolves it (against
-   * `<base href>`); one of another origin is dropped (TS's `setUrl` throws
-   * for it first, in `runtime.js`). */
+   * wins over a replace. Resolved against `addressBase()`; one of another
+   * origin is dropped (TS's `setUrl` throws for it first, in `runtime.js`). */
   setPageUrl(url, push = false) {
     if (!this.history) return;
     let resolved;
     try {
-      resolved = new URL(url, document.baseURI);
+      resolved = new URL(url, this.addressBase());
     } catch {
       console.warn(`[nsh] the app's address is not a URL: ${url}`);
       return;
@@ -5944,8 +6282,7 @@ class Player {
       this.pageUrl = null;
       this.pageUrlPush = false;
       try {
-        // Resolved as `replaceState` does, against `<base href>` when the
-        // page has one.
+        // Absolute: `setPageUrl` resolved it.
         if (push) this.pushEntry(depth, url);
         else history.replaceState(history.state, "", url);
         this.shownUrl = url;
@@ -6422,6 +6759,134 @@ class Player {
     el.style.transformOrigin = scaled ? "0 0" : "";
   }
 
+  // Overlays over the window ------------------------------------------
+
+  /** `overlays: "viewport"`: follows where the root is in the window, which
+   * the page's scrolling and layout move, and the presses on the page
+   * around it. */
+  installFloats() {
+    const moved = () => this.placeFloats();
+    // Any scroll view of the page around the container moves it: a
+    // capturing listener hears them all. The app's own scroll views move
+    // nothing of it, and their scrolling is a hot path: left alone.
+    addEventListener("scroll", (e) => {
+      if (!(e.target instanceof Node && this.root.contains(e.target))) moved();
+    }, { capture: true, passive: true });
+    addEventListener("resize", moved);
+    // The on-screen keyboard shrinks the visual viewport only.
+    visualViewport?.addEventListener("resize", moved);
+    // What is above the container on the page changing size moves it
+    // without a scroll.
+    new ResizeObserver(moved).observe(document.documentElement);
+    document.addEventListener("pointerdown", (e) => this.pressAround(e), true);
+    this.placeFloats();
+  }
+
+  /**
+   * Anchored overlays drawn over the window (`overlays: "viewport"`): the
+   * root's children from its first overlay placed against an anchor on
+   * (the core puts the overlays above the root's own views, in the order
+   * they stack) are manual popovers in the browser's top layer, so the
+   * container's clipping, stacking and transforms leave them whole. Each
+   * stays where it is in the root, so its events, focus and `inert` are as
+   * before; the overlays shown after it are lifted with it, to stay above
+   * it. Overlays without an anchor before the first (a fixed view, a
+   * backdrop) stay in the container. A lifted view the batch moved in the
+   * DOM left the top layer, and is raised again with those above it.
+   */
+  syncFloats() {
+    const lifted = [];
+    for (const child of this.root.children) {
+      if (child._id === undefined || child._kind === "modal") continue;
+      if (lifted.length || child._props?.anchored) lifted.push(child);
+    }
+    const before = this.floats ?? [];
+    let kept = 0;
+    while (kept < lifted.length && lifted[kept] === before[kept] && lifted[kept].matches(":popover-open")) kept++;
+    for (const el of before) if (!lifted.includes(el)) this.sinkFloat(el);
+    if (kept === lifted.length) {
+      this.floats = lifted;
+      return;
+    }
+    // Raising again what is open takes the focus out of it.
+    const focus = document.activeElement;
+    for (const el of lifted.slice(kept)) this.liftFloat(el);
+    this.floats = lifted;
+    // Dialogs and alerts over the window stay above them.
+    for (const layer of this.root.children) {
+      if (layer.classList.contains("nsh-viewport") && layer.matches(":popover-open")) {
+        layer.hidePopover();
+        layer.showPopover();
+      }
+    }
+    if (focus && focus !== document.activeElement && focus.isConnected) focus.focus({ preventScroll: true });
+    this.placeFloats();
+  }
+
+  /** Shows overlay `el` in the top layer, above what is there already. */
+  liftFloat(el) {
+    el.classList.add("nsh-float");
+    el.popover = "manual";
+    // As a dialog's layer (`raise`): the browser waits for the root's
+    // blocking `wheel` listener only over the root's box. Added once, and
+    // again to a view drawn as another element since (`retag`).
+    el.addEventListener("wheel", noop, { passive: false });
+    if (el.matches(":popover-open")) el.hidePopover();
+    el.showPopover();
+  }
+
+  /** Overlay `el` is drawn in the container again (or went). */
+  sinkFloat(el) {
+    if (!el.classList.contains("nsh-float")) return;
+    if (el.matches(":popover-open")) el.hidePopover();
+    el.removeAttribute("popover");
+    el.classList.remove("nsh-float");
+    el.removeEventListener("wheel", noop);
+  }
+
+  /**
+   * Where the lifted overlays go: their frames are in the root's
+   * coordinates, moved by where the root is in the window (its CSS
+   * variables), and the core places them in the window less its safe
+   * area, in those coordinates (`nsh_overlay_area`), so they flip and
+   * stay inside it by the window's edges rather than the container's.
+   */
+  placeFloats() {
+    if (!this.wasm || this.stopping) return;
+    const r = this.root.getBoundingClientRect();
+    const x = `${r.left}px`, y = `${r.top}px`;
+    if (this.floatOrigin !== x + y) {
+      this.floatOrigin = x + y;
+      this.root.style.setProperty("--nsh-float-x", x);
+      this.root.style.setProperty("--nsh-float-y", y);
+    }
+    // The window without its scroll bars, less its safe area.
+    const doc = document.documentElement;
+    const [w, h] = [doc.clientWidth, doc.clientHeight];
+    const [top, right, bottom, left] = this.safeProbe
+      ? this.safeArea({ left: 0, top: 0, right: w, bottom: h })
+      : [0, 0, 0, 0];
+    // Not under the on-screen keyboard, which covers the layout viewport's
+    // bottom (as `keyboardHeight`; not while zoomed).
+    const vv = visualViewport;
+    const visible = vv && vv.scale <= 1.01 ? Math.min(h, vv.offsetTop + vv.height) : h;
+    const area = [left - r.left, top - r.top, Math.max(0, w - left - right), Math.max(0, visible - top - bottom)];
+    const key = area.join();
+    if (this.floatArea === key) return;
+    this.floatArea = key;
+    this.call((wasm) => wasm.nsh_overlay_area(...area));
+  }
+
+  /** A press on the page around the container while overlays are lifted
+   * over it: they hear `onPressOutside`, as for a press in the root
+   * outside them (a popover closes). */
+  pressAround(e) {
+    if (!this.floats?.length || this.stopping || !this.wasm) return;
+    if (e.target instanceof Node && this.root.contains(e.target)) return;
+    const [x, y] = this.point(e, null);
+    this.call((w) => w.nsh_press_outside(x, y));
+  }
+
   /** Going back or Escape on a modal: it asks to close (`onRequestClose`,
    * reason `"cancel"`); with `closeOnEscape` it closes natively, then
    * reports `onDismiss`. */
@@ -6508,7 +6973,9 @@ class Player {
       frame.removeAttribute("srcdoc");
       if (scroll) frame.removeAttribute("scrolling");
       else frame.setAttribute("scrolling", "no");
-      if (url) frame.src = url;
+      // A relative URL is the site's (`linkHref`), which no `<base href>`
+      // names when the page gives it to the player.
+      if (url) frame.src = this.siteBase ? this.linkHref(url) : url;
       else frame.removeAttribute("src");
     }
     // After the batch: its events may come after its props.
@@ -6661,7 +7128,13 @@ class Player {
         break;
       }
       case "zoomTo": if (el) this.zoomCommand(el, ...args); break;
-      case "dialog": this.dialog(args[0], args[1], args[2], args[3], args[4] ?? [], args[5] ?? true, args[6] ?? false); break;
+      case "setResponder": this.responderBlocks = !!args[0]; break;
+      case "clearResponder": this.responderBlocks = false; break;
+      case "dialog":
+        this.dialog(args[0], args[1], args[2], args[3], args[4] ?? [], args[5] ?? true, args[6] ?? false,
+          args[7] ?? null, args[8] ?? null, args[9] ?? false, args[10] ?? false);
+        break;
+      case "closeDialog": this.closeDialog(args[0]); break;
       case "reload": {
         const frame = el?._frameEl;
         if (!frame) break;
@@ -6711,6 +7184,7 @@ class Player {
       // Pages see no local paths: never any files.
       case "readClipboardFiles": this.event(ROOT_ID, "onClipboard", { id: args[0], has: false, files: "" }); break;
       case "pickScreenColor": this.pickScreenColor(args[0]); break;
+      case "share": this.share(args[0], args[1], args[2], args[3], args[4]); break;
       case "renderCanvas": this.renderCanvas(...args); break;
       case "pickImages": this.pickImages(args[0], args[1], args[2], args[3], args[4]); break;
       case "pickFiles": this.pickFiles(args[0], args[1], args[2], args[3]); break;
@@ -6936,6 +7410,43 @@ class Player {
       color = parseInt(sRGBHex.slice(1, 7), 16) * 256 + 255;
     } catch {}
     this.event(ROOT_ID, "onScreenColor", color === undefined ? { id: request } : { id: request, color });
+  }
+
+  // `share`: the browser's share sheet (`navigator.share`, which the
+  // environment's `share` reports). A page has no local files to share, and
+  // a browser that cannot share this content says so: both are reported as
+  // unavailable, never as shared. The user closing the sheet rejects with
+  // an `AbortError`: dismissed.
+  async share(request, title, text, url, files) {
+    const unavailable = (error) => this.event(ROOT_ID, "onShare",
+      { id: request, error, code: "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM" });
+    const data = {};
+    if (title != null) data.title = title;
+    if (text != null) data.text = text;
+    if (url != null) data.url = url;
+    if (files) return unavailable("share: a page shares no local files");
+    if (!webShareAllowed()) return unavailable("share: this browser has no share sheet for this page");
+    if (typeof navigator.canShare === "function" && !navigator.canShare(data)) {
+      return unavailable("share: this browser cannot share this content");
+    }
+    try {
+      await navigator.share(data);
+      this.event(ROOT_ID, "onShare", { id: request, action: "shared" });
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        this.event(ROOT_ID, "onShare", { id: request, action: "dismissed" });
+      } else if (err?.name === "NotAllowedError") {
+        // The browser refuses the sheet here: the page's permissions policy
+        // (a frame without `web-share`) or a share without a user gesture.
+        unavailable(`share: the browser does not allow sharing here (${err?.message ?? err})`);
+      } else if (err?.name === "InvalidStateError") {
+        // An earlier share's sheet is still open: a browser shows one at a
+        // time and keeps it until the user closes it.
+        unavailable(`share: the browser still shows an earlier share (${err?.message ?? err})`);
+      } else {
+        this.event(ROOT_ID, "onShare", { id: request, error: `share: ${err?.message ?? err}` });
+      }
+    }
   }
 
   // Audio (`Sound`, `AudioPlayer`) -----------------------------------------
@@ -7918,9 +8429,13 @@ class Player {
    * buttons in a row, the last regular one the default), otherwise as
    * iOS's alert and action sheet. Answers the button's index, -1 when
    * dismissed (a click beside it, or Escape, when cancelable); Escape
-   * presses the cancel button if any (`keyDown`, `_cancel`).
+   * presses the cancel button if any (`keyDown`, `_cancel`). An alert with
+   * `input` (not null) has a text field starting with it, focused, its
+   * text answered as `value`: Enter in it presses the default button, and
+   * while a `required` field is empty only the cancel buttons are enabled.
    */
-  dialog(dialogId, title, message, buttons, styles, cancelable, sheet) {
+  dialog(dialogId, title, message, buttons, styles, cancelable, sheet, input = null, placeholder = null,
+    selectAll = false, required = false) {
     // `AlertDialog` always brings the app's actions: no label of NSH's own.
     const list = buttons;
     const style = (i) => styles[i] ?? "default";
@@ -7935,16 +8450,24 @@ class Player {
     let down = null;
     backdrop.addEventListener("pointerdown", (e) => { down = e.target; }, true);
     const pressed = (e, el) => e.detail === 0 || (down !== null && el.contains(down));
-    const close = (index) => {
-      if (answered) return;
+    // Off the surface, once: false when it was already.
+    const takeDown = () => {
+      if (answered) return false;
       answered = true;
       backdrop.remove();
       this.releaseFrame(backdrop);
       this.dialogs = this.dialogs.filter((d) => d !== backdrop);
       this.scopeFocus();
       if (restore?.isConnected) restore.focus({ preventScroll: true });
-      this.event(ROOT_ID, "onDialog", { id: dialogId, index });
+      return true;
     };
+    let field = null;
+    const close = (index) => {
+      if (!takeDown()) return;
+      this.event(ROOT_ID, "onDialog", field ? { id: dialogId, index, value: field.value } : { id: dialogId, index });
+    };
+    backdrop._dialogId = dialogId;
+    backdrop._takeDown = takeDown;
     const cancel = list.findIndex((_, i) => style(i) === "cancel");
     backdrop._cancel = () => (cancel >= 0 ? close(cancel) : cancelable && close(-1));
     const button = (index) => {
@@ -7999,6 +8522,15 @@ class Player {
         p.textContent = message;
         box.append(p);
       }
+      if (input !== null) {
+        field = document.createElement("input");
+        field.type = "text";
+        field.className = "nsh-dialog-input";
+        field.value = input;
+        if (placeholder !== null) field.placeholder = placeholder;
+        field.setAttribute("aria-label", title ?? message ?? placeholder ?? "");
+        box.append(field);
+      }
       const actions = document.createElement("div");
       // Desktop: up to three in a row; iOS: two side by side.
       const row = desktop ? list.length <= 3 : list.length === 2;
@@ -8016,6 +8548,23 @@ class Player {
       });
       focus ??= actions.firstChild;
       box.append(actions);
+      if (field) {
+        const all = [...actions.children];
+        const enable = () => {
+          if (!required) return;
+          const empty = field.value === "";
+          all.forEach((b, i) => { b.disabled = empty && style(i) !== "cancel"; });
+        };
+        enable();
+        field.addEventListener("input", enable);
+        field.addEventListener("keydown", (e) => {
+          if (e.key !== "Enter" || e.isComposing) return;
+          e.preventDefault();
+          const b = all[preferred];
+          if (b && !b.disabled) close(preferred);
+        });
+        focus = field;
+      }
     }
     backdrop.addEventListener("click", (e) => e.target === backdrop && down === backdrop && cancelable && close(-1));
     backdrop.append(box);
@@ -8024,6 +8573,15 @@ class Player {
     (this.dialogs ??= []).push(backdrop);
     this.scopeFocus();
     focus?.focus({ preventScroll: true });
+    if (field) {
+      if (selectAll) field.select();
+      else field.setSelectionRange(field.value.length, field.value.length);
+    }
+  }
+
+  /** Takes back the dialog `dialog` showed as `dialogId` (`closeDialog`), reporting nothing: the core answered it. */
+  closeDialog(dialogId) {
+    this.dialogs?.find((d) => d._dialogId === dialogId)?._takeDown();
   }
 
   /** Dialogs and other system UI look as the desktop backends' with the desktop idiom, else as on phones. */
@@ -8146,6 +8704,14 @@ class Player {
     root.addEventListener("pointerdown", () => this.inputWith(1), true);
     window.addEventListener("keydown", (e) => MODALITY_KEYS_SKIPPED.has(e.key) || this.inputWith(0), true);
     root.addEventListener("pointerdown", (e) => this.pointerDown(e));
+    // A responder that blocks native scrolling (`setResponder`, a
+    // `TouchClaim`'s `block_native`) keeps its touches: the browser would
+    // scroll the scroll view around it and cancel them. One the browser
+    // already scrolls (`cancelable` false) stays the browser's, as a
+    // native scroll view that started dragging first takes them over.
+    root.addEventListener("touchmove", (e) => {
+      if (this.responderBlocks && e.cancelable) e.preventDefault();
+    }, { passive: false });
     // A link (`Link` with an `href`) is the app's to press: a plain click
     // stays in the app (its `onPress`), a click with a modifier or the
     // middle button opens its `href` as the browser would.
@@ -8646,10 +9212,16 @@ class Player {
     const pos = h ? el.scrollLeft : el.scrollTop;
     const max = h ? el.scrollWidth - el.clientWidth : el.scrollHeight - el.clientHeight;
     const page = (h ? el.clientWidth : el.clientHeight) * 0.875;
-    const d = { ArrowUp: -40, ArrowLeft: -40, ArrowDown: 40, ArrowRight: 40, PageUp: -page, PageDown: page,
-      " ": e.shiftKey ? -page : page, Home: -pos, End: max - pos }[k];
+    // The key's move, as `nsh_key_scroll` takes it: by points (0), by
+    // pages (1), to the start (2), to the end (3).
+    const [kind, amount] = { ArrowUp: [0, -40], ArrowLeft: [0, -40], ArrowDown: [0, 40], ArrowRight: [0, 40],
+      PageUp: [1, -1], PageDown: [1, 1], " ": [1, e.shiftKey ? -1 : 1], Home: [2, 0], End: [3, 0] }[k];
+    const d = [amount, amount * page, -pos, max - pos][kind];
     if (el._snapPoints) this.snapStep(el, Math.sign(d));
     else this.scrollSmoothly(el, h ? d : 0, h ? 0 : d, true);
+    // A list follows its real end from here on (rows never rendered are
+    // only estimated), and the other keys leave it.
+    this.call((w) => w.nsh_key_scroll(el._id, kind, amount));
     return true;
   }
 
@@ -9019,6 +9591,7 @@ class Player {
         y: p.y - top,
         changed: id === changedId,
         pointerType: p.pointerType,
+        pressure: p.pressure, tiltX: p.tiltX, tiltY: p.tiltY,
       });
     }
     if (!points.length) return;
@@ -9074,11 +9647,13 @@ class Player {
     // touches scroll natively, except in zoomable views, which pan and
     // pinch here.
     const scrollView = isField ? null : chain.find((v) => v._kind === "scroll") ?? null;
+    const link = isField ? null : this.linkPress(e.target, target);
     const p = {
       x, y, layer, startX: x, startY: y, t: performance.now(), vx: 0, vy: 0,
       pointerType: e.pointerType,
+      pressure: e.pressure, tiltX: e.tiltX || 0, tiltY: e.tiltY || 0,
       touchPath: chain.filter((v) => v._events.has("onTouch")).map((v) => v._id),
-      press: isField ? null : this.linkPress(e.target, target) ?? chain.find((v) => PRESS_EVENTS.some((n) => v._events.has(n)) && !v._props?.disabled) ?? null,
+      ...(isField ? { press: null } : link ? { press: link } : this.pickPress(chain)),
       // What presses report: the modifier keys at the press and its clicks.
       modifiers: { control: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, platform: e.metaKey },
       clicks: e.pointerType === "mouse" ? this.clickCount(x, y) : 1,
@@ -9104,6 +9679,27 @@ class Player {
     if ((p.scroll || p.pan) && !isField) e.preventDefault();
   }
 
+  /** The press of the views in `chain` (innermost first): `{ press,
+   * longPress }`. The innermost enabled view with a press listener gets it;
+   * one that listens only to `onLongPress` leaves the taps to the nearest
+   * enabled view outwards that listens to them, as a long press recognizer
+   * takes no taps from the views around it, and keeps the long press
+   * (`input::pick_press`). */
+  pickPress(chain) {
+    const taps = (v) => TAP_EVENTS.some((n) => v._events.has(n));
+    let long = null;
+    for (const v of chain) {
+      if (v._props?.disabled || !PRESS_EVENTS.some((n) => v._events.has(n))) continue;
+      if (!long) {
+        if (taps(v)) return { press: v, longPress: null };
+        long = v;
+      } else if (taps(v)) {
+        return { press: v, longPress: long };
+      }
+    }
+    return { press: long, longPress: null };
+  }
+
   /** The press target of a press on a link's run in text view `view`: the
    * link's node, its events, placed as the text (as on the other
    * platforms, a link's press reports positions in its text). */
@@ -9122,11 +9718,12 @@ class Player {
     const el = p.press;
     p.pressed = true;
     if (el._events.has("onPressIn")) this.event(el._id, "onPressIn", this.pressPayload(p));
-    if (el._events.has("onLongPress")) {
+    const long = p.longPress ?? el;
+    if (long._events.has("onLongPress")) {
       p.longTimer = setTimeout(() => {
         p.long = true;
-        this.event(el._id, "onLongPress", this.pressPayload(p));
-      }, el._props?.longPressDelay ?? 500);
+        this.event(long._id, "onLongPress", this.pressPayload(p));
+      }, long._props?.longPressDelay ?? 500);
     }
   }
 
@@ -9202,6 +9799,9 @@ class Player {
     p.x = x;
     p.y = y;
     p.t = now;
+    p.pressure = e.pressure;
+    p.tiltX = e.tiltX || 0;
+    p.tiltY = e.tiltY || 0;
     this.track(p, now);
     const tx = x - p.startX;
     const ty = y - p.startY;
@@ -9356,6 +9956,7 @@ class Player {
       return;
     }
     if (cancelled && p.scrolls?.length) this.touchScroll(p, this.point(e, p.layer));
+    p.pressure = 0;
     if (p.touchPath.length) this.touchEvent(cancelled ? 3 : 2, e.pointerId);
     this.pointers.delete(e.pointerId);
     if (this.twoFinger) {

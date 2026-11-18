@@ -272,6 +272,12 @@ pub trait ScrollHost {
     fn report_zoom(&self, scale: f32) {
         let _ = scale;
     }
+    /// Tells the engine that a scroll key moved the view by `key_move`
+    /// (`EngineControl::key_scrolled`), once [`key_scroll`] started its
+    /// animation: a list follows its real end from End on.
+    fn key_scrolled(&self, key_move: KeyMove) {
+        let _ = key_move;
+    }
     /// The offset or the zoom changed (`offset` is the one reported): the
     /// children move, the sticky cells pin to it, native scroll values
     /// follow.
@@ -395,16 +401,34 @@ pub fn indicator_alpha(since: f64) -> f32 {
 /// `viewport` points showing `total` points at `offset`, or `None` when
 /// everything fits.
 pub fn indicator_span(viewport: Points, total: Points, offset: Points) -> Option<(Points, Points)> {
-    span(viewport.0, total.0, offset.0).map(|(start, len)| (Points(start), Points(len)))
+    indicator_span_within(viewport, total, offset, Points::ZERO, Points::ZERO)
 }
 
-fn span(viewport: f32, total: f32, offset: f32) -> Option<(f32, f32)> {
+/// [`indicator_span`] along a track that keeps `before` points from the
+/// viewport's start and `after` from its end (the view's
+/// [`crate::ScrollBehavior::scrollbar_inset`] along its axis), so that the
+/// indicator stays clear of bars floating over the ends of the view.
+/// `None` also when the insets leave no room for it.
+pub fn indicator_span_within(
+    viewport: Points,
+    total: Points,
+    offset: Points,
+    before: Points,
+    after: Points,
+) -> Option<(Points, Points)> {
+    span(viewport.0, total.0, offset.0, before.0, after.0)
+        .map(|(start, len)| (Points(start), Points(len)))
+}
+
+fn span(viewport: f32, total: f32, offset: f32, before: f32, after: f32) -> Option<(f32, f32)> {
     /// Short enough to see where it is in long lists, long enough to see.
     const MIN_LENGTH: f32 = 32.0;
-    if total <= viewport + 0.5 || viewport <= 4.0 * INDICATOR_MARGIN {
+    let (before, after) = (before.max(0.0), after.max(0.0));
+    let room = viewport - before - after;
+    if total <= viewport + 0.5 || room <= 4.0 * INDICATOR_MARGIN {
         return None;
     }
-    let track = viewport - 2.0 * INDICATOR_MARGIN;
+    let track = room - 2.0 * INDICATOR_MARGIN;
     let max = total - viewport;
     // Overscrolling shrinks it, as on iOS.
     let over = if offset < 0.0 {
@@ -414,7 +438,7 @@ fn span(viewport: f32, total: f32, offset: f32) -> Option<(f32, f32)> {
     };
     let len = (track * viewport / total - over).max(MIN_LENGTH).min(track);
     let t = (offset / max).clamp(0.0, 1.0);
-    Some((INDICATOR_MARGIN + (track - len) * t, len))
+    Some((before + INDICATOR_MARGIN + (track - len) * t, len))
 }
 
 /// How far the offset moves when the thumb moves by `d`: the thumb's
@@ -756,29 +780,41 @@ impl ScrollState {
         let (w, h) = (size.width.0, size.height.0);
         let (right, bottom) = Self::visible_edges(size, visible)?;
         let inset = self.behavior.content_inset;
-        let (dim, total, offset) = if self.horizontal {
+        let bar = self.behavior.scrollbar_inset.map(|v| v.0.max(0.0));
+        // Along the axis, from where the offset counts (the right of a
+        // mirrored view).
+        let (dim, total, offset, before, after) = if self.horizontal {
+            let (before, after) = if self.mirrored {
+                (bar.right, bar.left)
+            } else {
+                (bar.left, bar.right)
+            };
             (
                 w,
                 self.content.width.0 + inset.left.0 + inset.right.0,
                 self.x.0,
+                before,
+                after,
             )
         } else {
             (
                 h,
                 self.content.height.0 + inset.top.0 + inset.bottom.0,
                 self.y.0,
+                bar.top,
+                bar.bottom,
             )
         };
-        let (start, len) = span(dim, total, offset)?;
+        let (start, len) = span(dim, total, offset, before, after)?;
         let (x, y, rw, rh) = if self.horizontal {
             let x = if self.mirrored {
                 w - start - len
             } else {
                 start
             };
-            (x, bottom - thick - EDGE, len, thick)
+            (x, bottom - bar.bottom - thick - EDGE, len, thick)
         } else {
-            (right - thick - EDGE, start, thick, len)
+            (right - bar.right - thick - EDGE, start, thick, len)
         };
         let rect = Bounds {
             origin: point(Points(x), Points(y)),
@@ -787,7 +823,7 @@ impl ScrollState {
                 height: Points(rh),
             },
         };
-        Some((rect, dim - 2.0 * INDICATOR_MARGIN - len))
+        Some((rect, dim - before - after - 2.0 * INDICATOR_MARGIN - len))
     }
 
     /// Whether a mouse press `at` a point (view coordinates) in a view of
@@ -823,10 +859,18 @@ impl ScrollState {
         let Some((right, bottom)) = Self::visible_edges(size, visible) else {
             return false;
         };
+        // The edge the indicator runs along, moved in by its inset.
+        let bar = self.behavior.scrollbar_inset.map(|v| v.0.max(0.0));
         let (along, across, start, len, edge) = if self.horizontal {
-            (x, y, rect.origin.x.0, rect.size.width.0, bottom)
+            (
+                x,
+                y,
+                rect.origin.x.0,
+                rect.size.width.0,
+                bottom - bar.bottom,
+            )
         } else {
-            (y, x, rect.origin.y.0, rect.size.height.0, right)
+            (y, x, rect.origin.y.0, rect.size.height.0, right - bar.right)
         };
         (edge - THUMB_GRAB..=edge).contains(&across)
             && (start - THUMB_SLOP..=start + len + THUMB_SLOP).contains(&along)
@@ -2007,7 +2051,8 @@ fn key_target(m: KeyMove, base: f32, viewport: f32, min: f32, max: f32) -> f32 {
 /// Scrolls the view by the key move `m`, animated; a repeat continues
 /// from where the running scroll goes. With `flip`, a move by points goes
 /// the other way in a mirrored view (Left and Right follow what they show
-/// in a right-to-left list).
+/// in a right-to-left list). Tells the host the key's move once the
+/// scroll started ([`ScrollHost::key_scrolled`]).
 pub fn key_scroll(host: &impl ScrollHost, m: KeyMove, flip: bool) {
     let Some((base, viewport, min, max, flip)) = host.scroll(|s, size| {
         let (min, max) = s.limits(size);
@@ -2015,13 +2060,17 @@ pub fn key_scroll(host: &impl ScrollHost, m: KeyMove, flip: bool) {
     }) else {
         return;
     };
-    let m = match m {
+    let moved = match m {
         KeyMove::Points(d) if flip => KeyMove::Points(-d),
         m => m,
     };
-    let to = key_target(m, base, viewport, min, max);
+    let to = key_target(moved, base, viewport, min, max);
     interrupt(host);
     animate_along(host, to, KEY_ANIMATION, false, true);
+    // A list follows its real end from here on (rows never rendered are
+    // only estimated), and the other keys leave it. The key's own move,
+    // as the backends with a key scroll of their own report it.
+    host.key_scrolled(m);
 }
 
 /// Room kept around a view scrolled into view.
@@ -2261,13 +2310,13 @@ mod tests {
 
     #[test]
     fn indicator_geometry() {
-        assert_eq!(span(400.0, 400.0, 0.0), None);
-        let (s0, l0) = span(400.0, 1600.0, 0.0).unwrap();
+        assert_eq!(span(400.0, 400.0, 0.0, 0.0, 0.0), None);
+        let (s0, l0) = span(400.0, 1600.0, 0.0, 0.0, 0.0).unwrap();
         assert_eq!(s0, 2.0);
         assert!((l0 - 99.0).abs() < 0.01);
-        let (s1, l1) = span(400.0, 1600.0, 1200.0).unwrap();
+        let (s1, l1) = span(400.0, 1600.0, 1200.0, 0.0, 0.0).unwrap();
         assert!((s1 + l1 - 398.0).abs() < 0.01);
-        let (_, l2) = span(400.0, 1600.0, -50.0).unwrap();
+        let (_, l2) = span(400.0, 1600.0, -50.0, 0.0, 0.0).unwrap();
         assert!(l2 < l0);
         assert_eq!(
             indicator_span(Points(400.0), Points(1600.0), Points(0.0)),
@@ -2377,11 +2426,11 @@ mod tests {
         // The thumb's travel spans the scroll range: moving it by its
         // whole travel scrolls to the end, and it ends that far along.
         let p = Points;
-        let (s0, l0) = span(400.0, 1600.0, 0.0).unwrap();
+        let (s0, l0) = span(400.0, 1600.0, 0.0, 0.0, 0.0).unwrap();
         let travel = 400.0 - 2.0 * INDICATOR_MARGIN - l0;
         let end = thumb_scroll(p(travel), p(1200.0), p(travel)).0;
         assert!((end - 1200.0).abs() < 0.01);
-        let (s1, _) = span(400.0, 1600.0, end).unwrap();
+        let (s1, _) = span(400.0, 1600.0, end, 0.0, 0.0).unwrap();
         assert!((s1 - s0 - travel).abs() < 0.01);
         assert!(thumb_scroll(p(-10.0), p(1200.0), p(travel)).0 < 0.0);
         assert_eq!(thumb_scroll(p(10.0), p(1200.0), p(0.0)), p(0.0));
@@ -2398,6 +2447,75 @@ mod tests {
         assert!(s.grabs_thumb(size, pt(295.0, 10.0)));
         assert!(!s.grabs_thumb(size, pt(200.0, 10.0)));
         assert!(!s.grabs_thumb(size, pt(295.0, 300.0)));
+    }
+
+    #[test]
+    fn thumb_keeps_clear_of_the_scrollbar_inset() {
+        // A list under a 100-point bar floating at its bottom and a 50-point
+        // one at its top: the thumb runs between them, as far as before.
+        let (s0, l0) = span(400.0, 1600.0, 0.0, 50.0, 100.0).unwrap();
+        assert_eq!(s0, 50.0 + INDICATOR_MARGIN);
+        let (s1, l1) = span(400.0, 1600.0, 1200.0, 50.0, 100.0).unwrap();
+        assert!((s1 + l1 - (300.0 - INDICATOR_MARGIN)).abs() < 0.01);
+        // Its length is the shorter track's share of what shows.
+        let (_, full) = span(400.0, 1600.0, 0.0, 0.0, 0.0).unwrap();
+        assert!(l0 < full && (l0 - 246.0 / 4.0).abs() < 0.01, "{l0}");
+        // No room left between the insets: no indicator.
+        assert_eq!(span(400.0, 1600.0, 0.0, 200.0, 195.0), None);
+        // Negative insets count as none.
+        assert_eq!(
+            span(400.0, 1600.0, 0.0, -10.0, 0.0),
+            span(400.0, 1600.0, 0.0, 0.0, 0.0)
+        );
+        assert_eq!(
+            indicator_span_within(
+                Points(400.0),
+                Points(1600.0),
+                Points(0.0),
+                Points(50.0),
+                Points(100.0)
+            ),
+            Some((Points(s0), Points(l0)))
+        );
+
+        // In a view: the thumb, its travel and where a press grabs it.
+        let mut s = scroll_state((300.0, 1600.0), false);
+        s.indicator = true;
+        s.behavior.enabled = true;
+        s.behavior.scrollbar_inset = EdgeInsets {
+            top: Points(50.0),
+            right: Points(8.0),
+            bottom: Points(100.0),
+            left: Points::ZERO,
+        };
+        let size = sz(300.0, 400.0);
+        let (rect, travel) = s.thumb(size).unwrap();
+        assert_eq!(rect.origin.x.0, 300.0 - 8.0 - INDICATOR_THICK.0 - 2.0);
+        assert_eq!(rect.origin.y.0, s0);
+        assert!((travel.0 - (400.0 - 150.0 - 2.0 * INDICATOR_MARGIN - l0)).abs() < 0.01);
+        assert!(s.grabs_thumb(size, pt(287.0, 60.0)));
+        assert!(!s.grabs_thumb(size, pt(295.0, 60.0)), "past its edge");
+        assert!(!s.grabs_thumb(size, pt(287.0, 20.0)), "above its track");
+
+        // A horizontal one moves up by the bottom inset and runs between
+        // the left and right ones, from the right when mirrored.
+        let mut s = scroll_state((900.0, 2000.0), true);
+        s.behavior.scrollbar_inset = EdgeInsets {
+            top: Points::ZERO,
+            right: Points(30.0),
+            bottom: Points(20.0),
+            left: Points(10.0),
+        };
+        let size = sz(300.0, 400.0);
+        let (rect, _) = s.thumb(size).unwrap();
+        assert_eq!(rect.origin.y.0, 400.0 - 20.0 - INDICATOR_THICK.0 - 2.0);
+        assert_eq!(rect.origin.x.0, 10.0 + INDICATOR_MARGIN);
+        s.mirrored = true;
+        let (rect, _) = s.thumb(size).unwrap();
+        assert_eq!(
+            rect.origin.x.0 + rect.size.width.0,
+            300.0 - 30.0 - INDICATOR_MARGIN
+        );
     }
 
     #[test]
@@ -2528,6 +2646,8 @@ mod tests {
         redraws: std::cell::Cell<u32>,
         /// What it reported, in order: `zoom <scale>` and `scroll <x> <y>`.
         reports: std::cell::RefCell<Vec<String>>,
+        /// The key moves it was told of, in order.
+        key_moves: std::cell::RefCell<Vec<KeyMove>>,
     }
 
     impl TestHost {
@@ -2536,6 +2656,7 @@ mod tests {
                 state: std::cell::RefCell::new(state),
                 redraws: std::cell::Cell::new(0),
                 reports: Default::default(),
+                key_moves: Default::default(),
             }
         }
     }
@@ -2561,6 +2682,9 @@ mod tests {
         fn report_zoom(&self, scale: f32) {
             self.reports.borrow_mut().push(format!("zoom {scale}"));
         }
+        fn key_scrolled(&self, key_move: KeyMove) {
+            self.key_moves.borrow_mut().push(key_move);
+        }
         fn moved(&self, _: Point<Points>) {}
         fn pulled(&self, _: Points) {}
         fn relayout(&self) {}
@@ -2571,6 +2695,31 @@ mod tests {
             true
         }
         fn start_ticking(&self) {}
+    }
+
+    #[test]
+    fn a_key_scroll_tells_the_host_every_key_move() {
+        let host = TestHost::new(scroll_state((300.0, 100_000.0), false));
+        key_scroll(&host, KeyMove::End, false);
+        key_scroll(&host, KeyMove::Pages(-1.0), false);
+        assert_eq!(
+            *host.key_moves.borrow(),
+            [KeyMove::End, KeyMove::Pages(-1.0)]
+        );
+        assert!(matches!(
+            host.state.borrow().live.phase,
+            Phase::Animate { .. }
+        ));
+
+        // A right-to-left row scrolls the other way, and the host still
+        // hears the key's own move.
+        let mut row = scroll_state((100_000.0, 500.0), true);
+        row.mirrored = true;
+        row.x = Points(1000.0);
+        let host = TestHost::new(row);
+        key_scroll(&host, KeyMove::Points(KEY_LINE), true);
+        assert_eq!(host.state.borrow().goal(), 1000.0 - KEY_LINE.0);
+        assert_eq!(*host.key_moves.borrow(), [KeyMove::Points(KEY_LINE)]);
     }
 
     #[test]

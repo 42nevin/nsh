@@ -8,8 +8,8 @@ import test from "node:test";
 
 const source = await readFile(new URL("nsh.js", import.meta.url), "utf8");
 // `Player` is not exported; the page only gets it from `createPlayer`.
-const { Player, keyCode, elementTag } = await import(
-  `data:text/javascript,${encodeURIComponent(`${source}\nexport { Player, keyCode };`)}`
+const { Player, keyCode, elementTag, runtimeSheet, charLength, clipChars } = await import(
+  `data:text/javascript,${encodeURIComponent(`${source}\nexport { Player, keyCode, runtimeSheet, charLength, clipChars };`)}`
 );
 
 /** A player on a fake engine; `sent` holds `[name, payload]` of the events it got. */
@@ -132,15 +132,73 @@ test("links the app shows no menu for keep the browser's context menu", () => {
   assert.equal(player.contextMenu(e), false);
 });
 
+test("maxLength counts characters and cuts between user-perceived characters", () => {
+  assert.equal(charLength("a😀𠀀"), 3);
+  assert.equal(clipChars("hello", 3), "hel");
+  assert.equal(clipChars("hello", 0), "");
+  assert.equal(clipChars("a😀b", 2), "a😀");
+  assert.equal(clipChars("😀".repeat(3), 2), "😀😀");
+  // A letter with its combining accent, an emoji with its skin tone, a
+  // family joined by zero-width joiners: whole or not at all.
+  assert.equal(clipChars("café", 4), "caf");
+  assert.equal(clipChars("ok👍🏽", 3), "ok");
+  assert.equal(clipChars("ok👍🏽", 4), "ok👍🏽");
+  assert.equal(clipChars("a👨‍👩‍👧b", 5), "a");
+});
+
+test("a field's maxlength lets in what fits by characters, an emoji counting once", () => {
+  const { player } = fakePlayer();
+  const field = {
+    tagName: "INPUT",
+    value: "",
+    classList: { toggle() {} },
+    getAttribute: () => null,
+    setAttribute() {},
+    removeAttribute(name) {
+      if (name === "maxlength") delete this.maxLength;
+    },
+  };
+  const el = { _field: field, getAttribute: () => null };
+  player.view = () => el;
+  player.op_in(["in", 1, { multiline: false, maxLength: 10 }, null]);
+  assert.equal(field.maxLength, 10);
+  // 800 emoji in a 1500 limit: room for 700 more characters, 1600 + 700 units.
+  player.op_in(["in", 1, { multiline: false, maxLength: 1500 }, null]);
+  field.value = "😀".repeat(800);
+  player.fieldLimit(field);
+  assert.equal(field.maxLength, 2300);
+  // Before a paste at the end: exactly what fits by characters.
+  field.selectionStart = field.selectionEnd = field.value.length;
+  const paste = (text) => ({ inputType: "insertFromPaste", data: null, dataTransfer: { getData: () => text } });
+  player.beforeInput(field, paste("😀".repeat(800)));
+  assert.equal(field.maxLength, 3000, "700 emoji more");
+  player.beforeInput(field, paste("ab👍🏽"));
+  assert.equal(field.maxLength, 1600 + "ab👍🏽".length);
+  // Typing over a selected emoji frees one character's room.
+  field.value = "😀".repeat(1500);
+  field.selectionStart = 0;
+  field.selectionEnd = 2;
+  player.beforeInput(field, { inputType: "insertText", data: "ab" });
+  assert.equal(field.maxLength, 2998 + 1, "only the a");
+  // A composition is held to the room left, one unit per character.
+  field.selectionStart = field.selectionEnd = 3000;
+  player.beforeInput(field, { inputType: "insertCompositionText", data: "中" });
+  assert.equal(field.maxLength, 3000);
+  // No maxLength, no limit.
+  player.op_in(["in", 1, { multiline: false }, null]);
+  assert.equal(field.maxLength, undefined);
+});
+
 test("input autofill hints are set, changed and cleared on both field kinds", () => {
   const { player } = fakePlayer();
   const attrs = new Map();
   const field = {
     classList: { toggle() {} },
+    getAttribute: (name) => attrs.get(name) ?? null,
     setAttribute: (name, value) => attrs.set(name, value),
     removeAttribute: (name) => attrs.delete(name),
   };
-  const el = { _field: field, removeAttribute() {} };
+  const el = { _field: field, getAttribute: () => null };
   player.view = () => el;
   for (const multiline of [false, true]) {
     field.tagName = multiline ? "TEXTAREA" : "INPUT";
@@ -164,10 +222,11 @@ test("input autoCorrect sets spellcheck and the autocorrect attribute on both fi
   const attrs = new Map();
   const field = {
     classList: { toggle() {} },
+    getAttribute: (name) => attrs.get(name) ?? null,
     setAttribute: (name, value) => attrs.set(name, value),
     removeAttribute: (name) => attrs.delete(name),
   };
-  const el = { _field: field, removeAttribute() {} };
+  const el = { _field: field, getAttribute: () => null };
   player.view = () => el;
   for (const multiline of [false, true]) {
     field.tagName = multiline ? "TEXTAREA" : "INPUT";
@@ -183,12 +242,58 @@ test("input autoCorrect sets spellcheck and the autocorrect attribute on both fi
   }
 });
 
+test("view and field ARIA write only changed attributes", () => {
+  const { player } = fakePlayer();
+  const element = () => {
+    const attrs = new Map();
+    const writes = [];
+    return {
+      attrs,
+      writes,
+      getAttribute: (name) => attrs.get(name) ?? null,
+      setAttribute(name, value) {
+        writes.push(["set", name, value]);
+        attrs.set(name, value);
+      },
+      removeAttribute(name) {
+        writes.push(["remove", name]);
+        attrs.delete(name);
+      },
+    };
+  };
+  const el = element();
+  player.updateAria(el);
+  assert.deepEqual(el.writes, []);
+
+  // A label can arrive before the field, which then takes it from the view.
+  el._props = { label: "Price" };
+  player.updateAria(el);
+  assert.deepEqual(el.writes.splice(0), [["set", "aria-label", "Price"]]);
+  const field = element();
+  el._field = field;
+  player.fieldAria(el, field);
+  assert.deepEqual(el.writes.splice(0), [["remove", "aria-label"]]);
+  assert.deepEqual(field.writes.splice(0), [["set", "aria-label", "Price"]]);
+
+  player.updateAria(el);
+  assert.deepEqual(el.writes, []);
+  assert.deepEqual(field.writes, []);
+  el._props = {};
+  player.updateAria(el);
+  assert.deepEqual(field.writes.splice(0), [["remove", "aria-label"]]);
+  assert.equal(field.attrs.has("aria-label"), false);
+  player.updateAria(el);
+  assert.deepEqual(el.writes, []);
+  assert.deepEqual(field.writes, []);
+});
+
 test("an invalid view is aria-invalid, and so is the field of an input", () => {
   const { player } = fakePlayer();
   const element = () => {
     const attrs = new Map();
     return {
       attrs,
+      getAttribute: (name) => attrs.get(name) ?? null,
       setAttribute: (name, value) => attrs.set(name, value),
       removeAttribute: (name) => attrs.delete(name),
     };
@@ -221,6 +326,7 @@ for (const multiline of [false, true]) {
         const attrs = new Map();
         return {
           attrs, style: {}, classList: { toggle() {} },
+          getAttribute: (name) => attrs.get(name) ?? null,
           setAttribute: (name, value) => attrs.set(name, value),
           removeAttribute: (name) => attrs.delete(name),
         };
@@ -295,6 +401,7 @@ test("a combo box's field names its highlighted row and its list by DOM id", () 
     return {
       attrs,
       id: "",
+      getAttribute: (name) => attrs.get(name) ?? null,
       setAttribute: (name, value) => attrs.set(name, value),
       removeAttribute: (name) => attrs.delete(name),
       ...extra,
@@ -348,6 +455,7 @@ test("a field names the line describing it by DOM id, followed as it comes and g
     return {
       attrs,
       id: "",
+      getAttribute: (name) => attrs.get(name) ?? null,
       setAttribute: (name, value) => attrs.set(name, value),
       removeAttribute: (name) => attrs.delete(name),
       ...extra,
@@ -1450,6 +1558,54 @@ test("a paused WebSocket holds its events, in order, until the engine resumes it
   }
 });
 
+test("another tab's changes to the app's storage reach the engine as this tab now reads them", () => {
+  const { player } = fakePlayer();
+  const text = (p, l) => new TextDecoder().decode(new Uint8Array(player.wasm.memory.buffer, p, l));
+  const got = [];
+  player.wasm.nsh_storage_changed = (pp, pl, kp, kl, vp, vl, kind) => {
+    got.push([text(pp, pl), text(kp, kl), text(vp, vl), kind]);
+    return -1;
+  };
+  const listeners = new Set();
+  const kept = new Map();
+  const area = { getItem: (key) => kept.get(key) ?? null };
+  const saved = { window: globalThis.window, localStorage: globalThis.localStorage };
+  globalThis.window = {
+    addEventListener: (type, f) => type === "storage" && listeners.add(f),
+    removeEventListener: (type, f) => type === "storage" && listeners.delete(f),
+  };
+  globalThis.localStorage = area;
+  const dispatch = (event) => listeners.forEach((f) => f({ storageArea: area, ...event }));
+  try {
+    player.followStorage("nsh:app:");
+    player.followStorage("nsh:app:");
+    assert.equal(listeners.size, 1, "one listener however many loads");
+    // This tab wrote "mine" after the other tab's "theirs": it keeps its own.
+    kept.set("nsh:app:draft", "mine");
+    dispatch({ key: "nsh:app:draft", newValue: "theirs" });
+    kept.delete("nsh:app:gone");
+    dispatch({ key: "nsh:app:gone", newValue: null });
+    // Other apps' keys, the page's own and `sessionStorage` are not the app's.
+    dispatch({ key: "nsh:other:draft", newValue: "x" });
+    dispatch({ key: "draft", newValue: "x" });
+    dispatch({ key: "nsh:app:draft", newValue: "x", storageArea: {} });
+    dispatch({ key: null, newValue: null });
+    assert.deepEqual(got, [
+      ["nsh:app:", "draft", "mine", 1],
+      ["nsh:app:", "gone", "", 0],
+      ["nsh:app:", "", "", 2],
+    ]);
+    // A stopped app follows nothing until the next one loads its storage.
+    globalThis.cancelAnimationFrame ??= () => {};
+    player.stop();
+    assert.equal(listeners.size, 0);
+    assert.equal(player.storagePrefixes.size, 0);
+  } finally {
+    clearTimeout(player.timer);
+    Object.assign(globalThis, saved);
+  }
+});
+
 test("a plain Shader uploads the whole built-ins block, progress and overflow at 0", () => {
   const { player } = fakePlayer();
   const uploads = [];
@@ -2179,10 +2335,11 @@ function animating(t) {
     else player.requestFrame();
     return -1;
   };
-  const frame = () => {
+  // The page's animation frame, which began at `at` (now by default).
+  const frame = (at = clock.now) => {
     const due = frames;
     frames = [];
-    for (const f of due) f(clock.now);
+    for (const f of due) f(at);
   };
   // Time passes by `ms`: the timers due run, and what the calls into the
   // engine left for after them (`deadlineSoon`).
@@ -2192,7 +2349,7 @@ function animating(t) {
     t.mock.timers.tick(ms);
     await null;
   };
-  return { player, ticks, frame, pass, ended: () => ended };
+  return { player, ticks, frame, pass, clock, ended: () => ended };
 }
 
 test("a native animation ends on time while no animation frames come", async (t) => {
@@ -2223,6 +2380,33 @@ test("while animation frames come the page runs no frames of its own", async (t)
   assert.equal(ticks.length, frames, "every frame the browser's");
   await pass(1000);
   assert.equal(ticks.length, frames);
+});
+
+test("a frame a task held steps the animations when its callbacks run", (t) => {
+  const { player, ticks, frame, clock } = animating(t);
+  player.requestFrame();
+  // The frame began at 0; a press handled before its callbacks took
+  // 170 ms (it opened a sheet, whose entrance asks for this frame).
+  clock.now = 170;
+  frame(0);
+  assert.deepEqual(ticks, [170], "the entrance starts when it was asked for, not 170 ms in");
+  // The next frames are on time: their own times keep the display's pace.
+  clock.now = 189;
+  frame(186.7);
+  clock.now = 205;
+  frame(203.3);
+  assert.deepEqual(ticks, [170, 186.7, 203.3]);
+});
+
+test("an animation frame never steps earlier than the one before", (t) => {
+  const { player, ticks, frame, clock } = animating(t);
+  player.requestFrame();
+  clock.now = 170;
+  frame(0);
+  // On time by its own measure, but begun before the held one ran.
+  clock.now = 172;
+  frame(160);
+  assert.deepEqual(ticks, [170, 170]);
 });
 
 test("a dialog comes in and reports it shown without animation frames", () => {
@@ -3300,9 +3484,10 @@ function leavingPage() {
       preventDefault() { this.defaultPrevented = true; },
     });
   const hide = (persisted = false) => dispatch("pagehide", { persisted });
+  const show = (persisted = false) => dispatch("pageshow", { persisted });
   const guards = () => (listeners.get("beforeunload") ?? []).length;
   const watchers = () => (listeners.get("pagehide") ?? []).length;
-  return { leave, hide, guards, watchers, restore: () => Object.assign(globalThis, saved) };
+  return { leave, hide, show, guards, watchers, restore: () => Object.assign(globalThis, saved) };
 }
 
 /** A running app (it watches the page's end, as `begin` has it) that
@@ -3404,6 +3589,45 @@ test("a page kept in the back / forward cache keeps its app running", () => {
     page.hide();
     assert.equal(calls.quits, 1);
   } finally {
+    page.restore();
+  }
+});
+
+test("a page in the back / forward cache is in the background until it comes back", () => {
+  const page = leavingPage();
+  const document = globalThis.document;
+  // A browser that tells no `visibilitychange` around the cache: the page
+  // stays visible and focused throughout.
+  globalThis.document = { visibilityState: "visible", hasFocus: () => true };
+  try {
+    const { player, calls } = quittingPlayer(() => true);
+    const reported = [];
+    Object.assign(player, { reported: "{}", environment: () => ({ lifecycle: player.lifecycle() }) });
+    player.wasm.nsh_environment = (ptr, len) => {
+      reported.push(JSON.parse(new TextDecoder().decode(new Uint8Array(player.wasm.memory.buffer, ptr, len))).lifecycle);
+      return -1;
+    };
+    player.watchPageCache(() => player.environmentChanged());
+    page.show();
+    page.hide(true);
+    assert.deepEqual(reported, ["background"], "kept in the cache: the app goes to the background");
+    assert.equal(calls.quits, 0, "and runs on");
+    page.show(true);
+    assert.deepEqual(reported, ["background", "active"], "restored: back in the foreground");
+    // Hidden again: the cache and visibility are one background.
+    page.hide(true);
+    globalThis.document.visibilityState = "hidden";
+    page.show(true);
+    assert.deepEqual(reported, ["background", "active", "background"]);
+    globalThis.document.visibilityState = "visible";
+    player.environmentChanged();
+    // The page's real end ends the app, once, with no lifecycle edge.
+    page.hide();
+    page.hide();
+    assert.equal(calls.quits, 1);
+    assert.deepEqual(reported, ["background", "active", "background", "active"]);
+  } finally {
+    globalThis.document = document;
     page.restore();
   }
 });
@@ -3706,4 +3930,169 @@ test("animated values skip a view that left the page until it is back, and reach
   el.isConnected = true;
   player.op_a(["a", 2, "opacity", "0.6"]);
   assert.equal(inline.get("opacity"), "0.6");
+});
+
+test("the runtime's rules are sheets the document adopts, which a strict style-src allows", () => {
+  const savedDocument = globalThis.document, savedSheet = globalThis.CSSStyleSheet;
+  const appended = [];
+  class Sheet { replaceSync(text) { this.text = text; } }
+  globalThis.CSSStyleSheet = Sheet;
+  globalThis.document = { adoptedStyleSheets: [], head: { append: el => appended.push(el) } };
+  try {
+    const own = runtimeSheet("nsh-style", "@keyframes a {}");
+    const classes = runtimeSheet("nsh-classes");
+    assert.deepEqual(document.adoptedStyleSheets, [own, classes]);
+    assert.equal(own.text, "@keyframes a {}");
+    assert.deepEqual(appended, []);
+    // A browser without constructed sheets gets `<style>` elements.
+    globalThis.CSSStyleSheet = undefined;
+    globalThis.document = {
+      createElement: () => ({ sheet: { rules: [] } }),
+      head: { append: el => appended.push(el) },
+    };
+    const style = runtimeSheet("nsh-own", "a {}");
+    assert.equal(appended.length, 1);
+    assert.equal(appended[0].id, "nsh-own");
+    assert.equal(appended[0].textContent, "a {}");
+    assert.equal(style, appended[0].sheet);
+  } finally {
+    globalThis.document = savedDocument;
+    globalThis.CSSStyleSheet = savedSheet;
+  }
+});
+
+test("links and addresses resolve against the site's base where the page names it", () => {
+  const savedDocument = globalThis.document;
+  // A strict `base-uri`: the page's base is the route it was opened at.
+  globalThis.document = { baseURI: "https://a.test/apps/notes/n/42" };
+  try {
+    const { player } = fakePlayer();
+    player.siteBase = null;
+    assert.equal(player.addressBase(), "https://a.test/apps/notes/n/42");
+    player.siteBase = "https://a.test/apps/notes/";
+    assert.equal(player.addressBase(), "https://a.test/apps/notes/");
+    assert.equal(player.linkHref("n/43"), "https://a.test/apps/notes/n/43");
+    assert.equal(player.linkHref("/elsewhere"), "https://a.test/elsewhere");
+    assert.equal(player.linkHref("https://b.test/x"), "https://b.test/x");
+  } finally {
+    globalThis.document = savedDocument;
+  }
+});
+
+/** An element whose DOM state, as a real one's, is not among its own
+ * enumerable keys (`retag` copies those); a `style` attribute set as text
+ * applies nothing, as under a strict `style-src`. */
+function fakeElement(tag, attributes = {}) {
+  const attrs = new Map(Object.entries(attributes));
+  const set = [];
+  const el = {};
+  Object.defineProperties(el, {
+    localName: { value: tag },
+    attributes: { get: () => [...attrs].map(([name, value]) => ({ name, value })) },
+    setAttribute: { value(name, value) { set.push(name); if (name !== "style") attrs.set(name, String(value)); } },
+    getAttribute: { value: (name) => attrs.get(name) ?? null },
+    removeAttribute: { value: (name) => attrs.delete(name) },
+    attributesSet: { value: set },
+    style: { value: { cssText: attributes.style ?? "" } },
+    childNodes: { value: [] },
+    append: { value(...nodes) { this.childNodes.push(...nodes); } },
+    replaceWith: { value() {} },
+  });
+  return el;
+}
+
+test("a view drawn as another element keeps its frame under a strict style-src", () => {
+  const savedDocument = globalThis.document;
+  globalThis.document = { createElement: (tag) => fakeElement(tag) };
+  try {
+    const { player } = fakePlayer();
+    player.views = new Map();
+    const frame = "left: 10px; top: 20px; width: 100px; height: 40px;";
+    const el = fakeElement("div", { class: "nsh-v", style: frame });
+    Object.assign(el, { _id: 6, _kind: "view" });
+    player.views.set(6, el);
+    // A `Link` whose `href` arrives after its frame: drawn as an `a`.
+    const next = player.retag(el, "a");
+    assert.equal(next.localName, "a");
+    assert.equal(next.style.cssText, frame);
+    assert.ok(!next.attributesSet.includes("style"));
+    assert.equal(next.getAttribute("class"), "nsh-v");
+    assert.equal(next._id, 6);
+    assert.equal(player.views.get(6), next);
+  } finally {
+    globalThis.document = savedDocument;
+  }
+});
+
+test("a web view's relative URL is the site's where the page names its base", () => {
+  const savedLocation = globalThis.location;
+  // Opened at one of the app's routes, below the site's base.
+  globalThis.location = { href: "https://a.test/apps/x/a/b", origin: "https://a.test" };
+  try {
+    const { player } = fakePlayer();
+    const frame = fakeElement("iframe");
+    const el = { _id: 8, _frameEl: frame, _events: new Set() };
+    player.view = () => el;
+    const load = (url) => {
+      el._web = null;
+      player.op_web(["web", 8, url, null, null, null, null, true, true]);
+      return frame.src;
+    };
+    player.siteBase = "https://a.test/apps/x/";
+    assert.equal(load("help/index.html"), "https://a.test/apps/x/help/index.html");
+    assert.equal(load("https://b.test/doc"), "https://b.test/doc");
+    // Without a site base the page's own base resolves it, as it does a link's.
+    player.siteBase = null;
+    assert.equal(load("help/index.html"), "help/index.html");
+    assert.equal(el._webUrl, "help/index.html");
+  } finally {
+    if (savedLocation === undefined) delete globalThis.location;
+    else globalThis.location = savedLocation;
+  }
+});
+
+test("share reports shared, dismissed and unavailable, never shared when it could not", async () => {
+  const { player } = fakePlayer();
+  const got = [];
+  player.event = (_, name, value) => got.push([name, value]);
+  const saved = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const browser = (share, canShare) =>
+    Object.defineProperty(globalThis, "navigator", { value: { share, canShare }, configurable: true });
+  try {
+    const shared = [];
+    browser(async (data) => { shared.push(data); });
+    await player.share(1, "Docs", null, "https://example.com/docs", false);
+    assert.deepEqual(shared, [{ title: "Docs", url: "https://example.com/docs" }]);
+    browser(async () => { throw Object.assign(new Error("closed"), { name: "AbortError" }); });
+    await player.share(2, null, "Hello", null, false);
+    // Files never reach the browser.
+    browser(async () => assert.fail("shared files"));
+    await player.share(3, null, "Hello", null, true);
+    browser(async () => assert.fail("shared what it cannot"), () => false);
+    await player.share(4, null, "Hello", null, false);
+    browser(undefined);
+    await player.share(5, null, "Hello", null, false);
+    browser(async () => { throw Object.assign(new Error("no activation"), { name: "NotAllowedError" }); });
+    await player.share(6, null, "Hello", null, false);
+    // An earlier share's sheet still open.
+    browser(async () => { throw Object.assign(new Error("in progress"), { name: "InvalidStateError" }); });
+    await player.share(7, null, "Hello", null, false);
+    // Anything else is a failure without a code.
+    browser(async () => { throw new TypeError("bad data"); });
+    await player.share(8, null, "Hello", null, false);
+    const unavailable = "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM";
+    assert.deepEqual(got.map(([name, v]) => [name, v.id, v.action ?? v.code ?? "error"]), [
+      ["onShare", 1, "shared"],
+      ["onShare", 2, "dismissed"],
+      ["onShare", 3, unavailable],
+      ["onShare", 4, unavailable],
+      ["onShare", 5, unavailable],
+      ["onShare", 6, unavailable],
+      ["onShare", 7, unavailable],
+      ["onShare", 8, "error"],
+    ]);
+  } finally {
+    if (saved) Object.defineProperty(globalThis, "navigator", saved);
+    else delete globalThis.navigator;
+  }
 });

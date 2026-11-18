@@ -99,6 +99,9 @@ final class Native {
     static final int DOWNLOAD_OFFER = 87;
     static final int DOWNLOAD_PROGRESS = 88;
     static final int DOWNLOAD_END = 89;
+    static final int SHARE = 90;
+    static final int DETENT_CHANGE = 91;
+    static final int AUTH_SESSION = 92;
 
     /**
      * Draws the SVG {@code bytes} for a view {@code maxPx} pixels on its longer side, with its shorter side that long
@@ -125,6 +128,9 @@ final class Native {
 
     /** No VM limits for the apps loaded next: they run on their own. */
     static native void setStandaloneLimits(long handle);
+
+    /** Whether scroll views make their content's native views only near their viewport (default: true). */
+    static native void setContentCulling(long handle, boolean enabled);
 
     /** The directory the storage of the apps loaded next is kept in (null: each app's own in the data directory). */
     static native void setStorage(long handle, String dir);
@@ -416,8 +422,9 @@ final class Native {
     /**
      * Touches for the JS responder system. phase: 0 start, 1 move, 2 end,
      * 3 cancel. Per finger: id, target node, path length (in {@code paths},
-     * innermost first), pageX, pageY, locationX, locationY (in
-     * {@code coords}, dp) and whether it changed. {@code time}: ms.
+     * innermost first), pageX, pageY, locationX, locationY (dp), pressure,
+     * tiltX, tiltY (degrees) and kind (0 touch, 1 pen, 2 mouse) (8 floats
+     * in {@code coords}) and whether it changed. {@code time}: ms.
      */
     static native void touch(long handle, int phase, int[] ids, int[] targets, int[] pathLengths, int[] paths,
             float[] coords, boolean[] changed, long time, int activated);

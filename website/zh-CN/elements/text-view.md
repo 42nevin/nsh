@@ -222,6 +222,7 @@ fn reply(markdown: Signal<SharedString>) -> impl IntoElement {
 | `mathBlock` | `MathBlock` | 公式块；没有 `renderMath` 时由 TextView 排版并居中。 |
 | `table` | `Table` | 表格：`renderTableActions` 的内容，然后是单元格的滚动视图。 |
 | `tableScroll` | `TableScroll` | 表格单元格的横向滚动视图：空间足够时各列适应内容宽度，较窄时换行收缩到每列的下限，再窄则横向滚动。 |
+| `tableGrid` | `TableGrid` | 表格单元格所在的网格，位于 `tableScroll` 内。它绘制表格的上边线和左边线，每个单元格绘制自己的右边线和下边线；应用自己的外框（四边、圆角）设在这里。 |
 | `tableRow` | `TableRow` | 表格的每一行：位于单元格后面的视图，用于背景和边框（文本样式设在 `tableCell` 上）。 |
 | `tableHead` | `TableHead` | 表头行，在 `tableRow` 之后。 |
 | `tableCell` | `TableCell` | 每个单元格。 |
@@ -240,7 +241,7 @@ fn reply(markdown: Signal<SharedString>) -> impl IntoElement {
 
 ## 流式 AI 回复
 
-随着回复增长传入它，并设置 `options={{ streaming: true }}`（Rust 中是 `MarkdownOptions { streaming: true, .. }`）。仍在到达的文本末尾常常留着未闭合的语法（`**bold`、`` `code ``、`[a link](htt`、刚到达表头的表格）；流式模式会把它显示成闭合后的样子，读者不会看到零散的 `**` 或 `[`。含义要看后面字符的末行在这一行结束时显示：单独的列表标记、段落下的 `-` 或 `=` 行、代码围栏的开头行或打了一半的收尾围栏，因此列表项、标题和代码块一出现就是最终的样子。词内的 `*`（`a*b`）保持原样。回复结束后（关闭 `streaming`），文本按原样解析。文档块按位置保留：已完成的块保留它们的视图，只有正在写的块会重新生成，因此长回复的更新依然很轻。
+随着回复增长传入它，并设置 `options={{ streaming: true }}`（Rust 中是 `MarkdownOptions { streaming: true, .. }`）。仍在到达的文本末尾常常留着未闭合的语法（`**bold`、`` `code ``、`[a link](htt`、刚到达表头的表格）；流式模式会把它显示成闭合后的样子，读者不会看到零散的 `**` 或 `[`。含义要看后面字符的末行在这一行结束时显示：单独的列表标记、段落下的 `-` 或 `=` 行、代码围栏的开头行或打了一半的收尾围栏，因此列表项、标题和代码块一出现就是最终的样子。词内的 `*`（`a*b`）保持原样。回复结束后（关闭 `streaming`），文本按原样解析。文档块按位置保留：已完成的块只解析一次并保留它们的视图，每次更新只重新解析并生成正在写的块，因此长回复的更新依然很轻。
 
 `streamingCaret` 跟随文档末尾：以行内方式显示在最后一段文本的末尾，无论最后一个块在哪里结束（段落、列表项、代码块、表格的最后一个单元格）；否则单独一行显示在最后一个块之后（分隔线、渲染函数的内容）。回复结束后去掉它。
 
@@ -725,6 +726,8 @@ fn chat() -> impl IntoElement {
 
 插件的 `render` 最先生效，然后是 `renderCustom`，最后是节点的内容。`configure` 打开 markdown-rs 的更多语法，`ParseContext` 按解析器的方式读取节点的子节点。
 
+`ParseContext::source` 是整篇 Markdown 文本，节点位置是它里面的偏移；长文本分段读取时也一样。带插件的长文档同样读得快；`configure` 打开或关闭某个语法结构（construct）的插件会让文本每次按整篇一次解析。
+
 <a id="props"></a>
 
 ## 属性
@@ -772,6 +775,7 @@ fn chat() -> impl IntoElement {
 |---|---|---|
 | `selectedText({ format? })` | `selected_text(Option<TextSelectionOptions>)` | 读取 `selectable` 视图的选区：`format` 为 `"plain"`（默认，与复制相同）、`"markdown"` 或 `"html"`，由选中的节点重新生成；选中全部时返回原样的源文（[读取为 Markdown 或 HTML](./text-selection.md#读取为-markdown-或-html)）。没有选中内容时返回 `""`。 |
 | `onImagePress` | `.on_image_press(\|image: &Image\| ..)` | 不在链接中的图片被点击：`{ image }` 是该图片，由应用放大显示（应用自己的可缩放查看器）。 |
+| `onTaskPress` | `.on_task_press(\|event: &TextViewTaskPressEvent\| ..)` | 任务项的方框被点击：`{ index, checked }`，即文档中的第几个任务（从 0 开始，按阅读顺序）以及这次点击要求的状态。文档本身不会改变：由应用把修改后的源文本交给视图。 |
 
 <a id="accessibility"></a>
 

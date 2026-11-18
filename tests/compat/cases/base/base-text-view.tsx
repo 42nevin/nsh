@@ -5,13 +5,15 @@
 // of each kind shown by `renderCustom`, the other render functions
 // (`renderCodeBlock`, `renderCodeBlockAction`, `renderTableActions`,
 // `renderMath`, `renderImage`), parts styled by `classes` and `styles`
-// (the root's text styles passing to every part), code blocks without
+// (the root's text styles passing to every part; a table's grid,
+// `tableGrid`, takes its frame), code blocks without
 // their scroll indicator (`codeBlockScrollbar`), tables without
 // theirs (`tableScrollbar`),
 // code blocks' actions (`codeBlockActions`, the built-in copy and one of
 // the app's: `onCodeBlockAction`), `selectable`, link presses
 // (`onLinkPress`, with the modifier keys held), images' presses
-// (`onImagePress`), and the static functions
+// (`onImagePress`), task boxes' presses (`onTaskPress`),
+// and the static functions
 // (`TextView.parse`, `TextView.parseHtml`, `TextView.plainText`; emphasis
 // beside CJK text read by the CJK-friendly rule, a tag that names no
 // element read as text, bare URLs ending at CJK text, escaped brackets
@@ -63,6 +65,7 @@ function App() {
   const link = signal("none");
   const action = signal("none");
   const image = signal("none");
+  const task = signal("none");
   const parsed = TextView.parse("**a** b");
   const first = parsed.blocks[0];
   // Escaped brackets around reference numbers: text, not a formula.
@@ -79,6 +82,7 @@ function App() {
         codeBlockScrollbar={false}
         tableScrollbar={false}
         classes={{ root: "text-[#0000ff]" }}
+        styles={{ tableGrid: { backgroundColor: "#00ff00" } }}
         onLinkPress={({ url, modifiers }) => link.set(`${url} (Command: ${modifiers.platform})`)}
         codeBlockActions={[{ id: "copy", label: "Copy code" }, { id: "run", label: "Run code" }]}
         renderCodeBlockAction={(action) => <Text>{`Action ${action.id}`}</Text>}
@@ -88,6 +92,11 @@ function App() {
       <Text>{`Link: ${link()}`}</Text>
       <Text>{`Code action: ${action()}`}</Text>
       <Text>{`Image pressed: ${image()}`}</Text>
+      <TextView
+        markdown={"- [x] Draft it\n- [ ] Ship it"}
+        onTaskPress={({ index, checked }) => task.set(`${index} ${checked}`)}
+      />
+      <Text>{`Task: ${task()}`}</Text>
       <TextView html="<h2>From HTML</h2><p>An <b>hypertext</b> paragraph.</p>" />
       <TextView document={{ blocks: [{ type: "paragraph", content: [{ type: "text", text: "From a document" }] }] }} />
       <TextView

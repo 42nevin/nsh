@@ -23,7 +23,7 @@ use nsh_core::{
     KeyboardDismissMode, KeyboardTaps, KeyboardType, LayoutCurve, LayoutProperty, LayoutTransition,
     LiveRegion, ModalAnimation, ModalPresentation, MountBatch, MountItem, NativeProps,
     PointerEvents, ResizeMode, ReturnKeyType, ScreenAnimation, ScreenConfig, SnapAlignment,
-    StatusBarStyle, SubmitBehavior, TextAlign, ViewKind, ViewProps, ViewStyle, WebSource,
+    StatusBarStyle, SubmitBehavior, ViewKind, ViewProps, ViewStyle, WebSource,
     audio::AudioCommand,
     geometry::{DefiniteLength, REM_SIZE},
 };
@@ -424,6 +424,11 @@ pub(crate) fn encode(batch: MountBatch, web_generation: u64) -> Encoded {
                 e.bool(b.center_content);
                 e.bool(b.refresh_indicator.is_some());
                 e.float(b.refresh_indicator.map_or(0.0, |h| h.0));
+                let i = b.scrollbar_inset;
+                e.float(i.top.0);
+                e.float(i.right.0);
+                e.float(i.bottom.0);
+                e.float(i.left.0);
             }
             MountItem::ScrollBy { id, dx, dy } => {
                 e.int(SCROLL_BY);
@@ -628,6 +633,21 @@ pub(crate) fn encode(batch: MountBatch, web_generation: u64) -> Encoded {
                                 DialogButtonStyle::Destructive => 2,
                             });
                         }
+                        // The text field (`SystemUi.dialog`): an alert's only.
+                        match d.input {
+                            Some(input) if !d.sheet => {
+                                e.bool(true);
+                                e.string(input.text);
+                                e.opt_string(input.placeholder.as_deref());
+                                e.bool(input.select_all);
+                                e.bool(input.required);
+                            }
+                            _ => e.bool(false),
+                        }
+                    }
+                    Command::CloseDialog(dialog) => {
+                        e.int(60);
+                        e.int(dialog as i32);
                     }
                     Command::SetJsResponder { block } => {
                         e.int(14);
@@ -739,6 +759,37 @@ pub(crate) fn encode(batch: MountBatch, web_generation: u64) -> Encoded {
                         e.int(id as i32);
                         e.string(url);
                     }
+                    // `Share.java`: the request, the title and the text
+                    // (the text and the URL on lines of their own), each
+                    // after whether it is there, then the files. Android's
+                    // sheet is no popover: the anchor is not sent.
+                    Command::Share { id, sheet } => {
+                        e.int(58);
+                        e.int(id as i32);
+                        e.bool(sheet.title.is_some());
+                        e.string(sheet.title.clone().unwrap_or_default());
+                        let text = sheet.combined_text();
+                        e.bool(text.is_some());
+                        e.string(text.unwrap_or_default());
+                        e.int(sheet.files.len() as i32);
+                        for file in sheet.files {
+                            e.string(file);
+                        }
+                    }
+                    // `AuthSession.java`: the request, the page, the callback
+                    // scheme and whether it is ephemeral.
+                    Command::AuthSession { id, page } => {
+                        e.int(59);
+                        e.int(id as i32);
+                        e.string(page.url);
+                        e.string(page.callback_scheme);
+                        e.bool(page.ephemeral);
+                    }
+                    // `AuthSession.java`: the request the app closed.
+                    Command::CloseAuthSession(id) => {
+                        e.int(61);
+                        e.int(id as i32);
+                    }
                     // Answered by the sink (`host::answer_clipboard_reads`);
                     // images are not written to Android's clipboard.
                     Command::ReadClipboardImage { .. }
@@ -775,7 +826,8 @@ pub(crate) fn encode(batch: MountBatch, web_generation: u64) -> Encoded {
                     | Command::ScrollToEnd { .. }
                     // Desktops only.
                     | Command::Desktop(_)
-                    // The web's history entries; the core sends it there only.
+                    // The app's address: Android keeps none (App Links only
+                    // come in).
                     | Command::SetAppUrl(_)
                     | Command::PushAppUrl(_)
                     // No host answers `nsh/host` here (`Environment::host`):
@@ -796,9 +848,16 @@ pub(crate) fn encode(batch: MountBatch, web_generation: u64) -> Encoded {
                     }
                     // `SystemUi.openPath`: the file at the path, a `content:`
                     // URI the app's FilesProvider serves, to the system's
-                    // viewer (`ACTION_VIEW`). `OpenPath` alone; the dialogs
-                    // have no answer on Android.
+                    // viewer (`ACTION_VIEW`); open dialogs use `Picker.java`
+                    // to copy provider streams into app-owned paths.
                     Command::FileRequest { id, request } => match *request {
+                        nsh_core::file_dialog::FileRequest::OpenDialog(dialog) => {
+                            e.int(57);
+                            e.int(id as i32);
+                            e.bool(dialog.multiple);
+                            e.bool(dialog.kind == nsh_core::file_dialog::OpenDialogKind::Folders);
+                            e.string(nsh_core::file_dialog::extensions(&dialog.filters).join(","));
+                        }
                         nsh_core::file_dialog::FileRequest::OpenPath(path) => {
                             e.int(28);
                             e.int(id as i32);
@@ -861,12 +920,18 @@ pub(crate) fn encode(batch: MountBatch, web_generation: u64) -> Encoded {
                                 e.bool(ask);
                             }
                             N::Show { id, notification } => {
+                                let sound = notification
+                                    .sound_path()
+                                    .map(nsh_core::notifications::Notification::sound_resource_name)
+                                    .unwrap_or_default();
                                 e.int(1);
                                 e.int(id as i32);
                                 e.string(notification.id);
                                 e.string(notification.title);
                                 e.string(notification.body);
                                 e.bool(notification.silent);
+                                // The app's sound as a raw resource name, "" for none.
+                                e.string(sound);
                             }
                             N::Close(id) => {
                                 e.int(2);
@@ -1247,18 +1312,28 @@ fn effects(e: &mut Encoded, s: &ViewStyle) {
         Cursor::NwseResize => 17,
         Cursor::NeswResize => 18,
     });
-    match s.transition.filter(|t| t.duration > 0.0) {
+    // The duration a spring takes to settle; then the curve: 0 a cubic
+    // Bézier's control points, 1 a spring's stiffness, damping and mass.
+    match s.transition.filter(|t| t.run_ms() > 0.0) {
         Some(t) => {
             e.int(t.properties.0 as i32);
-            e.float(t.duration);
+            e.float(t.run_ms());
             e.float(t.delay);
-            for v in t.easing {
+            let (curve, values) = match t.spring {
+                Some(spring) => (1, [spring.stiffness, spring.damping, spring.mass, 0.0]),
+                None => (0, t.easing),
+            };
+            e.int(curve);
+            for v in values {
                 e.float(v);
             }
         }
         None => {
             e.int(0);
-            for _ in 0..6 {
+            e.float(0.0);
+            e.float(0.0);
+            e.int(0);
+            for _ in 0..4 {
                 e.float(0.0);
             }
         }
@@ -1423,7 +1498,7 @@ fn view_props(e: &mut Encoded, p: &ViewProps) {
         Some(Checked::Mixed) => flags |= 256 | 1024,
         None => {}
     }
-    // The current item's kind, in bits 11 to 13 (`A11y.java`
+    // The current item's kind, in bits 11 to 13 (`A11yChanges.java`
     // `CURRENT_DESCRIPTIONS`).
     flags |= match s.current {
         None => 0,
@@ -1629,11 +1704,7 @@ fn input(e: &mut Encoded, c: &InputConfig) {
         None => e.int(-1),
     }
     e.float(s.letter_spacing.0);
-    e.int(match c.align {
-        TextAlign::Auto | TextAlign::Left | TextAlign::Justify => 0,
-        TextAlign::Center => 1,
-        TextAlign::Right => 2,
-    });
+    e.int(crate::text::encode_align(c.align));
     e.string(c.placeholder.clone());
     e.bool(c.placeholder_color.is_some());
     e.int(c.placeholder_color.map_or(0, argb));
@@ -1717,6 +1788,7 @@ fn input(e: &mut Encoded, c: &InputConfig) {
     // (the input then reports how far its text scrolled).
     e.bool(c.scrollbar_visible);
     e.bool(c.replaced);
+    e.int(s.font_variant.0 as i32);
 }
 
 // --- Canvas drawings (`CanvasPainter.java`) ---------------------------------
@@ -2104,7 +2176,7 @@ mod tests {
     }
 
     #[test]
-    fn open_path_is_sent_and_the_other_file_requests_fail() {
+    fn open_requests_are_sent_and_the_other_file_requests_fail() {
         // `COMMAND`, the view id, op 28, the request id, the path's
         // object index: `Mounter.java` opens the file and answers.
         assert_eq!(
@@ -2112,12 +2184,21 @@ mod tests {
             vec![COMMAND, 3, 28, 7, 0]
         );
 
+        assert_eq!(
+            ints(FileRequest::OpenDialog(file_dialog::OpenDialog::files())),
+            vec![COMMAND, 3, 57, 7, 0, 0, 0]
+        );
+        assert_eq!(
+            ints(FileRequest::OpenDialog(
+                file_dialog::OpenDialog::folders().multiple(true)
+            )),
+            vec![COMMAND, 3, 57, 7, 1, 1, 0]
+        );
         // `Environment::file_requests` is set, so the core waits for an
         // answer to every request: op 30 fails the rest instead of leaving
-        // `pick_paths`, `pick_save_path`, `reveal_path` and `move_to_trash`
+        // `pick_save_path`, `reveal_path` and `move_to_trash`
         // pending forever.
         for request in [
-            FileRequest::OpenDialog(file_dialog::OpenDialog::default()),
             FileRequest::SaveDialog(file_dialog::SaveDialog::default()),
             FileRequest::RevealPath("a".into()),
             FileRequest::MoveToTrash("a".into()),
@@ -2280,5 +2361,61 @@ mod tests {
             .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
             .collect();
         assert_eq!(ints[ints.len() - 1], 7);
+    }
+
+    #[test]
+    fn inputs_carry_text_layout_align_letter_spacing_and_font_variant() {
+        use nsh_core::{FontVariant, InputConfig, Points, ResolvedTextStyle, TextAlign};
+
+        let mut config = InputConfig::default();
+        config.style = ResolvedTextStyle {
+            letter_spacing: Points(2.5),
+            font_variant: FontVariant(FontVariant::TABULAR_NUMS | FontVariant::SMALL_CAPS),
+            ..ResolvedTextStyle::default()
+        };
+        let ints_for = |cfg: InputConfig| {
+            let encoded = encode(
+                MountBatch {
+                    items: vec![MountItem::Input { id: 5, config: cfg }],
+                },
+                0,
+            );
+            encoded
+                .bytes
+                .chunks_exact(4)
+                .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
+                .collect::<Vec<_>>()
+        };
+
+        // Distinct alignment codes match `TextLayouts.ALIGN_*` (`0..=4`).
+        let encoded_aligns: Vec<i32> = [
+            TextAlign::Auto,
+            TextAlign::Left,
+            TextAlign::Center,
+            TextAlign::Right,
+            TextAlign::Justify,
+        ]
+        .into_iter()
+        .map(|align| {
+            let mut cfg = config.clone();
+            cfg.align = align;
+            ints_for(cfg)[8]
+        })
+        .collect();
+        assert_eq!(encoded_aligns, [0, 1, 2, 3, 4]);
+
+        let with_variant = ints_for(config.clone());
+        assert_eq!(with_variant[7], 2.5f32.to_bits() as i32);
+        assert_eq!(
+            *with_variant.last().unwrap(),
+            (FontVariant::TABULAR_NUMS | FontVariant::SMALL_CAPS) as i32
+        );
+
+        let mut reset = config;
+        reset.style.letter_spacing = Points(0.0);
+        reset.style.font_variant = FontVariant(0);
+        let reset_ints = ints_for(reset);
+        assert_eq!(reset_ints[7], 0.0f32.to_bits() as i32);
+        assert_eq!(*reset_ints.last().unwrap(), 0);
     }
 }

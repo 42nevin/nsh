@@ -58,7 +58,7 @@ use anyhow::{Context as _, bail};
 use nsh_core::element::description::{Description, SetDescription};
 use sha2::{Digest as _, Sha256};
 
-use crate::{runtime::Platform, ui};
+use crate::{apple::AppleMinimums, runtime::Platform, ui};
 
 /// The function `#[native_module]` makes at the root of the app's crate
 /// (`nsh-macros` `native_module.rs`): the crate's UI set.
@@ -149,10 +149,12 @@ fn runner_features(platform: &str) -> &'static [&'static str] {
         "term",
         "zlib",
         "crypto",
+        "webview",
         "websocket",
         "updater",
         "svg",
         "net",
+        "media",
     ];
     match platform {
         "nsh-platform-linux" => LINUX,
@@ -164,7 +166,7 @@ fn runner_features(platform: &str) -> &'static [&'static str] {
 /// The cargo arguments of a release runner of `platform`: its features
 /// when [`set_runner_features`] chose some, each the runner's crate has
 /// (`net` is not macOS's), plus those no import tells about (Linux's
-/// `sound` and `webview`).
+/// `sound` and `webview`, Windows' `webview` and `media`).
 fn runner_feature_args(platform: &str) -> Vec<String> {
     let Some(chosen) = RUNNER_FEATURES
         .lock()
@@ -177,7 +179,7 @@ fn runner_feature_args(platform: &str) -> Vec<String> {
     let kept: Vec<&str> = has
         .iter()
         .copied()
-        .filter(|f| matches!(*f, "sound" | "webview") || chosen.iter().any(|c| c == f))
+        .filter(|f| matches!(*f, "sound" | "webview" | "media") || chosen.iter().any(|c| c == f))
         .collect();
     vec![
         "--no-default-features".into(),
@@ -246,6 +248,13 @@ pub(crate) struct RustApp {
     /// share one build of what they have in common
     /// ([`RustApp::unify_features`]).
     unify: bool,
+    /// The app's extensions (`nsh add`): their Git URLs, packages and
+    /// checkouts. The app's crates name them by Git; the workspace patches
+    /// those to the locked checkouts, so all link one copy.
+    extensions: Vec<(String, String, PathBuf)>,
+    /// The oldest Apple systems its packages declare, which its builds for
+    /// them compile for ([`set_deployment_target`]).
+    minimums: AppleMinimums,
 }
 
 /// A crate of the app (`nsh.json` `"rust"`).
@@ -258,6 +267,11 @@ pub(crate) struct AppCrate {
 }
 
 impl AppCrate {
+    /// The crate `package` in `dir`.
+    pub(crate) fn new(package: String, dir: PathBuf) -> AppCrate {
+        AppCrate { package, dir }
+    }
+
     /// Its package name.
     pub(crate) fn package(&self) -> &str {
         &self.package
@@ -810,6 +824,13 @@ pub(crate) fn runner_only(entry: &Path) -> anyhow::Result<RustApp> {
     let dir = entry.parent().context("entry has no directory")?;
     let nsh = crate::runtime::cli_checkout().map_or(Nsh::Registry, Nsh::Source);
     let watched = watched(&[], nsh.source());
+    // A TSX app packaged from flags alone has no `nsh.json`: the runtime's.
+    let minimums = match fs::read_to_string(dir.join("nsh.json")) {
+        Ok(text) => {
+            AppleMinimums::of(&serde_json::from_str(&text).context("nsh.json is not JSON")?)?
+        }
+        Err(_) => AppleMinimums::default(),
+    };
     let app = RustApp {
         workspace: dir.join(".nsh/rust"),
         nsh,
@@ -818,6 +839,8 @@ pub(crate) fn runner_only(entry: &Path) -> anyhow::Result<RustApp> {
         root: None,
         retargeted: false,
         unify: true,
+        extensions: Vec::new(),
+        minimums,
     };
     app.write_workspace()?;
     Ok(app)
@@ -834,11 +857,39 @@ pub(crate) fn of(entry: &Path, unify: bool) -> anyhow::Result<Option<RustApp>> {
         return Ok(None);
     };
     let config: serde_json::Value = serde_json::from_str(&text).context("nsh.json is not JSON")?;
-    let Some(rust) = config.get("rust") else {
+    let extensions = crate::extensions::crates(dir, &config)?;
+    let rust = config.get("rust");
+    if rust.is_none() && extensions.is_empty() {
         return Ok(None);
+    }
+    // The app's own crates, then the extensions it installed (`nsh add`):
+    // one list of UI sets, checked together.
+    let mut crates = match rust {
+        Some(rust) => crates(dir, rust)?,
+        None => Vec::new(),
     };
-    let crates = crates(dir, rust)?;
-    let nsh = Nsh::of(&crates)?;
+    // nsh's crates come from where the app's own crates take them; an
+    // extension asks crates.io for a version, patched to that place. An app
+    // with extensions only builds with this CLI's, as a TSX app's runner
+    // does ([`runner_only`]).
+    let nsh = if crates.is_empty() {
+        crate::runtime::cli_checkout().map_or(Nsh::Registry, Nsh::Source)
+    } else {
+        Nsh::of(&crates)?
+    };
+    let extension_patches = extensions
+        .iter()
+        .map(|(url, c)| (url.clone(), c.package.clone(), c.dir.clone()))
+        .collect();
+    if !extensions.is_empty() {
+        let mut named: Vec<(String, AppCrate)> = crates
+            .iter()
+            .map(|c| (c.dir.display().to_string(), c.clone()))
+            .collect();
+        named.extend(extensions);
+        check_crates(&named)?;
+        crates = named.into_iter().map(|(_, c)| c).collect();
+    }
     let watched = watched(&crates, nsh.source());
     let workspace = dir.join(".nsh/rust");
     let retargeted = retargeted(&crates, &nsh)?;
@@ -847,6 +898,7 @@ pub(crate) fn of(entry: &Path, unify: bool) -> anyhow::Result<Option<RustApp>> {
     } else {
         None
     };
+    let minimums = AppleMinimums::of(&config)?;
     let app = RustApp {
         workspace,
         nsh,
@@ -855,6 +907,8 @@ pub(crate) fn of(entry: &Path, unify: bool) -> anyhow::Result<Option<RustApp>> {
         root,
         retargeted,
         unify,
+        extensions: extension_patches,
+        minimums,
     };
     app.write_workspace()?;
     Ok(Some(app))
@@ -875,18 +929,30 @@ fn crates(dir: &Path, rust: &serde_json::Value) -> anyhow::Result<Vec<AppCrate>>
             .collect::<anyhow::Result<_>>()?,
         _ => bail!(WHAT),
     };
-    let mut crates: Vec<(&str, AppCrate)> = Vec::new();
+    let mut crates: Vec<(String, AppCrate)> = Vec::new();
     for path in paths {
         let dir = dunce::canonicalize(dir.join(path))
             .with_context(|| format!("nsh.json: \"rust\": no crate at {path}"))?;
         let package = package_name(&dir.join("Cargo.toml"))?;
-        let krate = AppCrate { package, dir };
-        if let Some((other, _)) = crates.iter().find(|(_, c)| c.dir == krate.dir) {
+        crates.push((path.to_owned(), AppCrate { package, dir }));
+    }
+    check_crates(&crates)?;
+    Ok(crates.into_iter().map(|(_, c)| c).collect())
+}
+
+/// Checks the crates the app links (`"rust"`'s and the extensions', each
+/// with how `nsh.json` names it): two of the same directory, package or
+/// specifier (`#[native_module("…")]`, [`specifier_of`]) would make two
+/// sets one import cannot tell apart.
+pub(crate) fn check_crates(crates: &[(String, AppCrate)]) -> anyhow::Result<()> {
+    for (i, (path, krate)) in crates.iter().enumerate() {
+        let before = &crates[..i];
+        if let Some((other, _)) = before.iter().find(|(_, c)| c.dir == krate.dir) {
             bail!("nsh.json: \"rust\" lists the crate {other} twice ({path})");
         }
         // Cargo takes `-` and `_` in names as one: so do the names the
         // generated code links the crates by.
-        if let Some((other, first)) = crates.iter().find(|(_, c)| c.name() == krate.name()) {
+        if let Some((other, first)) = before.iter().find(|(_, c)| c.name() == krate.name()) {
             let same = if first.package == krate.package {
                 format!("are both the package `{}`", krate.package)
             } else {
@@ -896,30 +962,29 @@ fn crates(dir: &Path, rust: &serde_json::Value) -> anyhow::Result<Vec<AppCrate>>
                 )
             };
             bail!(
-                "nsh.json: \"rust\": {other} and {path} {same}: give each crate a [package] name of its own"
+                "nsh.json: {other} and {path} {same}: give each crate a [package] name of its own"
             );
         }
-        crates.push((path, krate));
     }
     let mut specifiers: Vec<(&str, String)> = Vec::new();
-    for (path, krate) in &crates {
+    for (path, krate) in crates {
         let Some(specifier) = specifier_of(&krate.dir) else {
             continue;
         };
         if let Some((other, _)) = specifiers.iter().find(|(_, s)| *s == specifier) {
             bail!(
-                "nsh.json: \"rust\": {other} and {path} both have `#[native_module({specifier:?})]`: give each crate a specifier of its own, the one its TSX imports it by"
+                "nsh.json: {other} and {path} both have `#[native_module({specifier:?})]`: give each crate a specifier of its own, the one its TSX imports it by"
             );
         }
         specifiers.push((path, specifier));
     }
-    Ok(crates.into_iter().map(|(_, c)| c).collect())
+    Ok(())
 }
 
 /// The specifier of the `#[native_module("…")]` at the root of the crate
 /// in `dir` (its `[lib] path`, or `src/lib.rs`), if it has one; the build
 /// fails on a crate without one ([`RustApp::app_sets`]).
-fn specifier_of(dir: &Path) -> Option<String> {
+pub(crate) fn specifier_of(dir: &Path) -> Option<String> {
     let manifest = fs::read_to_string(dir.join("Cargo.toml")).ok()?;
     let lib = toml_tables(&manifest)
         .find_map(|(table, line)| {
@@ -980,7 +1045,7 @@ fn path_dependencies(dir: &Path) -> Vec<PathBuf> {
 /// The lines of the TOML document `text` outside table headers, with the
 /// name of the table each is in (`dependencies`, `dependencies.shared`,
 /// `target.'cfg(unix)'.dependencies`), trimmed.
-fn toml_tables(text: &str) -> impl Iterator<Item = (&str, &str)> {
+pub(crate) fn toml_tables(text: &str) -> impl Iterator<Item = (&str, &str)> {
     let mut table = "";
     text.lines().filter_map(move |line| {
         let line = line.trim();
@@ -995,7 +1060,7 @@ fn toml_tables(text: &str) -> impl Iterator<Item = (&str, &str)> {
 
 /// The string value of `key` in the TOML `line` (`key = "…"`, also within
 /// an inline table: `shared = { path = "../shared" }`).
-fn toml_string(line: &str, key: &str) -> Option<String> {
+pub(crate) fn toml_string(line: &str, key: &str) -> Option<String> {
     let mut rest = line;
     while let Some(at) = rest.find(key) {
         let before = rest[..at].trim_end();
@@ -1502,7 +1567,7 @@ fn write_retargeted(ws: &Path, dir: &Path, nsh: &Nsh) -> anyhow::Result<PathBuf>
 }
 
 /// The `name` of the `[package]` of `manifest`.
-fn package_name(manifest: &Path) -> anyhow::Result<String> {
+pub(crate) fn package_name(manifest: &Path) -> anyhow::Result<String> {
     let text = fs::read_to_string(manifest)
         .with_context(|| format!("nsh.json: \"rust\": no {}", manifest.display()))?;
     let mut in_package = false;
@@ -2543,8 +2608,23 @@ opt-level = \"s\"
                 "\n[profile.dev.package.{package}]\nopt-level = 3\n"
             ));
         }
+        // The app's crates take its extensions from Git or crates.io (`nsh
+        // add`): the locked checkouts, the ones the sets link. One from a
+        // directory is that directory already.
+        let mut crates_io = String::new();
+        let mut git_patches = String::new();
+        for (id, package, dir) in &self.extensions {
+            let line = format!("{package} = {{ path = {:?} }}\n", dir.to_string_lossy());
+            match crate::extensions::patch_table(id) {
+                Some(None) => crates_io.push_str(&line),
+                Some(Some(url)) => git_patches.push_str(&format!("\n[patch.{url:?}]\n{line}")),
+                None => {}
+            }
+        }
         if let Some(source) = self.nsh.source() {
             manifest.push_str("\n[patch.crates-io]\n");
+            manifest.push_str(&crates_io);
+            crates_io.clear();
             let mut patches = String::new();
             for name in NSH_CRATES
                 .iter()
@@ -2563,6 +2643,10 @@ opt-level = \"s\"
                 manifest.push_str(&format!("\n[patch.{url:?}]\n{patches}"));
             }
         }
+        if !crates_io.is_empty() {
+            manifest.push_str(&format!("\n[patch.crates-io]\n{crates_io}"));
+        }
+        manifest.push_str(&git_patches);
         write(&path, &manifest)
     }
 
@@ -2760,6 +2844,9 @@ opt-level = \"s\"
             what,
         } = *build;
         crate::runtime::cross_build(&mut cmd, triple)?;
+        set_deployment_target(&mut cmd, triple, &self.minimums, |name| {
+            env::var_os(name).is_some()
+        });
         cmd.arg("build")
             .arg("--manifest-path")
             .arg(workspace.join("Cargo.toml"))
@@ -3464,6 +3551,23 @@ fn cargo() -> std::ffi::OsString {
     env::var_os("CARGO").unwrap_or_else(|| "cargo".into())
 }
 
+/// Has `cmd`, a build for `triple` (`None`: this machine), compile for the
+/// oldest Apple system the app's packages declare
+/// ([`AppleMinimums::deployment_target`]), unless `set` says the user set
+/// the variable, whose value is kept.
+fn set_deployment_target(
+    cmd: &mut Command,
+    triple: Option<&str>,
+    minimums: &AppleMinimums,
+    set: impl Fn(&str) -> bool,
+) {
+    if let Some((name, version)) = minimums.deployment_target(triple)
+        && !set(name)
+    {
+        cmd.env(name, version);
+    }
+}
+
 /// The target directory of the generated `workspace` ([`RustApp::target_dir`]):
 /// `cargo_target_dir` (a relative one against the current directory, as Cargo
 /// takes it), else the app's `target`.
@@ -3517,9 +3621,14 @@ mod tests {
         let args = super::runner_feature_args("nsh-platform-windows");
         assert_eq!(
             args,
-            ["--no-default-features", "--features", "js,plot,svg,net"]
+            [
+                "--no-default-features",
+                "--features",
+                "js,plot,webview,svg,net,media"
+            ]
         );
-        // macOS has no `net`; Linux keeps `sound`, which no import tells.
+        // macOS has no `net`; Linux keeps `sound` and Windows `media`, which no
+        // import tells.
         assert_eq!(
             super::runner_feature_args("nsh-platform-macos")[2],
             "js,plot,svg"
@@ -3643,7 +3752,48 @@ mod tests {
             root,
             retargeted: false,
             unify: true,
+            extensions: Vec::new(),
+            minimums: crate::apple::AppleMinimums::default(),
         }
+    }
+
+    /// Builds for an Apple system get the deployment target of the app's
+    /// packages (the raised one when the app raises it); one the user set
+    /// is theirs.
+    #[test]
+    fn apple_builds_set_the_deployment_target_the_user_has_not() {
+        use std::process::Command;
+
+        use crate::apple::AppleMinimums;
+        let env = |cmd: &Command, name: &str| {
+            cmd.get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        let ios = "IPHONEOS_DEPLOYMENT_TARGET";
+        let default = AppleMinimums::default();
+        let mut cmd = Command::new("cargo");
+        super::set_deployment_target(&mut cmd, Some("aarch64-apple-ios"), &default, |_| false);
+        assert_eq!(env(&cmd, ios).as_deref(), Some(crate::apple::IOS_MINIMUM));
+
+        let raised = AppleMinimums::of(&serde_json::json!({
+            "ios": { "infoPlist": { "MinimumOSVersion": "16.4" } }
+        }))
+        .unwrap();
+        let mut cmd = Command::new("cargo");
+        super::set_deployment_target(&mut cmd, Some("aarch64-apple-ios-sim"), &raised, |_| false);
+        assert_eq!(env(&cmd, ios).as_deref(), Some("16.4"));
+
+        let mut cmd = Command::new("cargo");
+        super::set_deployment_target(&mut cmd, Some("aarch64-apple-ios"), &raised, |name| {
+            name == ios
+        });
+        assert!(cmd.get_envs().next().is_none());
+
+        let mut cmd = Command::new("cargo");
+        super::set_deployment_target(&mut cmd, Some("wasm32-unknown-unknown"), &raised, |_| false);
+        assert!(cmd.get_envs().next().is_none());
     }
 
     #[test]

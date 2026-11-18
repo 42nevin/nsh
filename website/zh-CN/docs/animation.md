@@ -179,6 +179,24 @@ card.play({
 card.play({ duration: 600, iterations: "infinite", keyframes: { rotateY: ["0deg", "180deg", "360deg"] } });
 ```
 
+### 弹簧动效
+
+给动效设置 `spring` 后，每个通道以弹簧运动到它的关键帧终点，而不是逐帧经过各关键帧。它从通道当前所在的位置出发并保留当前速度，所以一个动效打断另一个时（面板还在上升就被收起，卡片回弹途中又被按下）会平滑地转向，而不是从第一帧重新开始。第一个关键帧仍是 `enter` 让视图起步的位置；`delay` 在弹簧开始前等待；中间的关键帧以及 `duration`、`easing`、`iterations` 不参与，动效多久结束由弹簧决定。刚度、阻尼和质量与 [`spring`](#animatedvalue-的方法) 的相同（默认 170、26、1）。预设可以像接受时间参数一样接受弹簧选项。用户要求减少动态效果时，弹簧动效和其他动效一样立即落在终点。
+
+```rust tabs
+// 约 380 毫秒静止，过冲 3%。
+let spring = Spring { stiffness: 620.0, damping: 36.0, ..Spring::default() };
+let sheet = motion().entering(MotionPreset::SlideInUp.spec().spring(spring));
+let _ = sheet.play(MotionPreset::SlideOutDown.spec().spring(spring));
+```
+
+```tsx tabs
+// 约 380 毫秒静止，过冲 3%。
+const spring = { stiffness: 620, damping: 36 };
+const sheet = createMotion({ enter: "slideInUp", spring });
+sheet.play("slideOutDown", { spring });
+```
+
 ### 入场与列表的错开
 
 给每一行一个入场动效，延迟随行号增长：同时出现的行会依次进入。给延迟设个上限，这样加在列表靠后位置的行不必久等。
@@ -309,7 +327,7 @@ mount(App);
 | `transitionProperty` | `.transition()`、`.transition_all()`、`.transition_colors()`、`.transition_opacity()`、`.transition_transform()`、`.transition_shadow()` | `string` | 参与动画的属性，用逗号分隔：`"all"`、`"colors"`、`"opacity"`、`"transform"`、`"box-shadow"`、`"border-radius"` 等。 |
 | `transitionDuration` | `.duration(ms)` | `number \| "150ms" \| "0.2s"` | 数字表示毫秒，或 CSS 时间。 |
 | `transitionDelay` | `.delay(ms)` | `number \| "150ms" \| "0.2s"` | 开始前的延迟。 |
-| `transitionTimingFunction` | `.ease_linear()`、`.ease_in()`、`.ease_out()`、`.ease_in_out()`、`.ease_bezier(..)` | `"linear" \| "ease" \| "ease-in" \| "ease-out" \| "ease-in-out" \| "cubic-bezier(…)"` | 缓动曲线。 |
+| `transitionTimingFunction` | `.ease_linear()`、`.ease_in()`、`.ease_out()`、`.ease_in_out()`、`.ease_bezier(..)`、`.ease_spring(..)` | `"linear" \| "ease" \| "ease-in" \| "ease-out" \| "ease-in-out" \| "cubic-bezier(…)" \| "spring(…)"` | 缓动曲线，或一个弹簧（刚度、阻尼、质量）：它自己决定时长，持续到稳定为止，不使用时长。 |
 
 可过渡的属性按组划分：**颜色**（背景、边框、轮廓、阴影和文字的颜色，渐变色标）、**不透明度**、**变换**、**阴影**（`box-shadow`）以及**形状**（圆角和边框宽度）。CSS 名称及其驼峰形式都可以用（`background-color`、`backgroundColor`、`transform`、`scale` 等）。布局的变化用[布局动画](#layoutanimation)来呈现。
 
@@ -361,7 +379,7 @@ view().h_4().w_40().rounded(px(4.0)).bg(ZINC.shade(200)).animate_pulse()
 | `animationName` | `.animate_spin()`、`.animate_ping()`、`.animate_pulse()`、`.animate_bounce()`、`.animate_none()`，或 `.animation(KeyframeAnimation::new(Keyframes::Spin))` | `"none" \| "spin" \| "ping" \| "pulse" \| "bounce"` | 动画名称。 |
 | `animationDuration` | `KeyframeAnimation::duration(ms)` | `number \| "1s" \| …` | 一次迭代的时长。 |
 | `animationDelay` | `KeyframeAnimation::delay(ms)` | `number \| "200ms" \| …` | 开始前的延迟。 |
-| `animationTimingFunction` | `KeyframeAnimation::easing([x1, y1, x2, y2])` | 同 `transitionTimingFunction` | 缓动曲线。 |
+| `animationTimingFunction` | `KeyframeAnimation::easing([x1, y1, x2, y2])` | 同 `transitionTimingFunction`，但不接受 `spring()` | 缓动曲线。 |
 | `animationIterationCount` | `KeyframeAnimation::iterations(n)` | `number \| "infinite"` | 默认 `"infinite"`。 |
 | `animationFrameRate` | `KeyframeAnimation::frame_rate(hz)` | `number` | 它需要的最高帧率，单位 Hz（见[帧率](#帧率)）。默认为屏幕的最高帧率。 |
 
@@ -811,7 +829,7 @@ const remove = () => {
 | `easeInEaseOut(onEnd?)`、`linear(onEnd?)`、`spring(onEnd?)` | 用预设调用 `animate_layout` | 使用预设调用 `configureNext`。 |
 | `Types`、`Properties` | `LayoutCurve`、`LayoutProperty` | 构造配置时用的名称。 |
 
-配置为 `{ duration, create?, update?, delete? }`（Rust 中为 `LayoutAnimation { create, update, delete }`）：`create` 用于插入的视图，`update` 用于移动或改变尺寸的视图，`delete` 用于删除的视图。每个阶段为 `{ type?, property?, duration?, delay?, springDamping?, bezier? }`（`LayoutTransition { curve, property, duration_ms, delay_ms }`），其中 `type` 为 `"easeInEaseOut"`、`"spring"`、`"linear"`、`"easeIn"`、`"easeOut"`、`"bezier"`（三次贝塞尔曲线：取该阶段的 `bezier: [x1, y1, x2, y2]`，同 CSS `cubic-bezier()`，每个 `x` 限制在 0..1；`LayoutCurve::bezier(x1, y1, x2, y2)`）或 `"keyboard"`（软键盘自己的曲线，从键盘开始移动时算起，让为它让位的内容与它一起移动；`LayoutCurve::Keyboard`）；`property` 是出现和消失的视图做什么动画（`"opacity"`、`"scaleXY"`、`"scale"`）；`springDamping`（0..1，默认 0.7；`LayoutCurve::FittedSpring { damping_ratio }`）决定弹簧的过冲程度。
+配置为 `{ duration, create?, update?, delete? }`（Rust 中为 `LayoutAnimation { create, update, delete }`）：`create` 用于插入的视图，`update` 用于移动或改变尺寸的视图，`delete` 用于删除的视图。每个阶段为 `{ type?, property?, duration?, delay?, springDamping?, stiffness?, damping?, mass?, bezier? }`（`LayoutTransition { curve, property, duration_ms, delay_ms }`），其中 `type` 为 `"easeInEaseOut"`、`"spring"`、`"linear"`、`"easeIn"`、`"easeOut"`、`"bezier"`（三次贝塞尔曲线：取该阶段的 `bezier: [x1, y1, x2, y2]`，同 CSS `cubic-bezier()`，每个 `x` 限制在 0..1；`LayoutCurve::bezier(x1, y1, x2, y2)`）或 `"keyboard"`（软键盘自己的曲线，从键盘开始移动时算起，让为它让位的内容与它一起移动；`LayoutCurve::Keyboard`）；`property` 是出现和消失的视图做什么动画（`"opacity"`、`"scaleXY"`、`"scale"`）；`springDamping`（0..1，默认 0.7；`LayoutCurve::FittedSpring { damping_ratio }`）决定按阶段时长拟合的弹簧的过冲程度。带 `stiffness`、`damping` 或 `mass` 的 `"spring"` 则按这些物理参数运动（见下文）。
 
 ```rust tabs
 use nsh_core::element::{LayoutAnimation, LayoutCurve, LayoutProperty, LayoutTransition};
@@ -868,14 +886,24 @@ const collapse = () => {
 <View ref={(r) => (header = r)} style={{ height: compact() ? 56 : 120 }} />;
 ```
 
-按物理参数给出的弹簧（设计系统通常这样给出）为 `LayoutTransition::spring(spring)`，其中 `Spring` 与 gpui-base 的一致：`Spring::new(response_ms)`（无阻尼时的周期，临界阻尼）或 `Spring::from_stiffness(stiffness)`（质量为 1），再用 `.damping_ratio(ζ)` 调整阻尼比。动画持续到弹簧停留在目标的千分之一以内为止（`Spring::settle_ms`），与过渡给定的时长无关，并在每个平台上都按同样的物理规律运动（`LayoutCurve::Spring`）。`LayoutCurve::FittedSpring { damping_ratio }` 是 JS 配置所指的弹簧（`type: "spring"`）：它的刚度按过渡的时长拟合。
+按物理参数给出的弹簧（设计系统通常这样给出）为 `LayoutTransition::spring(spring)`，其中 `Spring` 与 gpui-base 的一致：`Spring::new(response_ms)`（无阻尼时的周期，临界阻尼）或 `Spring::from_stiffness(stiffness)`（质量为 1），再用 `.damping_ratio(ζ)` 调整阻尼比。动画持续到弹簧停留在目标的千分之一以内为止（`Spring::settle_ms`），与过渡给定的时长无关，并在每个平台上都按同样的物理规律运动（`LayoutCurve::Spring`）。在 TSX 中，写了 `stiffness`、`damping`（阻尼系数，不是阻尼比）或 `mass` 的 `"spring"` 阶段就是这样的弹簧，未写的取 `Animated.spring` 的默认值（170、26 和 1）；此时不使用它的 `duration` 和 `springDamping`。`configureNext` 和 `ref.animateLayout` 都可以这样写。不带这些参数的 `"spring"` 阶段（`springDamping`）是 `LayoutCurve::FittedSpring { damping_ratio }`：它的刚度按过渡的时长拟合。
 
-```rust
+```rust tabs
 use nsh_core::element::{LayoutTransition, Spring};
 
 // Material 3 Expressive 的快速空间弹簧：刚度 800，阻尼比 0.6。
 region.animate_layout(LayoutTransition::spring(Spring::from_stiffness(800.0).damping_ratio(0.6)));
 ```
+
+```tsx tabs
+// 刚度 620、阻尼 36、质量 1：阻尼比约 0.72，约 380 ms 停稳。
+const spring = { type: "spring", stiffness: 620, damping: 36, mass: 1 } as const;
+
+region?.animateLayout(spring);
+LayoutAnimation.configureNext({ duration: 380, update: spring });
+```
+
+`configureNext` 的 `onEnd` 在配置的 `duration` 之后调用；有逻辑要等弹簧停下时，把 `duration` 设为弹簧的停稳时间。
 
 ## 各部分运行在哪里
 

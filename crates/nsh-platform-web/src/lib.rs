@@ -63,7 +63,7 @@ use crate::{animation::UiAnimation, encode::Out, text::WebTextEngine};
 pub use crate::{
     filesystem::nsh_filesystem_reply,
     net::{nsh_fetch_body_wanted, nsh_fetch_data, nsh_fetch_end, nsh_fetch_failed, nsh_fetch_head},
-    storage::nsh_storage_reply,
+    storage::{nsh_storage_changed, nsh_storage_reply},
     websocket::{nsh_websocket_event, nsh_websocket_reply},
 };
 
@@ -491,8 +491,8 @@ fn page() -> Environment {
 /// bottom, left]`), `keyboard` (the height the on-screen keyboard
 /// covers), `appleKeyboard` (the browser runs on an Apple platform: its
 /// shortcuts are Apple's), `host` (the page answers `nsh/host` calls:
-/// `createPlayer`'s `host`) and `screenColor` (the browser has an
-/// `EyeDropper`) and `shaders` (`false` once a shader view found no
+/// `createPlayer`'s `host`), `screenColor` (the browser has an
+/// `EyeDropper`), `share` (the browser has `navigator.share`) and `shaders` (`false` once a shader view found no
 /// WebGL 2); missing keys keep their value. Called before the app starts
 /// and on every change; the idiom and `host` are the ones at start, as on every
 /// platform. Returns the pump delay.
@@ -599,6 +599,7 @@ pub unsafe extern "C" fn nsh_environment(ptr: *const u8, len: usize) -> f64 {
         None => env.lifecycle,
     };
     env.screen_color = flag("screenColor").unwrap_or(env.screen_color);
+    env.share = flag("share").unwrap_or(env.share);
     env.notifications = flag("notifications").unwrap_or(env.notifications);
     env.audio = flag("audio").unwrap_or(env.audio);
     env.shaders = flag("shaders").unwrap_or(env.shaders);
@@ -617,6 +618,7 @@ pub unsafe extern "C" fn nsh_environment(ptr: *const u8, len: usize) -> f64 {
         e.keyboard_height = env.keyboard_height;
         e.lifecycle = env.lifecycle;
         e.screen_color = env.screen_color;
+        e.share = env.share;
         e.notifications = env.notifications;
         e.audio = env.audio;
         e.shaders = env.shaders;
@@ -689,7 +691,7 @@ pub unsafe extern "C" fn nsh_data(
 /// Starts `app` in the page's surface.
 fn run(app: App, width: f32, height: f32, environment: Environment, limits: Limits) -> f64 {
     let storage =
-        BASE_URL.with(|b| storage::LocalStorage::new(app.app_id(), b.borrow().as_deref()));
+        BASE_URL.with(|b| storage::LocalStorage::open(app.app_id(), b.borrow().as_deref()));
     let namespace = BASE_URL.with(|b| {
         nsh_engine::local_storage_prefix(app.app_id(), b.borrow().as_deref().unwrap_or(""))
     });
@@ -709,13 +711,14 @@ fn run(app: App, width: f32, height: f32, environment: Environment, limits: Limi
         limits,
         ui_sets: ui_sets(),
         runtime: None,
-        data_dir: Some("/app-data".into()),
+        support_dir: Some("/app-data".into()),
+        data_dir: None,
         // The browser keeps what it downloads in its HTTP cache.
         cache: nsh_engine::CacheOptions::off(),
         filesystem: Some(std::sync::Arc::new(filesystem::BrowserFileSystem {
             namespace,
         })),
-        storage: Some(std::sync::Arc::new(storage)),
+        storage: Some(storage),
         clock: Default::default(),
         context: Default::default(),
         pinned: Default::default(),
@@ -752,10 +755,10 @@ fn run(app: App, width: f32, height: f32, environment: Environment, limits: Limi
         serde_json::json!({ "url": url, "page": true, "quiet": true, "base": base })
     });
     let Some(mut engine) = LocalEngine::start_with(config, text.clone(), Sink, |control| {
-        if let Some(payload) = page {
-            if let Some(payload) = event::payload(EventKind::UrlScheme, payload) {
-                control.dispatch_event(ROOT_ID, EventKind::UrlScheme, payload);
-            }
+        if let Some(payload) = page
+            && let Some(payload) = event::payload(EventKind::UrlScheme, payload)
+        {
+            control.dispatch_event(ROOT_ID, EventKind::UrlScheme, payload);
         }
     }) else {
         return -1.0;
@@ -1426,7 +1429,7 @@ pub unsafe extern "C" fn nsh_canvas_image(
 }
 
 /// Touches, as JSON `{ phase, time, points: [{ id, target, path, pageX,
-/// pageY, x, y, changed, pointerType }] }` (`phase`: 0 start, 1 move, 2 end, 3
+/// pageY, x, y, changed, pointerType, pressure, tiltX, tiltY }] }` (`phase`: 0 start, 1 move, 2 end, 3
 /// cancel).
 ///
 /// # Safety
@@ -1473,6 +1476,17 @@ pub unsafe extern "C" fn nsh_touch(ptr: *const u8, len: usize) -> f64 {
                         .and_then(|v| v.as_str())
                         .and_then(nsh_core::PointerType::from_name)
                         .unwrap_or(nsh_core::PointerType::Touch),
+                    pressure: p.get("pressure").and_then(|v| v.as_f64()).map_or_else(
+                        || {
+                            nsh_core::TouchPoint::default_pressure(
+                                phase,
+                                p.get("changed").and_then(|v| v.as_bool()).unwrap_or(true),
+                            )
+                        },
+                        |v| v.clamp(0.0, 1.0) as f32,
+                    ),
+                    tilt_x: f(p, "tiltX") as f32,
+                    tilt_y: f(p, "tiltY") as f32,
                 })
                 .collect()
         })
@@ -1705,6 +1719,25 @@ pub extern "C" fn nsh_scroll(id: u32, x: f32, y: f32, applied: u32) -> f64 {
     })
 }
 
+/// The user moved scroll view `id` with a scroll key, which the page
+/// animates (`EngineControl::key_scrolled`; a list follows its end from
+/// End on). `kind` is the key's move, as `scrollKey` of `web/nsh.js`
+/// numbers it: 0 by `amount` points along the view's axis, 1 by `amount`
+/// viewports, 2 to the start, 3 to the end.
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_key_scroll(id: u32, kind: u32, amount: f32) -> f64 {
+    use nsh_core::scroll::KeyMove;
+    let key_move = match kind {
+        0 => KeyMove::Points(px(amount)),
+        1 => KeyMove::Pages(amount),
+        2 => KeyMove::Start,
+        3 => KeyMove::End,
+        // A move this runtime does not know: nothing to tell the core.
+        _ => return pump(),
+    };
+    send(|app| app.control.key_scrolled(id, key_move))
+}
+
 /// The text of multiline input `id` scrolled to `y`, or its height
 /// (`content`) or its viewport's changed, while a built-in bar takes the
 /// place of its indicator.
@@ -1827,6 +1860,34 @@ pub extern "C" fn nsh_transform_gesture(id: u32, rotation: u32, phase: u32, amou
         if let Some(kind) = kind {
             app.control.dispatch_event(id, kind, payload);
         }
+    })
+}
+
+/// `overlays: "viewport"`: the root view's anchored overlays are drawn
+/// over the window, which is at `x`, `y` (the root's top left at 0, 0) and
+/// `width` × `height` less its safe area; they are placed within it. A
+/// negative `width` keeps them to the root view.
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_overlay_area(x: f32, y: f32, width: f32, height: f32) -> f64 {
+    send(|app| {
+        let area = (width >= 0.0).then(|| {
+            nsh_core::geometry::bounds(
+                nsh_core::geometry::point(Points(x), Points(y)),
+                Size::new(Points(width), Points(height.max(0.0))),
+            )
+        });
+        app.control.set_overlay_area(area);
+    })
+}
+
+/// `overlays: "viewport"`: a press on the page around the player, at
+/// `x`, `y` in the root view's coordinates, while anchored overlays are
+/// drawn over it: the ones watching presses hear `onPressOutside`.
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_press_outside(x: f32, y: f32) -> f64 {
+    send(|app| {
+        app.control
+            .press_beyond_root(nsh_core::geometry::point(Points(x), Points(y)))
     })
 }
 

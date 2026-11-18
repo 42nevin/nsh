@@ -2,12 +2,20 @@
 //! click or a held finger), their `MenuItem`s, `MenuSeparator`s and
 //! `Submenu`s.
 //!
+//! A `ContextMenu` given `items` (`MenuButton`'s item data) is the system's
+//! context menu on iOS instead (`system_menu`): a native component the
+//! iOS backend answers without JS, its children the menu elsewhere.
+//!
 //! One structure for every device, presented as it suits (`popup.rs`): on
-//! the desktops a popup at the trigger (or the pointer) whose submenus
-//! cascade beside the item that opens them, on hover or press; on phones
-//! and tablets a sheet at the bottom of the screen, over a backdrop, whose
-//! submenus replace its items (a submenu's `back` row, and Escape or the
-//! back button, return to the items above). The items reach their menu
+//! the desktops, and on an iPad whose window is regular in width, a popup
+//! at the trigger (or the pointer) whose submenus cascade beside the item
+//! that opens them, on hover or press; on phones and the other tablets,
+//! and on an iPad in a compact width, a sheet at the bottom of the screen,
+//! over a backdrop, whose submenus replace its items (a submenu's `back`
+//! row, and Escape or the back button, return to the items above). The
+//! iPad follows UIKit's horizontal size class, as UIKit's own menus and
+//! popovers adapt to it: a window resized across it presents the menu the
+//! other way ([`as_sheet`]). The items reach their menu
 //! through context, so the app arranges them freely (groups, labels,
 //! conditions). An item with `checked` is checkable (a setting, or one
 //! choice of a group by its `role`): the value is the app's, its indicator
@@ -22,7 +30,8 @@
 //! `available`), so the core chooses the side at the popup's natural size
 //! and the items scroll past the room rather than run out of the window.
 //! The keys measure where the items are to bring the one they move to into
-//! view and to page by the viewport.
+//! view and to page by the viewport. Typeahead matches `Select`'s
+//! (`listbox.rs`) on each item's label or the text the core has for it.
 
 use std::{
     cell::{Cell, RefCell},
@@ -32,15 +41,19 @@ use std::{
 };
 
 use nsh_core::{
-    AccessibilityState, Checked, ContextMenuEvent, PointerType, TouchEvent, TouchPhase,
+    AccessibilityState, Checked, ContextMenuEvent, JsonValue, PointerType, TouchEvent, TouchPhase,
     element::{OrderWatch, Style, watch_order},
     geometry::Axis,
     keymap::When,
     overlay::OverlayAnchor,
+    platform::{CONTEXT_MENU_COMPONENT, Idiom, Os},
     prelude::*,
+    time::now,
 };
 
 use crate::{
+    listbox::{self, Typeahead},
+    menu_button::{MenuButtonItem, menu_json},
     popup::{
         OpenChangeReason, OpenState, PopupPresence, SheetMotion, StateLooks,
         bottom_panel_max_height, keyboard_lift, lifecycle,
@@ -54,13 +67,17 @@ use crate::{
 /// still down), and how far it may move meanwhile.
 const HOLD: Duration = Duration::from_millis(400);
 const SLOP: f32 = 10.0;
+/// iOS's system menu: how long a `ContextMenu`'s preview stays made after
+/// the finger lifted or was taken over without the menu coming up (a tap,
+/// a scroll); the system asks for it a moment after a takeover.
+const PREVIEW_LINGER: Duration = Duration::from_secs(1);
 
 /// What a menu's items reach through context.
 #[derive(Clone)]
 struct MenuContext {
     /// Closes the whole menu.
     close: Rc<dyn Fn(OpenChangeReason)>,
-    /// Presented as a sheet (touch screens).
+    /// Presented as a sheet ([`as_sheet`]).
     sheet: bool,
     /// Sheet: the submenus shown, innermost last.
     path: Signal<Vec<u32>>,
@@ -338,6 +355,9 @@ struct Entry {
     /// The submenu it is in (0: the menu).
     level: u32,
     disabled: Prop<bool>,
+    /// What screen readers say for it when its content is not enough,
+    /// which typeahead matches in place of its text.
+    label: Prop<Option<SharedString>>,
     /// A list's rows: the entry stands for all of them, made or not.
     rows: Option<Rc<Rows>>,
 }
@@ -366,6 +386,7 @@ struct RowItem {
     index: usize,
     node: ElementRef,
     disabled: Prop<bool>,
+    label: Prop<Option<SharedString>>,
 }
 
 impl Rows {
@@ -598,6 +619,38 @@ impl Walk {
         Some((start, start + rows.len() - 1, page))
     }
 
+    /// The enabled items made, by place: what typeahead matches, the
+    /// label an item has or else its text. A list's rows not made yet are
+    /// not among them.
+    fn enabled(&self) -> Vec<(usize, Prop<Option<SharedString>>, ElementRef)> {
+        let mut found = Vec::new();
+        let mut start = 0;
+        for e in &self.parts {
+            match &e.rows {
+                None => {
+                    if !e.disabled.get_untracked() {
+                        found.push((start, e.label, e.node));
+                    }
+                    start += 1;
+                }
+                Some(rows) => {
+                    let len = rows.len();
+                    let mut made: Vec<RowItem> = rows
+                        .items
+                        .borrow()
+                        .iter()
+                        .filter(|i| i.index < len && !i.disabled.get_untracked())
+                        .copied()
+                        .collect();
+                    made.sort_by_key(|i| i.index);
+                    found.extend(made.iter().map(|i| (start + i.index, i.label, i.node)));
+                    start += len;
+                }
+            }
+        }
+        found
+    }
+
     fn spot(&self, at: usize) -> Spot {
         let Some((entry, row)) = self.part_at(at) else {
             return Spot::Skip;
@@ -647,6 +700,9 @@ struct Items {
     /// Each item's select, by key, for a Return or Space typed ahead of
     /// the focus.
     selects: Rc<RefCell<Vec<(u64, Select)>>>,
+    /// What was typed for typeahead, as `Select`'s list keeps it, and the
+    /// level it was typed in.
+    typeahead: Rc<RefCell<(Option<u32>, Typeahead)>>,
 }
 
 /// A key's move waiting for the ones under way.
@@ -735,6 +791,7 @@ impl Items {
             busy: Rc::new(Cell::new(0)),
             queued: Rc::new(RefCell::new(VecDeque::new())),
             selects: Rc::new(RefCell::new(Vec::new())),
+            typeahead: Rc::new(RefCell::new((None, Typeahead::default()))),
         };
         *made.borrow_mut() = Some(items.clone());
         items
@@ -1013,7 +1070,13 @@ impl Items {
     /// Adds an item of submenu `level` (the item of a [`MenuList`]'s
     /// `row` when it is in one at that level), which the menu forgets
     /// when the current owner (the item's component) ends.
-    fn add(&self, node: ElementRef, level: u32, disabled: Prop<bool>) -> u64 {
+    fn add(
+        &self,
+        node: ElementRef,
+        level: u32,
+        disabled: Prop<bool>,
+        label: Prop<Option<SharedString>>,
+    ) -> u64 {
         let key = self.next.get() + 1;
         self.next.set(key);
         let row = use_context::<MenuRow>().filter(|r| r.rows.level == level);
@@ -1023,6 +1086,7 @@ impl Items {
                 index,
                 node,
                 disabled,
+                label,
             });
             cleanup(move || rows.items.borrow_mut().retain(|i| i.key != key));
             return key;
@@ -1032,6 +1096,7 @@ impl Items {
             node,
             level,
             disabled,
+            label,
             rows: None,
         });
         key
@@ -1055,6 +1120,7 @@ impl Items {
             node: rows.list,
             level: rows.level,
             disabled: Prop::from(false),
+            label: Prop::new(None),
             rows: Some(rows),
         });
     }
@@ -1252,6 +1318,76 @@ impl Items {
         self.walk_from(level, Start::On(target), back, target.abs_diff(first) + 1);
     }
 
+    /// A letter or digit `c` typed: the focus goes to the next enabled
+    /// item of the level the keys are in whose label or text starts with
+    /// what was typed in that level since the last pause, as `Select`'s
+    /// typeahead finds it ([`listbox::find_typed_among`]): the same
+    /// character again moves on among the items it starts, several make a
+    /// prefix. Read where the
+    /// core has the items' texts: the keys pressed meanwhile wait for it
+    /// ([`Busy`]). An item out of view is scrolled into it.
+    fn type_ahead(&self, c: char) {
+        // When it was typed, though it may wait for a move under way.
+        let pressed = now();
+        self.in_turn(move |items| {
+            let from = items.moved_to().or(items.focused.get_untracked());
+            let level = from.and_then(|key| items.level_of(key)).unwrap_or(0);
+            // Each level starts again: letters typed just before Right
+            // opened a submenu are no prefix of its items.
+            let typed = {
+                let mut typeahead = items.typeahead.borrow_mut();
+                let (last, typeahead) = &mut *typeahead;
+                if last.replace(level) != Some(level) {
+                    typeahead.clear();
+                }
+                typeahead.push(c, pressed).to_owned()
+            };
+            let walk = items.walk(level);
+            // A row the keys are still waiting for counts as reached.
+            let waiting = items.pending.take().filter(|p| p.level == level);
+            let at = waiting
+                .and_then(|p| {
+                    walk.place_of_row(&p.rows, p.index)
+                        .filter(|_| p.index < p.rows.len())
+                })
+                .or_else(|| from.and_then(|key| walk.place_of(key)));
+            // Asked all at once, answered in one commit.
+            let texts: Vec<_> = walk
+                .enabled()
+                .into_iter()
+                .map(|(place, label, node)| {
+                    let text = match label.get_untracked() {
+                        Some(label) => Ok(label),
+                        None => Err(node.text_content()),
+                    };
+                    (place, text)
+                })
+                .collect();
+            if texts.is_empty() {
+                return;
+            }
+            let (busy, items) = (Busy::new(items), items.clone());
+            spawn(async move {
+                let _busy = busy;
+                let mut order = Vec::with_capacity(texts.len());
+                let mut folded = Vec::with_capacity(texts.len());
+                for (i, (place, text)) in texts.into_iter().enumerate() {
+                    let text = match text {
+                        Ok(label) => label.to_string(),
+                        Err(answer) => answer.await,
+                    };
+                    order.push((place as u32, i as u32));
+                    folded.push(text.trim_start().to_lowercase().into_boxed_str());
+                }
+                let at = at.map(|at| at as u32);
+                if let Some(i) = listbox::find_typed_among(&order, at, &folded, &typed) {
+                    let place = order[i].0 as usize;
+                    items.walk_from(level, Start::On(place), Dir::Forward, 1);
+                }
+            });
+        });
+    }
+
     /// Binds the keys that move the focus into the menu's items while
     /// `active` and none of them has it (a menu the pointer opened), as
     /// the desktops' menus take them: Down and Home focus the first
@@ -1337,9 +1473,16 @@ fn items_scroll(items: &Items, level: u32, children: Prop<Children>) -> AnyEleme
     let (offset, reported) = (signal(Points::ZERO), signal(Points::ZERO));
     items.add_scroll(level, me, offset, reported);
     scroll()
+        // Menus stop at their content edges and never show a scroll bar.
+        .bounces(false)
+        .scrollbar(false)
         .element_ref(&me)
         .flex_shrink(1.0)
         .min_h(px(0.0))
+        // An item acts on the first tap while the software keyboard is up
+        // for an input the menu opened beside (a composer's): the input
+        // keeps it, as with UIKit's menus.
+        .keyboard_taps(KeyboardTaps::Handled)
         .on_scroll(move |e: &ScrollEvent| {
             reported.set(e.offset.y);
             offset.set(e.offset.y);
@@ -1379,7 +1522,7 @@ impl Surface {
     }
 }
 
-/// Where a menu's popup goes on the desktops.
+/// Where a menu's popup goes.
 #[derive(Clone)]
 enum At {
     Trigger(ElementRef),
@@ -1396,9 +1539,25 @@ struct Asked {
     why: Why,
 }
 
-/// The menu while it is open: its popup or sheet, with the context its
-/// items read. `change` asks to open or close it.
-fn surface(
+/// Whether a menu is a sheet at the bottom of the screen rather than a
+/// popup at its trigger or the pointer: on phones and tablets, an iPad
+/// only while its window is compact in width by UIKit's horizontal size
+/// class (Slide Over, a narrow Split View or Stage Manager window),
+/// as UIKit's own menus and popovers are anchored in a regular width and
+/// adapt to a sheet in a compact one. Mac Catalyst keeps the sheet. Read
+/// in a binding, it follows the size class as the window is resized.
+fn as_sheet() -> bool {
+    if is_desktop() {
+        return false;
+    }
+    let ipad = os() == Os::Ios && idiom() == Idiom::Pad && !is_catalyst();
+    !(ipad && horizontal_size_class() == SizeClass::Regular)
+}
+
+/// The menu's popup or sheet, as [`as_sheet`] has it: made again the other
+/// way when that changes (an iPad's window resized across its size class),
+/// an open menu staying open in its new presentation.
+fn presented(
     open: OpenState,
     change: Rc<dyn Fn(bool, OpenChangeReason)>,
     emit: Rc<dyn Fn(MenuEvent)>,
@@ -1407,8 +1566,38 @@ fn surface(
     asked: Asked,
     children: Prop<Children>,
 ) -> AnyElement {
+    let make = move |at: Option<At>| {
+        let (change, emit) = (change.clone(), emit.clone());
+        move || {
+            surface(
+                open,
+                change.clone(),
+                emit.clone(),
+                at.clone(),
+                parts,
+                asked,
+                children,
+            )
+        }
+    };
+    when(as_sheet, make(None))
+        .otherwise(make(Some(at)))
+        .into_element()
+}
+
+/// The menu while it is open: its popup at `at`, or its sheet without one,
+/// with the context its items read. `change` asks to open or close it.
+fn surface(
+    open: OpenState,
+    change: Rc<dyn Fn(bool, OpenChangeReason)>,
+    emit: Rc<dyn Fn(MenuEvent)>,
+    at: Option<At>,
+    parts: Surface,
+    asked: Asked,
+    children: Prop<Children>,
+) -> AnyElement {
     let Asked { keyed, why } = asked;
-    let sheet = !is_desktop();
+    let sheet = at.is_none();
     // Why it last closed: a press outside put the focus where it pressed.
     let closed_by = stored(None::<OpenChangeReason>);
     let change: Rc<dyn Fn(bool, OpenChangeReason)> = Rc::new(move |next, reason| {
@@ -1429,6 +1618,20 @@ fn surface(
     // arrows, Home and End as well.
     if !sheet {
         items.bind_entry_keys(move || presence.mounted() && open.get());
+        // Letters and digits move the focus by typeahead in the level the
+        // keys are in, as the desktops' menus do; a text field in the menu
+        // keeps them. Each opening starts again.
+        let typeahead = items.typeahead.clone();
+        effect(move || {
+            if open.get() {
+                typeahead.borrow_mut().1.clear();
+            }
+        });
+        let typing = items.clone();
+        listbox::bind_typeahead(
+            move || presence.mounted() && open.get(),
+            Rc::new(move |c| typing.type_ahead(c)),
+        );
     }
     let (asks, regain) = (Asks::new(), signal(None::<(u32, usize)>));
     // A place to regain is only for the submenu made in place of the one it
@@ -1497,8 +1700,8 @@ fn surface(
     // where it pressed, nor over a focus the choice moved elsewhere in the
     // same turn (an item that starts editing a field).
     let trigger = match &at {
-        At::Trigger(anchor) | At::Pointer(_, anchor) if !sheet => Some(*anchor),
-        _ => None,
+        Some(At::Trigger(anchor) | At::Pointer(_, anchor)) => Some(*anchor),
+        None => None,
     };
     if let Some(anchor) = trigger {
         presence.focus_back_on_close(
@@ -1541,6 +1744,9 @@ fn surface(
         );
     }
     let placed = emit.clone();
+    // A popup on a touch screen (an iPad's): a press outside only closes
+    // it, as a popover's there.
+    let touch = !is_desktop();
     when(
         move || {
             if sheet {
@@ -1555,7 +1761,7 @@ fn surface(
             // Each opening starts at the top.
             path.set(Vec::new());
             open_sub.set(None);
-            if sheet {
+            let Some(at) = &at else {
                 let dismiss = dismiss.clone();
                 let backdrop = overlay()
                     .inset_0()
@@ -1579,8 +1785,27 @@ fn surface(
                     .on_cancel(cancel.clone())
                     .child(items_scroll(&items, 0, children));
                 return vec![backdrop.into_element(), panel.into_element()];
-            }
-            let popup = match &at {
+            };
+            // The press outside a popup on a touch screen is the menu's
+            // (not while it goes): a transparent overlay takes it. Made
+            // before the popup, as overlays shown together stack in the
+            // order they were made, and its submenus' popups come later.
+            let backdrop = touch.then(|| {
+                let dismiss = dismiss.clone();
+                overlay()
+                    .inset_0()
+                    .focusable(false)
+                    .pointer_events(move || {
+                        if open.get() {
+                            PointerEvents::Auto
+                        } else {
+                            PointerEvents::None
+                        }
+                    })
+                    .on_press(move || dismiss(OpenChangeReason::PressOutside))
+                    .into_element()
+            });
+            let popup = match at {
                 At::Trigger(anchor) => overlay().anchor_content(anchor),
                 At::Pointer(point, anchor) => {
                     let (point, anchor) = (*point, *anchor);
@@ -1611,10 +1836,18 @@ fn surface(
                     room.set(Some(p.available.height));
                     placed(MenuEvent::Position(p.placement, p.bounds, p.available))
                 })
-                .on_press_outside(move |_: &Point<Points>| dismiss(OpenChangeReason::PressOutside))
+                .on_press_outside(move |_: &Point<Points>| {
+                    // A touch screen's went to the overlay under it.
+                    if !touch {
+                        dismiss(OpenChangeReason::PressOutside)
+                    }
+                })
                 .on_cancel(cancel.clone())
                 .child(items_scroll(&items, 0, children));
-            vec![popup.into_element()]
+            backdrop
+                .into_iter()
+                .chain([popup.into_element()])
+                .collect::<Vec<_>>()
         },
     )
     .into_element()
@@ -1629,45 +1862,45 @@ pub struct MenuProps {
     /// Open at first, while `open` is not set.
     #[prop(default)]
     pub default_open: Prop<bool>,
-    /// Desktops: the side of the trigger it goes on (default `"bottom"`);
-    /// the other side when only that one has room.
+    /// As a popup: the side of the trigger it goes on (default
+    /// `"bottom"`); the other side when only that one has room.
     #[prop(default)]
     pub placement: Prop<Placement>,
-    /// Desktops: how it lines up with the trigger (default `"start"`).
+    /// As a popup: how it lines up with the trigger (default `"start"`).
     #[prop(default = Align::Start)]
     pub align: Prop<Align>,
-    /// Desktops: the gap between the trigger and the popup.
+    /// As a popup: the gap between the trigger and the popup.
     #[prop(default)]
     pub offset: Prop<Points>,
-    /// Desktops: the distance it keeps from the edges of the safe area.
+    /// As a popup: the distance it keeps from the edges of the safe area.
     #[prop(default)]
     pub margin: Prop<Points>,
-    /// The classes of the popup the items are in (desktops), or of the
-    /// sheet (touch screens); its submenus' popups take them too.
+    /// The classes of the popup the items are in, or of the sheet; its
+    /// submenus' popups take them too.
     pub popup_class: Prop<Option<SharedString>>,
     /// The inline style of the popup or sheet, over its classes.
     #[prop(default)]
     pub popup_style: Prop<Style>,
-    /// Desktops: classes the popup (and its submenus' popups) has in its
-    /// first frame, which its `transition` classes animate from
+    /// As a popup: classes the popup (and its submenus' popups) has in
+    /// its first frame, which its `transition` classes animate from
     /// (Tailwind's `starting:`, CSS's `@starting-style`): its entrance. A
     /// state's classes apply over `popupClass` and `popupStyle`, as a
-    /// state's styles do. The sheet of touch screens has its own motion.
+    /// state's styles do. A sheet has its own motion.
     pub popup_starting_class: Prop<Option<SharedString>>,
-    /// Desktops: the inline style of the popup in its first frame, over
+    /// As a popup: the inline style of the popup in its first frame, over
     /// `popupStyle`.
     #[prop(default)]
     pub popup_starting_style: Prop<Style>,
-    /// Desktops: classes the popup has while it goes: it stays, taking no
-    /// presses, until the transitions it has then ran (`onClose` after),
+    /// As a popup: classes the popup has while it goes: it stays, taking
+    /// no presses, until the transitions it has then ran (`onClose` after),
     /// so they run its exit.
     pub popup_ending_class: Prop<Option<SharedString>>,
-    /// Desktops: the inline style of the popup while it goes, over
+    /// As a popup: the inline style of the popup while it goes, over
     /// `popupStyle`.
     #[prop(default)]
     pub popup_ending_style: Prop<Style>,
-    /// Touch screens: the classes of the backdrop behind the sheet
-    /// (pressing it closes the menu).
+    /// As a sheet: the classes of the backdrop behind it (pressing it
+    /// closes the menu).
     pub backdrop_class: Prop<Option<SharedString>>,
     /// The inline style of the backdrop, over its classes.
     #[prop(default)]
@@ -1696,27 +1929,79 @@ pub enum MenuEvent {
     /// The user tried to close it without choosing (Escape or back, a press
     /// outside or on the backdrop).
     Cancel,
-    /// Desktops: the popup was placed: the side it went on (the other side
-    /// of `placement` when only that one had room), its frame in the root
-    /// view and the room on that side.
+    /// As a popup: the popup was placed: the side it went on (the other
+    /// side of `placement` when only that one had room), its frame in the
+    /// root view and the room on that side.
     #[args(placement, bounds, available)]
     Position(Placement, Bounds<Points>, Size<Points>),
 }
 
-/// A menu its trigger opens: a popup at the trigger on the desktops, a
-/// sheet at the bottom of the screen on phones and tablets (over a
-/// backdrop), whose items are `MenuItem`s, `MenuSeparator`s and `Submenu`s
-/// (cascading popups on the desktops, the sheet's next items on touch
-/// screens). Choosing an item, a press outside, Escape and the Android back
-/// button close it. Return, Space or Down on the focused trigger opens it
-/// with the keyboard focus on its first enabled item, Up on its last
-/// (WAI-ARIA's menu button); a press opens it with none, and on the
-/// desktops Down or Home then focuses the first, Up or End the last, as
-/// the desktops' menus do. Page Down and Page Up go to the last and first
-/// enabled items in view, a view at a time, stopping at the ends. On the
-/// desktops the pointer moving over an item gives it the keyboard focus,
-/// so the keys go on from it (its `focus:` styles apply, as `hover:`
-/// ones). The popup (each submenu's too) is never taller than the room on
+/// The events of a [`ContextMenu`]: a menu's ([`MenuEvent`]'s), and the
+/// choice in the system's menu its `items` make. (`ContextMenuEvent` is
+/// the core's `onContextMenu` payload.)
+#[derive(Debug, Clone, PartialEq, Event)]
+pub enum ContextMenuEvents {
+    /// It opened or closed (a secondary click or a held finger, a press
+    /// outside or on the backdrop, Escape or back, an item chosen), with
+    /// why: set `open` to follow it.
+    #[args(open, reason)]
+    OpenChange(bool, OpenChangeReason),
+    /// It is shown (a sheet once it came in).
+    Open,
+    /// It is gone (a sheet once it went, a popup after its exit; also when
+    /// the app closed it).
+    Close,
+    /// The user tried to close it without choosing (Escape or back, a press
+    /// outside or on the backdrop).
+    Cancel,
+    /// As a popup: the popup was placed: the side it went on (the other
+    /// side of `placement` when only that one had room), its frame in the
+    /// root view and the room on that side.
+    #[args(placement, bounds, available)]
+    Position(Placement, Bounds<Points>, Size<Points>),
+    /// iOS only: the user chose the item of this `id` in the system's
+    /// menu (`items`); the menu has closed. Not sent on the other
+    /// platforms, whose drawn menu reports through its items' `onSelect`.
+    #[args(id)]
+    Select(SharedString),
+    /// iOS only: the user pressed the system's preview (`preview`); the
+    /// menu has closed. Not sent on the other platforms.
+    PreviewPress,
+}
+
+impl From<MenuEvent> for ContextMenuEvents {
+    fn from(event: MenuEvent) -> Self {
+        match event {
+            MenuEvent::OpenChange(open, reason) => Self::OpenChange(open, reason),
+            MenuEvent::Open => Self::Open,
+            MenuEvent::Close => Self::Close,
+            MenuEvent::Cancel => Self::Cancel,
+            MenuEvent::Position(placement, bounds, available) => {
+                Self::Position(placement, bounds, available)
+            }
+        }
+    }
+}
+
+/// A menu its trigger opens: a popup at the trigger on the desktops and on
+/// an iPad whose window is regular in width (UIKit's horizontal size
+/// class), a sheet at the bottom of the screen (over a backdrop) on phones
+/// and the other tablets and on an iPad in a compact width, whose items
+/// are `MenuItem`s, `MenuSeparator`s and `Submenu`s (cascading popups
+/// beside a popup's items, the sheet's next items in a sheet). Choosing an
+/// item, a press outside, Escape and the Android back button close it.
+/// Return, Space or Down on the focused trigger opens it with the keyboard
+/// focus on its first enabled item, Up on its last (WAI-ARIA's menu
+/// button); a press opens it with none, and in a popup Down or Home then
+/// focuses the first, Up or End the last, as the desktops' menus do. Page
+/// Down and Page Up go to the last and first enabled items in view, a view
+/// at a time, stopping at the ends. In a popup the pointer moving over an
+/// item gives it the keyboard focus, so the keys go on from it (its
+/// `focus:` styles apply, as `hover:` ones). In a popup a letter or digit
+/// moves the focus by `Select`'s
+/// typeahead to the next enabled item of the level the focus is in whose
+/// `accessibilityLabel`, else its text, starts with what was typed (a text
+/// field in the menu keeps its letters). The popup (each submenu's too) is never taller than the room on
 /// the side it goes on, nor the sheet than the window below the status
 /// bar: the items scroll inside it, the keys bring the item they move to
 /// into view, and a submenu closes once its trigger scrolls out of view.
@@ -1838,7 +2123,7 @@ pub fn Menu(props: MenuProps, cx: Scope<MenuEvent>) -> impl IntoElement {
                 });
             bar_trigger(around.clone(), trigger, anchor)
         }))
-        .child(surface(
+        .child(presented(
             open,
             change,
             Rc::new(move |e| cx.emit(e)),
@@ -1861,31 +2146,30 @@ pub struct ContextMenuProps {
     /// No menu: the secondary button and held fingers do nothing.
     #[prop(default)]
     pub disabled: Prop<bool>,
-    /// Desktops: the gap between the pointer and the popup.
+    /// As a popup: the gap between the pointer and the popup.
     #[prop(default)]
     pub offset: Prop<Points>,
-    /// Desktops: the distance it keeps from the edges of the safe area.
+    /// As a popup: the distance it keeps from the edges of the safe area.
     #[prop(default)]
     pub margin: Prop<Points>,
-    /// The classes of the popup (desktops) or of the sheet (touch
-    /// screens).
+    /// The classes of the popup or of the sheet.
     pub popup_class: Prop<Option<SharedString>>,
     /// The inline style of the popup or sheet, over its classes.
     #[prop(default)]
     pub popup_style: Prop<Style>,
-    /// Desktops: classes the popup has in its first frame, which its
+    /// As a popup: classes the popup has in its first frame, which its
     /// `transition` classes animate from: its entrance (as `Menu`'s).
     pub popup_starting_class: Prop<Option<SharedString>>,
-    /// Desktops: the inline style of the popup in its first frame.
+    /// As a popup: the inline style of the popup in its first frame.
     #[prop(default)]
     pub popup_starting_style: Prop<Style>,
-    /// Desktops: classes the popup has while it goes, until the
+    /// As a popup: classes the popup has while it goes, until the
     /// transitions it has then ran: its exit (as `Menu`'s).
     pub popup_ending_class: Prop<Option<SharedString>>,
-    /// Desktops: the inline style of the popup while it goes.
+    /// As a popup: the inline style of the popup while it goes.
     #[prop(default)]
     pub popup_ending_style: Prop<Style>,
-    /// Touch screens: the classes of the backdrop behind the sheet.
+    /// As a sheet: the classes of the backdrop behind it.
     pub backdrop_class: Prop<Option<SharedString>>,
     /// The inline style of the backdrop, over its classes.
     #[prop(default)]
@@ -1895,6 +2179,30 @@ pub struct ContextMenuProps {
     /// the focus (the web, Linux) or a screen reader's "show menu" action (macOS,
     /// Windows) opens the menu.
     pub trigger: Prop<Option<Slot>>,
+    /// iOS only: the menu as data, for the system's own context menu. On
+    /// iOS (and Mac Catalyst) any items make the menu the system's
+    /// (`UIContextMenuInteraction`: the trigger lifts as its preview over
+    /// the blurred screen, with the system's haptics, placement and
+    /// motion), in place of the children; a chosen item comes back as
+    /// `onSelect({ id })`. `MenuButton`'s items: ids, labels, SF Symbols,
+    /// checks, disabled and destructive items, submenus and sections. On
+    /// every other platform `items`, `title` and `onSelect` are not used:
+    /// the children are the menu, drawn as without `items`.
+    #[prop(default)]
+    pub items: Prop<Vec<MenuButtonItem>>,
+    /// iOS only: the system's menu's title, above its items (`items`);
+    /// none when unset. Not used on the other platforms.
+    pub title: Prop<Option<SharedString>>,
+    /// iOS only, with `items`: what the system lifts beside the menu in
+    /// place of the trigger (a message's or a document's content, a
+    /// conversation's last lines). Made when a finger goes down on the
+    /// trigger and laid out at its own size out of sight, then shown as a
+    /// picture of how it looked when the menu opened; gone once the menu
+    /// closed. A press on it closes the menu and reports `onPreviewPress`.
+    /// Without it, or when it is not laid out yet, the trigger lifts. Not
+    /// used on the other platforms, nor for the secondary click's compact
+    /// menu, which has no preview.
+    pub preview: Prop<Option<Slot>>,
     /// The items, made on each opening.
     #[prop(lazy)]
     pub children: Prop<Children>,
@@ -1902,8 +2210,10 @@ pub struct ContextMenuProps {
 
 /// A menu about its trigger: the secondary button (a right click, a
 /// two-finger click) opens it where the pointer is on the desktops; a
-/// finger held on the trigger opens it as a sheet at the bottom of the
-/// screen on phones and tablets. While it is open, a secondary click on
+/// finger held on the trigger opens it on touch screens, as a popup where
+/// the finger is on an iPad in a regular width, as a sheet at the bottom
+/// of the screen on phones, the other tablets and an iPad in a compact
+/// width (`Menu`'s presentations). While it is open, a secondary click on
 /// the trigger opens it again where the pointer is (it reports closing,
 /// then opening); one elsewhere closes it. Shift+F10 or the Menu key on the focused
 /// trigger (the web, Linux) and a screen reader's "show menu" action (VoiceOver's
@@ -1916,9 +2226,28 @@ pub struct ContextMenuProps {
 /// first enabled item and Up or End the last, as `Menu`'s keys do.
 /// Its items are those of `Menu`, and so is how it
 /// closes and how it is styled.
+///
+/// Given `items`, iOS shows the system's context menu instead
+/// (`UIContextMenuInteraction`, on the native component
+/// [`CONTEXT_MENU_COMPONENT`]): a held finger lifts the trigger over the
+/// blurred screen and shows the items below it, a secondary click (an
+/// iPad's pointer, Mac Catalyst) shows them at the pointer, all answered
+/// natively without waiting for JS. It reports `onOpenChange`, `onOpen`,
+/// `onSelect({ id })`, `onCancel` and `onClose` as the drawn menu does;
+/// the app cannot open it (`open` set true shows nothing), and `open` set
+/// false closes it.
 #[component]
-pub fn ContextMenu(props: ContextMenuProps, cx: Scope<MenuEvent>) -> impl IntoElement {
+pub fn ContextMenu(props: ContextMenuProps, cx: Scope<ContextMenuEvents>) -> impl IntoElement {
     let open = OpenState::new(props.open, Prop::from(false));
+    let items = props.items;
+    // The system's menu: iOS with items. The drawn menu's openers stand
+    // aside while it is, so a held finger opens one menu. Elsewhere there
+    // is nothing to follow: the menu is made as without `items`.
+    let system = (os() == Os::Ios).then(|| computed(move || items.with(|i| !i.is_empty())));
+    let is_system = move || system.is_some_and(|s| s.get_untracked());
+    // The system menu's preview (`preview`): made while a finger is down on
+    // the trigger, kept while the menu is up.
+    let preview = Previewing::new(props.preview);
     // An opening from the keyboard or an assistive technology focuses the
     // first enabled item once they are there.
     let keyed = stored(None::<Keyed>);
@@ -1931,7 +2260,9 @@ pub fn ContextMenu(props: ContextMenuProps, cx: Scope<MenuEvent>) -> impl IntoEl
             return;
         }
         why.stamp(reason);
-        open.request(next, || cx.emit(MenuEvent::OpenChange(next, reason)));
+        open.request(next, || {
+            cx.emit(ContextMenuEvents::OpenChange(next, reason))
+        });
     });
     // Where the pointer asked for it; none when the app opened it.
     let point = signal(None::<Point<Points>>);
@@ -1971,6 +2302,9 @@ pub fn ContextMenu(props: ContextMenuProps, cx: Scope<MenuEvent>) -> impl IntoEl
             trigger
                 .element_ref(&anchor)
                 .on_context_menu(move |e: &ContextMenuEvent| {
+                    if is_system() {
+                        return;
+                    }
                     point.set(Some(e.page_position));
                     // No pointer: the keyboard (Shift+F10, the Menu key) or
                     // an assistive technology, placed at the trigger by the
@@ -1989,10 +2323,14 @@ pub fn ContextMenu(props: ContextMenuProps, cx: Scope<MenuEvent>) -> impl IntoEl
                 // secondary button does).
                 .on_touch(move |e: &TouchEvent| {
                     let at = e.points.first().map(|p| p.page);
+                    if is_system() {
+                        preview.touched(e.phase);
+                    }
                     match e.phase {
                         TouchPhase::Start
                             if e.points.len() == 1
-                                && e.points[0].pointer_type != PointerType::Mouse =>
+                                && e.points[0].pointer_type != PointerType::Mouse
+                                && !is_system() =>
                         {
                             let on_hold = on_hold.clone();
                             let page = at.unwrap_or_default();
@@ -2030,17 +2368,216 @@ pub fn ContextMenu(props: ContextMenuProps, cx: Scope<MenuEvent>) -> impl IntoEl
                     }
                 })
         }))
-        .child(surface(
-            open,
-            change,
-            Rc::new(move |e| cx.emit(e)),
-            At::Pointer(point, anchor),
-            parts,
-            // The secondary button and a held finger open it with no item
-            // focused, the keyboard with the first.
-            Asked { keyed, why },
-            props.children,
-        ))
+        .child({
+            let drawn = {
+                let change = change.clone();
+                move || {
+                    presented(
+                        open,
+                        change.clone(),
+                        Rc::new(move |e: MenuEvent| cx.emit(e.into())),
+                        At::Pointer(point, anchor),
+                        parts,
+                        // The secondary button and a held finger open it with
+                        // no item focused, the keyboard with the first.
+                        Asked { keyed, why },
+                        props.children,
+                    )
+                }
+            };
+            match system {
+                None => drawn(),
+                Some(system) => {
+                    let (title, disabled) = (props.title, props.disabled);
+                    when(system, move || {
+                        system_menu(items, title, disabled, preview, open, change.clone(), cx)
+                    })
+                    .otherwise(drawn)
+                    .into_element()
+                }
+            }
+        })
+}
+
+/// A `ContextMenu`'s preview in the system's menu (`preview`): made while
+/// a finger is down on the trigger (the system asks for the preview as the
+/// hold completes, without waiting on the app, so it has to be laid out by
+/// then) and while the menu is up.
+#[derive(Clone, Copy)]
+struct Previewing {
+    slot: Prop<Option<Slot>>,
+    /// Made now.
+    made: Signal<bool>,
+    /// The menu is up, as the platform last told.
+    up: Stored<bool>,
+    /// Lets it go after a finger that opened no menu.
+    linger: Stored<Option<Spawned<()>>>,
+}
+
+impl Previewing {
+    fn new(slot: Prop<Option<Slot>>) -> Self {
+        Self {
+            slot,
+            made: signal(false),
+            up: stored(false),
+            linger: stored(None),
+        }
+    }
+
+    /// A touch on the trigger, while the menu is the system's.
+    fn touched(self, phase: TouchPhase) {
+        match phase {
+            TouchPhase::Start => {
+                if let Some(old) = self.linger.replace(None) {
+                    old.cancel();
+                }
+                if self.slot.with_untracked(Option::is_some) {
+                    self.made.set(true);
+                }
+            }
+            TouchPhase::End | TouchPhase::Cancel if self.made.get_untracked() => {
+                let task = set_timeout(PREVIEW_LINGER, move || {
+                    self.linger.replace(None);
+                    if !self.up.get() {
+                        self.made.set(false);
+                    }
+                });
+                if let Some(old) = self.linger.replace(Some(task)) {
+                    old.cancel();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The menu came up (true) or went (false).
+    fn menu_up(self, up: bool) {
+        self.up.replace(up);
+        if !up {
+            self.made.set(false);
+        }
+    }
+
+    /// The preview, out of sight beside the native component: the platform
+    /// takes a picture of it when the menu opens. Hidden from assistive
+    /// technologies, which have the trigger.
+    fn holder(self) -> impl IntoElement {
+        let slot = self.slot;
+        when(
+            move || self.made.get() && slot.with(Option::is_some),
+            move || {
+                view()
+                    .absolute()
+                    .top_0()
+                    .left(px(-PREVIEW_ASIDE))
+                    .accessibility_elements_hidden(true)
+                    .child(slot.place(|preview| preview))
+            },
+        )
+    }
+}
+
+/// How far left of the trigger a `ContextMenu`'s preview is laid out: off
+/// any screen.
+const PREVIEW_ASIDE: f32 = 100_000.0;
+
+/// A `ContextMenu`'s system menu (iOS, given `items`): the native
+/// component beside the trigger, and the preview out of sight, taking no
+/// room and no touches.
+fn system_menu(
+    items: Prop<Vec<MenuButtonItem>>,
+    title: Prop<Option<SharedString>>,
+    disabled: Prop<bool>,
+    preview: Previewing,
+    open: OpenState,
+    change: Rc<dyn Fn(bool, OpenChangeReason)>,
+    cx: Scope<ContextMenuEvents>,
+) -> impl IntoElement {
+    // Shown, as the platform last told. The platform tells a choice before
+    // the dismissal it causes, so a dismissal finding the menu still shown
+    // closed it without one.
+    let shown = stored(false);
+    let component = native(CONTEXT_MENU_COMPONENT)
+        .absolute()
+        .size_0()
+        .pointer_events(PointerEvents::None)
+        .prop("preview", move || {
+            JsonValue::Bool(preview.slot.with(Option::is_some))
+        })
+        .prop("items", move || items.with(|items| menu_json(items)))
+        .prop("title", move || {
+            title
+                .get()
+                .map_or(JsonValue::Null, |t| JsonValue::from(t.as_ref()))
+        })
+        .prop("disabled", move || JsonValue::Bool(disabled.get()))
+        // Only `false` acts: it closes the menu shown.
+        .prop("open", move || JsonValue::Bool(open.get()))
+        .on_native_event(move |event: &NativeEvent| {
+            match &*event.name {
+                "open" if !shown.replace(true) => {
+                    preview.menu_up(true);
+                    // A finger held (the lifted preview), or the secondary
+                    // button (the compact menu at the pointer).
+                    let reason = match event.data.as_str() {
+                        Some("pointer") => OpenChangeReason::ContextMenu,
+                        _ => OpenChangeReason::LongPress,
+                    };
+                    change(true, reason);
+                    cx.emit(ContextMenuEvents::Open);
+                }
+                "select" => {
+                    if let Some(id) = event.data.as_str() {
+                        // As a drawn menu's item: closing with the choice,
+                        // the choice, then gone. A choice told after its
+                        // dismissal still reaches the app, alone.
+                        let was = shown.replace(false);
+                        if was {
+                            preview.menu_up(false);
+                            change(false, OpenChangeReason::Select);
+                        }
+                        cx.emit(ContextMenuEvents::Select(SharedString::from(id.to_owned())));
+                        if was {
+                            cx.emit(ContextMenuEvents::Close);
+                        }
+                    }
+                }
+                // The preview pressed: as a choice, before the closing.
+                "previewPress" => {
+                    let was = shown.replace(false);
+                    if was {
+                        preview.menu_up(false);
+                        change(false, OpenChangeReason::Select);
+                    }
+                    cx.emit(ContextMenuEvents::PreviewPress);
+                    if was {
+                        cx.emit(ContextMenuEvents::Close);
+                    }
+                }
+                // Gone without a choice. As the drawn menu's dismissal: the
+                // user's attempt (a tap outside, the preview's drag away) is
+                // reported, then it closes; when the app closed it, only the
+                // closing is.
+                "close" if shown.replace(false) => {
+                    preview.menu_up(false);
+                    if open.get_untracked() {
+                        cx.emit(ContextMenuEvents::Cancel);
+                        change(false, OpenChangeReason::PressOutside);
+                    }
+                    cx.emit(ContextMenuEvents::Close);
+                }
+                _ => {}
+            }
+        });
+    // The component's view is the first child, the preview's the second:
+    // the platform finds the trigger around them and the preview beside
+    // its view.
+    view()
+        .absolute()
+        .size_0()
+        .pointer_events(PointerEvents::None)
+        .child(component)
+        .child(preview.holder())
 }
 
 /// The props of [`MenuItem`].
@@ -2118,7 +2655,9 @@ pub fn MenuItem(props: MenuItemProps, cx: Scope<MenuItemEvent>) -> impl IntoElem
     let node = element_ref();
     let focused = signal(false);
     let key = hover.as_ref().map(|m| {
-        let key = m.items.add(node, m.level, disabled);
+        let key = m
+            .items
+            .add(node, m.level, disabled, props.accessibility_label);
         m.items.bind_keys(key, focused, m.open);
         key
     });
@@ -2324,8 +2863,9 @@ pub struct MenuListProps {
 /// of the list, made or not, scrolling to a row before focusing it and
 /// passing over disabled ones, and go on to the items before and after the
 /// list (a submenu's trigger too); Page Down and Page Up scroll it a view
-/// at a time. Bound its height with a style (`h`,
-/// `max_h`); `render_item` draws each row from its index. A row's
+/// at a time; typeahead reaches the rows it made, near its viewport. Bound
+/// its height with a style (`h`, `max_h`); `render_item` draws each row
+/// from its index. A row's
 /// `Submenu` closes with its row when the list scrolls the row away and
 /// reuses its cell.
 #[component]
@@ -2377,6 +2917,8 @@ pub fn MenuList(props: MenuListProps, cx: Scope<NoEvent>) -> impl IntoElement {
             })
         },
     )
+    .bounces(false)
+    .scrollbar(false)
     .element_ref(&list)
     .viewability(Viewability {
         item_visible_threshold: Some(Percentage(0.995)),
@@ -2406,13 +2948,13 @@ pub struct SubmenuProps {
     /// It does not open.
     #[prop(default)]
     pub disabled: Prop<bool>,
-    /// Desktops: the gap between the menu around it and its popup.
+    /// As a popup: the gap between the menu around it and its popup.
     #[prop(default)]
     pub offset: Prop<Points>,
     /// The item that opens it, among its menu's items.
     pub trigger: Prop<Option<Slot>>,
-    /// Touch screens: the row above its items that returns to the items
-    /// it is among (Escape and back do too).
+    /// As a sheet: the row above its items that returns to the items it
+    /// is among (Escape and back do too).
     pub back: Prop<Option<Slot>>,
     /// Its items.
     #[prop(lazy)]
@@ -2435,15 +2977,15 @@ pub enum SubmenuEvent {
     OpenChange(bool, OpenChangeReason),
 }
 
-/// A menu inside a menu: on the desktops its items are a popup beside its
-/// trigger, its first item level with the trigger (inside the popup's
+/// A menu inside a menu: in a menu's popup its items are a popup beside
+/// its trigger, its first item level with the trigger (inside the popup's
 /// padding and border), opened as the pointer comes over the trigger or
-/// presses it; on touch screens pressing the trigger shows its items in
+/// presses it; in a menu's sheet pressing the trigger shows its items in
 /// the sheet instead of the ones around it, with its `back` row first. Its
 /// popups take the menu's `popupClass` / `popupStyle` and its states' looks
 /// (`popupStartingClass`, `popupEndingClass`, ...). In a terminal its
 /// trigger is a row that ends with ` ›` ([`crate::terminal`]).
-/// On the desktops and in a terminal, Right, Return or Space on its
+/// In a popup and in a terminal, Right, Return or Space on its
 /// focused trigger open it with the keyboard focus on its first enabled
 /// item; Left on one of its items, or Escape, closes it with the focus
 /// back on its trigger, as WAI-ARIA's menus do. `onOpenChange` reports its
@@ -2662,7 +3204,9 @@ pub fn Submenu(props: SubmenuProps, cx: Scope<SubmenuEvent>) -> impl IntoElement
         }
     });
     let this_level = menu.this_level();
-    let item_key = menu.items.add(anchor, menu.level, props.disabled);
+    let item_key = menu
+        .items
+        .add(anchor, menu.level, props.disabled, Prop::new(None));
     let edges = menu.popup;
     let open_by: Rc<dyn Fn(OpenChangeReason)> = {
         let request = request.clone();

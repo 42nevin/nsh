@@ -46,6 +46,9 @@ An embedded app has these limits:
 (including the rendering it causes), bind one list row, run one timer, run one frame's `requestAnimationFrame`
 callbacks, drain the microtask queue. A long-running app never accumulates time toward a limit; only a single call
 that does not return in time is interrupted. Calls nested inside another share the outer call's budget.
+A call is charged the time it runs: its thread's CPU time on Linux, Android, macOS and iOS, monotonic time on
+Windows and the web. Time the system keeps the app frozen or suspended in the background, or waiting for a CPU, is not
+the call's.
 
 An interrupted call ends with an exception that no `catch` can swallow, and the error is reported with the budget it
 exceeded:
@@ -128,6 +131,7 @@ An app declares what it may reach outside its VM in `nsh.json`:
     "statusBar": true,
     "clipboard": true,
     "picker": true,
+    "share": true,
     "speech": true,
     "notifications": true,
     "audio": true,
@@ -198,7 +202,7 @@ nothing).
 
 A local file in a media source (a `file:` URL, or in a native app an absolute path such as `/Users/a/x.png` or
 `C:\pictures\x.png`) is read under the [`fs`](../modules/standard-modules.md) capability's `read` roots, as
-`fs/promises` reads files, and so only on the desktops. Its symlinks are resolved when the source is set, and the
+`fs/promises` reads files, on every native platform. Its symlinks are resolved when the source is set, and the
 platform loads the resolved path, so a link inside a granted root then does not lead out of it; a link made there
 later is followed while the source stays set. On the web, `/x.png` is the page's
 own path. An app without `capabilities` loads local files as before.
@@ -250,6 +254,11 @@ for when a page first needs them. Pages need a secure context (`https:` or `loca
 
 `"picker": true` lets the app show the system's picker for photos ([`Picker`](../modules/nsh.md#picker)): the user
 picks what reaches the app.
+
+### `share`
+
+`"share": true` lets the app show the system's share sheet ([`Share`](../modules/nsh.md#share)): the user chooses
+where the content goes. A shared file must also be readable under `fs.read`.
 
 ### `speech`
 
@@ -342,6 +351,7 @@ if (host.available()) {
 | Status bar change, canvas image | Nothing changes or is drawn; the refusal is logged. |
 | Clipboard | Every function of `Clipboard` rejects with `ERR_ACCESS_DENIED`, `permission` `"clipboard"` and `resource` `""`; the system clipboard is never touched. |
 | Picker | `pickImages` and `pickFiles` show nothing and reject with `ERR_ACCESS_DENIED`, `permission` `"picker"` and `resource` `""`. |
+| Share | `Share.available()` resolves `false` and `Share.show` shows nothing and rejects with `ERR_ACCESS_DENIED`, `permission` `"share"` and `resource` `""`. |
 | Speech | `Speech.start` throws `ERR_ACCESS_DENIED`, `permission` `"speech"` and `resource` `""`; the microphone stays off. |
 | Sound | `Sound.load` rejects and `new AudioPlayer` throws `ERR_ACCESS_DENIED`, `permission` `"audio"` and `resource` the source; nothing is read or played. |
 | Notifications | Each function of `Notifications` rejects or throws `ERR_ACCESS_DENIED`, `permission` `"notifications"` and `resource` `""`; nothing shows. |

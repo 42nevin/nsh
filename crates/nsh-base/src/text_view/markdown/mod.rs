@@ -11,10 +11,16 @@
 //! its tree converted. Definitions and footnotes are
 //! collected from the trees first, so references resolve wherever they
 //! stand and footnotes are numbered by their first reference.
+//!
+//! A view whose text grows at its end (a reply still arriving) reads it
+//! from where it can still change and keeps the blocks before
+//! (`incremental.rs`); a long text is read in parts the same way. Both are
+//! held to [`parse_whole`], which reads a whole text in one parse.
 
 mod autolink;
 mod cjk;
 mod container;
+mod incremental;
 mod latex;
 mod offsets;
 mod streaming;
@@ -28,8 +34,11 @@ use markdown::{
     mdast::{self, AlignKind, AttributeContent, AttributeValue, Node},
 };
 
-pub(crate) use self::streaming::repair_streaming;
 use self::{container::Segment, offsets::Inserted};
+pub(crate) use self::{
+    incremental::{Incremental, Parsed, SharedBlock},
+    streaming::repair_streaming,
+};
 use super::{
     Parser,
     common::{self, Slugger},
@@ -40,35 +49,26 @@ use super::{
     extension::{ParseContext, ReadChildren},
     html,
 };
+use crate::mdast_tree::{Mdast, plain_text};
 
 /// How deep blocks and inline content are read: deeper content is text.
 const MAX_DEPTH: usize = 32;
 
-/// Markdown `source` read with `parser`'s options, extensions and plugins.
+/// Markdown `source` read with `parser`'s options, extensions and plugins:
+/// the document [`parse_whole`] makes of it, a long text read a part at a
+/// time where nothing after a part changes it (`incremental.rs`).
 pub(crate) fn parse(parser: &Parser, source: &str) -> Document {
-    let mut source = if source.contains('\r') {
+    incremental::parse_long(parser, source).unwrap_or_else(|| parse_whole(parser, source))
+}
+
+/// Markdown `source` read in one parse.
+pub(crate) fn parse_whole(parser: &Parser, source: &str) -> Document {
+    let source = if source.contains('\r') {
         Cow::Owned(source.replace("\r\n", "\n").replace('\r', "\n"))
     } else {
         Cow::Borrowed(source)
     };
-    if parser.options.streaming {
-        let repaired = match repair_streaming(&source) {
-            Cow::Owned(repaired) => Some(repaired),
-            Cow::Borrowed(_) => None,
-        };
-        if let Some(repaired) = repaired {
-            source = Cow::Owned(repaired);
-        }
-    }
-    if parser.options.math {
-        let rewritten = match latex::rewrite(&source) {
-            Cow::Owned(rewritten) => Some(rewritten),
-            Cow::Borrowed(_) => None,
-        };
-        if let Some(rewritten) = rewritten {
-            source = Cow::Owned(rewritten);
-        }
-    }
+    let source = prepare(parser, source);
     let source = source.as_ref();
 
     let segments = if parser.extensions.iter().any(|e| e.container.is_some()) {
@@ -108,11 +108,36 @@ pub(crate) fn parse(parser: &Parser, source: &str) -> Document {
     Document { blocks, footnotes }
 }
 
+/// Markdown `source` (its line endings `\n`) as it is parsed: the end of a
+/// streamed reply repaired, TeX's delimiters rewritten. Positions in the
+/// syntax tree, and so what plugins read, are offsets in it.
+fn prepare<'s>(parser: &Parser, mut source: Cow<'s, str>) -> Cow<'s, str> {
+    if parser.options.streaming {
+        let repaired = match repair_streaming(&source) {
+            Cow::Owned(repaired) => Some(repaired),
+            Cow::Borrowed(_) => None,
+        };
+        if let Some(repaired) = repaired {
+            source = Cow::Owned(repaired);
+        }
+    }
+    if parser.options.math {
+        let rewritten = match latex::rewrite(&source) {
+            Cow::Owned(rewritten) => Some(rewritten),
+            Cow::Borrowed(_) => None,
+        };
+        if let Some(rewritten) = rewritten {
+            source = Cow::Owned(rewritten);
+        }
+    }
+    source
+}
+
 /// A Markdown part of the source and its syntax tree, whose positions are
 /// offsets in it.
 struct Tree<'s> {
     source: &'s str,
-    root: Node,
+    root: Mdast,
 }
 
 fn parse_trees<'s>(
@@ -154,7 +179,7 @@ fn tree<'s>(parser: &Parser, text: &'s str, first: bool) -> Tree<'s> {
     let mut source = marked.map_or(ended, Cow::Owned);
     inserted.insert(&marks, cjk::MARK.len_utf8());
     let strip = !ends.is_empty() || !marks.is_empty();
-    let mut root = parse_tree(parser, &source, first);
+    let mut root = Mdast(parse_tree(parser, &source, first));
     if parser.options.math {
         // Pairs of `$` that are prose: their opening `$` escaped, the text
         // is read again, as a whole (emphasis may span the pair); a
@@ -176,7 +201,7 @@ fn tree<'s>(parser: &Parser, text: &'s str, first: bool) -> Tree<'s> {
             }
             escaped.push_str(&source[at..]);
             inserted.insert(&opens, 1);
-            root = parse_tree(parser, &escaped, first);
+            root = Mdast(parse_tree(parser, &escaped, first));
             source = Cow::Owned(escaped);
         }
     }
@@ -217,7 +242,16 @@ fn definitions(trees: &[Tree<'_>]) -> String {
     out
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The longest text one `markdown-rs` parse read on this thread: a long
+    /// text read in parts is never parsed whole.
+    static LONGEST_PARSE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn parse_tree(parser: &Parser, text: &str, first: bool) -> Node {
+    #[cfg(test)]
+    LONGEST_PARSE.with(|longest| longest.set(longest.get().max(text.len())));
     let mdx = parser.options.mdx;
     match markdown::to_mdast(text, &options(parser, first, mdx)) {
         Ok(root) => root,
@@ -243,6 +277,26 @@ fn parse_tree(parser: &Parser, text: &str, first: bool) -> Node {
 
 /// `markdown-rs`'s options for `parser`'s.
 fn options(parser: &Parser, frontmatter: bool, mdx: bool) -> ParseOptions {
+    let mut options = own_options(parser, frontmatter, mdx);
+    for plugin in &parser.plugins.0 {
+        plugin.configure(&mut options);
+    }
+    options
+}
+
+/// Whether `parser`'s plugins leave the syntax of a text as its options
+/// make it: they turn no construct on or off (what else they configure,
+/// as `gfm_strikethrough_single_tilde`, is read inside a paragraph).
+fn plugins_keep_constructs(parser: &Parser) -> bool {
+    parser.plugins.is_empty()
+        || [true, false].into_iter().all(|first| {
+            let mdx = parser.options.mdx;
+            options(parser, first, mdx).constructs == own_options(parser, first, mdx).constructs
+        })
+}
+
+/// [`options`] without the plugins'.
+fn own_options(parser: &Parser, frontmatter: bool, mdx: bool) -> ParseOptions {
     let opts = &parser.options;
     let mut options = ParseOptions::gfm();
     let c = &mut options.constructs;
@@ -259,9 +313,6 @@ fn options(parser: &Parser, frontmatter: bool, mdx: bool) -> ParseOptions {
         c.mdx_expression_text = true;
         c.mdx_jsx_flow = true;
         c.mdx_jsx_text = true;
-    }
-    for plugin in &parser.plugins.0 {
-        plugin.configure(&mut options);
     }
     options
 }
@@ -468,7 +519,7 @@ impl<'a> Converter<'a> {
         // The tree is read recursively, as it is shown: deeper content is
         // its text, so no input runs the stack out.
         if self.depth >= MAX_DEPTH {
-            let text: String = nodes.iter().map(Node::to_string).collect();
+            let text = plain_text(nodes);
             if !text.trim().is_empty() {
                 out.push(Block::Paragraph {
                     content: vec![Inline::Text { text }],
@@ -748,7 +799,7 @@ impl<'a> Converter<'a> {
 
     fn inlines(&mut self, nodes: &[Node]) -> Vec<Inline> {
         if self.depth >= MAX_DEPTH {
-            let text: String = nodes.iter().map(Node::to_string).collect();
+            let text = plain_text(nodes);
             return vec![Inline::Text { text }];
         }
         self.depth += 1;
@@ -974,7 +1025,7 @@ impl<'a> Converter<'a> {
             .position()
             .and_then(|p| self.source.get(p.start.offset..p.end.offset))
             .map(|s| s.replace('\n', " "))
-            .unwrap_or_else(|| node.to_string());
+            .unwrap_or_else(|| plain_text(std::slice::from_ref(node)));
         push_text(out, &text);
     }
 

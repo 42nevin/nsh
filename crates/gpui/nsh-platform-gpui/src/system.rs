@@ -1422,6 +1422,7 @@ mod os {
 pub(crate) fn command(surface: &Rc<Surface>, _id: NodeId, command: &Command) {
     match command {
         Command::Dialog(dialog) => show_dialog(surface, dialog),
+        Command::CloseDialog(dialog) => close_dialog(surface, *dialog),
         // GPUI's clipboard items hold no HTML: the text only.
         Command::SetClipboard(text) | Command::SetClipboardItem(nsh_core::element::ClipboardItem { text, .. }) => {
             let text = text.clone();
@@ -1527,7 +1528,10 @@ pub(crate) fn command(surface: &Rc<Surface>, _id: NodeId, command: &Command) {
         Command::StatusBar(_)
         | Command::SetStatusBar(_)
         | Command::LayoutAnimation(_)
-        | Command::CancelPress => {}
+        | Command::CancelPress
+        // The app's address: this platform keeps none.
+        | Command::SetAppUrl(_)
+        | Command::PushAppUrl(_) => {}
         other => log::debug!("gpui: command {other:?} is not supported"),
     }
 }
@@ -1904,6 +1908,23 @@ fn add_overlay(surface: &Rc<Surface>, serial: u64, kind: OverlayKind) {
     } else {
         kind.opacity().set(0.0);
         fade(surface, serial, 1.0, FADE_IN, false);
+    }
+}
+
+/// Takes back the dialog [`show_dialog`] showed as `id`
+/// (`Command::CloseDialog`): it fades out as an answered one does, and
+/// reports nothing (the core answered it).
+fn close_dialog(surface: &Rc<Surface>, id: u32) {
+    let serial = OVERLAYS.with(|o| {
+        o.borrow().iter().find_map(|o| match &o.kind {
+            OverlayKind::Dialog(d) if o.key == surface.key() && d.id == id && !d.closing.get() => {
+                Some(o.serial)
+            }
+            _ => None,
+        })
+    });
+    if let Some(serial) = serial {
+        remove_overlay(surface, serial);
     }
 }
 

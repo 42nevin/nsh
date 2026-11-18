@@ -28,6 +28,7 @@ mod agent;
 mod animation;
 mod app;
 mod app_window;
+#[cfg_attr(not(feature = "media"), path = "audio_off.rs")]
 mod audio;
 mod canvas;
 mod chrome;
@@ -89,6 +90,7 @@ pub use crate::{
         AppOptions, AppSource, AppView, debug_output, fatal_error, run_app, set_components,
         set_ui_sets,
     },
+    compose::Placement,
     image::AssetBase,
     native::{ComponentContext, ComponentFactory, Components, NativeComponent, Wheel},
     text::DWriteTextEngine,

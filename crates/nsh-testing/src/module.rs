@@ -999,6 +999,51 @@ impl From<&nsh_core::picker::Pick> for PickRequest {
     }
 }
 
+/// How the user answers the share sheet (`app.onShare`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PropEnum)]
+pub enum ShareAnswerAction {
+    /// The user shares.
+    Shared,
+    /// The user closes the sheet without sharing.
+    #[default]
+    Dismissed,
+}
+
+/// How the user answers every share sheet (`app.onShare`).
+#[derive(Debug, Clone, Default, PartialEq, JsObject)]
+#[prop(exact)]
+pub struct ShareAnswer {
+    /// `"shared"` or `"dismissed"`.
+    pub action: ShareAnswerAction,
+    /// The target chosen when shared (`"com.apple.UIKit.activity.Mail"`);
+    /// none: the platform names none.
+    pub target: Option<String>,
+}
+
+/// What the app shared (`Share.show`), as a test reads it.
+#[derive(Debug, Clone, PartialEq, JsObject)]
+pub struct SharedContent {
+    /// The title; `null` when none was given.
+    pub title: Option<String>,
+    /// The text; `null` when none was given.
+    pub text: Option<String>,
+    /// The link; `null` when none was given.
+    pub url: Option<String>,
+    /// The files' real paths.
+    pub files: Vec<String>,
+}
+
+impl From<&nsh_core::share::ShareSheet> for SharedContent {
+    fn from(sheet: &nsh_core::share::ShareSheet) -> Self {
+        SharedContent {
+            title: sheet.title.clone(),
+            text: sheet.text.clone(),
+            url: sheet.url.clone(),
+            files: sheet.files.clone(),
+        }
+    }
+}
+
 /// A speech recognition session the app started (`Speech.start`), as a
 /// test reads it.
 #[derive(Debug, Clone, PartialEq, JsObject)]
@@ -1945,7 +1990,9 @@ const CLOSED: &str = "the app is closed: the test that opened it ended";
 #[class]
 impl App {
     /// Presses what `selector` names (or the nearest view around it that
-    /// hears presses, as a tap on a button's text does).
+    /// hears presses, as a tap on a button's text does). On iOS, a header
+    /// button of `ios.headerRightItems` is pressed too, by `id:<key>` or
+    /// its label: it presses it, or opens its menu.
     pub async fn press(this: Instance<Self>, selector: String) -> Result<(), JsError> {
         step(&this, move |app| app.press(&selector)).await
     }
@@ -2059,7 +2106,9 @@ impl App {
 
     /// Chooses the open context menu's action labelled `label` (a
     /// submenu's: `"Share > Mail"`), as a click on it: the app hears
-    /// `onMenu`, then the menu closes.
+    /// `onMenu`, then the menu closes. On iOS it is a menu the system
+    /// shows (a `MenuButton`'s, a `ContextMenu`'s, a header button's),
+    /// chosen from as a tap does.
     pub async fn choose_menu_item(this: Instance<Self>, label: String) -> Result<(), JsError> {
         step(&this, move |app| app.choose_menu_item(&label)).await
     }
@@ -2242,7 +2291,8 @@ impl App {
     }
 
     /// Goes back as the user does (a header's back button, swiping a sheet
-    /// down): the innermost stack of the newest modal (else of the screen)
+    /// down; in a sheet showing a pushed page, its header's back button):
+    /// the innermost stack of the newest modal (else of the screen)
     /// pops its top screen, or asks it when it prevents going back; without
     /// one, the newest modal asks to close. Rejects (`ERR_NSH_TEST_NO_BACK`)
     /// when there is nothing to go back from.
@@ -2476,6 +2526,26 @@ impl App {
     /// quiet. Headless only.
     pub async fn fail_open_urls(this: Instance<Self>, url: String) -> Result<(), JsError> {
         step(&this, move |app| app.fail_open_urls(&url)).await
+    }
+
+    /// The platform shows a share sheet from now on (`Share.available()`
+    /// resolves `true`), and the user answers every one the app shows
+    /// (`Share.show`) as `answer` says: shared, to its `target` if it names
+    /// one, or dismissed. What the app shares is listed by `shares`. Then
+    /// waits until the app is quiet. Headless only: a real platform shows
+    /// its own sheet.
+    pub async fn on_share(this: Instance<Self>, answer: ShareAnswer) -> Result<(), JsError> {
+        let outcome = match answer.action {
+            ShareAnswerAction::Shared => nsh_core::share::ShareOutcome::shared(answer.target),
+            ShareAnswerAction::Dismissed => nsh_core::share::ShareOutcome::dismissed(),
+        };
+        step(&this, move |app| app.on_share(outcome)).await
+    }
+
+    /// What the app shared (`Share.show`), in order: recorded, never
+    /// shared, and answered as `onShare` says. Headless only.
+    pub fn shares(&self) -> Result<Vec<SharedContent>, JsError> {
+        self.with(|app| Ok(app.shares()?.iter().map(SharedContent::from).collect()))
     }
 
     /// Moves the app to `state`, as the system does when the user leaves it

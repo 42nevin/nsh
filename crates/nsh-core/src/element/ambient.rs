@@ -291,6 +291,15 @@ fn act(action: Action) {
     executor().act(action);
 }
 
+/// [`act`] while the engine runs Rust code, else nothing: for cleanups and
+/// handles that may outlive it.
+pub(super) fn act_if_running(action: Action) {
+    if let Some(executor) = super::reactive::try_with_data(|d| d.ambient.executor.clone()).flatten()
+    {
+        executor.act(action);
+    }
+}
+
 // --- The environment ---------------------------------------------------------
 
 /// The surface's size in points (TS: `windowSize()`).
@@ -456,6 +465,15 @@ pub fn platform_name() -> &'static str {
     with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
         .with_untracked(|e| e.platform_name())
+}
+
+/// The platform shows the system's tab bar: iOS and Android, unless a
+/// platform built outside NSH has none
+/// ([`crate::platform::Environment::tab_bar`]); it does not change.
+pub(crate) fn has_tab_bar() -> bool {
+    with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
+        .expect("the core sets the environment")
+        .with_untracked(|e| matches!(e.os, Os::Ios | Os::Android) && e.tab_bar)
 }
 
 /// [`os`] where an engine runs (its thread, while it runs Rust code),
@@ -783,6 +801,72 @@ pub fn pick_screen_color() -> Answer<Option<crate::Hsla>> {
     answer
 }
 
+/// Shows the system's share sheet for `request` (TS: `Share.show`;
+/// [`crate::share`]): text, a link or local files the user sends to
+/// another app, a message or mail. To await in a task: the
+/// [`ShareOutcome`](crate::share::ShareOutcome) says whether the user
+/// shared or dismissed it; it fails with the
+/// [`ShareError`](crate::share::ShareError) `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`
+/// where the platform shows no share sheet ([`share_available`]),
+/// `ERR_ACCESS_DENIED` where the app's capabilities do not grant `share`,
+/// and with no code for a request [`ShareRequest::check`](crate::share::ShareRequest::check)
+/// refuses or the platform could not share.
+pub fn share(
+    request: crate::share::ShareRequest,
+) -> Answer<Result<crate::share::ShareOutcome, crate::share::ShareError>> {
+    let (answer, action) = super::services::share(request);
+    act(action);
+    answer
+}
+
+/// Opens a web sign-in session for `request` ([`crate::auth_session`]):
+/// the provider's sign-in page, which redirects to a URL of the request's
+/// callback scheme when the user is done. iOS shows it in an
+/// `ASWebAuthenticationSession`, Android in a Custom Tab, other platforms
+/// in the system browser. To await in a task: the
+/// [`AuthSessionOutcome`](crate::auth_session::AuthSessionOutcome) is the
+/// callback URL, or a cancellation (the user closed the page or came back
+/// without signing in, or a later session replaced it). Outside iOS the
+/// callback comes back as a link of a scheme the app claims (`nsh.json`
+/// `schemes`), which the session takes instead of
+/// [`next_url_scheme_open`]; where neither brings it back, the session
+/// fails with the [`AuthSessionError`](crate::auth_session::AuthSessionError)
+/// `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`. It fails with `ERR_ACCESS_DENIED`
+/// where the app's `openUrl` capability does not grant the page's URL, and
+/// with no code for a request
+/// [`AuthSessionRequest::check`](crate::auth_session::AuthSessionRequest::check)
+/// refuses or a page the platform could not show.
+pub fn open_auth_session(
+    request: crate::auth_session::AuthSessionRequest,
+) -> Answer<Result<crate::auth_session::AuthSessionOutcome, crate::auth_session::AuthSessionError>>
+{
+    let (answer, slot) = Answer::new();
+    act(Action::AuthSession(request, slot));
+    answer
+}
+
+/// Closes the app's web sign-in session ([`open_auth_session`]) while it
+/// still waits, as when the app learned the user signed in some other way
+/// (a device code approved on the page, which never redirects back): its
+/// answer resolves now as
+/// [`Cancelled`](crate::auth_session::AuthSessionOutcome::Cancelled), and
+/// iOS and Android take the page off the screen, bringing the app back.
+/// A page in the system browser elsewhere stays open. Only the app's own
+/// session closes; with none waiting, nothing happens.
+pub fn close_auth_session() {
+    act(Action::CloseAuthSession);
+}
+
+/// Whether the system's share sheet shows here (TS: `Share.available()`):
+/// the platform has one (iOS, Android, macOS, browsers with
+/// `navigator.share`) and the app's capabilities grant `share`. To await
+/// in a task.
+pub fn share_available() -> Answer<bool> {
+    let (answer, slot) = Answer::new();
+    act(Action::ShareAvailable(slot));
+    answer
+}
+
 /// The `file:` URLs of the local files on the system clipboard (files
 /// copied in a file manager; TS: `Clipboard.readFiles`), to await in a task.
 pub fn clipboard_files() -> Answer<Vec<String>> {
@@ -806,9 +890,13 @@ pub fn register_font(data: impl Into<Vec<u8>>) -> Answer<Result<String, String>>
 /// [`OpenDialog::folders`](crate::file_dialog::OpenDialog::folders)) the
 /// user picked, to await in a task: `None` when cancelled, the error when
 /// the dialog could not show (on Linux without a file chooser portal, or
-/// on a platform without file dialogs: iOS, Android, the web;
+/// on a platform without file dialogs, such as the web;
 /// [`crate::platform::Environment::file_requests`]). GPUI's
-/// `prompt_for_paths`.
+/// `prompt_for_paths`. On iOS and Android, returns app-owned copies without
+/// loading the files into memory or imposing a size limit. Android copies
+/// into the app cache; move files you need to keep to persistent storage.
+/// Android's folder picker selects one folder at a time. Mobile pickers use
+/// the system's title, button label and initial location.
 pub fn pick_paths(
     dialog: crate::file_dialog::OpenDialog,
 ) -> Answer<Result<Option<Vec<PathBuf>>, String>> {
@@ -1642,10 +1730,10 @@ pub fn try_apple_keys() -> Option<bool> {
 /// lives (TS: `keymap.bind`): `"mod+k"` (`mod` is Command on Apple
 /// platforms, Control elsewhere), `"shift+mod+l"`, `"escape"`, ... (the
 /// keystrokes of `nsh/keymap`). The handler gets the keystroke as written.
-/// It belongs to the window bound in ([`super::desktop::current_window`])
-/// and fires only for keys pressed there; a key it does not take goes on
-/// as usual. Desktop platforms fire them; elsewhere they are kept but no
-/// key does.
+/// It belongs to the window bound in ([`super::desktop::current_window`];
+/// in a component JS places in a window, that window) and fires only for
+/// keys pressed there; a key it does not take goes on as usual. Desktop
+/// platforms fire them; elsewhere they are kept but no key does.
 ///
 /// # Panics
 ///
@@ -1671,7 +1759,9 @@ pub fn on_key_with(keystroke: &str, options: KeyOptions, handler: impl Fn(&str) 
     }
     let owner = Owner::current();
     let handler: super::keys::KeyHandler = Rc::new(move |k: &str| owner.run(|| handler(k)));
-    // It belongs to the window whose tree binds it (`current_window`).
+    // It belongs to the window whose tree binds it (`current_window`); with
+    // no window around it in Rust (a component JS placed in a `Window`),
+    // the core finds the window its owner's component shows in.
     let window = super::use_context::<super::desktop::WindowRef>().and_then(|w| w.dialog_root());
     let keys = executor().keys.clone();
     let id = keys.borrow_mut().add(
@@ -1683,6 +1773,7 @@ pub fn on_key_with(keystroke: &str, options: KeyOptions, handler: impl Fn(&str) 
         keystroke.into(),
         handler,
         window,
+        owner,
     );
     let weak = Rc::downgrade(&keys);
     cleanup(move || {

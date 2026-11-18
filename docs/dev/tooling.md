@@ -158,7 +158,12 @@ to that file. `C-h e` opens its log/error panel; closing it gives every row back
   `target`, also after following links (`asset_in_root`); sources, `nsh.json`, `.env`, JSON and other files return
   404. `/ws` takes native hosts (no `Origin`) and the dev server's own web page: a browser's `Origin` must be
   `http(s)://` plus the request's `Host`, an IP address or `localhost` (`allowed_origin`), so another page open in a
-  browser, even on loopback or under a name rebound to this machine, gets 403.
+  browser, even on loopback or under a name rebound to this machine, gets 403. Every other path (`/bundle.js`,
+  `/assets/…`, the web host's page and files) takes only a `Host` that is an IP address or `localhost`
+  (`address_host`, the rule `/ws` holds a browser's page to), else 403: a page whose own name is rebound to this
+  machine (DNS rebinding) reads them same-origin, with no `Origin`, under that name, and any name can be rebound, by
+  its site's DNS or on the network (`.local`, a name of one label). Hosts reach the server by the address the CLI
+  prints.
 - Asset names: `asset:/<path>` is a file's path in the app's directory, the bundle's asset root
   (`nsh_bundler::Bundle::asset_root`, `HotBundle::asset_root`; `bundle.rs` `app_dir`: the entry's directory when it
   holds an `nsh.json` or an `App.tsx`, else the nearest one up with an `nsh.json`, else the nearest one up with an
@@ -315,8 +320,10 @@ queries report an error, including bare selectors whose test id matches an empty
 are mapped to what the step acts on (`Screen::pick`: the pressable ancestor, the input inside, the scroll view around)
 and more than one fails the step; a press whose match, or a view between it and its pressable ancestor, is disabled
 (the accessibility state) fails too. When the app moves the focus (`focus()`, `blur()`), the input it left gets
-`Blur` and the one it went to `Focus`, as on a platform. Each step sends what a platform would, to the views that
-report it:
+`Blur` and the one it went to `Focus`, as on a platform; an input whose first configuration asks for the focus
+(`autoFocus`) takes it after the batch that puts it in a window, from whatever had it, the last such input winning
+(`Screen::auto_focus`, as the platforms focus it once it is on screen). Each step sends what a platform would, to the
+views that report it:
 
 - `press`: the match or its nearest pressable ancestor gets `PressIn`, `PressOut`, `Press`, at the match's center
   (a press of a text inside a pressable view lands on the text, as a finger does); presses of one view within
@@ -436,6 +443,8 @@ Headless runs play the platform's part NSH's protocol defines, and refuse what o
   (`Headless::on_pick`, `app.onPick`; given as they are, nothing scaled), else cancelled (no files); `nsh/test`'s `App`
   answers them after each step and its dialogs (`answer_picks_myself`), and `app.picks()` lists what was asked; a real
   platform shows its own picker, which the driver does not answer;
+- shares (`Command::Share`) are answered as `onShare` says (`Headless::on_share`, `app.onShare`, which also turns
+  `Environment::share` on), and `app.shares()` lists what was shared;
 - speech sessions run on a fake recognizer (`headless/speech.rs`, unless the test's `EngineConfig::speech` is set): a
   session starts at once, `Headless::hear` (`app.hear(text)`) reports `text` as the transcript so far, `stop` and
   `Headless::end_speech` (`app.endSpeech(error?)`) end it with the last transcript as final (`no-speech` when nothing
@@ -767,7 +776,7 @@ simulator's values. Touches are IOHID digitizer events handed to UIKit
 (`-[UIApplication _enqueueHIDEvent:]`, with IOKit's and BackBoardServices' functions looked up at run time,
 `synth.rs`), so UIKit makes the `UITouch`es and runs hit
 testing, gesture recognizers and scroll views as for a finger: a press is a finger down and up, a scroll a drag kept
-inside the scroll view that rests (still reporting where it is) before it lifts, so it ends without a fling; a tap
+inside the scroll view that rests (trembling a fraction of a point) before it lifts, so it ends without a fling; a tap
 that lands in a text input also gives it the focus (made touches leave the first responder where it was, as UI test
 tools know). Typing goes through the software keyboard's input manager (`UIKeyboardImpl.addInputString:`, a key at
 a quick typist's pace), which asks the input's delegate first (`maxLength`, a controlled value), as the keyboard does.
@@ -1023,6 +1032,22 @@ A Rust app's runners were and are what they were: `nsh package --target macos` a
 for the release runner in both. The test runner links QuickJS, so the first `nsh test` of such an app builds what its
 `nsh build` no longer does.
 
+
+### Third-party extensions (`nsh.json` `"extensions"`, `nsh add`)
+
+`crates/nsh-cli/src/extensions.rs`. An extension is a crate like the ones `"rust"` lists, from Git (`nsh add <url>
+[--tag|--rev]`, `{ "git", "tag"|"rev" }`, locked to a `commit`), crates.io (`nsh add <crate>[@<req>]`, `{ "crate",
+"version" }`, resolved by `cargo metadata` on a probe crate in the cache and locked to the exact version as `resolved`)
+or a directory (`nsh add --path <dir>`, `{ "path" }`, not locked, read as it is). `nsh.lock` holds `{ <source>,
+commit|resolved, package, module }`. A locked crate is Cargo's own download of that version. Each locked commit is a `git worktree` of one clone per repository in
+nsh's cache (`<cache>/extensions/<name>-<hash of url>/<commit>`), made again when missing, so a build after clearing
+the cache takes the same commit. `rust_app::of` appends the extensions to the app's crates (an app with extensions
+only is a `RustApp` too, its nsh crates this CLI's, as `runner_only`), checks them together (`check_crates`: the same
+directory, package or `#[native_module]` specifier), and the workspace links each like an app crate. The app's crate
+depends on the extension as `nsh add` writes it (Git at the locked `rev`, the resolved crate version, or a relative
+`path`), which the workspace's `[patch."<url>"]` / `[patch.crates-io]` sends to the same checkout. Before linking, the extension must have a `#[native_module]` at its root
+(its module) and its `nsh-core` dependency requirement, if any, must match this CLI; there is no NSH-specific metadata. `nsh check` does not `cargo check` extensions (only crates outside the cache). Not yet: per-target support checks, web and mobile packaging checks, and an OTA check of the shell's linked modules.
+
 ## Finding the runtimes
 
 The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distribution layout) or, in a checkout, in
@@ -1058,6 +1083,12 @@ are. App-specific development hosts are generated in `.nsh/rust/tui/tui-host`.
 
 ## Releases
 
+The Apple-silicon release job uses `macos-26` and checks that the selected Xcode's device, simulator and
+macOS SDKs are 26 or newer. Building against the newer SDK enables iOS 26's system appearance, including
+Liquid Glass; the deployment target stays iOS 15.0. After building, `.github/ci/ios-build-versions.py` checks
+the four device, simulator and Catalyst runtimes' actual `LC_BUILD_VERSION` before packaging: the SDK must
+be 26 or newer and the minimum OS must remain 15.0. It reads the binaries without modifying them.
+
 `.github/workflows/release.yml` runs `cargo xtask dist` on macOS (Apple silicon, with the iOS and Mac Catalyst
 runtimes and the iOS SDK, and Intel), Linux and Windows (x86_64 and arm64), each with the desktop runtime and the GPUI
 and terminal development hosts of its machine. The components the same on every machine,
@@ -1073,10 +1104,11 @@ the profile's fat LTO over one, which linked each executable single-threaded for
 `xtask dist` strips the executables it copies (`copy_executable`: about a sixth of each), after the build rather
 than with the profile's `strip`, so the release builds a checkout keeps for profiling stay as they are. Asset
 names carry no version, so `releases/latest/download/<asset>` always resolves; the installers and package managers
-rely on that. To release, set `version` in the root `Cargo.toml`, push the tag `v<version>` (a tag that does not
-match fails the run) and publish the draft release the run creates once every platform has built. Running the
-workflow by hand without a tag builds the archives only (the run's artifacts): a dry run before tagging, and how to
-check a change to the workflow or to how xtask builds the distribution (`dist.rs`, `android.rs`, `ios.rs`).
+rely on that. To release, set `version` in the root `Cargo.toml` and commit both lock files refreshed (`Cargo.lock`,
+`crates/gpui/Cargo.lock`: the release builds `--locked`), push the tag `v<version>` (a tag that does not match fails
+the run) and publish the draft release the run creates once every platform has built. Running the workflow by hand
+without a tag builds the archives only (the run's artifacts): a dry run before tagging, and how to check a change to
+the workflow or to how xtask builds the distribution (`dist.rs`, `android.rs`, `ios.rs`, `cargo.rs`).
 
 Every night (18:00 UTC) the same workflow builds the latest `main` and publishes it as the release `nightly`, a
 prerelease never marked latest, so `releases/latest` and the package managers keep the stable release. A night

@@ -37,6 +37,17 @@ echo 'for (let i = 0; i < 8; i++) await app.press("id:edit");' | nsh test exampl
 Compare the final four edits after four warmups. Headless runs keep the complete document mounted; the trace
 includes selection geometry as well as the changed text. Results: `docs/dev/performance.md`.
 
+`MarkdownDefinitions.tsx` sets about 40 KB of Markdown with link and footnote definitions, then replaces text
+near the start on each press. The replacement is prepared before the press, and keeps the document's shape:
+
+```sh
+echo 'await app.wait(100); for (let i = 0; i < 6; i++) await app.press("id:replace"); await app.wait(100);' | nsh test examples/bench/MarkdownDefinitions.tsx --trace
+```
+
+Compare the initial set and all six replacements, including every mount item. The parser-only controls are
+`cargo test --release -p nsh-base --lib bench_streaming -- --ignored --nocapture --test-threads=1`.
+Results: `docs/dev/performance.md`.
+
 `RichEditorNodeViews.tsx` holds one paragraph with 300 inline stock tags, each rendered by the app's component
 (`addNodeView`). Each press inserts or removes one character before them: every tag moves, none of their values
 changes, so no JS runs for them (a runtime without `addNodeView` draws them as plain atoms):
@@ -44,3 +55,13 @@ changes, so no JS runs for them (a runtime without `addNodeView` draws them as p
 ```sh
 echo 'for (let i = 0; i < 8; i++) await app.press("id:edit");' | nsh test examples/bench/RichEditorNodeViews.tsx --trace
 ```
+
+`TextViewStream.tsx` shows a streamed reply in a `TextView`: 600 short blocks (the rows of an `each`), then 24
+bytes more with each press, so the last block grows or one comes after it while the rows before stay:
+
+```sh
+echo 'await app.wait(100); for (let i = 0; i < 40; i++) await app.press("id:more");' | nsh test examples/bench/TextViewStream.tsx --trace
+```
+
+Compare the presses' commits and every mount item. The core's own control is
+`cargo test --release -p nsh-core bench_each_update -- --ignored --nocapture`. Results: `docs/dev/performance.md`.
