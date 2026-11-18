@@ -10,6 +10,7 @@ mod table;
 #[cfg(target_os = "macos")]
 fn main() {
     macos::run();
+    macos::tab_from_hosted_control();
     table::run();
 }
 
@@ -19,23 +20,28 @@ fn main() {}
 #[cfg(target_os = "macos")]
 mod macos {
     use std::{
+        rc::Rc,
         sync::atomic::{AtomicBool, AtomicU32, Ordering},
         time::{Duration, Instant},
     };
 
-    use nsh_core::{element::Root, prelude::*};
+    use nsh_core::{
+        ModalAnimation,
+        element::{Root, modal, native},
+        prelude::*,
+    };
     use nsh_platform_macos::{
-        AppOptions, AppView,
+        AppOptions, AppView, ComponentContext, NativeComponent,
         objc2::{
             MainThreadMarker, MainThreadOnly, Message, msg_send, rc::Retained, runtime::AnyObject,
             sel,
         },
         objc2_app_kit::{
-            NSAccessibility, NSApplication, NSBackingStoreType, NSTextField, NSView, NSWindow,
-            NSWindowStyleMask,
+            NSAccessibility, NSApplication, NSBackingStoreType, NSButton, NSEvent,
+            NSEventModifierFlags, NSEventType, NSTextField, NSView, NSWindow, NSWindowStyleMask,
         },
         objc2_foundation::{
-            NSDate, NSNumber, NSPoint, NSRange, NSRect, NSRunLoop, NSSize, NSString,
+            NSDate, NSNumber, NSPoint, NSProcessInfo, NSRange, NSRect, NSRunLoop, NSSize, NSString,
         },
     };
 
@@ -706,5 +712,152 @@ mod macos {
         app.stop();
         window.close();
         println!("accessibility: ok");
+    }
+
+    // ---- A hosted AppKit control in the Tab loop -------------------------
+
+    /// A real `NSButton` mounted in the app: a Tab stop like any other.
+    const HOSTED: &str = "accessibility-test.restore";
+
+    struct HostButton(Retained<NSButton>);
+
+    impl NativeComponent for HostButton {
+        fn view(&self) -> Retained<NSView> {
+            self.0.clone().into_super().into_super()
+        }
+        fn set_prop(&mut self, _name: &str, _value: Option<&serde_json::Value>) {}
+    }
+
+    /// An outside stop, then a scoped `before → hosted Restore → after` row.
+    #[component]
+    fn HostedTab() -> impl IntoElement {
+        let stop = |id| {
+            view()
+                .test_id(id)
+                .role(AccessibilityRole::Button)
+                .h(px(24.0))
+                .w_full()
+                .on_press(|_: &()| {})
+        };
+        view().flex_1().child(stop("outside")).child(
+            modal().animation(ModalAnimation::None).child(
+                view()
+                    .p(px(8.0))
+                    .gap(px(8.0))
+                    .child(stop("before"))
+                    .child(native(HOSTED).test_id("host").h(px(24.0)).w_full())
+                    .child(stop("after")),
+            ),
+        )
+    }
+
+    /// A Tab or Shift-Tab key event as AppKit delivers it to the responder.
+    fn tab_event(window: &NSWindow, shift: bool) -> Retained<NSEvent> {
+        let characters = NSString::from_str("\t");
+        NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            NSEventType::KeyDown,
+            NSPoint::new(0.0, 0.0),
+            if shift { NSEventModifierFlags::Shift } else { NSEventModifierFlags::empty() },
+            NSProcessInfo::processInfo().systemUptime(),
+            window.windowNumber(),
+            None,
+            &characters,
+            &characters,
+            false,
+            48,
+        )
+        .expect("a Tab key event")
+    }
+
+    /// The hosted `NSButton` itself, not the view that carries it.
+    fn hosted_button(view: &NSView) -> Option<Retained<NSButton>> {
+        if let Some(button) = view.downcast_ref::<NSButton>() {
+            if button
+                .accessibilityIdentifier()
+                .is_some_and(|id| id.to_string() == "host")
+            {
+                return Some(button.retain());
+            }
+        }
+        view.subviews()
+            .iter()
+            .find_map(|child| hosted_button(&child))
+    }
+
+    fn focused(window: &NSWindow, view: &NSView) -> bool {
+        window
+            .firstResponder()
+            .and_then(|responder| responder.downcast::<NSView>().ok())
+            .is_some_and(|responder| std::ptr::eq(&*responder, view))
+    }
+
+    /// An unhandled Tab on the hosted button continues the key view loop from
+    /// it in both directions, confined to the modal scope.
+    pub(super) fn tab_from_hosted_control() {
+        let mtm = MainThreadMarker::new().expect("the main thread");
+        let _app = NSApplication::sharedApplication(mtm);
+        // SAFETY: a plain titled window, released by the test's end.
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0)),
+                NSWindowStyleMask::Titled,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        let app = AppView::new(
+            mtm,
+            AppOptions {
+                size: (400, 300),
+                ..AppOptions::default()
+            },
+        );
+        app.register_component(
+            HOSTED,
+            Rc::new(|_context: ComponentContext| -> Box<dyn NativeComponent> {
+                let mtm = MainThreadMarker::new().expect("components are made on the main thread");
+                let button = NSButton::new(mtm);
+                button.setTitle(&NSString::from_str("Restore"));
+                button.setAccessibilityIdentifier(Some(&NSString::from_str("host")));
+                Box::new(HostButton(button))
+            }),
+        );
+        window.setContentView(Some(&app.view()));
+        app.load(Root::of::<HostedTab>().into());
+        let root = app.view();
+        until("the hosted stops", || {
+            ["outside", "before", "after"]
+                .iter()
+                .all(|id| find(&root, id).is_some())
+                && hosted_button(&root).is_some()
+        });
+        let (outside, before, after) = (
+            find(&root, "outside").expect("outside stop"),
+            find(&root, "before").expect("stop before the host"),
+            find(&root, "after").expect("stop after the host"),
+        );
+        let host: Retained<NSView> =
+            Retained::from(&*hosted_button(&root).expect("hosted Restore button"));
+        // The window is never ordered front: real responder chain, no GUI.
+        for (from, shift, to) in [
+            (&host, false, &after),
+            (&host, true, &before),
+            (&after, false, &before),
+            (&before, true, &after),
+        ] {
+            assert!(window.makeFirstResponder(Some(&**from)));
+            window.sendEvent(&tab_event(&window, shift));
+            until("the focus to move", || !focused(&window, from));
+            assert!(
+                focused(&window, to),
+                "an unhandled Tab on the hosted control continues from it"
+            );
+            assert!(!focused(&window, &outside), "the modal confines Tab");
+        }
+        app.stop();
+        window.close();
+        println!("accessibility: hosted Tab ok");
     }
 }
