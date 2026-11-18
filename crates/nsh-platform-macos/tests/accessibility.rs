@@ -771,13 +771,12 @@ mod macos {
 
     /// The hosted `NSButton` itself, not the view that carries it.
     fn hosted_button(view: &NSView) -> Option<Retained<NSButton>> {
-        if let Some(button) = view.downcast_ref::<NSButton>() {
-            if button
+        if let Some(button) = view.downcast_ref::<NSButton>()
+            && button
                 .accessibilityIdentifier()
                 .is_some_and(|id| id.to_string() == "host")
-            {
-                return Some(button.retain());
-            }
+        {
+            return Some(button.retain());
         }
         view.subviews()
             .iter()
