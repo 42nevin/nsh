@@ -709,6 +709,11 @@ pub fn DatePicker(props: DatePickerProps, cx: Scope<DatePickerEvent>) -> impl In
         backdrop_style: props.backdrop_style,
     };
     let config = Config {
+        month: Prop::new(None),
+        today: Prop::new(None),
+        day_labels: Prop::new(Default::default()),
+        interactive_caption: Prop::new(true),
+        events: None,
         number_of_months: props.number_of_months,
         first_day_of_week: props.first_day_of_week,
         disabled_matcher: props.disabled_matcher,

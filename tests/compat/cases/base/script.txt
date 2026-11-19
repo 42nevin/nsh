@@ -4765,3 +4765,19 @@ tap id:content-size-narrow
 expect Width: true
 covers [events] onContentSizeChange
 covers [nsh/base] createRichEditor
+
+# base-calendar: browsing is independent from selection.
+tap id:case-base-calendar
+expect Current 2030-12-31
+tap label:Forward
+expect Month 2031-01-01
+expect Selected 2040-03-01
+tap label:Return
+tap label:Year end
+expect Selected 2030-12-31
+covers [nsh/base] Calendar
+covers [props] Calendar.month
+covers [props] Calendar.today
+covers [props] Calendar.dayLabels
+covers [props] Calendar.interactiveCaption
+covers [events] Calendar.onMonthChange

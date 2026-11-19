@@ -1276,7 +1276,7 @@ input there opens the list on touch screens only (through the focus).
 
 `DatePicker` (`date_picker.rs`) is `Select`'s popup (`popup::dropdown`, at least as wide as the trigger, a sheet on
 touch screens) around presets, a calendar and, with `timePrecision`, a time field. Its calendar is `calendar.rs`'s grid
-with every prop of `Calendar` passed on (`calendar::Config`); opening it on the desktops puts the keyboard on the
+with the shared grid props passed on (`calendar::Config`); opening it on the desktops puts the keyboard on the
 days (`Grid::focus_days`). A complete date is the value and closes it with `"select"`; with a time the popup stays
 open on the desktops, each edit reported, until the selected day is pressed again (`gpui-component`'s double click),
 while in a sheet (touch screens, the `sheet` the content is made for) a tap on a day picks it at its time and closes,
@@ -1286,7 +1286,7 @@ crosses to JS in the HTML inputs' forms (`date`, `datetime-local`), at the preci
 (`PickedDate`).
 
 `Calendar` (`calendar.rs`) is a grid of items (`Grid`: the shown page, the view, the cursor) over `gpui-base`'s
-`Date` and `Matcher`. Its days are one Tab stop: only the cursor's day (`stop`) is focusable, and the arrow, Home / End and
+`Date` and `Matcher`. The standalone calendar can receive a controlled `month` independent of its value, a reference `today`, ISO-keyed `dayLabels` and a non-interactive caption. Navigation requests (including keyboard crossings) emit `onMonthChange({ month })` without writing the controlled page. Its days are one Tab stop: only the cursor's day (`stop`) is focusable, and the arrow, Home / End and
 Page keys move the cursor (past disabled days, which the core never focuses: `Grid::enabled_toward`; the stop
 itself skips a disabled selected day or today), turning the months past the shown ones (`gpui-base`'s days take presses only). A
 JS function (`Matcher::Js`, as `gpui-base`'s `Matcher::Custom`) is asked for the shown days in a spawned task (the

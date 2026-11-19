@@ -58,7 +58,10 @@
 //!   in the days' width, so the calendar, and a date picker's popup, keeps
 //!   its width as the view changes.
 
-use std::{collections::HashSet, rc::Rc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    rc::Rc,
+};
 
 use chrono::{Datelike, Days, Months, NaiveDate};
 use nsh_core::{
@@ -248,6 +251,28 @@ impl JsValue for Date {
             Self::Single(v) => v.map(iso).to_js(host),
             Self::Range(a, b) => vec![a.map(iso), b.map(iso)].to_js(host),
         }
+    }
+}
+
+/// A local civil date in calendar props and events; JS uses an ISO date string.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct CalendarDate(pub NaiveDate);
+
+impl JsValue for CalendarDate {
+    fn ts_type(_: &mut TsTypes) -> String {
+        "string".into()
+    }
+
+    fn from_js(value: JsIn<'_>) -> Result<Self, PropError> {
+        value
+            .as_string()
+            .and_then(|s| parse_date(&s))
+            .map(Self)
+            .ok_or_else(|| value.expected("an ISO date (`2026-10-28`)"))
+    }
+
+    fn to_js<'a>(&self, host: &'a dyn JsHost) -> Result<JsOwned<'a>, PropError> {
+        iso(self.0).to_js(host)
     }
 }
 
@@ -581,6 +606,16 @@ pub struct CalendarProps {
     /// The value at first, while `value` is not set.
     #[prop(default)]
     pub default_value: Prop<Date>,
+    /// Independently controlled first displayed month. Pass an ISO date in the month.
+    pub month: Prop<Option<CalendarDate>>,
+    /// Reference day for the today mark and default keyboard stop; defaults to local today.
+    pub today: Prop<Option<CalendarDate>>,
+    /// Accessible names keyed by ISO date; omitted days use their ISO date.
+    #[prop(default)]
+    pub day_labels: Prop<BTreeMap<String, String>>,
+    /// With one month, provide month and year pickers instead of a static caption.
+    #[prop(default = true)]
+    pub interactive_caption: Prop<bool>,
     /// Pick a range: the first press starts it, the second ends it.
     #[prop(default)]
     pub range: Prop<bool>,
@@ -650,6 +685,9 @@ pub enum CalendarEvent {
     /// or a range's end. A `value` the app passes is never reported.
     #[args(value)]
     Change(Date),
+    /// Navigation requested a new first displayed month (its first day, as an ISO date).
+    #[args(month)]
+    MonthChange(CalendarDate),
 }
 
 /// Which view the calendar shows (`gpui-base`'s `CalendarView`).
@@ -714,6 +752,11 @@ pub(crate) fn today() -> NaiveDate {
 /// `DatePicker` passes on.
 #[derive(Clone, Copy)]
 pub(crate) struct Config {
+    pub(crate) month: Prop<Option<CalendarDate>>,
+    pub(crate) today: Prop<Option<CalendarDate>>,
+    pub(crate) day_labels: Prop<BTreeMap<String, String>>,
+    pub(crate) interactive_caption: Prop<bool>,
+    pub(crate) events: Option<Scope<CalendarEvent>>,
     pub(crate) number_of_months: Prop<u32>,
     pub(crate) first_day_of_week: Prop<u32>,
     pub(crate) disabled_matcher: Prop<Option<Matcher>>,
@@ -750,7 +793,7 @@ pub(crate) struct Grid {
     page: Signal<NaiveDate>,
     /// The first year of the shown page of years.
     year_page: Signal<i32>,
-    today: NaiveDate,
+    today: Memo<NaiveDate>,
     /// The day the keyboard is on while the days have the focus.
     cursor: Signal<Option<NaiveDate>>,
     /// The day to give the focus to once it is made.
@@ -778,9 +821,16 @@ impl Grid {
     /// A grid showing `value` (tracked: a value the app sets turns the
     /// page to it, as `CalendarState::set_date`).
     pub(crate) fn new(config: Config, value: impl Fn() -> Date + 'static) -> Self {
-        let today = today();
+        let local_today = today();
+        let today = computed(move || config.today.get().map_or(local_today, |d| d.0));
         let start = untracked(&value);
-        let shown_month = start.start().unwrap_or(today).with_day(1).unwrap_or(today);
+        let initial = config
+            .month
+            .get_untracked()
+            .map(|d| d.0)
+            .or(start.start())
+            .unwrap_or_else(|| today.get_untracked());
+        let shown_month = initial.with_day(1).unwrap();
         let grid = Self {
             config,
             shown: signal(start),
@@ -805,6 +855,11 @@ impl Grid {
                 return;
             }
             untracked(|| grid.show(date));
+        });
+        effect(move || {
+            if let Some(month) = config.month.get() {
+                grid.page.set(month.0.with_day(1).unwrap());
+            }
         });
         grid.light_stop();
         grid.ask_js();
@@ -849,8 +904,24 @@ impl Grid {
     /// Shows `date` as the value and turns to its month.
     pub(crate) fn show(self, date: Date) {
         self.shown.set(date);
-        if let Some(start) = date.start() {
+        if let Some(start) = date
+            .start()
+            .filter(|_| self.config.month.get_untracked().is_none())
+        {
             self.page.set(start.with_day(1).unwrap_or(start));
+        }
+    }
+
+    /// A user request is not a prop write. Only an uncontrolled grid turns immediately.
+    fn request_month(self, month: NaiveDate) {
+        if month == self.page.get_untracked() {
+            return;
+        }
+        if self.config.month.get_untracked().is_none() {
+            self.page.set(month);
+        }
+        if let Some(cx) = self.config.events {
+            cx.emit(CalendarEvent::MonthChange(CalendarDate(month)));
         }
     }
 
@@ -860,8 +931,8 @@ impl Grid {
 
     fn years(self) -> YearRange {
         self.config.year_range.get().unwrap_or(YearRange {
-            start: self.today.year() - 50,
-            end: self.today.year() + 50,
+            start: self.today.get().year() - 50,
+            end: self.today.get().year() + 50,
         })
     }
 
@@ -934,7 +1005,10 @@ impl Grid {
             return;
         }
         let next = self.shown.get_untracked().picked(day);
-        self.show(next);
+        self.shown.set(next);
+        if let Some(start) = next.start() {
+            self.request_month(start.with_day(1).unwrap());
+        }
         if next.is_complete() {
             changed(next);
         }
@@ -950,17 +1024,22 @@ impl Grid {
     /// The day the days' stop of Tab is on: the keyboard's, else the
     /// selected one shown, else today, else the first shown.
     fn stop(self) -> NaiveDate {
-        if let Some(day) = self.cursor.get() {
-            return day;
-        }
         let page = self.page.get();
         let last = page + Months::new(self.months());
         let shown = |d: &NaiveDate| *d >= page && *d < last;
+        if let Some(day) = self
+            .focus_to
+            .get()
+            .filter(shown)
+            .or_else(|| self.cursor.get().filter(shown))
+        {
+            return day;
+        }
         let day = self
             .shown
             .with(|v| v.start())
             .filter(shown)
-            .or(Some(self.today).filter(shown))
+            .or(Some(self.today.get()).filter(shown))
             .unwrap_or(page);
         // A disabled day takes no focus: the stop is the next day that
         // does, else the one before.
@@ -1001,13 +1080,15 @@ impl Grid {
             if !self.shows(day) {
                 let first = self.page.get_untracked();
                 let month = day.with_day(1).unwrap_or(day);
-                self.page.set(if day < first {
+                self.request_month(if day < first {
                     month
                 } else {
                     month - Months::new(untracked(|| self.months()) - 1)
                 });
             }
-            self.cursor.set(Some(day));
+            if self.shows(day) {
+                self.cursor.set(Some(day));
+            }
             self.focus_to.set(Some(day));
         });
     }
@@ -1116,7 +1197,7 @@ pub(crate) fn calendar_view(grid: Grid, changed: Rc<dyn Fn(Date)>) -> Vec<AnyEle
 
     let titles = dynamic(move || {
         let months = grid.months();
-        if months == 1 {
+        if months == 1 && config.interactive_caption.get() {
             return vec![
                 toggle(grid, CalendarItemKind::MonthToggle),
                 toggle(grid, CalendarItemKind::YearToggle),
@@ -1459,13 +1540,14 @@ fn nav(grid: Grid, kind: CalendarItemKind) -> AnyElement {
             return;
         }
         let step = |forward: bool| match grid.view.get_untracked() {
-            Mode::Day => grid.page.update(|p| {
-                *p = if forward {
-                    *p + Months::new(1)
+            Mode::Day => {
+                let p = grid.page.get_untracked();
+                grid.request_month(if forward {
+                    p + Months::new(1)
                 } else {
-                    *p - Months::new(1)
-                }
-            }),
+                    p - Months::new(1)
+                });
+            }
             _ => grid.year_page.update(|p| {
                 *p += if forward {
                     YEARS_PER_PAGE as i32
@@ -1630,14 +1712,13 @@ fn picker_item(grid: Grid, kind: CalendarItemKind, at: usize) -> AnyElement {
     })
     .on_press(move || {
         let value = untracked(value);
-        grid.page.update(|p| {
-            let (year, month) = if is_month {
-                (p.year(), value as u32)
-            } else {
-                (value, p.month())
-            };
-            *p = NaiveDate::from_ymd_opt(year, month, 1).unwrap_or(*p);
-        });
+        let p = grid.page.get_untracked();
+        let (year, month) = if is_month {
+            (p.year(), value as u32)
+        } else {
+            (value, p.month())
+        };
+        grid.request_month(NaiveDate::from_ymd_opt(year, month, 1).unwrap_or(p));
         grid.view.set(Mode::Day);
     })
     .into_element()
@@ -1810,7 +1891,7 @@ fn day(grid: Grid, cell: Cell, changed: Rc<dyn Fn(Date)>) -> AnyElement {
             date: Some(label.get()),
             year: page.year(),
             month: page.month(),
-            today: date == grid.today,
+            today: date == grid.today.get(),
             outside: !own.get(),
         }
     });
@@ -1835,6 +1916,7 @@ fn day(grid: Grid, cell: Cell, changed: Rc<dyn Fn(Date)>) -> AnyElement {
             return;
         }
         untracked(|| {
+            grid.cursor.set(Some(date.get_untracked()));
             grid.focus_to.set(None);
             let held = grid.focused_cell.get();
             if held == Some(id) {
@@ -1853,7 +1935,12 @@ fn day(grid: Grid, cell: Cell, changed: Rc<dyn Fn(Date)>) -> AnyElement {
         key,
         entry,
         states,
-        move || label.get(),
+        move || {
+            let iso = label.get();
+            grid.config
+                .day_labels
+                .with(|m| m.get(iso.as_str()).map(|s| s.clone().into()).unwrap_or(iso))
+        },
         Some(Rc::new(move || date.get().day().to_string().into())),
         shown,
     )
@@ -1932,6 +2019,11 @@ pub fn Calendar(props: CalendarProps, cx: Scope<CalendarEvent>) -> impl IntoElem
         .shaped(props.range.get())
     };
     let config = Config {
+        month: props.month,
+        today: props.today,
+        day_labels: props.day_labels,
+        interactive_caption: props.interactive_caption,
+        events: Some(cx),
         number_of_months: props.number_of_months,
         first_day_of_week: props.first_day_of_week,
         disabled_matcher: props.disabled_matcher,
