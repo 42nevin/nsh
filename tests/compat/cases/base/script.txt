@@ -4769,6 +4769,7 @@ covers [nsh/base] createRichEditor
 # base-calendar: browsing is independent from selection.
 tap id:case-base-calendar
 expect Current 2030-12-31
+prop label:"12 2030" role header
 tap label:Forward
 expect Month 2031-01-01
 expect Selected 2040-03-01
