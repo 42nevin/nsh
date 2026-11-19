@@ -75,7 +75,7 @@ import { Link } from "nsh/base";
 - 文字中的链接也一样显示：[TextView](./text-view.md) 文档里的链接会在目的地上方显示 Markdown 标题（`[docs](https://example.com "The guide")`）。
 - 应用给链接设置的 [`tooltip`](./tooltip.md) 是另一个独立的浮层，不是链接的标题。它默认显示在上方，目的地显示在下方，所以通常互不遮挡；但靠近窗口边缘时任何一个都可能翻到另一侧，这时两者可能重叠。
 
-提示使用主题的 popover 令牌绘制（`popover`、`border`，URL 用 `muted-foreground`），每个应用都会为用户提供这项核对。
+提示使用主题的 popover 令牌绘制（`popover`、`border`，URL 用 `muted-foreground`），与应用的配色一致。设置 `showDestinationHint={false}` 可关闭自动提示，不改变链接的目标、焦点、激活行为或应用提供的工具提示。
 
 ## Props
 
@@ -83,6 +83,7 @@ import { Link } from "nsh/base";
 |---|---|---|---|---|
 | `href` | `.href(..)` | `string` | 无 | 链接去往哪里：一个 URL，或应用自己的路径。由 `onOpen` 报告，并在桌面平台上作为链接的提示显示。 |
 | `title` | `.title(..)` | `string` | 无 | 所链接页面的名称：显示在链接提示里、目的地上方。可选。 |
+| `showDestinationHint` | `.show_destination_hint(..)` | `boolean` | `true` | 鼠标悬停时显示含目标和可选标题的自动提示。 |
 | `openWith` | `.open_with(LinkOpenWith::App)` | `"system" \| "app"`（`LinkOpenWith`） | `"system"` | 由谁打开 `href`：系统打开另一个应用或网站的 URL；`"app"` 交给 `onOpen`。 |
 | `disabled` | `.disabled(..)` | `boolean` | `false` | 不响应按压、没有按压反馈、不获得键盘焦点；应用 `disabled:` 样式，屏幕阅读器读出它不可用。 |
 | `current` | `.current(..)` | `boolean` | `false` | 导航或面包屑中指向用户所在页面的链接：屏幕阅读器读出它是当前页。 |

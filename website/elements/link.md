@@ -101,8 +101,7 @@ destination before following it, whatever the link's text says.
   default and the destination below, so they usually sit apart; either can flip to the other side near a window's
   edge, and then they may overlap.
 
-The hint draws with the theme's popover tokens (`popover`, `border`, `muted-foreground` for the URL), so every app
-gives its users this check.
+The hint draws with the theme's popover tokens (`popover`, `border`, `muted-foreground` for the URL), so a link follows the app’s colors. Set `showDestinationHint={false}` to omit this automatic hint without changing the link’s destination, focus, activation or an app-provided tooltip.
 
 ## Props
 
@@ -110,6 +109,7 @@ gives its users this check.
 |---|---|---|---|---|
 | `href` | `.href(..)` | `string` | none | Where the link goes: a URL, or a path of the app's. Reported with `onOpen`, and shown as the link's hint on the desktops. |
 | `title` | `.title(..)` | `string` | none | What the linked page is called: shown above the destination in the link's hint. Optional. |
+| `showDestinationHint` | `.show_destination_hint(..)` | `boolean` | `true` | Show the automatic pointer hint with the destination and optional title. |
 | `openWith` | `.open_with(LinkOpenWith::App)` | `"system" \| "app"` (`LinkOpenWith`) | `"system"` | Who opens `href`: the system opens a URL of another app or site; `"app"` leaves it to `onOpen`. |
 | `disabled` | `.disabled(..)` | `boolean` | `false` | No presses, no press feedback, no keyboard focus; `disabled:` styles apply, and screen readers say it is dimmed. |
 | `current` | `.current(..)` | `boolean` | `false` | The link to the page the user is on, in a navigation or a breadcrumb: screen readers say it is the current page. |
