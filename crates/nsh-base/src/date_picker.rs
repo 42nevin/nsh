@@ -840,7 +840,12 @@ pub fn DatePicker(props: DatePickerProps, cx: Scope<DatePickerEvent>) -> impl In
                                 .disabled(props.disabled)
                                 .app_class(props.time_field_class)
                                 .inline_style(props.time_field_style)
-                                .children(time_field::field(field_config, field_time, changed)),
+                                .children(time_field::field(
+                                    element_ref(),
+                                    field_config,
+                                    field_time,
+                                    changed,
+                                )),
                         )
                 },
             );

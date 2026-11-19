@@ -4781,3 +4781,9 @@ covers [props] Calendar.today
 covers [props] Calendar.dayLabels
 covers [props] Calendar.interactiveCaption
 covers [events] Calendar.onMonthChange
+
+# A public focus request selects the real native time editor, without clicking a segment.
+tap id:case-base-time-field
+tap id:focus-hour
+style parent:text:06 opacity 0.5
+covers [nsh/base] TimeField

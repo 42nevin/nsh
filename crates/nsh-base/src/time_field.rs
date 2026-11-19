@@ -410,6 +410,7 @@ const ECHOES: usize = 16;
 /// `time` (tracked; the app's) and reporting the user's edits to
 /// `changed`.
 pub(crate) fn field(
+    field_ref: ElementRef,
     config: FieldConfig,
     time: impl Fn() -> NaiveTime + 'static,
     changed: Rc<dyn Fn(NaiveTime)>,
@@ -427,7 +428,6 @@ pub(crate) fn field(
     let correction = stored(None::<Spawned<()>>);
     let echoes = stored(Vec::<String>::new());
     let focused = signal(false);
-    let field_ref = element_ref();
 
     effect(move || {
         let (precision, cycle) = (config.precision.get(), config.hour_cycle.get());
@@ -690,6 +690,20 @@ fn segment_view(
         .into_element()
 }
 
+/// The editing commands of a [`TimeField`]'s ref.
+#[non_exhaustive]
+pub struct TimeFieldApi {
+    field: ElementRef,
+}
+
+#[methods]
+impl TimeFieldApi {
+    /// Gives the currently selected segment the keyboard, without changing the time.
+    pub fn focus(&self) {
+        self.field.focus();
+    }
+}
+
 /// A time of day edited a segment at a time (`gpui-base`'s `TimeField`):
 /// the hour, the minute, with `precision="second"` the second, with
 /// `hourCycle="h12"` AM / PM, separated by `:`. The keys edit the selected
@@ -699,7 +713,7 @@ fn segment_view(
 /// nothing: the app's `class` and `style` lay out the field (`flex-row`),
 /// the parts style the segments and separators, or `renderSegment` draws
 /// them.
-#[component]
+#[component(methods = TimeFieldApi)]
 pub fn TimeField(props: TimeFieldProps, cx: Scope<TimeFieldEvent>) -> impl IntoElement {
     let own = signal(props.default_value.get_untracked().0);
     let time = move || props.value.get().map(|t| t.0).unwrap_or_else(|| own.get());
@@ -709,6 +723,8 @@ pub fn TimeField(props: TimeFieldProps, cx: Scope<TimeFieldEvent>) -> impl IntoE
         }
         cx.emit(TimeFieldEvent::Change(TimeOfDay(t)));
     });
+    let field_ref = element_ref();
+    cx.methods(TimeFieldApi { field: field_ref });
     let config = FieldConfig {
         precision: props.precision,
         hour_cycle: props.hour_cycle,
@@ -723,7 +739,7 @@ pub fn TimeField(props: TimeFieldProps, cx: Scope<TimeFieldEvent>) -> impl IntoE
     view()
         .flex_row()
         .disabled(props.disabled)
-        .children(field(config, time, changed))
+        .children(field(field_ref, config, time, changed))
 }
 
 #[cfg(test)]
