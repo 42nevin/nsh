@@ -131,7 +131,11 @@ impl Property {
         }
     }
 
-    fn accepts(self, value: Value) -> bool {
+    /// Checks whether the value's mode and range fit this property.
+    ///
+    /// This does not validate the target's identity, property applicability,
+    /// or animation bindings. A mutation checks those and the value again.
+    pub fn accepts(self, value: Value) -> bool {
         match (self, value) {
             (Self::Opacity, Value::Opacity(n)) => (0.0..=1.0).contains(&n.0),
             (Self::Background | Self::TextColor, Value::Color(_)) => true,
