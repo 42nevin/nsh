@@ -19,6 +19,8 @@ path = "tests/native/main.rs"
 harness = false
 
 [features]
+# Opt-in host inspection of live view instances.
+inspection = ["nsh-engine/inspection"]
 default = ["js", "shader", "editor", "emoji-picker", "highlight", "math", "plot", "rich-editor", "term", "zlib", "crypto", "websocket", "updater", "svg"]
 # JS apps (bundles, signed packages); without it, the library only runs a
 # Rust app and links no QuickJS.

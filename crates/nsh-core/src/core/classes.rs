@@ -689,6 +689,10 @@ impl<M: TextEngine> Core<M> {
     pub(super) fn mounted_view_style(&self, key: Key) -> Box<ViewStyle> {
         let node = &self.nodes[key as usize];
         let mut style = node.mounted_view_style();
+        #[cfg(feature = "inspection")]
+        if let Some(radius) = self.inspection.radius(node.id) {
+            style.border_radius = radius;
+        }
         let parent = node.parent;
         if parent == NO_KEY || node.inline {
             return style;

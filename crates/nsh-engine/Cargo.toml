@@ -13,6 +13,8 @@ repository.workspace = true
 workspace = true
 
 [features]
+# Opt-in host inspection of live view instances.
+inspection = ["nsh-core/inspection"]
 default = ["js"]
 # JS apps: the QuickJS VM, source maps, signed packages, and every standard
 # module.

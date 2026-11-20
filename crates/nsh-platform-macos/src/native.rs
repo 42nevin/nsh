@@ -1067,11 +1067,11 @@ pub(crate) fn lend(surface: &Rc<Surface>, top: &NshView, image: &NSView) -> Vec<
 }
 
 /// Where a lent view goes, in its leaving view's coordinates.
-struct Place {
+pub(crate) struct Place {
     /// The lent view's frame.
     frame: NSRect,
     /// What its ancestors let show of it.
-    clip: NSRect,
+    pub(crate) clip: NSRect,
     /// The layer whose rounded corners clipped it, when that layer alone
     /// made the clip.
     corners: Option<Retained<objc2_quartz_core::CALayer>>,
@@ -1079,7 +1079,7 @@ struct Place {
 
 /// Where `shown` shows inside `top`; `None` when it does not (hidden, or
 /// clipped away).
-fn place_in(shown: &NSView, top: &NSView) -> Option<Place> {
+pub(crate) fn place_in(shown: &NSView, top: &NSView) -> Option<Place> {
     let frame = shown.convertRect_toView(shown.bounds(), Some(top));
     let mut clip = top.bounds();
     let mut innermost: Option<(NSRect, Retained<objc2_quartz_core::CALayer>)> = None;

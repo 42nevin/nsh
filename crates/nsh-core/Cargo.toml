@@ -44,6 +44,8 @@ ttf-parser.workspace = true
 chrono.workspace = true
 
 [features]
+# Typed, host-driven live inspection. Not enabled by ordinary runtimes.
+inspection = []
 # SVG images for the native backends (`svg`: sniffing, sizes and rasters with
 # resvg). The web runtime leaves it off: the browser draws SVG itself.
 svg = ["dep:resvg", "dep:flate2", "dep:gif", "dep:simplecss"]

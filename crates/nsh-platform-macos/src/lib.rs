@@ -40,6 +40,8 @@ mod global_shortcut;
 mod gpu;
 mod image;
 mod input;
+#[cfg(feature = "inspection")]
+pub mod inspection;
 mod keyboard;
 mod keymap;
 mod login_item;

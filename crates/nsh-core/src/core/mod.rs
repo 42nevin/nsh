@@ -3,6 +3,8 @@ mod classes;
 mod components;
 mod cull;
 mod follow;
+#[cfg(feature = "inspection")]
+pub mod inspection;
 mod layout_scope;
 mod layout_tree;
 mod list;
@@ -1236,6 +1238,8 @@ impl ApplyError {
 /// runs those and commits again within the same frame.
 pub struct Core<M: TextEngine> {
     nodes: Slab<Node>,
+    #[cfg(feature = "inspection")]
+    inspection: inspection::Inspection,
     /// Node id -> key + 1 (0 = none). Ids are dense, so this is a flat vec.
     slots: crate::id_table::IdTable<Key>,
     /// Raw text runs kept without a node (#1345): a run not in the tree,
@@ -1621,6 +1625,8 @@ impl<M: TextEngine> Core<M> {
         slots.insert(ROOT_ID as usize, root);
         Self {
             nodes,
+            #[cfg(feature = "inspection")]
+            inspection: Default::default(),
             slots,
             layout,
             text_engine: Rc::new(text_engine),
@@ -7000,6 +7006,8 @@ impl<M: TextEngine> Core<M> {
             self.forget_outer(key);
             self.parent_lists.retain(|&k| k != key);
         }
+        #[cfg(feature = "inspection")]
+        self.inspection.forget(id);
         let node = self.nodes.remove(key as usize);
         self.ch_readers -= usize::from(node.reads_ch);
         self.slots.remove(id as usize);

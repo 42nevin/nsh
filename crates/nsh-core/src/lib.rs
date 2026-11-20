@@ -18,6 +18,8 @@ pub mod canvas;
 pub mod clipboard;
 pub mod color;
 mod core;
+#[cfg(feature = "inspection")]
+pub use core::inspection;
 mod css;
 mod css_named;
 pub mod desktop;

@@ -1278,6 +1278,17 @@ const MAX_ADVANCE_ROUNDS: usize = 100_000;
 const MAX_FLUSH_ROUNDS: usize = 64;
 
 enum Message {
+    #[cfg(feature = "inspection")]
+    Inspect(
+        Vec<NodeId>,
+        Box<dyn FnOnce(Vec<nsh_core::inspection::InspectedView>) + Send>,
+    ),
+    #[cfg(feature = "inspection")]
+    PreviewRadius(
+        nsh_core::inspection::ViewTarget,
+        Option<Points>,
+        Box<dyn FnOnce(Result<(), nsh_core::inspection::InspectError>) + Send>,
+    ),
     Event(NodeId, EventKind, EventPayload),
     /// Native menu ownership ended, after its preceding selection events.
     MenuRetired(u32),
@@ -1395,6 +1406,33 @@ pub struct EngineControl {
 }
 
 impl EngineControl {
+    /// Queries the inspectable mounted views among these native candidates in
+    /// order, in one engine turn. The callback runs on the engine thread.
+    /// Returns false if the engine has stopped accepting input.
+    #[cfg(feature = "inspection")]
+    pub fn inspect_views(
+        &self,
+        ids: Vec<NodeId>,
+        done: impl FnOnce(Vec<nsh_core::inspection::InspectedView>) + Send + 'static,
+    ) -> bool {
+        self.tx.send(Message::Inspect(ids, Box::new(done))).is_ok()
+    }
+
+    /// Sets or clears one ordinary common-radius override. Completion signals
+    /// engine acceptance, not delivery or display of the ensuing mount batch.
+    /// Returns false if the engine has stopped accepting input.
+    #[cfg(feature = "inspection")]
+    pub fn preview_radius(
+        &self,
+        target: nsh_core::inspection::ViewTarget,
+        radius: Option<Points>,
+        done: impl FnOnce(Result<(), nsh_core::inspection::InspectError>) + Send + 'static,
+    ) -> bool {
+        self.tx
+            .send(Message::PreviewRadius(target, radius, Box::new(done)))
+            .is_ok()
+    }
+
     /// Delivers an input event (and its data) to a node.
     pub fn dispatch_event(&self, id: NodeId, event: EventKind, payload: EventPayload) {
         // A download's stop acknowledgement is recorded with the cleanup
@@ -4026,6 +4064,18 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
                 // committed.
                 log::info!(target: "nsh::perf", "event js: {}µs", start.elapsed().as_micros());
             }
+        }
+        #[cfg(feature = "inspection")]
+        Message::Inspect(ids, done) => {
+            done(
+                ids.into_iter()
+                    .filter_map(|id| state.core.inspect_view(id))
+                    .collect(),
+            );
+        }
+        #[cfg(feature = "inspection")]
+        Message::PreviewRadius(target, radius, done) => {
+            done(state.core.preview_radius(target, radius))
         }
         Message::Scroll(id, offset, applied) => {
             state.core.set_scroll_offset(id, offset, applied);

@@ -7851,6 +7851,52 @@ fn classes_style_views_and_inline_styles_win() {
     assert!(c.commit().is_none());
 }
 
+#[cfg(feature = "inspection")]
+#[test]
+fn inspected_radius_composes_with_rerenders_and_cannot_follow_a_reused_node_id() {
+    let mut c = core();
+    view_with_classes(&mut c, 2, "w-20 h-10 bg-blue-500 rounded-lg");
+    c.commit().unwrap();
+    let first = c.inspect_view(2).unwrap();
+    assert_eq!(first.radius.underlying, px(8.0));
+    c.preview_radius(first.target, Some(px(23.375))).unwrap();
+    assert_eq!(
+        view_style_of(&c.commit().unwrap(), 2)
+            .unwrap()
+            .border_radius,
+        px(23.375)
+    );
+
+    // Both declarations change under the preview. Only radius is masked.
+    c.apply(class_op(2, "w-20 h-10 bg-red-500")).unwrap();
+    let batch = c.commit().unwrap();
+    let shown = view_style_of(&batch, 2).unwrap();
+    assert_eq!(shown.border_radius, px(23.375));
+    assert_ne!(shown.background_color, Color(0x2b7f_ffff));
+    assert_eq!(c.inspect_view(2).unwrap().radius.underlying, px(0.0));
+    c.preview_radius(first.target, None).unwrap();
+    assert_eq!(
+        view_style_of(&c.commit().unwrap(), 2)
+            .unwrap()
+            .border_radius,
+        px(0.0)
+    );
+
+    c.preview_radius(first.target, Some(px(12.0))).unwrap();
+    c.apply(Op::Release { id: 2 }).unwrap();
+    view_with_classes(&mut c, 2, "rounded-lg");
+    let replacement = c.inspect_view(2).unwrap();
+    assert_ne!(first.target, replacement.target);
+    assert!(c.preview_radius(first.target, Some(px(99.0))).is_err());
+    assert_eq!(replacement.radius.preview, None);
+    assert_eq!(
+        view_style_of(&c.commit().unwrap(), 2)
+            .unwrap()
+            .border_radius,
+        px(8.0)
+    );
+}
+
 #[test]
 fn important_classes_win_over_inline_styles() {
     let mut c = core();
