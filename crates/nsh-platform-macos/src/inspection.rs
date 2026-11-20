@@ -29,6 +29,16 @@ pub struct Candidate {
 }
 
 impl Candidate {
+    /// Samples the current backing layer, not the requested style. The native
+    /// radius can differ from the declaration (for example a short view clamps
+    /// its corners). A retired candidate has no measurement.
+    pub fn mounted_corner_radius(&self, app: &AppView) -> Option<Points> {
+        self.is_current(app)
+            .then(|| self.view.ns().layer())
+            .flatten()
+            .map(|layer| Points(layer.cornerRadius() as f32))
+    }
+
     /// Still the same mounted view, not a different view reusing its id.
     pub fn is_current(&self, app: &AppView) -> bool {
         app.surface().mounter.borrow().views.get(&self.node) == Some(&self.view)
