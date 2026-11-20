@@ -114,7 +114,7 @@ impl<M: TextEngine> Core<M> {
         &mut self,
         target: ViewTarget,
         radius: Option<Points>,
-    ) -> Result<(), InspectError> {
+    ) -> Result<Radius, InspectError> {
         let (current, previous) = self
             .inspection
             .entries
@@ -126,13 +126,17 @@ impl<M: TextEngine> Core<M> {
         if radius.is_some_and(|r| !r.0.is_finite() || r.0 < 0.0) {
             return Err(InspectError::InvalidRadius);
         }
-        if *previous != radius {
-            *previous = radius;
-            let key = self
-                .key(target.node)
-                .expect("an inspected view remains live");
+        let changed = *previous != radius;
+        *previous = radius;
+        let key = self
+            .key(target.node)
+            .expect("an inspected view remains live");
+        if changed {
             self.mark(key, dirty::VIEW);
         }
-        Ok(())
+        Ok(Radius {
+            underlying: self.nodes[key as usize].view_style.border_radius,
+            preview: radius,
+        })
     }
 }

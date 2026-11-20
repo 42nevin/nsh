@@ -1287,7 +1287,10 @@ enum Message {
     PreviewRadius(
         nsh_core::inspection::ViewTarget,
         Option<Points>,
-        Box<dyn FnOnce(Result<(), nsh_core::inspection::InspectError>) + Send>,
+        Box<
+            dyn FnOnce(Result<nsh_core::inspection::Radius, nsh_core::inspection::InspectError>)
+                + Send,
+        >,
     ),
     Event(NodeId, EventKind, EventPayload),
     /// Native menu ownership ended, after its preceding selection events.
@@ -1426,7 +1429,9 @@ impl EngineControl {
         &self,
         target: nsh_core::inspection::ViewTarget,
         radius: Option<Points>,
-        done: impl FnOnce(Result<(), nsh_core::inspection::InspectError>) + Send + 'static,
+        done: impl FnOnce(Result<nsh_core::inspection::Radius, nsh_core::inspection::InspectError>)
+        + Send
+        + 'static,
     ) -> bool {
         self.tx
             .send(Message::PreviewRadius(target, radius, Box::new(done)))
