@@ -918,3 +918,9 @@ Hidden accessibility subtrees remain excluded.
 Application-menu relabeling reuses the installed model and its native callback
 owner. Releasing an older localized menu does not retire the callbacks still
 used by the current menu; tray menus keep their separate callback lifetime.
+
+## Embedded live inspection
+
+The opt-in `inspection` feature exposes native selection to a development host without making it an application input hit test. Use `AppView::inspection_root` to convert AppKit events into the actual window root's flipped points and `inspection_window_candidates` for front-to-back selection. Candidates carry the projected, ancestor-clipped outline and separate engine-run/window identities. `Candidate::remeasure` recomputes that outline without altering selection. `set_inspection_observer` reports applied native geometry and mount changes; it does not accept or revise a property.
+
+Pass candidate IDs in one `EngineControl::inspect_views` call. The returned renderer generation must qualify any `preview_property` request; a locator or a reused native cell is not sufficient. `observe_inspection_retirement` names the exact retired renderer incarnation on the engine thread. Release and logical-row changes retire the old entry even if a native view will be reused. The embedding host owns its session and persistence. Sending typed absolute points, own opacity or RGBA never changes the underlying declaration; removal exposes the latest cascade. Relative, automatic, mixed and inherited declarations remain separate from the resolved outputs and native measurements. Engine acceptance precedes submission of the corresponding mount batch.

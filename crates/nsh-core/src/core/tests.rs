@@ -49097,3 +49097,301 @@ fn raw_text_table_bench() {
     times.sort_by(f64::total_cmp);
     println!("resize + full relayout + commit: median {:.1} ms", times[2]);
 }
+
+#[cfg(feature = "inspection")]
+#[test]
+fn inspection_retires_removed_ordinary_view_before_a_late_request() {
+    let mut c = core();
+    view_with_classes(&mut c, 2, "w-20 h-10 rounded-lg");
+    c.commit().unwrap();
+    let original = c.inspect_view(2).unwrap().target;
+    c.preview_radius(original, Some(px(12.0))).unwrap();
+    c.commit().unwrap();
+
+    c.apply(Op::Remove {
+        parent: ROOT_ID,
+        child: 2,
+    })
+    .unwrap();
+    assert_eq!(
+        c.preview_radius(original, Some(px(99.0))),
+        Err(crate::inspection::InspectError::Stale),
+        "removal retires the old target even while the application holds the node"
+    );
+    assert!(c.inspect_view(2).is_none());
+    c.apply(Op::Insert {
+        parent: ROOT_ID,
+        child: 2,
+        before: None,
+    })
+    .unwrap();
+    c.commit();
+    let reinserted = c.inspect_view(2).unwrap();
+    assert_ne!(reinserted.target, original);
+    assert_eq!(reinserted.radius.preview, None);
+    assert_eq!(reinserted.radius.underlying, px(8.0));
+}
+
+#[cfg(feature = "inspection")]
+#[test]
+fn inspected_properties_share_normal_layout_and_view_invalidation() {
+    use crate::inspection::{Property as P, Value as V};
+    let mut c = core();
+    view_with_classes(&mut c, 2, "w-[100px] h-[100px] opacity-50");
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 3,
+                tag: Tag::View,
+            },
+            style_op(
+                3,
+                &[
+                    ("width", StyleValue::Str("50%")),
+                    ("padding", StyleValue::Number(4.0)),
+                    ("backgroundColor", StyleValue::Str("#123456")),
+                    ("opacity", StyleValue::Number(0.5)),
+                ],
+            ),
+            Op::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+            Op::Create {
+                id: 4,
+                tag: Tag::View,
+            },
+            style_op(4, &[("height", StyleValue::Number(10.0))]),
+            Op::Insert {
+                parent: 3,
+                child: 4,
+                before: None,
+            },
+            Op::Create {
+                id: 5,
+                tag: Tag::View,
+            },
+            style_op(5, &[("height", StyleValue::Number(10.0))]),
+            Op::Insert {
+                parent: 3,
+                child: 5,
+                before: None,
+            },
+        ],
+    );
+    c.commit().unwrap();
+    let initial = c.inspect_view(3).unwrap();
+    let target = initial.target;
+    let property = |p| initial.properties.iter().find(|v| v.property == p).unwrap();
+    assert_eq!(property(P::Width).underlying, V::Percent(0.5));
+    assert_eq!(property(P::Opacity).underlying, V::Number(0.5));
+    assert_eq!(property(P::Opacity).resolved, Some(V::Number(0.25)));
+
+    for (key, value) in [
+        (P::Width, V::Points(px(60.0))),
+        (P::Padding, V::Points(px(7.0))),
+        (P::RowGap, V::Points(px(8.0))),
+        (P::Background, V::Color(Color(0x21436580))),
+        (P::Opacity, V::Number(0.8)),
+    ] {
+        c.preview_property(target, key, Some(value)).unwrap();
+    }
+    let mounted = c.commit().unwrap();
+    let view = view_style_of(&mounted, 3).unwrap();
+    assert_eq!(view.background_color, Color(0x21436580));
+    assert_eq!(view.opacity, 0.8);
+    assert_eq!(c.measure(3).unwrap().frame.size.width, px(60.0));
+    assert_eq!(c.measure(4).unwrap().frame.origin.y, px(7.0));
+    assert_eq!(c.measure(5).unwrap().frame.origin.y, px(25.0));
+
+    c.apply(style_op(
+        3,
+        &[
+            ("width", StyleValue::Str("40%")),
+            ("padding", StyleValue::Number(3.0)),
+            ("backgroundColor", StyleValue::Str("#224466")),
+            ("opacity", StyleValue::Number(0.3)),
+            ("borderRadius", StyleValue::Number(9.0)),
+        ],
+    ))
+    .unwrap();
+    let mounted = c.commit().unwrap();
+    let view = view_style_of(&mounted, 3).unwrap();
+    assert_eq!(view.border_radius, px(9.0));
+    assert_eq!(view.background_color, Color(0x21436580));
+    assert_eq!(c.measure(3).unwrap().frame.size.width, px(60.0));
+
+    assert!(
+        c.preview_property(target, P::Opacity, Some(V::Number(1.01)))
+            .is_err()
+    );
+    assert!(
+        c.preview_property(target, P::Width, Some(V::Percent(0.5)))
+            .is_err()
+    );
+    for p in [P::Width, P::Padding, P::RowGap, P::Background, P::Opacity] {
+        c.preview_property(target, p, None).unwrap();
+    }
+    let mounted = c.commit().unwrap();
+    let view = view_style_of(&mounted, 3).unwrap();
+    assert_eq!(view.background_color, Color(0x224466ff));
+    assert_eq!(view.opacity, 0.3);
+    assert_eq!(c.measure(3).unwrap().frame.size.width, px(40.0));
+    assert_eq!(c.measure(4).unwrap().frame.origin.y, px(3.0));
+    assert_eq!(c.measure(5).unwrap().frame.origin.y, px(13.0));
+}
+
+#[cfg(feature = "inspection")]
+#[test]
+fn inspected_text_preview_reflows_and_restores_latest_inherited_style() {
+    use crate::inspection::{Property as P, Value as V};
+    let mut c = core();
+    view_with_classes(&mut c, 2, "text-[20px] leading-[1.5]");
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 3,
+                tag: Tag::Text,
+            },
+            Op::CreateText {
+                id: 4,
+                text: "preview".into(),
+            },
+            Op::Insert {
+                parent: 3,
+                child: 4,
+                before: None,
+            },
+            Op::Insert {
+                parent: 2,
+                child: 3,
+                before: None,
+            },
+        ],
+    );
+    c.commit().unwrap();
+    let first = c.inspect_view(3).unwrap();
+    let state = |p| first.properties.iter().find(|v| v.property == p).unwrap();
+    assert_eq!(state(P::FontSize).underlying, V::Inherit);
+    assert_eq!(state(P::FontSize).resolved, Some(V::Points(px(20.0))));
+    assert_eq!(state(P::LineHeight).resolved, Some(V::Points(px(30.0))));
+
+    let current_span = |b: &MountBatch| {
+        b.items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Text { id: 3, text, .. } => Some(text.spans[0].style),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let target = first.target;
+    c.preview_property(target, P::FontSize, Some(V::Points(px(26.0))))
+        .unwrap();
+    c.preview_property(target, P::LineHeight, Some(V::Points(px(32.0))))
+        .unwrap();
+    c.preview_property(target, P::TextColor, Some(V::Color(Color(0x123456ff))))
+        .unwrap();
+    let preview = current_span(&c.commit().unwrap());
+    assert_eq!(preview.font_size, px(26.0));
+    assert_eq!(preview.line_height, px(32.0));
+    assert_eq!(preview.color, Color(0x123456ff));
+
+    c.apply(class_op(2, "text-[18px] leading-[150%]")).unwrap();
+    c.commit();
+    for p in [P::FontSize, P::LineHeight, P::TextColor] {
+        c.preview_property(target, p, None).unwrap();
+    }
+    let restored = current_span(&c.commit().unwrap());
+    assert_eq!(restored.font_size, px(18.0));
+    assert_eq!(restored.line_height, px(27.0));
+    assert_eq!(restored.color, Color::BLACK);
+}
+
+#[cfg(feature = "inspection")]
+#[test]
+fn a_cell_rebinding_retires_the_inspected_item_without_recreating_its_view() {
+    let mut c = core();
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::List,
+            },
+            style_op(2, &[("height", StyleValue::Number(100.0))]),
+            Op::SetProp {
+                id: 2,
+                prop: Prop::EstimatedItemSize(px(50.0)),
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Count(4),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    c.commit();
+    let mut cells = Vec::new();
+    assert!(render_binds(&mut c, &mut 100, &mut cells, 50.0) > 0);
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 3,
+                tag: Tag::View,
+            },
+            class_op(3, "w-20 h-10 rounded-lg"),
+            Op::Insert {
+                parent: cells[0],
+                child: 3,
+                before: None,
+            },
+        ],
+    );
+    c.commit();
+    let first = c.inspect_view(3).unwrap().target;
+    c.preview_radius(first, Some(px(20.0))).unwrap();
+    c.commit();
+
+    // Replacement at the very same index with a distinct logical item.
+    c.apply(Op::SetProp {
+        id: 2,
+        prop: Prop::Splice(0, 1, 1),
+    })
+    .unwrap();
+    c.apply(class_op(3, "w-20 h-10 rounded-none")).unwrap();
+    assert_eq!(
+        c.preview_radius(first, Some(px(99.0))),
+        Err(crate::inspection::InspectError::Stale)
+    );
+    let mounted = c.commit().unwrap();
+    assert_eq!(view_style_of(&mounted, 3).unwrap().border_radius, px(0.0));
+    assert!(
+        !mounted
+            .items
+            .iter()
+            .any(|i| matches!(i, MountItem::Delete { id: 3 }))
+    );
+    let new = c.inspect_view(3).unwrap();
+    assert_ne!(first, new.target);
+    assert_eq!(new.radius.preview, None);
+
+    // The same cell is now bound by the runtime to another index.
+    c.apply(Op::SetProp {
+        id: cells[0],
+        prop: Prop::CellIndex(2),
+    })
+    .unwrap();
+    assert_eq!(
+        c.preview_radius(new.target, Some(px(99.0))),
+        Err(crate::inspection::InspectError::Stale)
+    );
+}

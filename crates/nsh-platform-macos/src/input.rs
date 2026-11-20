@@ -1762,7 +1762,7 @@ pub(crate) fn local(_surface: &Surface, view: &NshView, x: f32, y: f32) -> (f32,
 /// transforms on the way (layer transforms, which AppKit's conversions
 /// leave out), as [`local`] undoes them. `None` when a transform's
 /// perspective puts the point at infinity.
-#[cfg(feature = "dev")]
+#[cfg(any(feature = "dev", feature = "inspection"))]
 pub(crate) fn to_top(view: &NshView, p: (f32, f32), transforms: bool) -> Option<(f32, f32)> {
     let mut p = p;
     for pair in chain(view).windows(2) {
@@ -1782,7 +1782,7 @@ pub(crate) fn to_top(view: &NshView, p: (f32, f32), transforms: bool) -> Option<
 
 /// Where row-vector transform `m` shows point `p` of a view's plane
 /// (z = 0), perspective included: what [`unproject`] inverts.
-#[cfg(feature = "dev")]
+#[cfg(any(feature = "dev", feature = "inspection"))]
 fn project(m: &nsh_core::Matrix, p: (f32, f32)) -> Option<(f32, f32)> {
     let m = &m.0;
     let (x, y) = (p.0 as f64, p.1 as f64);

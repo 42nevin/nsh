@@ -1313,6 +1313,9 @@ pub struct Style {
 /// `animationName`.
 #[derive(Clone, Default)]
 pub(crate) struct Pending {
+    /// Was normal explicitly requested rather than inherited?
+    #[cfg(feature = "inspection")]
+    pub(crate) inspection_normal_line_height: bool,
     /// `outlineWidth` as set.
     outline_width: Points,
     /// `outlineStyle: "none"` / `"hidden"`.
@@ -4021,6 +4024,10 @@ impl Style {
             }
             (K::FontWeight, V::FontWeight(v)) => self.text.font_weight = *v,
             (K::LineHeight, V::LineHeight(v)) => {
+                #[cfg(feature = "inspection")]
+                {
+                    self.pending.inspection_normal_line_height = *v == LineHeight::Normal;
+                }
                 let t = &mut self.text;
                 (t.line_height, t.line_height_multiple, t.line_height_em) = match *v {
                     LineHeight::Normal => (None, None, None),

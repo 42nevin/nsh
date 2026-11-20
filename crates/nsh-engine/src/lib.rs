@@ -1277,11 +1277,28 @@ const MAX_ADVANCE_ROUNDS: usize = 100_000;
 /// once): a task that keeps waking itself leaves the engine busy.
 const MAX_FLUSH_ROUNDS: usize = 64;
 
+#[cfg(feature = "inspection")]
+type InspectRetirement = Box<dyn Fn(nsh_core::inspection::ViewTarget) + Send>;
+#[cfg(feature = "inspection")]
+type PropertyReply = Box<
+    dyn FnOnce(Result<nsh_core::inspection::PropertyState, nsh_core::inspection::InspectError>)
+        + Send,
+>;
+
 enum Message {
+    #[cfg(feature = "inspection")]
+    InspectRetirements(Option<InspectRetirement>),
     #[cfg(feature = "inspection")]
     Inspect(
         Vec<NodeId>,
         Box<dyn FnOnce(Vec<nsh_core::inspection::InspectedView>) + Send>,
+    ),
+    #[cfg(feature = "inspection")]
+    PreviewProperty(
+        nsh_core::inspection::ViewTarget,
+        nsh_core::inspection::Property,
+        Option<nsh_core::inspection::Value>,
+        PropertyReply,
     ),
     #[cfg(feature = "inspection")]
     PreviewRadius(
@@ -1419,6 +1436,47 @@ impl EngineControl {
         done: impl FnOnce(Vec<nsh_core::inspection::InspectedView>) + Send + 'static,
     ) -> bool {
         self.tx.send(Message::Inspect(ids, Box::new(done))).is_ok()
+    }
+
+    /// Observes exact incarnations retired by the renderer. The callback runs
+    /// on the engine thread. A new subscription replaces the old one.
+    #[cfg(feature = "inspection")]
+    pub fn observe_inspection_retirement(
+        &self,
+        callback: impl Fn(nsh_core::inspection::ViewTarget) + Send + 'static,
+    ) -> bool {
+        self.tx
+            .send(Message::InspectRetirements(Some(Box::new(callback))))
+            .is_ok()
+    }
+
+    /// Stops delivering retirement notifications to the inspection subscriber.
+    #[cfg(feature = "inspection")]
+    pub fn stop_inspection_retirement(&self) {
+        let _ = self.tx.send(Message::InspectRetirements(None));
+    }
+
+    /// Applies or clears a typed ordinary preview. The engine callback only
+    /// acknowledges the style change; the platform observes mounting separately.
+    #[cfg(feature = "inspection")]
+    pub fn preview_property(
+        &self,
+        target: nsh_core::inspection::ViewTarget,
+        property: nsh_core::inspection::Property,
+        value: Option<nsh_core::inspection::Value>,
+        done: impl FnOnce(
+            Result<nsh_core::inspection::PropertyState, nsh_core::inspection::InspectError>,
+        ) + Send
+        + 'static,
+    ) -> bool {
+        self.tx
+            .send(Message::PreviewProperty(
+                target,
+                property,
+                value,
+                Box::new(done),
+            ))
+            .is_ok()
     }
 
     /// Sets or clears one ordinary common-radius override. Completion signals
@@ -2366,6 +2424,8 @@ impl<M: TextEngine + 'static> Driver<M> {
         let js_tokens = core.tokens().clone();
         let state = State {
             core,
+            #[cfg(feature = "inspection")]
+            inspection_retirement: None,
             js_tokens,
             frame_requested: false,
             ops: Vec::new(),
@@ -2932,6 +2992,8 @@ struct ScrollEvent {
 
 struct State<M: TextEngine> {
     core: Core<M>,
+    #[cfg(feature = "inspection")]
+    inspection_retirement: Option<InspectRetirement>,
     /// The design tokens JS has (`token()`): the core's when they were
     /// last sent.
     js_tokens: Arc<nsh_core::element::Tokens>,
@@ -3760,6 +3822,12 @@ impl<M: TextEngine> State<M> {
                 self.core.node_count(),
             );
         }
+        #[cfg(feature = "inspection")]
+        for target in self.core.take_inspection_retirements() {
+            if let Some(callback) = &self.inspection_retirement {
+                callback(target);
+            }
+        }
         merged
     }
 }
@@ -4071,12 +4139,18 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
             }
         }
         #[cfg(feature = "inspection")]
+        Message::InspectRetirements(callback) => state.inspection_retirement = callback,
+        #[cfg(feature = "inspection")]
         Message::Inspect(ids, done) => {
             done(
                 ids.into_iter()
                     .filter_map(|id| state.core.inspect_view(id))
                     .collect(),
             );
+        }
+        #[cfg(feature = "inspection")]
+        Message::PreviewProperty(target, property, value, done) => {
+            done(state.core.preview_property(target, property, value))
         }
         #[cfg(feature = "inspection")]
         Message::PreviewRadius(target, radius, done) => {

@@ -689,10 +689,6 @@ impl<M: TextEngine> Core<M> {
     pub(super) fn mounted_view_style(&self, key: Key) -> Box<ViewStyle> {
         let node = &self.nodes[key as usize];
         let mut style = node.mounted_view_style();
-        #[cfg(feature = "inspection")]
-        if let Some(radius) = self.inspection.radius(node.id) {
-            style.border_radius = radius;
-        }
         let parent = node.parent;
         if parent == NO_KEY || node.inline {
             return style;
@@ -1417,6 +1413,8 @@ impl<M: TextEngine> Core<M> {
             space.apply(&mut base, false, self.resolved_rtl(key));
         }
         let spaced = space.is_some();
+        #[cfg(feature = "inspection")]
+        let rtl = self.resolved_rtl(key);
         let node = &mut self.nodes[key as usize];
         node.spaced = spaced;
         // The color it is styled with (`currentColor`, `sync_colors`).
@@ -1448,12 +1446,22 @@ impl<M: TextEngine> Core<M> {
                 style = base;
                 props = ClassProps::default();
                 self.resolve_classes(key, ch, position, &mut style, &mut props);
+                #[cfg(feature = "inspection")]
+                {
+                    let node = &self.nodes[key as usize];
+                    self.inspection.compose(node.id, node.kind, rtl, &mut style);
+                }
             }
             // Again with its own font's, once its classes set one.
             Some(inherited) => loop {
                 style = base.clone();
                 props = ClassProps::default();
                 self.resolve_classes(key, ch, position, &mut style, &mut props);
+                #[cfg(feature = "inspection")]
+                {
+                    let node = &self.nodes[key as usize];
+                    self.inspection.compose(node.id, node.kind, rtl, &mut style);
+                }
                 let own = self.zero_advance(inherited.inherit(&style.text));
                 if own == ch {
                     break;
@@ -1595,7 +1603,12 @@ impl<M: TextEngine> Core<M> {
             let inline = &node.inline_style;
             let current = crate::tailwind::CurrentColor {
                 inherited: node.inherited_color,
-                inline: inline_color(inline),
+                inline: {
+                    let color = inline_color(inline);
+                    #[cfg(feature = "inspection")]
+                    let color = self.inspection.text_color(node.id).or(color);
+                    color
+                },
             };
             let text_color = classes.current_color(&cx, &data, current);
             inline.apply_defaults(style, text_color);
@@ -1622,9 +1635,10 @@ impl<M: TextEngine> Core<M> {
                 self.nodes[parent as usize].positional_children = true;
             }
         } else {
-            let current = inline_color(&node.inline_style)
-                .or(node.inherited_color)
-                .unwrap_or(Color::BLACK);
+            let color = inline_color(&node.inline_style);
+            #[cfg(feature = "inspection")]
+            let color = self.inspection.text_color(node.id).or(color);
+            let current = color.or(node.inherited_color).unwrap_or(Color::BLACK);
             node.inline_style.apply_defaults(style, current);
             node.inline_style.apply(style);
             style.apply_current_color(current);

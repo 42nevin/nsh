@@ -4292,6 +4292,11 @@ impl<M: TextEngine> Core<M> {
         let key = self.key(id)?;
         let node = &mut self.nodes[key as usize];
         node.inline_style = patch;
+        #[cfg(feature = "inspection")]
+        if self.inspection.tracks(id) {
+            self.restyle(key);
+            return Ok(());
+        }
         if node.classes.is_some() || node.spaced || node.inline_style.reads_current_color() {
             self.restyle(key);
             return Ok(());
@@ -5374,6 +5379,10 @@ impl<M: TextEngine> Core<M> {
 
     fn set_prop(&mut self, id: NodeId, prop: Prop) -> Result<(), ApplyError> {
         let key = self.key(id)?;
+        #[cfg(feature = "inspection")]
+        if self.inspection.active() {
+            self.retire_inspection_list_items(key, &prop);
+        }
         // Rust components: `component` makes a view a host, its props
         // arrive decoded (`RustProp`; platform components keep JSON).
         let prop = match prop {
@@ -6815,6 +6824,8 @@ impl<M: TextEngine> Core<M> {
 
     /// Detaches `key` from its parent (Remove op).
     fn detach(&mut self, key: Key) {
+        #[cfg(feature = "inspection")]
+        self.retire_inspection_subtree(key);
         self.input_bar_moves(key);
         self.unlink(key, true);
     }
@@ -6973,6 +6984,10 @@ impl<M: TextEngine> Core<M> {
             return Ok(());
         }
         let key = self.key(id)?;
+        #[cfg(feature = "inspection")]
+        if key != self.root {
+            self.retire_inspection_subtree(key);
+        }
         // Its run is orphaned like its children.
         if let Some(run) = self.folded.remove(&key)
             && let Some(run) = self.runs.get_mut(&run)
@@ -7006,8 +7021,6 @@ impl<M: TextEngine> Core<M> {
             self.forget_outer(key);
             self.parent_lists.retain(|&k| k != key);
         }
-        #[cfg(feature = "inspection")]
-        self.inspection.forget(id);
         let node = self.nodes.remove(key as usize);
         self.ch_readers -= usize::from(node.reads_ch);
         self.slots.remove(id as usize);

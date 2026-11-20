@@ -216,6 +216,10 @@ type PerfMode = Box<dyn Fn(nsh_core::FpsMode)>;
 /// One engine and its views.
 pub(crate) struct Surface {
     key: u64,
+    #[cfg(feature = "inspection")]
+    inspection_run: Cell<u64>,
+    #[cfg(feature = "inspection")]
+    inspection_observer: RefCell<Option<Rc<dyn Fn()>>>,
     pub(crate) mtm: MainThreadMarker,
     /// The root view (node [`ROOT_ID`]): the surface's view.
     pub(crate) root: NshView,
@@ -401,6 +405,10 @@ impl Surface {
         let root = NshView::new(mtm, ROOT_ID, nsh_core::ViewKind::View);
         let surface = Rc::new(Surface {
             key,
+            #[cfg(feature = "inspection")]
+            inspection_run: Cell::new(0),
+            #[cfg(feature = "inspection")]
+            inspection_observer: RefCell::new(None),
             mtm,
             root: root.clone(),
             mounter: RefCell::new(Mounter::new(root.clone())),
@@ -488,6 +496,13 @@ impl Surface {
     /// Starts `config`'s app, replacing what ran.
     pub(crate) fn start(self: &Rc<Self>, mut config: EngineConfig) {
         self.stop();
+        #[cfg(feature = "inspection")]
+        self.inspection_run.set(
+            self.inspection_run
+                .get()
+                .checked_add(1)
+                .expect("inspection epoch exhausted"),
+        );
         let env = self.environment.get();
         config.viewport = Size::new(env.window.width, env.window.height);
         config.environment = env;
@@ -580,6 +595,32 @@ impl Surface {
         #[cfg(feature = "dev")]
         self.cosmetic_frames.set(0);
         crate::shader::clear(self);
+        #[cfg(feature = "inspection")]
+        self.inspection_changed();
+    }
+
+    #[cfg(feature = "inspection")]
+    pub(crate) fn inspection_epoch(&self) -> Option<crate::inspection::Epoch> {
+        self.control
+            .borrow()
+            .as_ref()
+            .map(|_| crate::inspection::Epoch {
+                surface: self.key,
+                run: self.inspection_run.get(),
+            })
+    }
+
+    #[cfg(feature = "inspection")]
+    pub(crate) fn set_inspection_observer(&self, observer: Option<Rc<dyn Fn()>>) {
+        *self.inspection_observer.borrow_mut() = observer;
+    }
+
+    #[cfg(feature = "inspection")]
+    fn inspection_changed(&self) {
+        let callback = self.inspection_observer.borrow().clone();
+        if let Some(callback) = callback {
+            callback();
+        }
     }
 
     /// Calls `f` with the engine's control, if an app runs.
@@ -1407,6 +1448,8 @@ impl Surface {
         {
             self.revisited.set(moves);
         }
+        #[cfg(feature = "inspection")]
+        self.inspection_changed();
     }
 }
 

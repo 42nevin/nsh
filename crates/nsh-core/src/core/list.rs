@@ -1774,6 +1774,27 @@ impl ListState {
         }
     }
 
+    /// Mounted cell keys whose represented item is about to change.
+    #[cfg(feature = "inspection")]
+    pub(super) fn cells_losing_item(&self, loses: impl Fn(u32) -> bool) -> Vec<u32> {
+        self.slots
+            .iter()
+            .filter_map(|slot| {
+                slot.rendered
+                    .filter(|&index| loses(index))
+                    .map(|_| slot.cell)
+            })
+            .filter(|&cell| cell != u32::MAX)
+            .collect()
+    }
+
+    #[cfg(feature = "inspection")]
+    pub(super) fn rebinds_cell(&self, key: u32, index: u32) -> bool {
+        self.slots
+            .iter()
+            .any(|s| s.cell == key && s.rendered != Some(index))
+    }
+
     pub(super) fn rendered(&mut self, cell: u32, index: u32) {
         if let Some(slot) = self.slots.iter_mut().find(|s| s.cell == cell) {
             slot.rendered = Some(index);
