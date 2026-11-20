@@ -3,6 +3,7 @@ mod shape;
 
 use nsh_core::{
     Bounds, Color, CornerRadii, NodeId, Point, Points, Size,
+    geometry::Percentage,
     inspection::{Property, Value},
 };
 use nsh_engine::EngineControl;
@@ -110,7 +111,7 @@ impl Candidate {
                     }
                     parent = v.parent_view();
                 }
-                Some(Value::Number(value))
+                Some(Value::Opacity(Percentage(value)))
             }
             Property::FontSize | Property::LineHeight | Property::TextColor => {
                 let span = &state.text.as_ref()?.text.spans.first()?.style;

@@ -7,7 +7,8 @@ use taffy::style::{ExpandedDimension, ExpandedLengthPercentage, ExpandedLengthPe
 
 use super::{Core, Key, Kind, NO_KEY};
 use crate::{
-    Color, NodeId, Points, Prop, Style, StyleKey, StyleValue, TextEngine, animation::AnimationProp,
+    Color, LineHeight, NodeId, Points, Prop, Style, StyleKey, StyleValue, TextEngine,
+    animation::AnimationProp, geometry::Percentage,
 };
 
 /// A node incarnation within one running surface.
@@ -132,7 +133,7 @@ impl Property {
 
     fn accepts(self, value: Value) -> bool {
         match (self, value) {
-            (Self::Opacity, Value::Number(n)) => (0.0..=1.0).contains(&n),
+            (Self::Opacity, Value::Opacity(n)) => (0.0..=1.0).contains(&n.0),
             (Self::Background | Self::TextColor, Value::Color(_)) => true,
             (Self::FontSize, Value::Points(p)) => p.0.is_finite() && p.0 > 0.0,
             (Self::Opacity | Self::Background | Self::TextColor, _) => false,
@@ -148,16 +149,16 @@ impl Property {
 pub enum Value {
     /// An absolute length in logical points.
     Points(Points),
-    /// A unitless scalar (own opacity, for example).
-    Number(f32),
+    /// Opacity as a fraction of full opacity.
+    Opacity(Percentage),
     /// A typed RGBA color.
     Color(Color),
     /// A percentage as a fraction from the underlying declaration.
-    Percent(f32),
-    /// A length relative to font size, resolved before inheritance.
-    FontRelative(f32),
-    /// A line height inherited as a unitless multiple.
-    Multiplier(f32),
+    Percent(Percentage),
+    /// An authored font size as a fraction of inherited font size.
+    FontRelative(Percentage),
+    /// An explicit line-height declaration, before inheritance or preview.
+    LineHeight(LineHeight),
     /// No local text declaration.
     Inherit,
     /// The font's normal line height.
@@ -305,8 +306,8 @@ impl Inspection {
                         _ => {}
                     }
                 }
-                Value::Number(n) => style
-                    .set_key(p.key(), StyleValue::Number(n))
+                Value::Opacity(n) => style
+                    .set_key(p.key(), StyleValue::Number(n.0))
                     .expect("validated opacity"),
                 Value::Color(c) => style
                     .apply_value(p.key(), &crate::style::PropertyValue::Color(Some(c)))
@@ -335,16 +336,16 @@ fn declaration(p: Property, style: &Style, rtl: bool) -> Value {
     use Value as V;
     let lp = |value: taffy::LengthPercentage| match value.expand() {
         ExpandedLengthPercentage::Length(v) => V::Points(Points(v)),
-        ExpandedLengthPercentage::Percent(v) => V::Percent(v),
+        ExpandedLengthPercentage::Percent(v) => V::Percent(Percentage(v)),
     };
     let constraint = |value: taffy::LengthPercentageAuto| match value.expand() {
         ExpandedLengthPercentageAuto::Length(v) => V::Points(Points(v)),
-        ExpandedLengthPercentageAuto::Percent(v) => V::Percent(v),
+        ExpandedLengthPercentageAuto::Percent(v) => V::Percent(Percentage(v)),
         ExpandedLengthPercentageAuto::Auto => V::Auto,
     };
     let dimension = |value: taffy::Dimension| match value.expand() {
         ExpandedDimension::Length(v) => V::Points(Points(v)),
-        ExpandedDimension::Percent(v) => V::Percent(v),
+        ExpandedDimension::Percent(v) => V::Percent(Percentage(v)),
         ExpandedDimension::Auto => V::Auto,
         ExpandedDimension::MinContent => V::Intrinsic(Intrinsic::MinContent),
         ExpandedDimension::MaxContent => V::Intrinsic(Intrinsic::MaxContent),
@@ -390,24 +391,24 @@ fn declaration(p: Property, style: &Style, rtl: bool) -> Value {
         P::MinHeight => constraint(l.min_size.height),
         P::MaxHeight => constraint(l.max_size.height),
         P::Radius => V::Points(style.view.border_radius),
-        P::Opacity => V::Number(style.view.opacity),
+        P::Opacity => V::Opacity(Percentage(style.view.opacity)),
         P::Background => V::Color(style.view.background_color),
         P::TextColor => t.color.map_or(V::Inherit, V::Color),
         P::FontSize => t
             .font_size_em
-            .map(V::FontRelative)
+            .map(|ratio| V::FontRelative(Percentage(ratio)))
             .or(t.font_size.map(V::Points))
             .unwrap_or(V::Inherit),
         P::LineHeight => t
             .line_height_em
-            .map(V::FontRelative)
-            .or(t.line_height_multiple.map(V::Multiplier))
-            .or(t.line_height.map(V::Points))
-            .unwrap_or(if style.pending.inspection_normal_line_height {
-                V::Normal
-            } else {
-                V::Inherit
-            }),
+            .map(LineHeight::Em)
+            .or(t.line_height_multiple.map(LineHeight::Multiple))
+            .or(t.line_height.map(LineHeight::Points))
+            .or(style
+                .pending
+                .inspection_normal_line_height
+                .then_some(LineHeight::Normal))
+            .map_or(V::Inherit, V::LineHeight),
     }
 }
 
@@ -532,7 +533,7 @@ impl<M: TextEngine> Core<M> {
                 underlying,
                 preview: entry.previews.iter().find(|v| v.0 == p).map(|v| v.1),
                 resolved: match p {
-                    Property::Opacity => Some(Value::Number(opacity)),
+                    Property::Opacity => Some(Value::Opacity(Percentage(opacity))),
                     Property::TextColor => Some(Value::Color(text.color)),
                     Property::FontSize => Some(Value::Points(text.font_size)),
                     Property::LineHeight if text.line_height > Points::ZERO => {

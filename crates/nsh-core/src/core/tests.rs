@@ -49135,7 +49135,10 @@ fn inspection_retires_removed_ordinary_view_before_a_late_request() {
 #[cfg(feature = "inspection")]
 #[test]
 fn inspected_properties_share_normal_layout_and_view_invalidation() {
-    use crate::inspection::{Property as P, Value as V};
+    use crate::{
+        geometry::Percentage,
+        inspection::{Property as P, Value as V},
+    };
     let mut c = core();
     view_with_classes(&mut c, 2, "w-[100px] h-[100px] opacity-50");
     apply(
@@ -49185,16 +49188,19 @@ fn inspected_properties_share_normal_layout_and_view_invalidation() {
     let initial = c.inspect_view(3).unwrap();
     let target = initial.target;
     let property = |p| initial.properties.iter().find(|v| v.property == p).unwrap();
-    assert_eq!(property(P::Width).underlying, V::Percent(0.5));
-    assert_eq!(property(P::Opacity).underlying, V::Number(0.5));
-    assert_eq!(property(P::Opacity).resolved, Some(V::Number(0.25)));
+    assert_eq!(property(P::Width).underlying, V::Percent(Percentage(0.5)));
+    assert_eq!(property(P::Opacity).underlying, V::Opacity(Percentage(0.5)));
+    assert_eq!(
+        property(P::Opacity).resolved,
+        Some(V::Opacity(Percentage(0.25)))
+    );
 
     for (key, value) in [
         (P::Width, V::Points(px(60.0))),
         (P::Padding, V::Points(px(7.0))),
         (P::RowGap, V::Points(px(8.0))),
         (P::Background, V::Color(Color(0x21436580))),
-        (P::Opacity, V::Number(0.8)),
+        (P::Opacity, V::Opacity(Percentage(0.8))),
     ] {
         c.preview_property(target, key, Some(value)).unwrap();
     }
@@ -49224,11 +49230,11 @@ fn inspected_properties_share_normal_layout_and_view_invalidation() {
     assert_eq!(c.measure(3).unwrap().frame.size.width, px(60.0));
 
     assert!(
-        c.preview_property(target, P::Opacity, Some(V::Number(1.01)))
+        c.preview_property(target, P::Opacity, Some(V::Opacity(Percentage(1.01))))
             .is_err()
     );
     assert!(
-        c.preview_property(target, P::Width, Some(V::Percent(0.5)))
+        c.preview_property(target, P::Width, Some(V::Percent(Percentage(0.5))))
             .is_err()
     );
     for p in [P::Width, P::Padding, P::RowGap, P::Background, P::Opacity] {
@@ -49246,7 +49252,11 @@ fn inspected_properties_share_normal_layout_and_view_invalidation() {
 #[cfg(feature = "inspection")]
 #[test]
 fn inspected_text_preview_reflows_and_restores_latest_inherited_style() {
-    use crate::inspection::{Property as P, Value as V};
+    use crate::{
+        LineHeight,
+        geometry::Percentage,
+        inspection::{Property as P, Value as V},
+    };
     let mut c = core();
     view_with_classes(&mut c, 2, "text-[20px] leading-[1.5]");
     apply(
@@ -49273,6 +49283,16 @@ fn inspected_text_preview_reflows_and_restores_latest_inherited_style() {
         ],
     );
     c.commit().unwrap();
+    assert_eq!(
+        c.inspect_view(2)
+            .unwrap()
+            .properties
+            .iter()
+            .find(|state| state.property == P::LineHeight)
+            .unwrap()
+            .underlying,
+        V::LineHeight(LineHeight::Multiple(1.5)),
+    );
     let first = c.inspect_view(3).unwrap();
     let state = |p| first.properties.iter().find(|v| v.property == p).unwrap();
     assert_eq!(state(P::FontSize).underlying, V::Inherit);
@@ -49309,6 +49329,31 @@ fn inspected_text_preview_reflows_and_restores_latest_inherited_style() {
     assert_eq!(restored.font_size, px(18.0));
     assert_eq!(restored.line_height, px(27.0));
     assert_eq!(restored.color, Color::BLACK);
+
+    assert_eq!(
+        c.inspect_view(2)
+            .unwrap()
+            .properties
+            .iter()
+            .find(|state| state.property == P::LineHeight)
+            .unwrap()
+            .underlying,
+        V::LineHeight(LineHeight::Em(1.5)),
+    );
+    c.apply(style_op(3, &[("fontSize", StyleValue::Str("1.25em"))]))
+        .unwrap();
+    let relative = current_span(&c.commit().unwrap());
+    assert_eq!(relative.font_size, px(22.5));
+    // The parent's relative line height is inherited as points, not multiplied by the child size.
+    assert_eq!(relative.line_height, px(27.0));
+    let described = c.inspect_view(3).unwrap();
+    let font = described
+        .properties
+        .iter()
+        .find(|state| state.property == P::FontSize)
+        .unwrap();
+    assert_eq!(font.underlying, V::FontRelative(Percentage(1.25)));
+    assert_eq!(font.resolved, Some(V::Points(px(22.5))));
 }
 
 #[cfg(feature = "inspection")]
