@@ -115,6 +115,14 @@ fn registered_window_submenu(app: &NSApplication) -> platform::objc2::rc::Retain
     window
 }
 
+fn contains_menu(bar: &NSMenu, expected: &NSMenu) -> bool {
+    std::ptr::eq(bar, expected)
+        || bar.itemArray().iter().any(|item| {
+            item.submenu()
+                .is_some_and(|submenu| contains_menu(&submenu, expected))
+        })
+}
+
 /// Runs the main run loop until `done` holds, for at most 5 s.
 fn until(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -178,13 +186,27 @@ pub(super) fn run() {
         })
     });
     let other_menu = app.mainMenu().unwrap();
-    assert!(app.windowsMenu().is_none());
+    // AppKit can return a detached menu even after setWindowsMenu(None).
+    let windows_in_other_bar = || {
+        app.windowsMenu()
+            .is_some_and(|windows| contains_menu(&other_menu, &windows))
+    };
+    assert!(
+        !windows_in_other_bar(),
+        "the unmarked bar must not own a registered Window submenu"
+    );
     LANGUAGE.store(2, Ordering::SeqCst);
     until("the first surface's English content", || {
         shows(&surface.view(), "Menu language en")
     });
-    assert!(app.mainMenu().is_some_and(|menu| menu == other_menu));
-    assert!(app.windowsMenu().is_none());
+    assert!(
+        app.mainMenu()
+            .is_some_and(|menu| std::ptr::eq(&*menu, &*other_menu))
+    );
+    assert!(
+        !windows_in_other_bar(),
+        "relabeling the inactive surface must not register a submenu of the unmarked bar"
+    );
     assert_eq!(titles(mtm), (Some("Copy".into()), Some("Paste".into())));
 
     println!(
