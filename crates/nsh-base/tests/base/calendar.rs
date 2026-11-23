@@ -348,6 +348,60 @@ fn a_value_the_app_sets_shows_its_month() {
     assert_eq!(log(&app), "", "the app's value is not reported");
 }
 
+#[component]
+fn IndependentMonth(_props: HarnessProps) -> impl IntoElement {
+    let month = signal(d(2030, 12, 18));
+    let selected = signal(d(2040, 3, 1));
+    let requested = signal(String::new());
+    view()
+        .child(
+            calendar()
+                .value(move || Date::from(selected.get()))
+                .month(move || nsh_base::CalendarDate(month.get()))
+                .today(nsh_base::CalendarDate(d(2030, 12, 31)))
+                .interactive_caption(false)
+                .day_labels(std::collections::BTreeMap::from([(
+                    "2030-12-31".into(),
+                    "Year end".into(),
+                )]))
+                .item_class(ITEM_CLASS)
+                .render_item(|e: &CalendarEntry| text(item(e)))
+                .on_change(move |v: &Date| selected.set(v.start().unwrap()))
+                .on_month_change(move |m: &nsh_base::CalendarDate| {
+                    requested.set(m.0.to_string());
+                    // Decline November; accept January's keyboard request.
+                    if m.0.month() == 1 {
+                        month.set(m.0);
+                    }
+                }),
+        )
+        .child(text(move || {
+            format!("Request: {}, selected: {}", requested.get(), selected.get())
+        }))
+}
+
+#[test]
+fn controlled_month_routes_requests_without_changing_selection() {
+    let mut app = launch(Root::new::<IndependentMonth>(props));
+    app.wait_for("label:Year end").unwrap();
+    app.press("label:‹").unwrap();
+    app.wait_for("text:Request: 2030-11-01, selected: 2040-03-01")
+        .unwrap();
+    see(&mut app, "M12/2030");
+    for _ in 0..3 {
+        app.press_key("tab").unwrap();
+    }
+    see(&mut app, "12-31@^");
+    app.press_key("right").unwrap();
+    see(&mut app, "1-1^");
+    app.wait_for("text:Request: 2031-01-01, selected: 2040-03-01")
+        .unwrap();
+    app.press_key("enter").unwrap();
+    see(&mut app, "1-1*^");
+    app.wait_for("text:Request: 2031-01-01, selected: 2031-01-01")
+        .unwrap();
+}
+
 #[test]
 fn a_range_takes_two_presses_and_reports_once_complete() {
     for controlled in [false, true] {

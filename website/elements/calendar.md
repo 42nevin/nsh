@@ -19,6 +19,8 @@ range's band). The grid fills the width it is given, as a table's columns do: th
 row share the row equally, so a calendar in a phone's sheet spans the screen and one in a popup sized to its content
 keeps its items' widths (`flex-none` in `itemClass` or `monthClass` keeps an item or a month at its own width).
 
+With `month`, the first displayed month belongs to the app, independently of `value`. Pass an ISO date in that month and handle `onMonthChange={({ month }) => …}`; navigation reports its first day, while a prop change emits nothing. Without `month`, the calendar browses on its own as before. Set `today` to an ISO date to override the local day. Use `dayLabels` (a record from ISO date to accessible name) to name the existing day buttons without changing their contents or keyboard behavior. Pass `interactiveCaption={false}` for a month heading instead of the month and year pickers.
+
 ```rust tabs
 use nsh_base::{CalendarEntry, CalendarItemKind, Date, Matcher, calendar};
 use nsh_core::prelude::*;

@@ -35,6 +35,11 @@ pub struct LinkProps {
     /// name (the children and `accessibilityLabel` are), and not a
     /// `tooltip`, which stays the app's own.
     pub title: Prop<Option<SharedString>>,
+    /// Shows the automatic destination hint on pointer devices (default
+    /// true). Turn it off without changing where the link goes, how it
+    /// activates, or an app-provided tooltip.
+    #[prop(default = true)]
+    pub show_destination_hint: Prop<bool>,
     /// How `href` opens when the link is pressed: `"system"` (the default)
     /// opens a URL of another app or site outside the app, `"app"` leaves
     /// it to the app's `onOpen`. `onOpen` reports it either way.
@@ -137,7 +142,7 @@ pub fn Link(props: LinkProps, cx: Scope<LinkEvent>) -> impl IntoElement {
         .when(!crate::terminal::is_terminal(), |view| {
             view.child(link_hint(
                 move || {
-                    if disabled.get() {
+                    if disabled.get() || !props.show_destination_hint.get() {
                         None
                     } else {
                         props.href.get()

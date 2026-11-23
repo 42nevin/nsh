@@ -54,6 +54,8 @@ mount(App);
 
 <a id="value"></a>
 
+表单校验后可以调用 `TimeFieldRef` 的 `focus()`，把键盘焦点交给当前选中的时间段，不改变时间。它的 `node` 是布局视图，不是编辑器。
+
 ## 值
 
 值是 24 小时制的一天中的时间，与 HTML `<input type="time">` 的相同：`"HH:MM"`，在 `precision="second"` 时为 `"HH:MM:SS"`，不论输入框显示哪种 `hourCycle`。有 `value` 时，值由应用持有：输入框显示它，并用 `onChange({ value })` 报告每次编辑；应用把 `value` 设为报告的值以跟随它。省略 `value` 时，输入框自己保存时间，初始为 `defaultValue`（默认 `00:00`）。

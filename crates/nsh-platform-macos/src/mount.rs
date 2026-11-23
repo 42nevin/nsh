@@ -824,3 +824,109 @@ fn release_later(surface: &Rc<Surface>, released: &Rc<RefCell<Vec<NshView>>>) {
         }
     });
 }
+
+/// A merged frame can configure and reinsert a just-created editor *after*
+/// its explicit focus command. AppKit would end editing at the reinsert.
+/// Let the mount settle before giving that editor the keyboard, without
+/// moving keyboard intents past each other, another imperative command,
+/// or the deletion of a command's target.
+pub(crate) fn apply_items(items: &[MountItem], mut apply: impl FnMut(&MountItem)) {
+    let mut keyboard = Vec::<&MountItem>::new();
+    for (i, item) in items.iter().enumerate() {
+        match item {
+            MountItem::Command {
+                id,
+                command: Command::Focus,
+            } if !keyboard.is_empty()
+                || items[..i]
+                    .iter()
+                    .rev()
+                    .find_map(|prior| match prior {
+                        MountItem::Create { id: target, kind } if target == id => {
+                            Some(*kind == ViewKind::Input)
+                        }
+                        MountItem::Delete { id: target } if target == id => Some(false),
+                        _ => None,
+                    })
+                    .unwrap_or(false) =>
+            {
+                keyboard.push(item);
+                continue;
+            }
+            MountItem::Command {
+                command: Command::Blur | Command::SetSelection { .. },
+                ..
+            } if !keyboard.is_empty() => {
+                keyboard.push(item);
+                continue;
+            }
+            MountItem::Command { .. } => keyboard.drain(..).for_each(&mut apply),
+            MountItem::Delete { id }
+                if keyboard.iter().any(
+                    |m| matches!(m, MountItem::Command { id: target, .. } if target == id),
+                ) =>
+            {
+                keyboard.drain(..).for_each(&mut apply)
+            }
+            _ => {}
+        }
+        apply(item);
+    }
+    keyboard.into_iter().for_each(apply);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_editor_focus_observes_final_attachment_and_command_order() {
+        let create = MountItem::Create {
+            id: 2,
+            kind: ViewKind::Input,
+        };
+        let insert = MountItem::Insert {
+            parent: 1,
+            child: 2,
+            before: None,
+        };
+        let focus = |id| MountItem::Command {
+            id,
+            command: Command::Focus,
+        };
+        let select = MountItem::Command {
+            id: 2,
+            command: Command::SetSelection { start: 1, end: 2 },
+        };
+        let blur = MountItem::Command {
+            id: 2,
+            command: Command::Blur,
+        };
+        let discard = MountItem::Delete { id: 2 };
+        let order = |items: &[MountItem]| {
+            let mut seen = Vec::new();
+            apply_items(items, |item| {
+                seen.push(items.iter().position(|v| std::ptr::eq(v, item)).unwrap())
+            });
+            seen
+        };
+        assert_eq!(
+            order(&[
+                create.clone(),
+                focus(2),
+                select,
+                insert.clone(),
+                blur.clone(),
+                focus(3)
+            ]),
+            [0, 3, 1, 2, 4, 5]
+        );
+        // Do not carry a command across deletion to another view with the same ID.
+        assert_eq!(
+            order(&[create.clone(), focus(2), discard, create, insert.clone()]),
+            [0, 1, 2, 3, 4]
+        );
+        // No new editor: the ordinary command stream stays in order.
+        assert_eq!(order(&[focus(2), insert, blur]), [0, 1, 2]);
+    }
+}

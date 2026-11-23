@@ -411,6 +411,34 @@ mod url_hint {
     }
 
     #[test]
+    fn opting_out_hides_the_destination_not_the_link() {
+        #[component]
+        fn QuietLink() -> impl IntoElement {
+            let opened = signal(String::new());
+            view()
+                .child(
+                    link()
+                        .href("#")
+                        .title("Document top")
+                        .show_destination_hint(false)
+                        .on_open(move |href: &SharedString| opened.set(href.to_string()))
+                        .child(text("Top")),
+                )
+                .child(text(move || format!("opened:{}", opened.get())))
+        }
+
+        let mut app = start::<QuietLink>(Os::MacOs, Idiom::Desktop);
+        app.hover("text:Top").unwrap();
+        app.wait(Duration::from_millis(1000)).unwrap();
+        assert!(!app.shows("#"));
+        assert!(!app.shows("Document top"));
+        app.press_key("tab").unwrap();
+        app.press_key("enter").unwrap();
+        app.wait_for("text:opened:#").unwrap();
+        assert!(app.screen().opened_urls().is_empty());
+    }
+
+    #[test]
     fn resting_on_a_link_in_a_text_shows_its_url_until_the_pointer_leaves() {
         let mut app = start::<Hinted>(Os::MacOs, Idiom::Desktop);
         app.hover("text:pricing").unwrap();

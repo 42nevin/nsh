@@ -10,6 +10,19 @@ expect /docs
 event id:destination onMouseLeave
 wait 20
 absent Documentation reference
+# The opt-out removes only the automatic hint, including the page title.
+event id:fragment onMouseEnter
+wait 600
+expect Local destination
+expect #
+event id:fragment onMouseLeave
+tap id:fragment
+expect Hint disabled
+event id:fragment onMouseEnter
+wait 600
+absent Local destination
+absent #
+covers [props] Link.showDestinationHint
 # window-open
 tap id:case-window-open
 expect Windows: main

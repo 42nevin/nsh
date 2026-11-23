@@ -892,7 +892,7 @@ impl Surface {
         }
         crate::access::prepare(batch);
         self.mounter.borrow_mut().begin_batch(&batch.items);
-        for item in &batch.items {
+        crate::mount::apply_items(&batch.items, |item| {
             self.anim.borrow_mut().apply(item);
             if !matches!(
                 item,
@@ -900,7 +900,7 @@ impl Surface {
             ) {
                 self.mounter.borrow_mut().apply(self, item);
             }
-        }
+        });
         self.mounter.borrow_mut().end_batch(self);
         crate::text_input::warm_later(self);
         if let Some(window) = self.root.ns().window() {

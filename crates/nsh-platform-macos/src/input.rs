@@ -1456,15 +1456,23 @@ fn tab(surface: &Surface, event: &NSEvent) -> bool {
         return false;
     }
     // Into the controls of the newest modal, if one is shown.
-    let responder = event_root(surface)
+    let root = event_root(surface);
+    let responder = root
         .ns()
         .window()
         .and_then(|window| window.firstResponder());
-    let root = event_root(surface);
     let from = responder
         .as_ref()
         .and_then(|responder| responder.downcast_ref::<objc2_app_kit::NSView>())
-        .filter(|view| NshView::from_ns(view).is_some_and(|view| is_key_stop(&view)))
+        .filter(|view| {
+            if let Some(view) = NshView::from_ns(view) {
+                return is_key_stop(&view);
+            }
+            // A hosted AppKit control can pass Tab up the responder chain.
+            // Continue from that control, not the beginning of its modal.
+            !crate::view::is_ours(view)
+                && view.isDescendantOf(&crate::navigation::focus_scope(surface))
+        })
         .unwrap_or(root.ns());
     crate::text_input::tab(surface, from, flags.contains(NSEventModifierFlags::Shift));
     true

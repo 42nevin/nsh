@@ -137,7 +137,7 @@ pub use crate::{
     },
     button::{Button, ButtonElement, ButtonEvent, ButtonProps, button},
     calendar::{
-        Calendar, CalendarElement, CalendarEntry, CalendarEvent, CalendarItemKind, CalendarProps,
+        Calendar, CalendarDate, CalendarElement, CalendarEntry, CalendarEvent, CalendarItemKind, CalendarProps,
         CalendarValue, Date, Matcher, YearRange, calendar,
     },
     carousel::{
@@ -249,7 +249,7 @@ pub use crate::{
     },
     theme::{DEFAULT_THEME, Theme, ThemeError, theme, theme_overrides, tokens_of},
     time_field::{
-        HourCycle, TimeField, TimeFieldElement, TimeFieldEvent, TimeFieldProps,
+        HourCycle, TimeField, TimeFieldApi, TimeFieldElement, TimeFieldEvent, TimeFieldProps,
         TimeFieldSegmentEntry, TimeOfDay, TimePrecision, TimeSegment, time_field,
     },
     toast::{

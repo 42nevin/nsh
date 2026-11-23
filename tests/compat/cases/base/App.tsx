@@ -8,6 +8,7 @@ import BaseAccordion from "./base-accordion";
 import BaseAlertDialog from "./base-alert-dialog";
 import BaseAvatar from "./base-avatar";
 import BaseButton from "./base-button";
+import BaseCalendar from "./base-calendar";
 import BaseCarousel from "./base-carousel";
 import BaseCheckbox from "./base-checkbox";
 import BaseCollapsible from "./base-collapsible";
@@ -50,6 +51,7 @@ import BaseRichEditorView from "./base-rich-editor-view";
 import BaseSafeAreaKeyboard from "./base-safe-area-keyboard";
 import BaseCombobox from "./base-combobox";
 import BaseCommand from "./base-command";
+import BaseTimeField from "./base-time-field";
 import BaseDatePicker from "./base-date-picker";
 import BaseEmojiPicker from "./base-emoji-picker";
 import BaseScrollbar from "./base-scrollbar";
@@ -73,6 +75,7 @@ const cases: Record<string, () => JSX.Element> = {
   "base-alert-dialog": BaseAlertDialog,
   "base-avatar": BaseAvatar,
   "base-button": BaseButton,
+  "base-calendar": BaseCalendar,
   "base-carousel": BaseCarousel,
   "base-dialog": BaseDialog,
   "base-dialog-backdrop": BaseDialogBackdrop,
@@ -121,6 +124,7 @@ const cases: Record<string, () => JSX.Element> = {
   "base-terminal": BaseTerminal,
   "base-combobox": BaseCombobox,
   "base-command": BaseCommand,
+  "base-time-field": BaseTimeField,
   "base-date-picker": BaseDatePicker,
   "base-emoji-picker": BaseEmojiPicker,
   "base-scrollbar": BaseScrollbar,

@@ -11,6 +11,8 @@ demo: el-date-picker
 
 日历负责行为：值（应用的，或它自己的）、显示的月份、视图、不能选的日期、键盘，以及屏幕阅读器听到的内容。外观由应用决定：应用为头部、主体、每个月、每一行和每个条目设置样式，并绘制条目的内容（月份和星期的名称、今天的标记、范围的色带）。日历的网格像表格的列一样填满给它的宽度：几个月平分它，一行里的条目平分这一行，所以手机底部面板里的日历横跨整个屏幕，而按内容定宽的弹出层里的日历保持条目自身的宽度（在 `itemClass` 或 `monthClass` 里写 `flex-none` 可让条目或月份保持自身宽度）。
 
+设置 `month` 可独立于选中值控制显示月份。传入该月内任一 ISO 日期，用户翻页时由 `onMonthChange({ month })` 返回目标月份第一天；应用直接更新属性不会触发回调。不设置时保留原有的自动翻页行为。`today` 可以指定作为今天的 ISO 日期；`dayLabels` 按 ISO 日期为原有日期按钮指定无障碍名称，不改变其内容或键盘行为。`interactiveCaption={false}` 将月份和年份选择器替换为月份标题。
+
 ```rust tabs
 use nsh_base::{CalendarEntry, CalendarItemKind, Date, Matcher, calendar};
 use nsh_core::prelude::*;

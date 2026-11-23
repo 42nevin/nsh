@@ -626,6 +626,12 @@ impl Ctx {
             }
         }
         if !focused {
+            if let Editor::Line { field, .. } = &*input.editor.borrow() {
+                let align = alignment(input.config.borrow().align);
+                if field.alignment() != align {
+                    field.setAlignment(align);
+                }
+            }
             // Leaving the input ends its composition.
             input.editing.set(false);
             self.compose(&input, None);
@@ -2277,7 +2283,11 @@ pub(crate) fn config(surface: &Rc<Surface>, view: &NshView, config: &InputConfig
         Editor::Line { field, .. } => {
             field.setFont(Some(&font));
             field.setTextColor(Some(&color));
-            field.setAlignment(align);
+            // Changing the cell alignment aborts an active field editor.
+            // Style the editor below, then the idle cell when editing ends.
+            if field.currentEditor().is_none() {
+                field.setAlignment(align);
+            }
             field.setBaseWritingDirection(direction);
             field.setEditable(config.editable);
             field.setPlaceholderAttributedString(Some(&placeholder(config, &font, align)));

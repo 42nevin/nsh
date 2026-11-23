@@ -31,6 +31,7 @@ static SELECTION: Mutex<Option<Selection>> = Mutex::new(None);
 
 #[component]
 fn Page() -> impl IntoElement {
+    let editing = signal(false);
     let field = |id, value| {
         input()
             .test_id(id)
@@ -58,6 +59,22 @@ fn Page() -> impl IntoElement {
         .child(
             field("pending-selection", LONG)
                 .selected_range(((LONG.len() - 5) as u32, (LONG.len() - 2) as u32)),
+        )
+        .child(
+            field("config-change", "")
+                .inline_style(move || {
+                    let align = if editing.get() {
+                        nsh_core::TextAlign::Center
+                    } else {
+                        nsh_core::TextAlign::Left
+                    };
+                    nsh_core::element::Style::default().with(
+                        nsh_core::StyleKey::TextAlign,
+                        nsh_core::PropertyValue::TextAlign(Some(align), true),
+                    )
+                })
+                .on_focus(move || editing.set(true))
+                .placeholder(move || if editing.get() { "Editing" } else { "" }),
         )
 }
 
@@ -180,6 +197,40 @@ pub(super) fn run() {
     while field(&root, "right").is_none() {
         assert!(Instant::now() < deadline, "inputs did not mount");
         settle();
+    }
+    if native_fixture {
+        let changed = field(&root, "config-change").unwrap();
+        assert!(window.makeFirstResponder(Some(&changed)));
+        let active = editor(&changed);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !changed
+            .placeholderAttributedString()
+            .is_some_and(|s| s.string().to_string() == "Editing")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "focused input config did not update"
+            );
+            settle();
+        }
+        assert!(
+            changed.currentEditor().is_some()
+                && window.firstResponder().as_deref() == Some(&*active),
+            "updating a focused input's props must keep its field editor as first responder"
+        );
+        let center = platform::objc2_app_kit::NSTextAlignment::Center;
+        assert_eq!(
+            active.alignment(),
+            center,
+            "the current editor takes the new alignment"
+        );
+        assert!(window.makeFirstResponder(None));
+        assert_eq!(
+            changed.alignment(),
+            center,
+            "the idle field retains the new alignment"
+        );
+        println!("input_focus: live alignment changed without resigning; idle cell is centered");
     }
     let long = field(&root, "long").unwrap();
     let short = field(&root, "short").unwrap();

@@ -58,6 +58,8 @@ mount(App);
 makes one with a setter per prop (`.value(..)`, `.precision(..)`, `.hour_cycle(..)`) and a listener per event
 (`.on_change(..)`). Its time is a `TimeOfDay`, a `chrono::NaiveTime`.
 
+Call `focus()` on a `TimeFieldRef` to give the selected segment the keyboard without changing the time, for example after form validation. Its `node` is the layout view, not the editor.
+
 ## Value
 
 The value is a time of day on a 24-hour clock, as an HTML `<input type="time">`'s: `"HH:MM"`, or `"HH:MM:SS"` with
