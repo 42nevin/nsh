@@ -28,6 +28,8 @@ NSH_MOUNT_BENCH_ONLY=1 cargo test --release -p nsh-platform-macos --test native 
 Features: `js` (default; JS apps; without it the crate only runs Rust apps and links no QuickJS) and `dev` (the dev
 server client, log forwarding, the error overlay: `dev.rs`). The runtime needs macOS 14 (`NSView`'s display links).
 
+The application menu model marks the top-level Window submenu. During publication and relabeling, `chrome.rs` registers that item's actual AppKit submenu as `NSApplication.windowsMenu`; it does not infer the role from a title or from a child action.
+
 ## Dialog fades
 
 Closing a modal restores the previous keyboard focus inside the remaining scope when no other control has

@@ -845,6 +845,7 @@ type MenuItem =
       destructive?: boolean;
       submenu?: MenuItem[];
       inline?: boolean;
+      windowMenu?: boolean;
     };
 ```
 
@@ -861,6 +862,7 @@ type MenuItem =
 | `destructive` | `true` 表示破坏性操作：iOS 显示为红色（`UIMenuElementAttributesDestructive`）。桌面端忽略。 |
 | `submenu` | 让菜单项成为子菜单（需要 `label`）。配合 `inline: true` 成为内联分组：在 iOS 上是带 `label` 为分组标题的 `UIMenuOptions.displayInline`；在桌面上是夹在分隔线之间的条目，不显示 `label`。 |
 | `inline` | 在设置了 `submenu` 时表示内联分组（见 `submenu`）。 |
+| `windowMenu` | 指定由 macOS 列出打开窗口的顶层应用子菜单。最多一个子菜单可以设为 `true`。 |
 | `role` | 由平台执行的标准菜单项（见下）。 |
 
 `null`、`undefined` 和 `false` 项会被忽略，因此可以在列表中写 `cond && { … }`。
@@ -888,7 +890,7 @@ Role：
 | `undo`、`redo`、`cut`、`copy`、`paste`、`selectAll` | 编辑获得焦点的文本框（快捷键仍归文本框自己） | 全部 |
 | `minimize`、`zoom`、`toggleFullScreen`、`close` | 窗口操作 | 全部 |
 
-在 macOS 上，第一个含窗口 role 的顶层菜单就是应用的 Window 菜单：macOS 会在它末尾加上“Bring All to Front”和已打开的窗口（按标题），并自动保持同步。默认菜单栏的 Window 菜单同样如此。其他平台没有这个列表。
+在 macOS 上，在用于列出打开窗口的顶层应用子菜单上设置 `windowMenu: true`（Rust：`MenuItem::window_menu(label, items)`）。系统会在其末尾添加“Bring All to Front”和已打开的窗口。标题以及 `close`、`toggleFullScreen` 等操作 role 均不用于指定这个子菜单。未指定的自定义菜单栏不显示窗口列表，默认菜单栏的 Window 子菜单仍然显示。
 
 带 role 的菜单项默认使用平台的文字和快捷键，除非自己设置（macOS 会在 `about`、`hide` 和 `quit` 中加上应用名）。
 
@@ -943,6 +945,12 @@ fn AppMenu() -> impl IntoElement {
                 .on_select(move || wrap.update(|w| *w = !*w)),
             MenuItem::role(MenuRole::ToggleFullScreen),
         ]));
+        if mac {
+            menus.push(MenuItem::window_menu("Window", [
+                MenuItem::role(MenuRole::Minimize),
+                MenuItem::role(MenuRole::Zoom),
+            ]));
+        }
         set_application_menu(menus);
     });
     view()
@@ -982,6 +990,11 @@ effect(() => {
         { label: "Word Wrap", checked: wrap(), onSelect: () => wrap.update((w) => !w) },
         { role: "toggleFullScreen" },
       ],
+    },
+    mac && {
+      label: "Window",
+      windowMenu: true,
+      submenu: [{ role: "minimize" }, { role: "zoom" }],
     },
   ]);
 });

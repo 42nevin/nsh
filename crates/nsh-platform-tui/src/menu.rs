@@ -322,6 +322,7 @@ fn kept(items: &[MenuItem]) -> Vec<MenuItem> {
                         icon: None,
                         symbol: None,
                         inline: false,
+                        window_menu: false,
                     });
                 }
             }
@@ -1066,6 +1067,7 @@ mod tests {
                 icon: None,
                 symbol: None,
                 inline: false,
+                window_menu: false,
             },
         ]
     }
@@ -1186,6 +1188,7 @@ mod tests {
                 icon: None,
                 symbol: None,
                 inline: false,
+                window_menu: false,
             },
         ];
         let mut menus = Menus {

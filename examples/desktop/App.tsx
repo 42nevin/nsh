@@ -62,6 +62,7 @@ function App() {
     },
     {
       label: "Window",
+      windowMenu: true,
       submenu: [{ role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "close" }],
     },
   ];

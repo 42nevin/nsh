@@ -1555,6 +1555,7 @@ mod tests {
                 icon: Some(source),
                 symbol: None,
                 inline: false,
+                window_menu: false,
             },
         ];
         assert_eq!(label_x(&mixed), LABEL_X + ICON_ADVANCE);

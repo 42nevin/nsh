@@ -356,6 +356,7 @@ impl Decoder {
                 icon,
                 symbol,
                 inline: flag(cx, v, c"inline").unwrap_or(false),
+                window_menu: flag(cx, v, c"windowMenu").unwrap_or(false),
             }));
         }
         let role = match string(cx, v, c"role") {
@@ -478,9 +479,11 @@ unsafe extern "C" fn set_application_menu(
     } else {
         match decode(cx, list) {
             Ok((items, functions)) => {
-                let items = MenuItem::with_inline_expanded(&items).into();
-                let result =
-                    listen(cx).and_then(|()| send(cx, DesktopCommand::SetMenu(Some(items))));
+                let items = MenuItem::with_inline_expanded(&items);
+                let result = MenuItem::window_menu(&items)
+                    .map_err(|message| throw(cx, &format!("nsh/desktop: {message}")))
+                    .and_then(|_| listen(cx))
+                    .and_then(|()| send(cx, DesktopCommand::SetMenu(Some(items.into()))));
                 if result.is_ok() {
                     if let Some(&(generation, _)) = functions.last() {
                         menus(cx).app.borrow_mut().insert(generation, functions);
@@ -1576,6 +1579,9 @@ export type MenuItem =
       submenu?: readonly (MenuItem | null | undefined | false)[];
       /** An inline section when `submenu` is set (see `submenu`). */
       inline?: boolean;
+      /** Designates the top-level application submenu in which macOS lists
+       * the app's open windows. At most one submenu can be designated. */
+      windowMenu?: boolean;
     };
 
 /** The application menu and context menus. */

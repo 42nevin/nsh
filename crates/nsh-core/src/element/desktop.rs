@@ -1134,6 +1134,7 @@ pub struct MenuItem {
     destructive: bool,
     /// Inline section when this is a submenu; see [`Self::inline`].
     inline: bool,
+    window_menu: bool,
     on_select: Option<MenuHandler>,
 }
 
@@ -1158,6 +1159,7 @@ impl MenuItem {
             symbol: None,
             destructive: false,
             inline: false,
+            window_menu: false,
             on_select: None,
         }
     }
@@ -1185,6 +1187,18 @@ impl MenuItem {
     /// application menu: `File`, `Edit`, ...).
     pub fn submenu(label: impl Into<String>, items: impl IntoIterator<Item = MenuItem>) -> Self {
         Self::of(Kind::Submenu(items.into_iter().collect()), label.into())
+    }
+
+    /// A top-level application submenu in which macOS lists the app's open
+    /// windows. On other platforms this acts like [`Self::submenu`].
+    pub fn window_menu(
+        label: impl Into<String>,
+        items: impl IntoIterator<Item = MenuItem>,
+    ) -> Self {
+        Self {
+            window_menu: true,
+            ..Self::submenu(label, items)
+        }
     }
 
     /// What it shows, in place of its role's label.
@@ -1324,6 +1338,7 @@ fn decode(
                 icon: item.icon.as_ref().and_then(ImageSrc::menu_icon),
                 symbol: item.symbol,
                 inline: item.inline,
+                window_menu: item.window_menu,
             },
             Kind::Action => {
                 let id = match item.on_select {
@@ -1391,6 +1406,10 @@ fn desktop_os() -> bool {
 /// the signals it reads. The items' handlers run while the current owner
 /// lives: the menu stays after it, inert, until it is set again.
 ///
+/// # Panics
+///
+/// If more than one top-level submenu is designated with [`MenuItem::window_menu`].
+///
 /// [`effect`]: super::effect
 pub fn set_application_menu(items: impl Into<Option<Vec<MenuItem>>>) {
     if !desktop_os() {
@@ -1414,6 +1433,9 @@ pub fn set_application_menu(items: impl Into<Option<Vec<MenuItem>>>) {
         &owner,
         &mut handlers,
     ));
+    if let Err(error) = desktop::MenuItem::window_menu(&items) {
+        panic!("set_application_menu: {error}");
+    }
     let generation = {
         let mut m = menus.borrow_mut();
         m.app_generation += 1;

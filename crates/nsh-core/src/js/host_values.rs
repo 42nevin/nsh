@@ -605,6 +605,7 @@ fn decode_menu_item<I: HostInput>(input: &I, cx: &mut HostCx) -> Option<crate::d
             icon,
             symbol,
             inline: flag("inline").unwrap_or(false),
+            window_menu: false,
         });
     }
     let role = field::<String, _>(input, "role", cx).and_then(|name| menu_role(&name));

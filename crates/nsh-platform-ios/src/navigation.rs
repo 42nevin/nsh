@@ -1251,6 +1251,7 @@ fn menu_element(
             icon: _,
             symbol,
             inline,
+            ..
         } => {
             let child_enabled = enabled && *submenu_enabled;
             let nested = menu_children(mtm, items, mounter, child_enabled);

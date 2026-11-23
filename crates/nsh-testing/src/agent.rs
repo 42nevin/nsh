@@ -746,6 +746,7 @@ impl MenuValue {
                 icon: None,
                 symbol: None,
                 inline: false,
+                window_menu: false,
             },
         }
     }

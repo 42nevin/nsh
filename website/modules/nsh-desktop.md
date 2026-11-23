@@ -875,6 +875,7 @@ type MenuItem =
       destructive?: boolean;
       submenu?: MenuItem[];
       inline?: boolean;
+      windowMenu?: boolean;
     };
 ```
 
@@ -891,6 +892,7 @@ type MenuItem =
 | `destructive` | `true` marks a destructive action: iOS draws it red (`UIMenuElementAttributesDestructive`). The desktops ignore it. |
 | `submenu` | Makes the item a submenu (it needs a `label`). With `inline: true`, an inline section: on iOS, `UIMenuOptions.displayInline` with `label` as the section title; on the desktops, its items between separators, its label not shown. |
 | `inline` | An inline section when `submenu` is set (see `submenu`). |
+| `windowMenu` | Marks the top-level application submenu for the macOS window list. At most one submenu may set it to `true`. |
 | `role` | A standard item the platform carries out (below). |
 
 `null`, `undefined` and `false` items are left out, so `cond && { … }` works in a list.
@@ -918,7 +920,7 @@ Roles:
 | `undo`, `redo`, `cut`, `copy`, `paste`, `selectAll` | Edit the focused text field (its own shortcuts stay its own) | All |
 | `minimize`, `zoom`, `toggleFullScreen`, `close` | The window | All |
 
-On macOS, the first top-level menu holding a window role is the app's Window menu: macOS adds "Bring All to Front" and the open windows (by title) at its end, and keeps them up to date. The default menu bar's Window menu does the same. Other platforms have no such list.
+On macOS, set `windowMenu: true` on the top-level application submenu that should list open windows (Rust: `MenuItem::window_menu(label, items)`). The system adds "Bring All to Front" and the open windows at its end. Labels and action roles such as `close` or `toggleFullScreen` do not designate this submenu. A custom bar without it has no window list. The default bar still lists windows in its own Window submenu.
 
 A role's item has the platform's label and shortcut unless it sets its own (macOS adds the app's name to `about`, `hide` and `quit`).
 
@@ -973,6 +975,12 @@ fn AppMenu() -> impl IntoElement {
                 .on_select(move || wrap.update(|w| *w = !*w)),
             MenuItem::role(MenuRole::ToggleFullScreen),
         ]));
+        if mac {
+            menus.push(MenuItem::window_menu("Window", [
+                MenuItem::role(MenuRole::Minimize),
+                MenuItem::role(MenuRole::Zoom),
+            ]));
+        }
         set_application_menu(menus);
     });
     view()
@@ -1012,6 +1020,11 @@ effect(() => {
         { label: "Word Wrap", checked: wrap(), onSelect: () => wrap.update((w) => !w) },
         { role: "toggleFullScreen" },
       ],
+    },
+    mac && {
+      label: "Window",
+      windowMenu: true,
+      submenu: [{ role: "minimize" }, { role: "zoom" }],
     },
   ]);
 });
