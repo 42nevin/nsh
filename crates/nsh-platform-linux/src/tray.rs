@@ -781,6 +781,7 @@ mod tests {
                 icon: None,
                 symbol: None,
                 inline: false,
+                window_menu: false,
             },
         ]
         .into();

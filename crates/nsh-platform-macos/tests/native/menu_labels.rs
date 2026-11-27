@@ -38,6 +38,10 @@ fn Menus() -> impl IntoElement {
                 MenuItem::role(MenuRole::Paste),
             ],
         ),
+        MenuItem::submenu("File", [MenuItem::role(MenuRole::Close)]),
+        MenuItem::submenu("View", [MenuItem::role(MenuRole::ToggleFullScreen)]),
+        MenuItem::submenu("Documents", [MenuItem::role(MenuRole::Zoom)]),
+        MenuItem::window_menu("Documents", []),
     ]);
     set_interval(Duration::from_millis(10), || {
         let language = match LANGUAGE.swap(0, Ordering::SeqCst) {
@@ -96,6 +100,29 @@ fn titles(mtm: MainThreadMarker) -> (Option<String>, Option<String>) {
     (title_of(&menu, sel!(copy:)), title_of(&menu, sel!(paste:)))
 }
 
+fn registered_window_submenu(app: &NSApplication) -> platform::objc2::rc::Retained<NSMenu> {
+    let bar = app.mainMenu().expect("visible application menu bar");
+    let window = bar
+        .itemArray()
+        .lastObject()
+        .and_then(|item| item.submenu())
+        .expect("the designated Window submenu in the bar");
+    let registered = app.windowsMenu().expect("registered Window submenu");
+    assert!(
+        std::ptr::eq(&*registered, &*window),
+        "Windows menu must be the designated live submenu, not the same-titled menu or an action's menu"
+    );
+    window
+}
+
+fn contains_menu(bar: &NSMenu, expected: &NSMenu) -> bool {
+    std::ptr::eq(bar, expected)
+        || bar.itemArray().iter().any(|item| {
+            item.submenu()
+                .is_some_and(|submenu| contains_menu(&submenu, expected))
+        })
+}
+
 /// Runs the main run loop until `done` holds, for at most 5 s.
 fn until(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -112,6 +139,7 @@ pub(super) fn run() {
     let mtm = MainThreadMarker::new().unwrap();
     let app = NSApplication::sharedApplication(mtm);
     let saved_menu = app.mainMenu();
+    let saved_windows = app.windowsMenu();
     // SAFETY: The window is created on the process main thread.
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -136,10 +164,13 @@ pub(super) fn run() {
     until("the app's menu", || {
         titles(mtm) == (Some("Copy".into()), Some("Paste".into()))
     });
+    let initial_windows = registered_window_submenu(&app);
     LANGUAGE.store(1, Ordering::SeqCst);
     until("the Japanese label", || {
         titles(mtm) == (Some("コピー".into()), Some("ペースト".into()))
     });
+    let rebuilt_windows = registered_window_submenu(&app);
+    assert!(!std::ptr::eq(&*initial_windows, &*rebuilt_windows));
 
     until("the Japanese content", || {
         shows(&surface.view(), "Menu language ja")
@@ -155,11 +186,27 @@ pub(super) fn run() {
         })
     });
     let other_menu = app.mainMenu().unwrap();
+    // AppKit can return a detached menu even after setWindowsMenu(None).
+    let windows_in_other_bar = || {
+        app.windowsMenu()
+            .is_some_and(|windows| contains_menu(&other_menu, &windows))
+    };
+    assert!(
+        !windows_in_other_bar(),
+        "the unmarked bar must not own a registered Window submenu"
+    );
     LANGUAGE.store(2, Ordering::SeqCst);
     until("the first surface's English content", || {
         shows(&surface.view(), "Menu language en")
     });
-    assert!(app.mainMenu().is_some_and(|menu| menu == other_menu));
+    assert!(
+        app.mainMenu()
+            .is_some_and(|menu| std::ptr::eq(&*menu, &*other_menu))
+    );
+    assert!(
+        !windows_in_other_bar(),
+        "relabeling the inactive surface must not register a submenu of the unmarked bar"
+    );
     assert_eq!(titles(mtm), (Some("Copy".into()), Some("Paste".into())));
 
     println!(
@@ -168,5 +215,6 @@ pub(super) fn run() {
     other.stop();
     surface.stop();
     app.setMainMenu(saved_menu.as_deref());
+    app.setWindowsMenu(saved_windows.as_deref());
     window.close();
 }

@@ -877,7 +877,7 @@ function quitWithConfirmation() {
       label: "Edit",
       submenu: [{ role: "undo" }, { role: "redo" }, { type: "separator" }, { role: "cut" }, { role: "copy" }, { role: "paste" }, { role: "selectAll" }],
     },
-    { label: "Window", submenu: [{ role: "minimize" }, { role: "zoom" }, { role: "toggleFullScreen" }, { type: "separator" }, { role: "close" }] },
+    { label: "Window", windowMenu: true, submenu: [{ role: "minimize" }, { role: "zoom" }, { role: "toggleFullScreen" }, { type: "separator" }, { role: "close" }] },
   ]);
   Storage.getItem(SIDEBAR_OPEN).then((open) => {
     if (open != null) sidebarOpen.set(open === "true");

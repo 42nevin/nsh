@@ -2322,6 +2322,7 @@ Menu.setApplicationMenu([
       { role: "quit" },
     ],
   },
+  { label: "File", windowMenu: true, submenu: [] },
 ]);
 
 Menu.popup([{ label: "Copy link", onSelect: () => chosen.set("copied") }]).then(() =>
@@ -2566,9 +2567,10 @@ fn menus_reach_the_platform_and_call_back() {
         symbol: None,
         destructive: false,
     };
+    assert_eq!(MenuItem::window_menu(&menu), Ok(Some(1)));
     assert_eq!(
-        &*menu,
-        [MenuItem::Submenu {
+        menu[0],
+        MenuItem::Submenu {
             label: "File".into(),
             enabled: true,
             items: vec![
@@ -2579,7 +2581,8 @@ fn menus_reach_the_platform_and_call_back() {
             icon: None,
             symbol: None,
             inline: false,
-        }]
+            window_menu: false,
+        }
     );
     engine.control().dispatch_event(
         ROOT_ID,

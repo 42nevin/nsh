@@ -59,6 +59,7 @@ function App() {
           Menu.setApplicationMenu([
             { label: "File", submenu: [{ label: "New", shortcut: "mod+n", icon: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E", onSelect: () => {} }, { type: "separator" }, { role: "quit" }] },
             { label: "Edit", submenu: [{ role: "copy" }, { role: "paste" }, false, { label: "Checked", checked: true, disabled: true }] },
+            { label: "Window", windowMenu: true, submenu: [{ role: "minimize" }] },
           ]);
           Menu.setApplicationMenu(null);
           Menu.setMenuBar("autoHide");

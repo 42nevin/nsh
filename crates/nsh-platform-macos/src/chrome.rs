@@ -1306,7 +1306,7 @@ fn menu_bar(
 ) {
     let bar = NSMenu::new(surface.mtm);
     let mut loads = Vec::new();
-    let window_menu = MenuItem::window_menu(&model.items);
+    let window_menu = MenuItem::window_menu(&model.items).expect("validated application menu");
     let mut windows_menu = None;
     for (index, item) in model.items.iter().enumerate() {
         // A top-level item that is not a submenu gets one of its own.

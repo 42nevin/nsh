@@ -1557,6 +1557,7 @@ fn default_mac_menu(title: &str) -> Arc<[MenuItem]> {
         icon: None,
         symbol: None,
         inline: false,
+        window_menu: false,
     };
     vec![
         submenu(

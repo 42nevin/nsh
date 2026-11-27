@@ -849,6 +849,9 @@ pub enum MenuItem {
         /// `label` as the section title; on the desktops, its items between
         /// separators, its label not shown ([`Self::with_inline_expanded`]).
         inline: bool,
+        /// When this is a top-level application submenu, designates the menu
+        /// in which macOS lists the app's open windows.
+        window_menu: bool,
     },
 }
 
@@ -922,6 +925,7 @@ impl MenuItem {
                     icon,
                     symbol,
                     inline: false,
+                    window_menu,
                 } => out.push(MenuItem::Submenu {
                     label: label.clone(),
                     enabled: *enabled,
@@ -929,6 +933,7 @@ impl MenuItem {
                     icon: icon.clone(),
                     symbol: symbol.clone(),
                     inline: false,
+                    window_menu: *window_menu,
                 }),
                 // An explicit separator after an inline section would
                 // otherwise double the one the expansion already pushed.
@@ -956,6 +961,7 @@ impl MenuItem {
                 icon,
                 symbol,
                 inline,
+                window_menu,
                 ..
             } => MenuItem::Submenu {
                 label,
@@ -964,36 +970,32 @@ impl MenuItem {
                 icon,
                 symbol,
                 inline,
+                window_menu,
             },
             MenuItem::Separator => MenuItem::Separator,
         }
     }
 
-    /// The index in `items` (a menu bar's top-level items) of its Window
-    /// menu: the first submenu holding a window role (`Minimize`, `Zoom`,
-    /// `ToggleFullScreen` or `Close`), at any depth. macOS lists the app's
-    /// open windows at its end.
+    /// The index of the designated Window submenu in an expanded menu bar.
+    /// Returns an error if more than one submenu is designated.
     #[doc(hidden)]
-    pub fn window_menu(items: &[MenuItem]) -> Option<usize> {
-        fn has_window_role(items: &[MenuItem]) -> bool {
-            items.iter().any(|item| match item {
-                MenuItem::Action(action) => matches!(
-                    action.role,
-                    Some(
-                        MenuRole::Minimize
-                            | MenuRole::Zoom
-                            | MenuRole::ToggleFullScreen
-                            | MenuRole::Close
-                    )
-                ),
-                MenuItem::Submenu { items, .. } => has_window_role(items),
-                MenuItem::Separator => false,
-            })
+    pub fn window_menu(items: &[MenuItem]) -> Result<Option<usize>, &'static str> {
+        let mut marked = items.iter().enumerate().filter_map(|(index, item)| {
+            matches!(
+                item,
+                MenuItem::Submenu {
+                    window_menu: true,
+                    inline: false,
+                    ..
+                }
+            )
+            .then_some(index)
+        });
+        let window = marked.next();
+        if marked.next().is_some() {
+            return Err("mark at most one application submenu as the Window menu");
         }
-        items.iter().position(|item| match item {
-            MenuItem::Submenu { items, .. } => has_window_role(items),
-            _ => false,
-        })
+        Ok(window)
     }
 
     /// Calls `f` with the icon of every item of `items`, submenus' too.
@@ -1257,7 +1259,7 @@ mod tests {
     use crate::geometry::px;
 
     #[test]
-    fn window_menu_is_the_submenu_with_a_window_role() {
+    fn window_menu_is_the_designated_top_level_submenu() {
         let action = |role: Option<MenuRole>| {
             MenuItem::Action(MenuAction {
                 id: 0,
@@ -1272,27 +1274,34 @@ mod tests {
                 destructive: false,
             })
         };
-        let sub = |items: Vec<MenuItem>| MenuItem::Submenu {
-            label: String::new(),
+        let sub = |label: &str, items: Vec<MenuItem>, window_menu| MenuItem::Submenu {
+            label: label.into(),
             enabled: true,
             items,
             icon: None,
             symbol: None,
             inline: false,
+            window_menu,
         };
-        let bar = vec![
-            sub(vec![action(Some(MenuRole::Quit))]),
-            sub(vec![action(Some(MenuRole::Copy))]),
-            sub(vec![action(None), sub(vec![action(Some(MenuRole::Zoom))])]),
-            sub(vec![action(Some(MenuRole::Minimize))]),
+        let window = sub("窗口", vec![], true);
+        let mut bar = vec![
+            sub("File", vec![action(Some(MenuRole::Close))], false),
+            sub(
+                "View",
+                vec![action(Some(MenuRole::ToggleFullScreen))],
+                false,
+            ),
+            sub("窗口", vec![action(Some(MenuRole::Zoom))], false),
+            sub("Other", vec![window.clone()], false),
         ];
-        assert_eq!(MenuItem::window_menu(&bar), Some(2));
-        assert_eq!(MenuItem::window_menu(&bar[..2]), None);
-        // A top-level role item is not a submenu of the bar.
+        assert_eq!(MenuItem::window_menu(&bar), Ok(None));
+        bar.push(window.clone());
         assert_eq!(
-            MenuItem::window_menu(&[action(Some(MenuRole::Close))]),
-            None
+            MenuItem::window_menu(&MenuItem::with_inline_expanded(&bar)),
+            Ok(Some(4))
         );
+        bar.push(window);
+        assert!(MenuItem::window_menu(&bar).is_err());
     }
 
     #[test]
@@ -1453,6 +1462,7 @@ mod tests {
             icon: None,
             symbol: None,
             inline: false,
+            window_menu: false,
         }];
         assert_eq!(MenuItem::find_shortcut(&menu, &new).map(|a| a.id), Some(1));
         // Text fields keep their own shortcuts.
@@ -1511,6 +1521,7 @@ mod tests {
                 icon: None,
                 symbol: None,
                 inline: true,
+                window_menu: false,
             },
             action("Quit"),
             MenuItem::Submenu {
@@ -1525,11 +1536,13 @@ mod tests {
                         icon: None,
                         symbol: None,
                         inline: true,
+                        window_menu: false,
                     },
                 ],
                 icon: None,
                 symbol: None,
                 inline: false,
+                window_menu: false,
             },
         ];
         let expanded = MenuItem::with_inline_expanded(&items);
@@ -1583,6 +1596,7 @@ mod tests {
             icon: None,
             symbol: None,
             inline: true,
+            window_menu: false,
         }]);
         assert_eq!(
             alone
@@ -1604,6 +1618,7 @@ mod tests {
                 icon: None,
                 symbol: None,
                 inline: true,
+                window_menu: false,
             },
             MenuItem::Separator,
             action("C"),
@@ -1649,11 +1664,13 @@ mod tests {
                     icon: None,
                     symbol: None,
                     inline: false,
+                    window_menu: false,
                 },
             ],
             icon: None,
             symbol: None,
             inline: true,
+            window_menu: false,
         };
         let enabled = |items: &[MenuItem]| {
             items

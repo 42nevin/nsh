@@ -11657,6 +11657,7 @@ fn menu_and_tray_icons_load_what_the_check_granted() {
                 icon: icon("https://evil.example/c.png"),
                 symbol: None,
                 inline: false,
+                window_menu: false,
             },
         ]
         .into()
